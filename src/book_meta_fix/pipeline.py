@@ -5,15 +5,26 @@ by the CLI:
 	run_pipeline()   - full scan+detect+extract+verify+enrich, returns list of (meta, diag, verif, enriched)
 	generate_review() - emit review.yaml for NEEDS_REVIEW items
 	apply_review()   - parse a (human-edited) review.yaml and write changes
+
+Cost-aware fix strategy for NEEDS_REVIEW books (cheap first, LLM last):
+	1. Extract content ONCE per book (cached) -> extracted: {title, authors, isbn, first_page}
+	2. Deterministic fixes from extracted:
+	   2a. extracted.isbn or isbn_from_text -> online lookup (OpenLibrary/GB)  [cached, ~1s]
+	   2b. extracted.title is cleaner than DB title -> use it
+	   2c. extracted.authors are cleaner than DB -> use them
+	3. If (2) produced a useful proposal -> done (NEEDS_REVIEW with proposed filled)
+	4. Else LLM (only for categories in llm_categories) -> proposed
+	5. Else proposed=null (human review)
 """
 from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 
 from .detectors import detect as detect_fn
 from .enrichers import Enricher
-from .extractors import extract
+from .extractors import ExtractedMeta, extract
 from .library import Cache, scan_library
 from .models import BookMeta, Verdict
 from .review import build_review, parse_review
@@ -30,45 +41,238 @@ def run_pipeline(
 	*,
 	skip_enrich: bool = False,
 	skip_verify: bool = False,
+	llm_provider: Any = None,
+	llm_categories: tuple[str, ...] = ("C1", "C4"),
+	limit: int | None = None,
 ) -> list[tuple[BookMeta, "Diagnosis", "Verification | None", "EnrichedMeta | None"]]:  # noqa: F821
 	"""Run the full pipeline over the whole library.
 
 	Returns a list of (meta, diagnosis, verification, enriched) tuples.
+
+	If *limit* is given, only the first N books (in scan order) are processed.
+	This is applied at the scan stage, so the expensive extraction/LLM work
+	isn't wasted on books the caller doesn't want.
 	"""
 	books = scan_library(library, cache=cache)
+	if limit is not None:
+		books = books[:limit]
+	stats = {"ok": 0, "needs_review": 0, "det_fixed": 0, "online_fixed": 0, "llm_fixed": 0, "unfixed": 0}
 
 	results = []
 	for meta in books:
 		diag = detect_fn(meta)
-
 		verification = None
 		enriched = None
 
-		# Only verify+enrich books that look OK structurally (the rest are
-		# already flagged for review by the detector).
+		is_needs_review = diag.verdict == Verdict.NEEDS_REVIEW or diag.category in ("MISSING_ISBN", "MISSING_YEAR")
+
+		# --- OK books: just verify against content ---
 		if diag.verdict == Verdict.OK and not skip_verify and meta.primary_file:
 			try:
 				verification = verify(meta)
 			except Exception as e:  # noqa: BLE001
 				log.debug("verify failed for %s: %s", meta.path, e)
+			stats["ok"] += 1
 
-		# Enrich: try for books that are AUTO_FIXABLE or NEEDS_REVIEW (missing data)
-		if enricher is not None and not skip_enrich:
-			need_enrich = diag.category in ("MISSING_ISBN", "MISSING_YEAR") or diag.verdict == Verdict.NEEDS_REVIEW
-			if need_enrich:
+		# --- NEEDS_REVIEW books: try cheap fixes first, LLM last ---
+		elif is_needs_review:
+			stats["needs_review"] += 1
+			# Extract content once (reused by both deterministic fixes and LLM)
+			extracted = _safe_extract(meta)
+
+			# Step 2a-2c: deterministic fixes from extracted content + online lookup
+			if extracted is not None:
+				enriched = _try_deterministic_fix(meta, diag, extracted, enricher, skip_enrich)
+				if enriched is not None:
+					stats["det_fixed" if enriched.source.startswith("embedded") else "online_fixed"] += 1
+
+			# Step 4: LLM fallback only if deterministic + online failed
+			if enriched is None and llm_provider is not None and diag.category in llm_categories:
 				try:
-					# Prefer ISBN from verification (extracted from content) over DB
-					isbn_for_lookup = None
-					if verification and verification.extracted:
-						isbn_for_lookup = verification.extracted.isbn or verification.extracted.isbn_from_text
-					isbn_for_lookup = isbn_for_lookup or meta.isbn
-					enriched = enricher.lookup(isbn=isbn_for_lookup, title=meta.title, author=meta.authors[0] if meta.authors else None)
+					evidence = _build_llm_evidence(meta, diag, extracted)
+					reconciled = llm_provider.reconcile(evidence)
+					if reconciled is not None and _reconciled_is_useful(reconciled, meta):
+						enriched = _reconciled_to_enriched(reconciled)
+						stats["llm_fixed"] += 1
 				except Exception as e:  # noqa: BLE001
-					log.debug("enrich failed for %s: %s", meta.path, e)
+					log.debug("LLM reconcile failed for %s: %s", meta.path, e)
+
+			if enriched is None:
+				stats["unfixed"] += 1
 
 		results.append((meta, diag, verification, enriched))
 
+	log.info(
+		"pipeline: %d ok, %d needs_review (det=%d, online=%d, llm=%d, unfixed=%d)",
+		stats["ok"], stats["needs_review"], stats["det_fixed"], stats["online_fixed"], stats["llm_fixed"], stats["unfixed"],
+	)
 	return results
+
+
+def _safe_extract(meta: BookMeta) -> ExtractedMeta | None:
+	"""Extract content metadata, returning None on any failure."""
+	if not meta.primary_file:
+		return None
+	try:
+		return extract(meta.primary_file)
+	except Exception as e:  # noqa: BLE001
+		log.debug("extract failed for %s: %s", meta.path, e)
+		return None
+
+
+def _try_deterministic_fix(
+	meta: BookMeta,
+	diag: "Diagnosis",  # noqa: F821
+	extracted: ExtractedMeta,
+	enricher: Enricher | None,
+	skip_enrich: bool,
+) -> "EnrichedMeta | None":  # noqa: F821
+	"""Try cheap fixes: online lookup by ISBN, then embedded metadata.
+
+	Returns an EnrichedMeta if we found something better than the current
+	(broken) metadata, else None.
+	"""
+	# Prefer ISBN found in the book's text over the (likely missing/wrong) DB ISBN
+	content_isbn = extracted.isbn or extracted.isbn_from_text
+
+	# --- 2a. Online lookup by ISBN (cached, ~1s) ---
+	if content_isbn and enricher is not None and not skip_enrich:
+		online = enricher.lookup(isbn=content_isbn)
+		if online is not None:
+			# Only accept if it brings something the DB doesn't have
+			if _is_better(online.title, meta.title) or _is_better(online.isbn, meta.isbn) or _is_better(online.year, meta.year):
+				return online
+
+	# --- 2b/2c. Embedded metadata from content (if cleaner than DB) ---
+	# Note: embedded EPUB metadata is often a copy of the broken DB (calibre
+	# wrote it back). So we ONLY trust embedded if it's clearly cleaner:
+	# title without underscores, author that isn't "Neznamy", etc.
+	proposal_title = extracted.title if _is_better(extracted.title, meta.title) else None
+	proposal_authors = extracted.authors if any(_is_better(a, m) for a, m in zip(extracted.authors, meta.authors)) else None
+	# Drop authors that are obvious garbage even in the extracted data
+	if proposal_authors:
+		proposal_authors = [a for a in proposal_authors if a and a != "Neznamy" and "_" not in a]
+
+	if proposal_title or proposal_authors or (content_isbn and content_isbn != meta.isbn):
+		from .enrichers import EnrichedMeta
+
+		return EnrichedMeta(
+			title=proposal_title,
+			authors=proposal_authors or [],
+			isbn=content_isbn if content_isbn != meta.isbn else None,
+			source="embedded",
+		)
+	return None
+
+
+def _is_better(candidate: str | None, current: str | None) -> bool:
+	"""Is *candidate* a better (cleaner) value than *current*?
+
+	A candidate is "better" if EITHER:
+	  - the current is obviously broken (underscores, extensions, mojibake,
+	    "Neznamy") and the candidate is not, OR
+	  - the candidate has Czech/Slovak diacritics that the current lacks
+	    (e.g. "Čas přílivu" beats "Cas prilivu" — same text, but with proper
+	    diacritics). This catches the common case where Calibre stripped
+	    diacritics but didn't replace it with underscores.
+	"""
+	if not candidate:
+		return False
+	if not current:
+		return True
+	candidate_bad = _looks_broken(candidate)
+	current_bad = _looks_broken(current)
+	if current_bad and not candidate_bad:
+		return True
+	# Diacritics check: candidate has CZ letters that current lacks at the
+	# same positions (after stripping both to ASCII they should be equal).
+	if not candidate_bad and not current_bad:
+		if _has_cz_diacritics(candidate) and not _has_cz_diacritics(current):
+			if _strip_diacritics(candidate).lower() == _strip_diacritics(current).lower():
+				return True
+	return False
+
+
+_BROKEN_VALUES = {"Neznamy", "Unknown", "anonym", "Anonymous", "Neznámý", ""}
+
+
+def _looks_broken(s: str) -> bool:
+	"""Does *s* have obvious corruption signals?"""
+	if not s or s in _BROKEN_VALUES:
+		return True
+	if "_" in s:
+		return True
+	if any(ext in s.lower() for ext in (".epub", ".pdb", ".pdf", ".doc", ".mobi")):
+		return True
+	# Mojibake / control chars
+	if any(ord(c) > 0x2000 and c not in "„“”‘’–—…" for c in s):
+		return True
+	return False
+
+
+_CZ_DIACRITICS = set("áčďéěíňóřšťúůýžÁČĎÉĚÍŇÓŘŠŤÚŮÝŽôäÄ")
+
+
+def _has_cz_diacritics(s: str) -> bool:
+	return any(c in _CZ_DIACRITICS for c in s)
+
+
+def _strip_diacritics(s: str) -> str:
+	repl = str.maketrans(
+		"áčďéěíňóřšťúůýžÁČĎÉĚÍŇÓŘŠŤÚŮÝŽôäÄ",
+		"acdeeinorstuuyzACDEEINORSTUUYZoaA",
+	)
+	return s.translate(repl)
+
+
+def _build_llm_evidence(meta: BookMeta, diag: "Diagnosis", extracted: ExtractedMeta | None) -> dict:  # noqa: F821
+	"""Assemble the evidence dict passed to the LLM provider."""
+	first_page = extracted.first_page_text if extracted is not None else None
+	return {
+		"category": diag.category,
+		"current": {
+			"title": meta.title,
+			"authors": meta.authors,
+			"isbn": meta.isbn,
+			"year": meta.year,
+			"publisher": meta.publisher,
+		},
+		"first_page_text": first_page,
+		"file_name": meta.primary_file,
+		"author_folder": meta.author_folder,
+		"title_folder": meta.title_folder,
+	}
+
+
+def _reconciled_is_useful(r, meta: BookMeta) -> bool:  # noqa: ANN001
+	"""Did the LLM produce anything better than what we already had?"""
+	# Useful if it proposed a title different from current, OR added ISBN/year,
+	# OR changed authors. If it just echoed current values, skip.
+	if r.title and r.title != meta.title:
+		return True
+	if r.isbn and r.isbn != meta.isbn:
+		return True
+	if r.year and r.year != meta.year:
+		return True
+	if r.authors and r.authors != meta.authors:
+		return True
+	return False
+
+
+def _reconciled_to_enriched(r) -> "EnrichedMeta":  # noqa: F821
+	"""Convert a ReconciledMeta into the EnrichedMeta shape used by review.py."""
+	from .enrichers import EnrichedMeta
+
+	return EnrichedMeta(
+		title=r.title,
+		authors=r.authors,
+		isbn=r.isbn,
+		publisher=r.publisher,
+		year=r.year,
+		language=r.language,
+		description=r.reasoning,  # stash reasoning as description for transparency
+		source=f"llm:{r.confidence}",
+	)
 
 
 def generate_review(

@@ -116,9 +116,12 @@ def detect(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--skip-enrich", is_flag=True, default=True, help="Skip online enrichment (offline mode)")
 @click.option("--skip-verify", is_flag=True, help="Skip content verification")
 @click.option("--output", "-o", type=click.Path(path_type=Path), default=None, help="Output review file (default: review.yaml)")
-def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, skip_verify: bool, output: Path | None) -> None:
+@click.option("--llm", "use_llm", is_flag=True, help="Enable LLM reconciliation (needs ZAI_API_KEY or BMF_LLM_MOCK=1)")
+@click.option("--llm-categories", default="C1,C4", help="Comma-separated categories to send to LLM (default: C1,C4)")
+def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, skip_verify: bool, output: Path | None, use_llm: bool, llm_categories: str) -> None:
 	"""Run full pipeline and generate a review.yaml for NEEDS_REVIEW books."""
 	from .enrichers import Enricher
+	from .llm import get_provider
 	from .pipeline import generate_review, run_pipeline
 
 	cfg = Config.from_env()
@@ -136,16 +139,29 @@ def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich:
 	if not skip_enrich:
 		enricher = Enricher(cache_db=cfg.cache_db)
 
+	# LLM provider
+	llm_provider = None
+	if use_llm:
+		llm_provider = get_provider(cfg)
+		if llm_provider is None:
+			console.print("[yellow]--llm given but no provider available (set ZAI_API_KEY or BMF_LLM_MOCK=1)[/yellow]")
+		else:
+			cats = tuple(c.strip() for c in llm_categories.split(",") if c.strip())
+			console.print(f"  LLM: [cyan]{llm_provider.name}[/cyan] for categories {cats}")
+
 	try:
-		results = run_pipeline(cfg.library, cache=cache, enricher=enricher, skip_enrich=skip_enrich, skip_verify=skip_verify)
+		results = run_pipeline(
+			cfg.library, cache=cache, enricher=enricher,
+			skip_enrich=skip_enrich, skip_verify=skip_verify,
+			llm_provider=llm_provider,
+			llm_categories=tuple(c.strip() for c in llm_categories.split(",") if c.strip()) if use_llm else (),
+			limit=limit,
+		)
 	finally:
 		if cache is not None:
 			cache.close()
 		if enricher is not None:
 			enricher.close()
-
-	if limit is not None:
-		results = results[:limit]
 
 	# Print pipeline summary
 	_print_pipeline_summary(results)
