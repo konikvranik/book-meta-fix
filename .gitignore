@@ -9,6 +9,7 @@ venv/
 .ruff_cache/
 .coverage
 htmlcov/
+.env
 
 # IDE
 .idea/
