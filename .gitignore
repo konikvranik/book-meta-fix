@@ -28,6 +28,7 @@ review.yaml
 review_*.yaml
 proposals.json
 bmf.log
+metadata_snapshot_*.tar.gz
 
 # OS
 .DS_Store

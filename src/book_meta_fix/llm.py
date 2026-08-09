@@ -40,6 +40,7 @@ class ReconciledMeta:
 	publisher: str | None = None
 	year: int | None = None
 	language: str | None = None
+	genres: list[str] = field(default_factory=list)  # literary genre tags (Czech)
 	confidence: str = "medium"  # low | medium | high (LLM's self-assessment)
 	reasoning: str = ""  # short explanation of how it derived the values
 
@@ -85,6 +86,13 @@ these fields (omit any you cannot determine):
   - "publisher": publisher name (optional)
   - "year": publication year as integer (optional)
   - "language": ISO 639-2 code like "ces", "slk", "eng" (optional)
+  - "genres": array of 1-3 literary genre tags in Czech (e.g. ["sci-fi"],
+    ["fantasy","série"], ["detektivka"], ["naučná literatura"],
+    ["populárně-naučná"], ["román"], ["povídky"], ["poezie"],
+    ["historický román"], ["horor"], ["thriller"], ["dobrodružný"],
+    ["romantický"], ["dětská literatura"], ["náboženský text"],
+    ["učebnice"], ["skripta"], ["technická dokumentace"]).
+    Infer from author's typical genre and first-page content if not explicit.
   - "confidence": one of "low", "medium", "high" — how confident you are
   - "reasoning": one short sentence explaining your reasoning
 
@@ -334,6 +342,7 @@ def _parse_llm_json(content: str) -> ReconciledMeta | None:
 		publisher=_str("publisher"),
 		year=year,
 		language=_str("language"),
+		genres=_list("genres"),
 		confidence=_str("confidence") or "medium",
 		reasoning=_str("reasoning") or "",
 	)

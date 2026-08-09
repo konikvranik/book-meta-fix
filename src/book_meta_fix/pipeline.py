@@ -391,6 +391,7 @@ def _reconciled_to_enriched(r) -> "EnrichedMeta":  # noqa: F821
 		description=r.reasoning,  # stash reasoning as description for transparency
 		series=r.series,
 		series_index=r.series_index,
+		genres=r.genres,
 		source=f"llm:{r.confidence}",
 	)
 
@@ -505,6 +506,8 @@ def _apply_enriched_to_meta(meta: BookMeta, enriched) -> BookMeta:  # noqa: ANN0
 		if enriched.series_index:
 			series_entry["index"] = enriched.series_index
 		updated.series = [series_entry]
+	if enriched.genres:
+		updated.genres = enriched.genres
 	return updated
 
 
@@ -618,6 +621,7 @@ def _proposed_to_enriched(proposed: dict):  # noqa: ANN202
 		language=proposed.get("language"),
 		series=proposed.get("series"),
 		series_index=proposed.get("series_index"),
+		genres=proposed.get("genres") or [],
 		description=proposed.get("reasoning"),
 		source=proposed.get("source") or "preserved",
 	)
@@ -716,3 +720,5 @@ def _apply_action(meta: BookMeta, item) -> None:  # noqa: ANN001
 			meta.publisher = item.edited["publisher"]
 		if "language" in item.edited:
 			meta.language = item.edited["language"]
+		if "genres" in item.edited:
+			meta.genres = item.edited["genres"] if isinstance(item.edited["genres"], list) else [item.edited["genres"]]

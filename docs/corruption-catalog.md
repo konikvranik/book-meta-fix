@@ -139,7 +139,7 @@ titles; everything else with anonym spelling is flagged.
 ## MISSING_ISBN / MISSING_YEAR
 
 Not corruption — just missing data that can be filled by online lookup
-(obalkyknih / Google Books / OpenLibrary).
+(databazeknih.cz for CZ/SK, plus Google Books / OpenLibrary as fallbacks).
 
 **Verdict:** AUTO_FIXABLE (enrich)
 

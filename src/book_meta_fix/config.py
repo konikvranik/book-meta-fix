@@ -65,6 +65,13 @@ class Config:
 			cfg.cache_db = Path(v)
 		if v := os.environ.get("BMF_REVIEW"):
 			cfg.review_file = Path(v)
+		# Enrichers (opt-in/out)
+		if (v := os.environ.get("BMF_DATABAZEKNIH")) is not None:
+			cfg.databazeknih_enabled = v.strip().lower() in ("1", "true", "yes", "on")
+		if (v := os.environ.get("BMF_OPENLIBRARY")) is not None:
+			cfg.openlibrary_enabled = v.strip().lower() in ("1", "true", "yes", "on")
+		if (v := os.environ.get("BMF_GOOGLE_BOOKS")) is not None:
+			cfg.google_books_enabled = v.strip().lower() in ("1", "true", "yes", "on")
 		# LLM
 		if v := os.environ.get("ZAI_API_KEY"):
 			cfg.zai_api_key = v
