@@ -40,8 +40,11 @@ class Config:
 	api_timeout: float = DEFAULT_API_TIMEOUT
 
 	# LLM (Z.AI)
+	# Coding plan users must use /api/coding/paas/v4/ (draws from subscription
+	# quota). PaaS / pay-as-you-go users use /api/paas/v4/ (per-token billing).
+	# Override via ZAI_BASE_URL if you have a PaaS key.
 	zai_api_key: str | None = field(default=None)
-	zai_base_url: str = "https://api.z.ai/api/paas/v4/"
+	zai_base_url: str = "https://api.z.ai/api/coding/paas/v4/"
 	zai_model: str = "glm-5.2"
 
 	# Verification thresholds

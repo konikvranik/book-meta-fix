@@ -159,8 +159,10 @@ class ZaiProvider(LLMProvider):
 	def reconcile(self, evidence: dict[str, Any]) -> ReconciledMeta | None:
 		"""Call the LLM with retry on empty/transient failures.
 
-		Z.AI occasionally returns an empty content (rate limit / overload).
-		We retry up to *max_retries* times with a short backoff.
+		GLM-5.x is a reasoning model: it produces a `reasoning_content` (chain
+		of thought) BEFORE the final answer. The reasoning can consume many
+		tokens, so we set a generous max_tokens (4000) and read both fields.
+		Retries on empty/transient failures (rate limit, overload).
 		"""
 		import time
 
@@ -176,21 +178,40 @@ class ZaiProvider(LLMProvider):
 						{"role": "system", "content": SYSTEM_PROMPT},
 						{"role": "user", "content": prompt},
 					],
-					response_format={"type": "json_object"},
-					temperature=0.1,  # low temperature for deterministic output
-					max_tokens=600,
+					# GLM-5.x reasoning models ignore response_format and may
+					# emit markdown fences; we tolerate both in _parse_llm_json.
+					temperature=0.1,
+					max_tokens=4000,
 				)
-				content = resp.choices[0].message.content or ""
+				choice = resp.choices[0]
+				content = choice.message.content or ""
+				# Reasoning models sometimes stash the answer only in content
+				# (after the thinking). If content is empty but finish_reason
+				# is "length", we ran out of tokens during reasoning — retry
+				# won't help, but we record it for debugging.
 				if not content.strip():
-					# Empty response — retry after backoff
+					finish = choice.finish_reason
+					reasoning = getattr(choice.message, "reasoning_content", None) or ""
+					if finish == "length":
+						log.warning(
+							"Z.AI ran out of tokens during reasoning (model=%s, max=4000). "
+							"Consider a non-reasoning model.",
+							self.model,
+						)
+						last_error = "length (reasoning too long)"
+						# Don't retry — same prompt will hit the same limit.
+						break
 					log.debug("Z.AI returned empty content (attempt %d/%d)", attempt + 1, max_retries)
 					last_error = "empty response"
 					time.sleep(1.0 * (attempt + 1))
 					continue
 				result = _parse_llm_json(content)
 				if result is not None:
+					# Attach the reasoning chain to the result for transparency.
+					reasoning = getattr(choice.message, "reasoning_content", None)
+					if reasoning and not result.reasoning:
+						result.reasoning = reasoning[-300:]  # last 300 chars
 					return result
-				# JSON parse failed — retry once, then give up
 				last_error = "json parse failed"
 				if attempt < max_retries - 1:
 					time.sleep(0.5)
@@ -198,7 +219,6 @@ class ZaiProvider(LLMProvider):
 			except Exception as e:  # noqa: BLE001
 				log.debug("Z.AI reconcile error (attempt %d/%d): %s", attempt + 1, max_retries, e)
 				last_error = str(e)
-				# Brief backoff for transient errors (rate limit, network)
 				time.sleep(1.0 * (attempt + 1))
 		if last_error:
 			log.warning("Z.AI reconcile gave up after %d attempts: %s", max_retries, last_error)
