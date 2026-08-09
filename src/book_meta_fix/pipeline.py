@@ -82,7 +82,11 @@ def run_pipeline(
 	if limit is not None:
 		books = books[:limit]
 	total = len(books)
-	stats = {"ok": 0, "needs_review": 0, "det_fixed": 0, "online_fixed": 0, "llm_fixed": 0, "unfixed": 0}
+	stats = {
+		"ok": 0, "needs_review": 0, "det_fixed": 0, "online_fixed": 0,
+		"llm_fixed": 0, "llm_skipped_no_text": 0, "llm_no_result": 0, "llm_error": 0,
+		"unfixed": 0,
+	}
 
 	# Per-book work closure. The shared enricher/llm are thread-safe:
 	# - openai client uses an internal httpx Client (thread-safe)
@@ -115,8 +119,9 @@ def run_pipeline(
 					progress_callback(i + 1, total)
 
 	log.info(
-		"pipeline: %d ok, %d needs_review (det=%d, online=%d, llm=%d, unfixed=%d)",
-		stats["ok"], stats["needs_review"], stats["det_fixed"], stats["online_fixed"], stats["llm_fixed"], stats["unfixed"],
+		"pipeline: %d ok, %d needs_review (det=%d, online=%d, llm=%d, llm_skipped=%d, llm_no_result=%d, unfixed=%d)",
+		stats["ok"], stats["needs_review"], stats["det_fixed"], stats["online_fixed"],
+		stats["llm_fixed"], stats["llm_skipped_no_text"], stats["llm_no_result"], stats["unfixed"],
 	)
 	return results
 
@@ -158,16 +163,27 @@ def _process_book(
 			if enriched is not None:
 				stats["det_fixed" if enriched.source.startswith("embedded") else "online_fixed"] += 1
 
-		# Step 4: LLM fallback only if deterministic + online failed
+		# Step 4: LLM fallback only if deterministic + online failed AND the
+		# book has usable first-page text (LLM cannot work without it).
 		if enriched is None and llm_provider is not None and diag.category in llm_categories:
-			try:
-				evidence = _build_llm_evidence(meta, diag, extracted)
-				reconciled = llm_provider.reconcile(evidence)
-				if reconciled is not None and _reconciled_is_useful(reconciled, meta):
-					enriched = _reconciled_to_enriched(reconciled)
-					stats["llm_fixed"] += 1
-			except Exception as e:  # noqa: BLE001
-				log.debug("LLM reconcile failed for %s: %s", meta.path, e)
+			# Pre-filter: skip LLM if no first-page text or only CSS noise.
+			# This is the #1 cost saver — books with empty/CSS-only content
+			# would waste an API call for nothing.
+			first_page = extracted.first_page_text if extracted is not None else None
+			if not _has_usable_text(first_page):
+				stats["llm_skipped_no_text"] += 1
+			else:
+				try:
+					evidence = _build_llm_evidence(meta, diag, extracted)
+					reconciled = llm_provider.reconcile(evidence)
+					if reconciled is not None and _reconciled_is_useful(reconciled, meta):
+						enriched = _reconciled_to_enriched(reconciled)
+						stats["llm_fixed"] += 1
+					else:
+						stats["llm_no_result"] += 1
+				except Exception as e:  # noqa: BLE001
+					log.debug("LLM reconcile failed for %s: %s", meta.path, e)
+					stats["llm_error"] += 1
 
 		if enriched is None:
 			stats["unfixed"] += 1
@@ -184,6 +200,30 @@ def _safe_extract(meta: BookMeta) -> ExtractedMeta | None:
 	except Exception as e:  # noqa: BLE001
 		log.debug("extract failed for %s: %s", meta.path, e)
 		return None
+
+
+def _has_usable_text(text: str | None) -> bool:
+	"""Does *text* contain enough readable content for the LLM to work with?
+
+	Rejects:
+	  - None / empty
+	  - Pure CSS (e.g. 'Cover @page {padding: 0pt; ...}')
+	  - Pure HTML tags / boilerplate with no prose
+	  - Very short snippets (< 80 chars of actual prose)
+
+	The check is heuristic and fast — it strips obvious non-prose and measures
+	the remaining length. This is the #1 LLM cost saver.
+	"""
+	if not text or len(text) < 80:
+		return False
+	# Strip CSS blocks (common in EPUB cover pages)
+	import re
+
+	clean = re.sub(r"@page\s*\{[^}]*\}", " ", text)
+	clean = re.sub(r"[{};]", " ", clean)
+	# Count word-like tokens (sequences of 3+ letters)
+	words = re.findall(r"[A-Za-zÁ-ž]{3,}", clean)
+	return len(words) >= 8
 
 
 def _try_deterministic_fix(
