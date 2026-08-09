@@ -395,6 +395,119 @@ def _reconciled_to_enriched(r) -> "EnrichedMeta":  # noqa: F821
 	)
 
 
+def auto_apply_results(
+	results: list,
+	*,
+	library_root: Path,
+	threshold: str = "high",
+	dry_run: bool = True,
+) -> dict:
+	"""Auto-apply LLM proposals at or above *threshold* confidence.
+
+	Writes metadata.json + metadata.opf directly (with .bak backup) for books
+	where the enriched proposal has source like 'llm:high' (or higher).
+	Returns a summary dict and the list of remaining (non-applied) results
+	for the caller to put into review.yaml.
+
+	Confidence order: high > medium > low. With threshold='high' (default),
+	only high-confidence proposals are auto-applied; medium/low go to review.
+	"""
+	confidence_rank = {"high": 3, "medium": 2, "low": 1}
+	min_rank = confidence_rank.get(threshold, 3)
+
+	applied = 0
+	skipped_low_conf = 0
+	skipped_no_proposal = 0
+	skipped_user_decided = 0
+	remaining: list = []
+
+	# Load existing review.yaml to respect user's prior decisions (action set).
+	prior_actions: dict[int | str, str | None] = {}
+	# (best-effort: caller passes results, not the review path, so we skip
+	#  prior-action checking here — it's handled in generate_review for the
+	#  remaining books.)
+
+	for item in results:
+		meta, diag, verification, enriched = item[0], item[1], item[2], item[3]
+		# Only consider NEEDS_REVIEW books with a proposal
+		if diag.verdict.value not in ("NEEDS_REVIEW", "UNFIXABLE"):
+			if not (verification and verification.result == "MISMATCH"):
+				continue
+		if enriched is None:
+			skipped_no_proposal += 1
+			remaining.append(item)
+			continue
+		# Check confidence
+		conf = "low"
+		if enriched.source.startswith("llm:"):
+			conf = enriched.source.split(":", 1)[1] if ":" in enriched.source else "low"
+		elif enriched.source.startswith("embedded"):
+			# Deterministic fixes are trustworthy — treat as high.
+			conf = "high"
+		if confidence_rank.get(conf, 0) < min_rank:
+			skipped_low_conf += 1
+			remaining.append(item)
+			continue
+		# Apply: build a BookMeta with the proposed values and write it.
+		updated = _apply_enriched_to_meta(meta, enriched)
+		if not dry_run:
+			try:
+				from .writers import write_book_meta
+
+				write_book_meta(updated, dry_run=False, backup=True)
+			except Exception as e:  # noqa: BLE001
+				log.warning("auto-apply write failed for %s: %s", meta.path, e)
+				remaining.append(item)
+				continue
+		applied += 1
+
+	summary = {
+		"applied": applied,
+		"skipped_low_conf": skipped_low_conf,
+		"skipped_no_proposal": skipped_no_proposal,
+		"dry_run": dry_run,
+		"threshold": threshold,
+		"remaining": remaining,
+	}
+	log.info(
+		"auto_apply: %d applied (%s), %d low-conf, %d no-proposal -> %d remaining for review",
+		applied, "dry-run" if dry_run else "WRITTEN", skipped_low_conf, skipped_no_proposal, len(remaining),
+	)
+	return summary
+
+
+def _apply_enriched_to_meta(meta: BookMeta, enriched) -> BookMeta:  # noqa: ANN001
+	"""Return a copy of *meta* with the enriched proposal applied.
+
+	Used by auto_apply_results to build the BookMeta that will be written.
+	"""
+	import copy
+
+	updated = copy.deepcopy(meta)
+	if enriched.title:
+		updated.title = enriched.title
+	if enriched.authors:
+		# Drop placeholder authors, keep real ones
+		real = [a for a in enriched.authors if a and a not in ("Neznamy", "Unknown", "Neznámý", "anonym", "Anonymous")]
+		if real:
+			updated.authors = real
+	if enriched.isbn:
+		updated.isbn = enriched.isbn
+	if enriched.year:
+		updated.year = enriched.year
+	if enriched.publisher:
+		updated.publisher = enriched.publisher
+	if enriched.language:
+		updated.language = enriched.language
+	if enriched.series:
+		# Add/replace series metadata
+		series_entry = {"name": enriched.series}
+		if enriched.series_index:
+			series_entry["index"] = enriched.series_index
+		updated.series = [series_entry]
+	return updated
+
+
 def generate_review(
 	results: list,
 	*,

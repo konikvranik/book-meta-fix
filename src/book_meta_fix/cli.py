@@ -119,18 +119,25 @@ def detect(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--llm", "use_llm", is_flag=True, help="Enable LLM reconciliation (needs ZAI_API_KEY or BMF_LLM_MOCK=1)")
 @click.option("--llm-categories", default="C1,C4", help="Comma-separated categories to send to LLM (default: C1,C4)")
 @click.option("--workers", "-w", type=int, default=10, help="Parallel workers for I/O (extract/LLM/enrich). Default 10.")
-def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, skip_verify: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int) -> None:
+@click.option("--auto-apply", "auto_apply", is_flag=True, help="Auto-apply high-confidence LLM proposals directly (with snapshot + .bak). Lower-confidence go to review.yaml.")
+@click.option("--auto-apply-threshold", default="high", help="Confidence threshold for auto-apply: high (default) | medium | low.")
+@click.option("--snapshot-dir", default=None, help="Where to write the metadata tar.gz snapshot before auto-apply (default: CWD).")
+def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, skip_verify: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int, auto_apply: bool, auto_apply_threshold: str, snapshot_dir: Path | None) -> None:
 	"""Run full pipeline and generate a review.yaml for NEEDS_REVIEW books."""
 	from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn
 
 	from .enrichers import Enricher
 	from .llm import get_provider
-	from .pipeline import generate_review, run_pipeline
+	from .pipeline import auto_apply_results, generate_review, run_pipeline
 
 	cfg = Config.from_env()
 	if library is not None:
 		cfg.library = library
 	out = output or cfg.review_file
+
+	if auto_apply and not use_llm:
+		console.print("[yellow]--auto-apply requires --llm (nothing to apply without LLM). Enabling --llm.[/yellow]")
+		use_llm = True
 
 	console.print(f"[bold]Running pipeline[/bold] on {cfg.library} ({workers} workers)")
 
@@ -188,6 +195,27 @@ def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich:
 
 	# Print pipeline summary
 	_print_pipeline_summary(results)
+
+	# Auto-apply high-confidence proposals (if --auto-apply)
+	if auto_apply:
+		from .writers import snapshot_metadata
+
+		# Create safety snapshot before any writes
+		snap_path = snapshot_metadata(cfg.library, output=Path(snapshot_dir) / f"metadata_snapshot.tar.gz" if snapshot_dir else None)
+		console.print(f"[dim]Snapshot: {snap_path}[/dim]")
+		summary = auto_apply_results(results, library_root=cfg.library, threshold=auto_apply_threshold, dry_run=False)
+		console.print()
+		t = Table(title="Auto-apply results", show_header=True, header_style="bold cyan")
+		t.add_column("Metric", style="bold")
+		t.add_column("Count", justify="right")
+		t.add_row("Threshold", auto_apply_threshold)
+		t.add_row("Applied (written)", str(summary["applied"]))
+		t.add_row("Skipped (low confidence)", str(summary["skipped_low_conf"]))
+		t.add_row("Skipped (no proposal)", str(summary["skipped_no_proposal"]))
+		t.add_row("Remaining for review", str(len(summary["remaining"])))
+		console.print(t)
+		# Use remaining (non-applied) results for the review file
+		results = summary["remaining"]
 
 	# Generate the review file
 	n = generate_review(results, library_root=cfg.library, output=out)
