@@ -109,6 +109,120 @@ def detect(library: Path | None, no_cache: bool, limit: int | None, category: st
 	_print_detect_summary(results, category, samples)
 
 
+@main.command()
+@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help="Library root")
+@click.option("--no-cache", is_flag=True, help="Disable SQLite cache (force full re-parse)")
+@click.option("--limit", type=int, default=None, help="Process only the first N books (for testing)")
+@click.option("--skip-enrich", is_flag=True, default=True, help="Skip online enrichment (offline mode)")
+@click.option("--skip-verify", is_flag=True, help="Skip content verification")
+@click.option("--output", "-o", type=click.Path(path_type=Path), default=None, help="Output review file (default: review.yaml)")
+def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, skip_verify: bool, output: Path | None) -> None:
+	"""Run full pipeline and generate a review.yaml for NEEDS_REVIEW books."""
+	from .enrichers import Enricher
+	from .pipeline import generate_review, run_pipeline
+
+	cfg = Config.from_env()
+	if library is not None:
+		cfg.library = library
+	out = output or cfg.review_file
+
+	console.print(f"[bold]Running pipeline[/bold] on {cfg.library}")
+
+	cache: Cache | None = None
+	if not no_cache:
+		cache = Cache(cfg.cache_db)
+
+	enricher = None
+	if not skip_enrich:
+		enricher = Enricher(cache_db=cfg.cache_db)
+
+	try:
+		results = run_pipeline(cfg.library, cache=cache, enricher=enricher, skip_enrich=skip_enrich, skip_verify=skip_verify)
+	finally:
+		if cache is not None:
+			cache.close()
+		if enricher is not None:
+			enricher.close()
+
+	if limit is not None:
+		results = results[:limit]
+
+	# Print pipeline summary
+	_print_pipeline_summary(results)
+
+	# Generate the review file
+	n = generate_review(results, library_root=cfg.library, output=out)
+	console.print()
+	console.print(f"[bold green]Wrote {n} review entries to {out}[/bold green]")
+	console.print(f"Edit the file, set `action` for each entry, then run: [bold]bmf apply {out}[/bold]")
+
+
+def _print_pipeline_summary(results) -> None:  # noqa: ANN001
+	"""Print a summary table of the pipeline's verdicts."""
+	from collections import Counter
+
+	verdict_counter: Counter[str] = Counter()
+	verify_counter: Counter[str] = Counter()
+	for _meta, diag, verification, _enriched in results:
+		verdict_counter[diag.verdict.value] += 1
+		if verification is not None:
+			verify_counter[verification.result] += 1
+		else:
+			verify_counter["(skipped)"] += 1
+
+	total = len(results)
+	console.print()
+	t = Table(title="Pipeline summary", show_header=True, header_style="bold cyan")
+	t.add_column("Verdict", style="bold")
+	t.add_column("Count", justify="right")
+	t.add_column("%", justify="right")
+	for v, n in verdict_counter.most_common():
+		t.add_row(v, str(n), f"{n / total * 100:.1f}%")
+	console.print(t)
+
+	t = Table(title="Verification results", show_header=True, header_style="bold cyan")
+	t.add_column("Result")
+	t.add_column("Count", justify="right")
+	for r, n in verify_counter.most_common():
+		t.add_row(r, str(n))
+	console.print(t)
+
+
+@main.command()
+@click.argument("review_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help="Library root")
+@click.option("--apply", "do_apply", is_flag=True, help="Actually write changes (default: dry-run)")
+def apply(review_file: Path, library: Path | None, do_apply: bool) -> None:
+	"""Apply approved changes from a (human-edited) review.yaml."""
+	from .pipeline import apply_review
+
+	cfg = Config.from_env()
+	if library is not None:
+		cfg.library = library
+
+	console.print(f"[bold]Applying[/bold] {review_file} ({'WRITE' if do_apply else 'DRY-RUN'})")
+	summary = apply_review(review_file, cfg.library, dry_run=not do_apply)
+	console.print()
+	t = Table(title="Apply summary", show_header=True, header_style="bold cyan")
+	t.add_column("Metric", style="bold")
+	t.add_column("Count", justify="right")
+	t.add_row("Mode", "WRITE" if do_apply else "DRY-RUN")
+	t.add_row("Applied", str(summary["applied"]))
+	t.add_row("Rejected", str(summary["rejected"]))
+	t.add_row("Errors", str(len(summary["errors"])))
+	console.print(t)
+	if summary["errors"]:
+		console.print()
+		console.print("[red]Errors:[/red]")
+		for e in summary["errors"][:20]:
+			console.print(f"  {e}")
+
+
+# Required imports for the new commands
+# (Enricher is imported lazily inside report() to avoid loading requests
+#  when the user only runs scan/detect.)
+
+
 def _print_scan_summary(books) -> None:  # noqa: ANN001
 	"""Print a rich table of scan statistics."""
 	console.print()
