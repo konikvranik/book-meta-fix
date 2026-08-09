@@ -179,6 +179,10 @@ def _build_proposed(
 			if getattr(enriched, "series_index", None):
 				proposed["series_index"] = enriched.series_index
 			source_parts.append(enriched.source)
+		# Genres (LLM-derived literary tags)
+		if getattr(enriched, "genres", None) and enriched.genres:
+			proposed["genres"] = enriched.genres
+			source_parts.append(enriched.source)
 		# LLM reasoning — show as a comment-like field for the human reviewer
 		if getattr(enriched, "description", None) and enriched.source.startswith("llm"):
 			proposed["reasoning"] = enriched.description

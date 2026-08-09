@@ -114,6 +114,7 @@ def detect(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--no-cache", is_flag=True, help="Disable SQLite cache (force full re-parse)")
 @click.option("--limit", type=int, default=None, help="Process only the first N books (for testing)")
 @click.option("--skip-enrich", is_flag=True, default=True, help="Skip online enrichment (offline mode)")
+@click.option("--databazeknih", "use_databazeknih", is_flag=True, help="Enable databazeknih.cz lookup (CZ/SK genres + metadata). Implies --no-skip-enrich.")
 @click.option("--skip-verify", is_flag=True, help="Skip content verification")
 @click.option("--output", "-o", type=click.Path(path_type=Path), default=None, help="Output review file (default: review.yaml)")
 @click.option("--llm", "use_llm", is_flag=True, help="Enable LLM reconciliation (needs ZAI_API_KEY or BMF_LLM_MOCK=1)")
@@ -122,7 +123,7 @@ def detect(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--auto-apply", "auto_apply", is_flag=True, help="Auto-apply high-confidence LLM proposals directly (with snapshot + .bak). Lower-confidence go to review.yaml.")
 @click.option("--auto-apply-threshold", default="high", help="Confidence threshold for auto-apply: high (default) | medium | low.")
 @click.option("--snapshot-dir", default=None, help="Where to write the metadata tar.gz snapshot before auto-apply (default: CWD).")
-def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, skip_verify: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int, auto_apply: bool, auto_apply_threshold: str, snapshot_dir: Path | None) -> None:
+def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, skip_verify: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int, auto_apply: bool, auto_apply_threshold: str, snapshot_dir: Path | None) -> None:
 	"""Run full pipeline and generate a review.yaml for NEEDS_REVIEW books."""
 	from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn
 
@@ -139,7 +140,14 @@ def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich:
 		console.print("[yellow]--auto-apply requires --llm (nothing to apply without LLM). Enabling --llm.[/yellow]")
 		use_llm = True
 
+	# --databazeknih turns enrichment on (and opts the CZ/SK scraper in).
+	if use_databazeknih:
+		skip_enrich = False
+		cfg.databazeknih_enabled = True
+
 	console.print(f"[bold]Running pipeline[/bold] on {cfg.library} ({workers} workers)")
+	if cfg.databazeknih_enabled:
+		console.print("  [cyan]databazeknih.cz[/cyan] lookup enabled (genres + metadata)")
 
 	cache: Cache | None = None
 	if not no_cache:
@@ -147,7 +155,12 @@ def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich:
 
 	enricher = None
 	if not skip_enrich:
-		enricher = Enricher(cache_db=cfg.cache_db)
+		enricher = Enricher(
+			cache_db=cfg.cache_db,
+			databazeknih_enabled=cfg.databazeknih_enabled,
+			openlibrary_enabled=cfg.openlibrary_enabled,
+			google_books_enabled=cfg.google_books_enabled,
+		)
 
 	# LLM provider
 	llm_provider = None

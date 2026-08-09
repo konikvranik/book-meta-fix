@@ -13,12 +13,12 @@ Audiobookshelf and Kavita pick up the fixes on rescan.
 - [x] Scan (`bmf scan`)
 - [x] Detect (`bmf detect`) — C1–C10 rules
 - [x] Verify (content vs metadata cascade)
-- [x] Enrich (OpenLibrary + Google Books; obalkyknih requires API key, TODO)
+- [x] Enrich (databazeknih.cz scraping for CZ/SK genres + metadata; OpenLibrary + Google Books fallback)
 - [x] Report + YAML review (`bmf report`, `bmf apply`)
 - [x] Organize (`bmf organize`) — split OK vs needfix
 - [x] EPUB generation (`bmf epubgen`)
 - [ ] LLM reconciliation (Z.AI, for C1/C4/C5) — pending `ZAI_API_KEY`
-- [x] Tests (36 passing) + docs
+- [x] Tests (51 passing) + docs
 
 ## Quick start
 
@@ -31,6 +31,11 @@ bmf detect --limit 500
 
 # 2. Generate a review file (this also scans; no separate `bmf scan` needed)
 bmf report --skip-enrich -o review.yaml --limit 1000
+
+#    Optional: enrich with CZ/SK genres from databazeknih.cz (no API key,
+#    2 HTTP requests per book, opt-in scraping). Adds genres + metadata to
+#    the proposed block.
+bmf report --databazeknih -o review.yaml --limit 1000
 
 # 3. Edit review.yaml — set `action: accept|reject|swap|edit` per entry
 $EDITOR review.yaml
@@ -71,7 +76,29 @@ bmf epubgen --apply
 | `bmf epubgen --apply` | Actually generate the EPUBs |
 
 Common options: `--library PATH`, `--limit N`, `--no-cache`, `-o FILE`,
-`--skip-enrich`, `--skip-verify`.
+`--skip-enrich`, `--skip-verify`, `--databazeknih`.
+
+## Enrichment sources
+
+Online metadata lookups are **off by default** (`--skip-enrich` is the default
+for `report`). Enable them with the flags below; results are cached in
+`bmf_cache.db` so re-runs don't re-hit the network.
+
+| Flag | Source | Strengths | Notes |
+|---|---|---|---|
+| `--databazeknih` | databazeknih.cz | **Best for CZ/SK**. Returns genres (broad categories + user tags), ISBN, publisher, language, description, cover. | Scraping (no API key). 2 requests/book. Fuzzy title match gates the result so the wrong book's genres aren't attached. |
+| *(always on when enrichment enabled)* | OpenLibrary | ISBN + title search, international editions | Weak CZ coverage (~10%) |
+| *(always on when enrichment enabled)* | Google Books | ISBN lookup | Often rate-limited without an API key |
+
+Lookup order when enrichment is on: **databazeknih (if enabled) → OpenLibrary by ISBN → Google Books by ISBN → OpenLibrary by title**. First hit wins.
+
+```bash
+# Enrich with CZ/SK genres only (no international fallbacks needed for a CZ library)
+bmf report --databazeknih --limit 100 -o review.yaml
+
+# Enable via env var instead of the flag
+echo 'BMF_DATABAZEKNIH=1' >> .env
+```
 
 ## Library layout expected
 
@@ -215,9 +242,11 @@ The tool works without them, but with reduced format coverage.
 
 ## Known limitations
 
-- **Online enrichment for CZ/SK books is weak**: OpenLibrary and Google Books
-  have poor coverage of Czech ISBNs. `obalkyknih.cz` is the right source but
-  its API requires a library key (HTML scraping is a TODO).
+- **Online enrichment for CZ/SK books**: use `--databazeknih` for
+  CZ/SK-focused lookup via databazeknih.cz scraping (genres + metadata, no API
+  key). OpenLibrary and Google Books remain as international fallbacks but
+  have poor Czech ISBN coverage. `obalkyknih.cz` API requires a library key
+  (not yet implemented).
 - **Mojibake in EPUB content**: when Calibre imported a book with corrupt
   metadata, it wrote that corruption into the EPUB's `content.opf` too. The
   verifier cannot detect this via text matching (the corrupt title is present
