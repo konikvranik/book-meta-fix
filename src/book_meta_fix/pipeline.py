@@ -46,14 +46,20 @@ def run_pipeline(
 	limit: int | None = None,
 	workers: int = 10,
 	progress_callback: Any = None,
+	only_needs_review: bool = True,
 ) -> list[tuple[BookMeta, "Diagnosis", "Verification | None", "EnrichedMeta | None"]]:  # noqa: F821
 	"""Run the full pipeline over the whole library.
 
 	Returns a list of (meta, diagnosis, verification, enriched) tuples.
 
-	If *limit* is given, only the first N books (in scan order) are processed.
-	This is applied at the scan stage, so the expensive extraction/LLM work
-	isn't wasted on books the caller doesn't want.
+	*only_needs_review* (default True): skip books that the detector already
+	classifies as OK or VERIFIED. This makes the pipeline incremental —
+	repeated runs only touch books that still need work. Set to False to
+	force a full re-scan (e.g. when detector rules change).
+
+	If *limit* is given, it caps the number of books processed AFTER the
+	only_needs_review filter. So `--limit 500` means "process at most 500
+	books that still need review", not "the first 500 books in the library".
 
 	*workers* controls parallelism: each book's expensive I/O (content
 	extraction, online lookup, LLM call) runs in a ThreadPoolExecutor with
@@ -62,7 +68,17 @@ def run_pipeline(
 	"""
 	from concurrent.futures import ThreadPoolExecutor
 
-	books = scan_library(library, cache=cache)
+	all_books = scan_library(library, cache=cache)
+	# Apply the detector cheaply to filter out already-OK books (incremental).
+	# This is fast (no I/O — just regex/heuristics over metadata).
+	if only_needs_review:
+		books = [b for b in all_books if detect_fn(b).verdict != Verdict.OK]
+		log.info(
+			"pipeline: %d total books, %d already OK -> %d to process",
+			len(all_books), len(all_books) - len(books), len(books),
+		)
+	else:
+		books = list(all_books)
 	if limit is not None:
 		books = books[:limit]
 	total = len(books)
