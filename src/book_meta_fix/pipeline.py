@@ -44,6 +44,8 @@ def run_pipeline(
 	llm_provider: Any = None,
 	llm_categories: tuple[str, ...] = ("C1", "C4"),
 	limit: int | None = None,
+	workers: int = 10,
+	progress_callback: Any = None,
 ) -> list[tuple[BookMeta, "Diagnosis", "Verification | None", "EnrichedMeta | None"]]:  # noqa: F821
 	"""Run the full pipeline over the whole library.
 
@@ -52,61 +54,109 @@ def run_pipeline(
 	If *limit* is given, only the first N books (in scan order) are processed.
 	This is applied at the scan stage, so the expensive extraction/LLM work
 	isn't wasted on books the caller doesn't want.
+
+	*workers* controls parallelism: each book's expensive I/O (content
+	extraction, online lookup, LLM call) runs in a ThreadPoolExecutor with
+	this many workers. Output order matches input order.
+	*progress_callback* (if given) is called with (i, total) after each book.
 	"""
+	from concurrent.futures import ThreadPoolExecutor
+
 	books = scan_library(library, cache=cache)
 	if limit is not None:
 		books = books[:limit]
+	total = len(books)
 	stats = {"ok": 0, "needs_review": 0, "det_fixed": 0, "online_fixed": 0, "llm_fixed": 0, "unfixed": 0}
 
-	results = []
-	for meta in books:
-		diag = detect_fn(meta)
-		verification = None
-		enriched = None
+	# Per-book work closure. The shared enricher/llm are thread-safe:
+	# - openai client uses an internal httpx Client (thread-safe)
+	# - requests.Session is thread-safe for GETs
+	# - SQLite Enricher cache serializes via its connection's check_same_thread=False
+	def _process(meta: BookMeta):
+		return _process_book(
+			meta, enricher=enricher, skip_enrich=skip_enrich, skip_verify=skip_verify,
+			llm_provider=llm_provider, llm_categories=llm_categories, stats=stats,
+		)
 
-		is_needs_review = diag.verdict == Verdict.NEEDS_REVIEW or diag.category in ("MISSING_ISBN", "MISSING_YEAR")
-
-		# --- OK books: just verify against content ---
-		if diag.verdict == Verdict.OK and not skip_verify and meta.primary_file:
-			try:
-				verification = verify(meta)
-			except Exception as e:  # noqa: BLE001
-				log.debug("verify failed for %s: %s", meta.path, e)
-			stats["ok"] += 1
-
-		# --- NEEDS_REVIEW books: try cheap fixes first, LLM last ---
-		elif is_needs_review:
-			stats["needs_review"] += 1
-			# Extract content once (reused by both deterministic fixes and LLM)
-			extracted = _safe_extract(meta)
-
-			# Step 2a-2c: deterministic fixes from extracted content + online lookup
-			if extracted is not None:
-				enriched = _try_deterministic_fix(meta, diag, extracted, enricher, skip_enrich)
-				if enriched is not None:
-					stats["det_fixed" if enriched.source.startswith("embedded") else "online_fixed"] += 1
-
-			# Step 4: LLM fallback only if deterministic + online failed
-			if enriched is None and llm_provider is not None and diag.category in llm_categories:
-				try:
-					evidence = _build_llm_evidence(meta, diag, extracted)
-					reconciled = llm_provider.reconcile(evidence)
-					if reconciled is not None and _reconciled_is_useful(reconciled, meta):
-						enriched = _reconciled_to_enriched(reconciled)
-						stats["llm_fixed"] += 1
-				except Exception as e:  # noqa: BLE001
-					log.debug("LLM reconcile failed for %s: %s", meta.path, e)
-
-			if enriched is None:
-				stats["unfixed"] += 1
-
-		results.append((meta, diag, verification, enriched))
+	# No point spawning a pool of 10 if we only have 3 books.
+	n_workers = max(1, min(workers, total))
+	if n_workers == 1:
+		# Serial path — keeps stack traces readable for debugging
+		results = []
+		for i, meta in enumerate(books):
+			results.append(_process(meta))
+			if progress_callback is not None:
+				progress_callback(i + 1, total)
+	else:
+		results = []
+		with ThreadPoolExecutor(max_workers=n_workers) as pool:
+			# submit + as_completed would give fastest-first ordering, but we
+			# want input-order output, so we submit all and read futures in order.
+			futures = [pool.submit(_process, meta) for meta in books]
+			for i, fut in enumerate(futures):
+				results.append(fut.result())
+				if progress_callback is not None:
+					progress_callback(i + 1, total)
 
 	log.info(
 		"pipeline: %d ok, %d needs_review (det=%d, online=%d, llm=%d, unfixed=%d)",
 		stats["ok"], stats["needs_review"], stats["det_fixed"], stats["online_fixed"], stats["llm_fixed"], stats["unfixed"],
 	)
 	return results
+
+
+def _process_book(
+	meta: BookMeta,
+	*,
+	enricher: Enricher | None,
+	skip_enrich: bool,
+	skip_verify: bool,
+	llm_provider: Any,
+	llm_categories: tuple[str, ...],
+	stats: dict,
+) -> tuple[BookMeta, "Diagnosis", "Verification | None", "EnrichedMeta | None"]:  # noqa: F821
+	"""Process one book end-to-end. Thread-safe (no shared mutable state except *stats*)."""
+	diag = detect_fn(meta)
+	verification = None
+	enriched = None
+
+	is_needs_review = diag.verdict == Verdict.NEEDS_REVIEW or diag.category in ("MISSING_ISBN", "MISSING_YEAR")
+
+	# --- OK books: just verify against content ---
+	if diag.verdict == Verdict.OK and not skip_verify and meta.primary_file:
+		try:
+			verification = verify(meta)
+		except Exception as e:  # noqa: BLE001
+			log.debug("verify failed for %s: %s", meta.path, e)
+		stats["ok"] += 1
+
+	# --- NEEDS_REVIEW books: try cheap fixes first, LLM last ---
+	elif is_needs_review:
+		stats["needs_review"] += 1
+		# Extract content once (reused by both deterministic fixes and LLM)
+		extracted = _safe_extract(meta)
+
+		# Step 2a-2c: deterministic fixes from extracted content + online lookup
+		if extracted is not None:
+			enriched = _try_deterministic_fix(meta, diag, extracted, enricher, skip_enrich)
+			if enriched is not None:
+				stats["det_fixed" if enriched.source.startswith("embedded") else "online_fixed"] += 1
+
+		# Step 4: LLM fallback only if deterministic + online failed
+		if enriched is None and llm_provider is not None and diag.category in llm_categories:
+			try:
+				evidence = _build_llm_evidence(meta, diag, extracted)
+				reconciled = llm_provider.reconcile(evidence)
+				if reconciled is not None and _reconciled_is_useful(reconciled, meta):
+					enriched = _reconciled_to_enriched(reconciled)
+					stats["llm_fixed"] += 1
+			except Exception as e:  # noqa: BLE001
+				log.debug("LLM reconcile failed for %s: %s", meta.path, e)
+
+		if enriched is None:
+			stats["unfixed"] += 1
+
+	return (meta, diag, verification, enriched)
 
 
 def _safe_extract(meta: BookMeta) -> ExtractedMeta | None:

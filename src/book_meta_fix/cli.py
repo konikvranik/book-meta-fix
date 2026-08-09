@@ -118,8 +118,11 @@ def detect(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--output", "-o", type=click.Path(path_type=Path), default=None, help="Output review file (default: review.yaml)")
 @click.option("--llm", "use_llm", is_flag=True, help="Enable LLM reconciliation (needs ZAI_API_KEY or BMF_LLM_MOCK=1)")
 @click.option("--llm-categories", default="C1,C4", help="Comma-separated categories to send to LLM (default: C1,C4)")
-def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, skip_verify: bool, output: Path | None, use_llm: bool, llm_categories: str) -> None:
+@click.option("--workers", "-w", type=int, default=10, help="Parallel workers for I/O (extract/LLM/enrich). Default 10.")
+def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, skip_verify: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int) -> None:
 	"""Run full pipeline and generate a review.yaml for NEEDS_REVIEW books."""
+	from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn
+
 	from .enrichers import Enricher
 	from .llm import get_provider
 	from .pipeline import generate_review, run_pipeline
@@ -129,7 +132,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich:
 		cfg.library = library
 	out = output or cfg.review_file
 
-	console.print(f"[bold]Running pipeline[/bold] on {cfg.library}")
+	console.print(f"[bold]Running pipeline[/bold] on {cfg.library} ({workers} workers)")
 
 	cache: Cache | None = None
 	if not no_cache:
@@ -149,15 +152,35 @@ def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich:
 			cats = tuple(c.strip() for c in llm_categories.split(",") if c.strip())
 			console.print(f"  LLM: [cyan]{llm_provider.name}[/cyan] for categories {cats}")
 
+	# Progress bar (updated from worker threads via callback)
+	progress = Progress(
+		SpinnerColumn(),
+		TextColumn("[progress.description]{task.description}"),
+		BarColumn(),
+		TextColumn("{task.completed}/{task.total}"),
+		TimeRemainingColumn(),
+		console=console,
+		transient=True,
+	)
+	task_id = progress.add_task("processing", total=None)
+	progress.start()
 	try:
+		def _cb(done: int, total: int) -> None:
+			if progress.tasks[0].total is None and total:
+				progress.update(task_id, total=total)
+			progress.update(task_id, completed=done)
+
 		results = run_pipeline(
 			cfg.library, cache=cache, enricher=enricher,
 			skip_enrich=skip_enrich, skip_verify=skip_verify,
 			llm_provider=llm_provider,
 			llm_categories=tuple(c.strip() for c in llm_categories.split(",") if c.strip()) if use_llm else (),
 			limit=limit,
+			workers=workers,
+			progress_callback=_cb,
 		)
 	finally:
+		progress.stop()
 		if cache is not None:
 			cache.close()
 		if enricher is not None:
