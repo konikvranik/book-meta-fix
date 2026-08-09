@@ -134,12 +134,21 @@ def _build_proposed(
 			source_parts.append("embedded")
 
 	if enriched is not None:
-		if enriched.title and "title" not in proposed and _looks_better(enriched.title, meta.title):
+		# LLM proposals are pre-vetted: trust them without _looks_better gate.
+		# The LLM already decided the new value is better than current.
+		trust_blindly = enriched.source.startswith("llm:")
+		if enriched.title and "title" not in proposed and (trust_blindly or _looks_better(enriched.title, meta.title)):
 			proposed["title"] = enriched.title
 			source_parts.append(enriched.source)
-		if enriched.authors and "author" not in proposed and _looks_better(enriched.authors[0], meta.authors[0] if meta.authors else ""):
-			proposed["author"] = enriched.authors[0]
-			source_parts.append(enriched.source)
+		if enriched.authors and "author" not in proposed:
+			# Pick the first non-placeholder author
+			real_author = next((a for a in enriched.authors if a and a not in ("Neznamy", "Unknown", "anonym", "Anonymous")), None)
+			if real_author and (trust_blindly or _looks_better(real_author, meta.authors[0] if meta.authors else "")):
+				proposed["author"] = real_author
+				# If LLM returned multiple authors, expose them all
+				if len(enriched.authors) > 1:
+					proposed["authors"] = enriched.authors
+				source_parts.append(enriched.source)
 		if enriched.isbn and "isbn" not in proposed:
 			proposed["isbn"] = enriched.isbn
 			source_parts.append(enriched.source)
@@ -152,6 +161,15 @@ def _build_proposed(
 		if enriched.cover_url:
 			proposed["cover_url"] = enriched.cover_url
 			source_parts.append(enriched.source)
+		# Series (mostly from LLM / obalkyknih — DB usually lacks it)
+		if getattr(enriched, "series", None) and enriched.series:
+			proposed["series"] = enriched.series
+			if getattr(enriched, "series_index", None):
+				proposed["series_index"] = enriched.series_index
+			source_parts.append(enriched.source)
+		# LLM reasoning — show as a comment-like field for the human reviewer
+		if getattr(enriched, "description", None) and enriched.source.startswith("llm"):
+			proposed["reasoning"] = enriched.description
 
 	if source_parts:
 		proposed["source"] = "+".join(sorted(set(source_parts)))

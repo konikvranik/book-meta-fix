@@ -34,7 +34,7 @@ USER_AGENT = "book-meta-fix/0.1 (https://github.com/pvranik/book-meta-fix)"
 
 @dataclass
 class EnrichedMeta:
-	"""Metadata fetched from an online source."""
+	"""Metadata fetched from an online source or LLM."""
 
 	title: str | None = None
 	authors: list[str] = field(default_factory=list)
@@ -44,7 +44,9 @@ class EnrichedMeta:
 	language: str | None = None
 	description: str | None = None
 	cover_url: str | None = None
-	source: str = ""  # 'openlibrary' | 'google_books' | 'obalkyknih'
+	series: str | None = None  # series name (LLM / obalkyknih)
+	series_index: str | None = None  # position within series
+	source: str = ""  # 'openlibrary' | 'google_books' | 'obalkyknih' | 'llm:high'
 
 
 # ---------------------------------------------------------------------------
