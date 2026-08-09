@@ -1,9 +1,11 @@
 """Configuration: paths, API keys, tunables.
 
-Resolution order for every setting:
+Resolution order for every setting (highest precedence first):
 	1. CLI flag (--library, ...)
-	2. Environment variable (BMF_LIBRARY, ZAI_API_KEY, ...)
-	3. config.toml in the current directory or ~/.config/bmf/config.toml
+	2. Process environment variable (BMF_LIBRARY, ZAI_API_KEY, ...)
+	3. .env file — found by walking up from CWD: ./.env, ../.env, ../../.env, ...
+	   (the first existing .env wins; its keys are loaded into os.environ
+	   only if not already set there, so real env vars still take precedence)
 	4. Built-in default
 """
 from __future__ import annotations
@@ -48,6 +50,10 @@ class Config:
 
 	@classmethod
 	def from_env(cls) -> "Config":
+		# Load .env first (walking up from CWD), so its values populate
+		# os.environ as defaults. Real env vars still win because load_dotenv
+		# is called with override=False.
+		load_dotenv_walk_up()
 		cfg = cls()
 		# Library / paths
 		if v := os.environ.get("BMF_LIBRARY"):
@@ -64,3 +70,66 @@ class Config:
 		if v := os.environ.get("ZAI_MODEL"):
 			cfg.zai_model = v
 		return cfg
+
+
+# ---------------------------------------------------------------------------
+# .env loader (walks up from CWD)
+# ---------------------------------------------------------------------------
+
+
+def load_dotenv_walk_up(*, max_depth: int = 20, override: bool = False) -> Path | None:
+	"""Load the first .env file found by walking up from CWD.
+
+	Search order: ./.env, ../.env, ../../.env, ... up to *max_depth* parents.
+	The first existing file is parsed (simple KEY=VALUE format, # comments and
+	blank lines ignored, optional `export ` prefix, single/double-quoted values
+	supported). Values are written into os.environ, but only when the key is
+	not already set — unless *override* is True.
+
+	Returns the path of the loaded file, or None if no .env was found.
+	"""
+	cwd = Path.cwd()
+	for depth in range(max_depth + 1):
+		candidate = cwd.parents[depth - 1] if depth > 0 else cwd
+		# At depth 0 we look at cwd itself; for depth>0 we look at parents[depth-1]
+		# (parents[0] is the immediate parent of cwd).
+		env_path = candidate / ".env"
+		if env_path.is_file():
+			_apply_env_file(env_path, override=override)
+			return env_path
+	return None
+
+
+def _apply_env_file(path: Path, *, override: bool) -> None:
+	"""Parse a .env file and populate os.environ (without overriding real env)."""
+	try:
+		text = path.read_text(encoding="utf-8")
+	except OSError:
+		return
+	for lineno, raw in enumerate(text.splitlines(), start=1):
+		line = raw.strip()
+		if not line or line.startswith("#"):
+			continue
+		# Optional `export ` prefix
+		if line.startswith("export "):
+			line = line[len("export ") :].lstrip()
+		if "=" not in line:
+			continue
+		key, _, value = line.partition("=")
+		key = key.strip()
+		if not key or not key.replace("_", "").isalnum():
+			# Reject malformed keys (avoid injecting garbage)
+			continue
+		value = value.strip()
+		# Strip matching surrounding quotes
+		if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+			value = value[1:-1]
+		# Expand ${VAR} and $VAR references to already-set env values
+		value = _expand_vars(value)
+		if override or key not in os.environ:
+			os.environ[key] = value
+
+
+def _expand_vars(value: str) -> str:
+	"""Expand $VAR and ${VAR} references against the current environment."""
+	return os.path.expandvars(value)
