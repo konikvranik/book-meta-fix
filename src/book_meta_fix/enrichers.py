@@ -208,8 +208,11 @@ class Enricher:
 	def __init__(self, cache_db: Path | None = None, rate_sec: float = 1.0) -> None:
 		self.rate_sec = rate_sec
 		self._cache_conn: sqlite3.Connection | None = None
+		self._cache_lock = __import__("threading").Lock()
 		if cache_db is not None:
-			self._cache_conn = sqlite3.connect(str(cache_db))
+			# check_same_thread=False: the Enricher is shared across worker
+			# threads. All access goes through self._cache_lock.
+			self._cache_conn = sqlite3.connect(str(cache_db), check_same_thread=False)
 			self._cache_conn.execute(
 				"""
 				CREATE TABLE IF NOT EXISTS enrich_cache (
@@ -257,7 +260,8 @@ class Enricher:
 		"""Returns: EnrichedMeta on hit, None on miss, '__NOT_FOUND__' on cached negative."""
 		if self._cache_conn is None:
 			return None
-		row = self._cache_conn.execute("SELECT payload FROM enrich_cache WHERE key = ?", (key,)).fetchone()
+		with self._cache_lock:
+			row = self._cache_conn.execute("SELECT payload FROM enrich_cache WHERE key = ?", (key,)).fetchone()
 		if row is None:
 			return None  # miss
 		payload = row[0]
@@ -288,8 +292,9 @@ class Enricher:
 					"source": result.source,
 				}
 			)
-		self._cache_conn.execute(
-			"INSERT OR REPLACE INTO enrich_cache(key, payload, cached_at) VALUES (?,?,?)",
-			(key, payload, time.time()),
-		)
-		self._cache_conn.commit()
+		with self._cache_lock:
+			self._cache_conn.execute(
+				"INSERT OR REPLACE INTO enrich_cache(key, payload, cached_at) VALUES (?,?,?)",
+				(key, payload, time.time()),
+			)
+			self._cache_conn.commit()
