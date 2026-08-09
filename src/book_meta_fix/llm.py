@@ -157,23 +157,52 @@ class ZaiProvider(LLMProvider):
 		return self._client
 
 	def reconcile(self, evidence: dict[str, Any]) -> ReconciledMeta | None:
-		try:
-			client = self._get_client()
-			resp = client.chat.completions.create(
-				model=self.model,
-				messages=[
-					{"role": "system", "content": SYSTEM_PROMPT},
-					{"role": "user", "content": build_user_prompt(evidence)},
-				],
-				response_format={"type": "json_object"},
-				temperature=0.1,  # low temperature for deterministic output
-				max_tokens=600,
-			)
-			content = resp.choices[0].message.content or ""
-			return _parse_llm_json(content)
-		except Exception as e:  # noqa: BLE001
-			log.warning("Z.AI reconcile failed: %s", e)
-			return None
+		"""Call the LLM with retry on empty/transient failures.
+
+		Z.AI occasionally returns an empty content (rate limit / overload).
+		We retry up to *max_retries* times with a short backoff.
+		"""
+		import time
+
+		max_retries = 3
+		prompt = build_user_prompt(evidence)
+		last_error = None
+		for attempt in range(max_retries):
+			try:
+				client = self._get_client()
+				resp = client.chat.completions.create(
+					model=self.model,
+					messages=[
+						{"role": "system", "content": SYSTEM_PROMPT},
+						{"role": "user", "content": prompt},
+					],
+					response_format={"type": "json_object"},
+					temperature=0.1,  # low temperature for deterministic output
+					max_tokens=600,
+				)
+				content = resp.choices[0].message.content or ""
+				if not content.strip():
+					# Empty response — retry after backoff
+					log.debug("Z.AI returned empty content (attempt %d/%d)", attempt + 1, max_retries)
+					last_error = "empty response"
+					time.sleep(1.0 * (attempt + 1))
+					continue
+				result = _parse_llm_json(content)
+				if result is not None:
+					return result
+				# JSON parse failed — retry once, then give up
+				last_error = "json parse failed"
+				if attempt < max_retries - 1:
+					time.sleep(0.5)
+					continue
+			except Exception as e:  # noqa: BLE001
+				log.debug("Z.AI reconcile error (attempt %d/%d): %s", attempt + 1, max_retries, e)
+				last_error = str(e)
+				# Brief backoff for transient errors (rate limit, network)
+				time.sleep(1.0 * (attempt + 1))
+		if last_error:
+			log.warning("Z.AI reconcile gave up after %d attempts: %s", max_retries, last_error)
+		return None
 
 
 # ---------------------------------------------------------------------------

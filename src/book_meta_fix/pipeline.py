@@ -245,16 +245,22 @@ def _build_llm_evidence(meta: BookMeta, diag: "Diagnosis", extracted: ExtractedM
 
 
 def _reconciled_is_useful(r, meta: BookMeta) -> bool:  # noqa: ANN001
-	"""Did the LLM produce anything better than what we already had?"""
-	# Useful if it proposed a title different from current, OR added ISBN/year,
-	# OR changed authors. If it just echoed current values, skip.
-	if r.title and r.title != meta.title:
+	"""Did the LLM produce anything useful?
+
+	Useful = at least ONE of:
+	  - a title (the most important field)
+	  - an author that's not a placeholder ("Neznamy", "Unknown")
+	  - an ISBN
+	  - a series (which the DB usually lacks)
+	If the LLM returned nothing for any of these, it's not useful.
+	"""
+	if r.title:
 		return True
-	if r.isbn and r.isbn != meta.isbn:
+	if r.authors and any(a not in ("Neznamy", "Unknown", "anonym", "Anonymous", "") for a in r.authors):
 		return True
-	if r.year and r.year != meta.year:
+	if r.isbn:
 		return True
-	if r.authors and r.authors != meta.authors:
+	if r.series:
 		return True
 	return False
 
@@ -271,6 +277,8 @@ def _reconciled_to_enriched(r) -> "EnrichedMeta":  # noqa: F821
 		year=r.year,
 		language=r.language,
 		description=r.reasoning,  # stash reasoning as description for transparency
+		series=r.series,
+		series_index=r.series_index,
 		source=f"llm:{r.confidence}",
 	)
 
