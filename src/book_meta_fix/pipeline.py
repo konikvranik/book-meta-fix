@@ -355,21 +355,123 @@ def generate_review(
 	library_root: Path,
 	output: Path,
 ) -> int:
-	"""Write a review.yaml from pipeline results. Returns the count of entries."""
-	# Build items for review: NEEDS_REVIEW + UNFIXABLE + verification=MISMATCH
+	"""Write a review.yaml from pipeline results. Incremental: preserves
+	existing user edits (action, edited, notes) and prior `proposed` values
+	when the new run didn't produce a better proposal.
+
+	Returns the count of entries written.
+	"""
+	# 1. Load existing review.yaml (if any) so we can preserve user edits.
+	existing_by_id: dict[int | str, dict] = {}
+	if output.is_file():
+		try:
+			prev = _yaml_safe_load(output)
+			for entry in prev or []:
+				eid = entry.get("id")
+				if eid is not None:
+					existing_by_id[eid] = entry
+		except Exception as e:  # noqa: BLE001
+			log.warning("could not parse existing %s (%s); starting fresh", output, e)
+
+	# 2. Build items for review: NEEDS_REVIEW + UNFIXABLE + verification=MISMATCH
 	items_for_review = []
+	preserved = 0
+	refreshed = 0
 	for meta, diag, verification, enriched in results:
 		include = diag.verdict.value in ("NEEDS_REVIEW", "UNFIXABLE")
 		if verification and verification.result == "MISMATCH":
 			include = True
-		if include:
-			extracted = verification.extracted if verification else None
-			items_for_review.append((meta, diag, extracted, enriched))
+		if not include:
+			continue
+		extracted = verification.extracted if verification else None
+
+		# If we have a prior entry for this id, preserve user edits. Two cases:
+		# (a) user already set `action` — keep the entry AS-IS (don't overwrite
+		#     their decision). They can re-run to refresh `current` if needed.
+		# (b) no action yet, but the prior run had a `proposed` and this run
+		#     doesn't (e.g. LLM quota ran out) — keep the prior `proposed`.
+		prior = existing_by_id.get(meta.calibre_id)
+		if prior is not None:
+			if prior.get("action") is not None:
+				# User already decided. Reuse the entire prior entry, but update
+				# `current` so it reflects any metadata changes since.
+				prior["current"] = _build_current(meta)
+				items_for_review.append(_entry_from_prior(prior, meta, diag, extracted))
+				preserved += 1
+				continue
+			# No user action yet. Use the new run's proposal if present, else
+			# carry over the prior proposal (LLM result from a previous run).
+			if enriched is None and prior.get("proposed"):
+				# Reconstruct an EnrichedMeta-like dict from the prior proposed.
+				enriched = _proposed_to_enriched(prior["proposed"])
+		items_for_review.append((meta, diag, extracted, enriched))
+		refreshed += 1
 
 	yaml_text = build_review(items_for_review, library_root=library_root)
 	output.write_text(yaml_text, encoding="utf-8")
-	log.info("wrote %d review entries to %s", len(items_for_review), output)
+	log.info(
+		"wrote %d review entries to %s (%d preserved, %d refreshed)",
+		len(items_for_review), output, preserved, refreshed,
+	)
 	return len(items_for_review)
+
+
+def _build_current(meta: BookMeta) -> dict:
+	"""Build the `current` block for a review entry from a BookMeta."""
+	current = {
+		"author": meta.authors[0] if meta.authors else None,
+		"authors": meta.authors if len(meta.authors) > 1 else None,
+		"title": meta.title,
+		"isbn": meta.isbn,
+		"year": meta.year,
+		"publisher": meta.publisher,
+		"language": meta.language,
+	}
+	return {k: v for k, v in current.items() if v is not None}
+
+
+def _entry_from_prior(prior: dict, meta: BookMeta, diag, extracted) -> tuple:  # noqa: ANN001
+	"""Wrap a preserved prior entry as a 5-element tuple that build_review
+	can re-emit. The enriched value carries the prior proposed, and the 5th
+	element carries the full prior dict (so build_review can preserve action/
+	edited/notes).
+	"""
+	proposed = prior.get("proposed")
+	enriched = _proposed_to_enriched(proposed) if proposed else None
+	return (meta, diag, extracted, enriched, prior)
+
+
+def _proposed_to_enriched(proposed: dict):  # noqa: ANN202
+	"""Reconstruct an EnrichedMeta from a review.yaml `proposed` block."""
+	from .enrichers import EnrichedMeta
+
+	authors = []
+	if proposed.get("author"):
+		authors = [proposed["author"]]
+	if proposed.get("authors"):
+		authors = proposed["authors"]
+	return EnrichedMeta(
+		title=proposed.get("title"),
+		authors=authors,
+		isbn=proposed.get("isbn"),
+		publisher=proposed.get("publisher"),
+		year=proposed.get("year"),
+		language=proposed.get("language"),
+		series=proposed.get("series"),
+		series_index=proposed.get("series_index"),
+		description=proposed.get("reasoning"),
+		source=proposed.get("source") or "preserved",
+	)
+
+
+def _yaml_safe_load(path: Path):
+	"""Load a YAML file, returning None on empty/invalid."""
+	import yaml
+
+	try:
+		return yaml.safe_load(path.read_text(encoding="utf-8"))
+	except yaml.YAMLError:
+		return None
 
 
 def apply_review(review_path: Path, library: Path, *, dry_run: bool = True) -> dict:
