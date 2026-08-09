@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "book-meta-fix"
+version = "0.1.0"
+description = "Detect and fix metadata of ebooks in a Calibre-style library"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Petr Vraník" }]
+dependencies = [
+	"click>=8.1",
+	"lxml>=4.9",
+	"requests>=2.28",
+	"rich>=13.0",
+	"PyYAML>=6.0",
+	"rapidfuzz>=3.0",
+]
+
+[project.optional-dependencies]
+# PDF metadata (pdfinfo/pdftotext are primary; pypdf is optional)
+pdf = ["pypdf>=4.0"]
+# LLM reconciliation via Z.AI (OpenAI-compatible client)
+llm = ["openai>=1.10"]
+dev = [
+	"pytest>=7.0",
+	"pytest-cov>=4.0",
+	"ruff>=0.1",
+]
+
+[project.scripts]
+bmf = "book_meta_fix.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]  # line length handled by formatter
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
