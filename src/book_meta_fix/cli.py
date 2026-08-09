@@ -218,6 +218,189 @@ def apply(review_file: Path, library: Path | None, do_apply: bool) -> None:
 			console.print(f"  {e}")
 
 
+@main.command()
+@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help="Library root")
+@click.option("--no-cache", is_flag=True, help="Disable SQLite cache")
+@click.option("--limit", type=int, default=None, help="Process only the first N books")
+@click.option("--pattern", default=None, help="Path pattern for OK books (default: '{author}/{title} ({id})')")
+@click.option("--needfix-dir", default=None, help="Folder for broken books (default: 'needfix')")
+@click.option("--apply", "do_apply", is_flag=True, help="Actually move (default: dry-run)")
+@click.option("--skip-verify", is_flag=True, help="Skip content verification (faster, less reliable)")
+def organize(library: Path | None, no_cache: bool, limit: int | None, pattern: str | None, needfix_dir: str | None, do_apply: bool, skip_verify: bool) -> None:
+	"""Move OK books to a clean path pattern and broken books to needfix/."""
+	from .detectors import detect as detect_fn
+	from .mover import DEFAULT_NEEDFIX_DIR, DEFAULT_PATH_PATTERN, organize as organize_fn
+	from .verifier import verify
+
+	cfg = Config.from_env()
+	if library is not None:
+		cfg.library = library
+	pat = pattern or DEFAULT_PATH_PATTERN
+	needfix = needfix_dir or DEFAULT_NEEDFIX_DIR
+
+	console.print(f"[bold]Organizing[/bold] {cfg.library}")
+	console.print(f"  OK pattern:    [cyan]{pat}[/cyan]")
+	console.print(f"  needfix dir:   [cyan]{needfix}[/cyan]")
+	console.print(f"  mode:          [{'WRITE' if do_apply else 'DRY-RUN'}]")
+
+	cache: Cache | None = None
+	if not no_cache:
+		cache = Cache(cfg.cache_db)
+	books = scan_library(cfg.library, cache=cache, use_cache=not no_cache)
+	if cache is not None:
+		cache.close()
+	if limit is not None:
+		books = books[:limit]
+
+	# Determine verdict for each book
+	console.print(f"\n[classifying] {len(books)} books...")
+	verdicts = []
+	for meta in books:
+		diag = detect_fn(meta)
+		# OK books get verified; if verification MISMATCHES, demote to NEEDS_REVIEW
+		v = diag.verdict
+		if v.value == "OK" and not skip_verify and meta.primary_file:
+			try:
+				ver = verify(meta)
+				if ver.result == "MISMATCH":
+					from .models import Verdict
+
+					v = Verdict.NEEDS_REVIEW
+			except Exception:  # noqa: BLE001
+				pass
+		verdicts.append((meta, v))
+
+	results = organize_fn(
+		verdicts, cfg.library,
+		path_pattern=pat, needfix_dir=needfix, dry_run=not do_apply,
+	)
+	_print_organize_summary(results, verdicts)
+
+
+def _print_organize_summary(results, verdicts) -> None:  # noqa: ANN001
+	from collections import Counter
+
+	from .models import Verdict
+
+	# Verdict distribution
+	vc: Counter[str] = Counter()
+	for _m, v in verdicts:
+		vc[v.value] += 1
+	console.print()
+	t = Table(title="Classification", show_header=True, header_style="bold cyan")
+	t.add_column("Verdict")
+	t.add_column("Count", justify="right")
+	t.add_column("Destination", style="dim")
+	for v, n in vc.most_common():
+		dest = "OK path" if v in ("OK", "VERIFIED") else "needfix/"
+		t.add_row(v, str(n), dest)
+	console.print(t)
+
+	# Move results
+	rc: Counter[str] = Counter()
+	for r in results:
+		rc[r.action] += 1
+	console.print()
+	t = Table(title="Move results", show_header=True, header_style="bold cyan")
+	t.add_column("Action")
+	t.add_column("Count", justify="right")
+	for a, n in rc.most_common():
+		t.add_row(a, str(n))
+	console.print(t)
+
+
+@main.command()
+@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help="Library root")
+@click.option("--no-cache", is_flag=True, help="Disable SQLite cache")
+@click.option("--limit", type=int, default=None, help="Process only the first N books")
+@click.option("--apply", "do_apply", is_flag=True, help="Actually generate EPUBs (default: dry-run)")
+@click.option("--skip-verify", is_flag=True, help="Skip content verification (faster)")
+def epubgen(library: Path | None, no_cache: bool, limit: int | None, do_apply: bool, skip_verify: bool) -> None:
+	"""Generate EPUBs for OK books that lack one, from the best source format."""
+	from .detectors import detect as detect_fn
+	from .epubgen import generate_epub
+	from .verifier import verify
+
+	cfg = Config.from_env()
+	if library is not None:
+		cfg.library = library
+
+	console.print(f"[bold]Generating EPUBs[/bold] for {cfg.library} [{'WRITE' if do_apply else 'DRY-RUN'}]")
+
+	cache: Cache | None = None
+	if not no_cache:
+		cache = Cache(cfg.cache_db)
+	books = scan_library(cfg.library, cache=cache, use_cache=not no_cache)
+	if cache is not None:
+		cache.close()
+	if limit is not None:
+		books = books[:limit]
+
+	results = []
+	skipped_not_ok = 0
+	skipped_has_epub = 0
+	for meta in books:
+		# Only OK books (verified clean)
+		diag = detect_fn(meta)
+		if diag.verdict.value not in ("OK", "VERIFIED"):
+			skipped_not_ok += 1
+			continue
+		if diag.verdict.value == "OK" and not skip_verify and meta.primary_file:
+			try:
+				ver = verify(meta)
+				if ver.result == "MISMATCH":
+					skipped_not_ok += 1
+					continue
+			except Exception:  # noqa: BLE001
+				pass
+		# Skip if already has epub
+		if ".epub" in meta.formats:
+			skipped_has_epub += 1
+			continue
+		result = generate_epub(meta, dry_run=not do_apply)
+		results.append(result)
+
+	_print_epubgen_summary(results, skipped_not_ok, skipped_has_epub)
+
+
+def _print_epubgen_summary(results, skipped_not_ok: int, skipped_has_epub: int) -> None:  # noqa: ANN001
+	from collections import Counter
+
+	console.print()
+	t = Table(title="EPUB generation summary", show_header=True, header_style="bold cyan")
+	t.add_column("Metric", style="bold")
+	t.add_column("Count", justify="right")
+	t.add_row("Skipped (not OK)", str(skipped_not_ok))
+	t.add_row("Skipped (already has epub)", str(skipped_has_epub))
+	t.add_row("To generate", str(len(results)))
+	console.print(t)
+
+	if not results:
+		return
+
+	# Source format breakdown
+	src: Counter[str] = Counter(r.source_format for r in results)
+	console.print()
+	t = Table(title="By source format", show_header=True, header_style="bold cyan")
+	t.add_column("Format")
+	t.add_column("Count", justify="right")
+	for fmt, n in src.most_common():
+		t.add_row(fmt, str(n))
+	console.print(t)
+
+	# Show sample (first 10)
+	console.print()
+	t = Table(title="Sample (first 10)", show_header=True, header_style="bold cyan")
+	t.add_column("ID", justify="right", style="cyan")
+	t.add_column("Source file")
+	t.add_column("Tool")
+	t.add_column("Output / Error", style="dim")
+	for r in results[:10]:
+		out = r.output_file or r.error or ""
+		t.add_row(str(r.book_id or "?"), Path(r.source_file).name[:40], r.tool, out[:50])
+	console.print(t)
+
+
 # Required imports for the new commands
 # (Enricher is imported lazily inside report() to avoid loading requests
 #  when the user only runs scan/detect.)
