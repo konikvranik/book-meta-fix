@@ -10,21 +10,68 @@ Audiobookshelf and Kavita pick up the fixes on rescan.
 
 ## Status
 
-- [x] Phase 1 — Scan (`bmf scan`)
-- [ ] Phase 2 — Detect (`bmf detect`) — C1–C10 rules
-- [ ] Phase 3 — Verify (`bmf verify`) — content vs metadata
-- [ ] Phase 4 — Enrich (obalkyknih / Google Books / OpenLibrary)
-- [ ] Phase 5 — Write + YAML review (`bmf apply`)
-- [ ] Phase 6 — LLM reconciliation (Z.AI, for C1/C4/C5)
-- [ ] Phase 7 — Tests + docs
+- [x] Scan (`bmf scan`)
+- [x] Detect (`bmf detect`) — C1–C10 rules
+- [x] Verify (content vs metadata cascade)
+- [x] Enrich (OpenLibrary + Google Books; obalkyknih requires API key, TODO)
+- [x] Report + YAML review (`bmf report`, `bmf apply`)
+- [x] Organize (`bmf organize`) — split OK vs needfix
+- [x] EPUB generation (`bmf epubgen`)
+- [ ] LLM reconciliation (Z.AI, for C1/C4/C5) — pending `ZAI_API_KEY`
+- [x] Tests (36 passing) + docs
 
 ## Quick start
 
 ```bash
-make dev-install        # create .venv, install package + dev deps
-make scan               # scan default library (/mnt/share_nfs/Shared eBooks)
-make scan LIBRARY=/path # scan a different library
+cd ~/priv/git/book-meta-fix
+make dev-install                  # create .venv, install package + dev deps
+
+# 1. See what's wrong (statistics only, no writes)
+bmf detect --limit 500
+
+# 2. Generate a review file (this also scans; no separate `bmf scan` needed)
+bmf report --skip-enrich -o review.yaml --limit 1000
+
+# 3. Edit review.yaml — set `action: accept|reject|swap|edit` per entry
+$EDITOR review.yaml
+
+# 4. Preview the changes (dry-run, no writes)
+bmf apply review.yaml
+
+# 5. Apply for real
+bmf apply --apply review.yaml
+
+# 6. Split library: OK books to clean paths, broken to needfix/
+bmf organize                       # dry-run
+bmf organize --apply
+
+# 7. Generate missing EPUBs for OK books
+bmf epubgen                        # dry-run
+bmf epubgen --apply
 ```
+
+> **Note:** every command that needs book metadata (`detect`, `report`,
+> `organize`, `epubgen`) runs an internal scan via `scan_library()`. There is
+> no need to run `bmf scan` first — its only purpose is to print summary
+> statistics. The scan uses a SQLite cache (`bmf_cache.db`) so repeated runs
+> are fast; pass `--no-cache` to force a full re-parse.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `bmf scan` | Traverse library, parse metadata, print summary stats |
+| `bmf detect` | Run C1–C10 detector rules, show category breakdown + samples |
+| `bmf report` | Full pipeline (scan+detect+extract+verify+enrich) → generate `review.yaml` |
+| `bmf apply <file>` | Apply approved changes from a review.yaml (dry-run by default) |
+| `bmf apply --apply <file>` | Actually write `metadata.json` + `metadata.opf` |
+| `bmf organize` | Move OK books to a clean path pattern; broken to `needfix/` |
+| `bmf organize --apply` | Actually move the folders |
+| `bmf epubgen` | Generate missing `.epub` files for OK books (from pdb/mobi/pdf/doc/txt) |
+| `bmf epubgen --apply` | Actually generate the EPUBs |
+
+Common options: `--library PATH`, `--limit N`, `--no-cache`, `-o FILE`,
+`--skip-enrich`, `--skip-verify`.
 
 ## Library layout expected
 
@@ -37,29 +84,142 @@ make scan LIBRARY=/path # scan a different library
 │       ├── <Title> - <Author>.epub
 │       ├── <Title> - <Author>.pdb
 │       └── cover.jpg
+└── needfix/                  # broken books moved here by `bmf organize`
+    └── <Author>/...          #   (preserving the original relative subpath)
 ```
 
-Excluded automatically: `temp_calibre/`, `calibre-*/`, `~$*` (Word lock files),
-dotfiles.
+Excluded automatically from scans: `temp_calibre/`, `calibre-*/`, `needfix/`,
+`~$*` (Word lock files), dotfiles.
 
 ## Configuration
 
 Settings resolve from (highest precedence first):
-1. CLI flags (`--library`, ...)
-2. Environment variables (`BMF_LIBRARY`, `ZAI_API_KEY`, ...)
-3. Built-in defaults
 
-| Variable | Default                        | Purpose |
-|---|--------------------------------|---|
+1. **CLI flags** — `--library`, `--pattern`, ...
+2. **Process environment variables** — `BMF_LIBRARY`, `ZAI_API_KEY`, ...
+3. **`.env` file** — searched by walking up from CWD: `./.env`, `../.env`,
+   `../../.env`, ... (the first existing file wins; values are loaded as
+   defaults, so real env vars still win). Copy `.env.example` to `.env`:
+   ```bash
+   cp .env.example .env
+   $EDITOR .env
+   ```
+4. **Built-in defaults**
+
+| Variable | Default | Purpose |
+|---|---|---|
 | `BMF_LIBRARY` | `/mnt/share_nfs/Shared eBooks` | Library root |
-| `BMF_CACHE` | `bmf_cache.db`                 | SQLite cache path |
-| `BMF_REVIEW` | `review.yaml`                  | Review file path |
-| `ZAI_API_KEY` | —                              | Z.AI API key (LLM, optional) |
-| `ZAI_MODEL` | `glm-5.2`                      | Z.AI model |
+| `BMF_CACHE` | `bmf_cache.db` | SQLite cache path |
+| `BMF_REVIEW` | `review.yaml` | Default review file path |
+| `ZAI_API_KEY` | — | Z.AI API key (LLM, optional — phase 7) |
+| `ZAI_BASE_URL` | `https://api.z.ai/api/paas/v4/` | Z.AI base URL |
+| `ZAI_MODEL` | `glm-5.2` | Z.AI model |
+
+## Corruption categories (C1–C10)
+
+See [`docs/corruption-catalog.md`](docs/corruption-catalog.md) for the full
+catalog with real examples. Summary:
+
+| Code | Description | Typical verdict |
+|---|---|---|
+| C1 | author/title swapped | NEEDS_REVIEW |
+| C2 | filename used as title (diacritics lost) | NEEDS_REVIEW |
+| C3 | series/library/publisher used as author | NEEDS_REVIEW |
+| C4 | metadata has unrepairable mojibake | NEEDS_REVIEW (LLM) |
+| C5 | literal placeholder record ("author"/"title") | AUTO_FIXABLE (delete) |
+| C6 | MS-Word lock-file duplicate (`~$`) | AUTO_FIXABLE (delete) |
+| C7 | glued authors ("byX...andY") | NEEDS_REVIEW |
+| C8 | translator mislabeled as author | NEEDS_REVIEW |
+| C9 | anonym (mostly fake — real anonym is whitelisted) | NEEDS_REVIEW |
+| C10 | long multi-author list (anthology vs translator team) | NEEDS_REVIEW |
+| — | MISSING_ISBN / MISSING_YEAR | AUTO_FIXABLE (enrich) |
+
+## YAML review format
+
+```yaml
+- id: 4895
+  path: "Karel Capek/_apek_Karel-RURe_n_ (4895)"
+  diagnosis:
+    category: C2
+    reason: "title == primary file stem"
+    confidence: HIGH
+  current:                # what's in the DB now
+    author: Karel Capek
+    title: _apek_Karel-RURe_n_
+    year: 2012
+    language: ces
+  proposed:               # our suggested fix (from content/online)
+    title: R.U.R.
+    author: Karel Čapek
+    isbn: '9788072451648'
+    year: 1920
+    source: embedded+openlibrary
+  action: accept          # ← you fill this in
+  # edited:               # uncomment for action: edit
+  #   title: R.U.R. (Rossum's Universal Robots)
+```
+
+**Actions:**
+- `accept` — apply `proposed` as-is
+- `reject` — leave unchanged
+- `swap` — swap author ↔ title (for C1 cases)
+- `edit` — apply fields under `edited:` (these override everything)
+
+## How verification works
+
+The verifier is the key insight: **embedded EPUB/PDF metadata is NOT trusted
+as confirmation**, because Calibre wrote the (possibly wrong) DB metadata back
+into the file at import time. Only **independent signals from the book's actual
+text** can confirm a record:
+
+1. **ISBN scanned from content text** (copyright page) — strongest signal
+2. **Fuzzy title match against first-page text** (rapidfuzz)
+3. **UNCERTAIN** if only embedded metadata is available (no readable text)
+
+## Organize patterns
+
+`bmf organize` moves OK books to a path built from a format string. Default:
+`{author}/{title} ({id})`. Available fields:
+
+| Field | Example | Notes |
+|---|---|---|
+| `{author}` | `Karel Čapek` | first author |
+| `{author_sort}` | `Čapek, Karel` | "Lastname, Firstname" |
+| `{title}` | `R.U.R.` | |
+| `{title_sort}` | `R.U.R.` | leading article moved (The/A/An) |
+| `{id}` | `4895` | calibre_id |
+| `{isbn}` | `9788072451648` | empty if missing |
+| `{year}` | `1920` | empty if missing |
+| `{language}` | `ces` | |
+| `{series}` | `Ren Dhark` | empty if not part of a series |
+| `{series_index}` | `3` | |
+
+Examples:
+```bash
+bmf organize --pattern "{author_sort}/{title} ({id})"
+bmf organize --pattern "{author}/{series}/{title}" --needfix-dir "_problems"
+```
+
+Broken books go to `<library>/<needfix-dir>/<original relative path>`
+(default `needfix/`), preserving the original folder structure so you can
+trace where they came from.
 
 ## Optional external tools
 
 - **`pdftotext` / `pdfinfo`** (poppler-utils) — PDF content & metadata extraction
-- **`ebook-meta`** (calibre) — fallback extractor for mobi/pdb/rtf
+- **`ebook-convert`** + **`ebook-meta`** (calibre) — EPUB generation from
+  pdb/mobi/doc, and fallback metadata extraction
+- **`pandoc`** — fallback EPUB generation from txt/doc/rtf/html
 
 The tool works without them, but with reduced format coverage.
+
+## Known limitations
+
+- **Online enrichment for CZ/SK books is weak**: OpenLibrary and Google Books
+  have poor coverage of Czech ISBNs. `obalkyknih.cz` is the right source but
+  its API requires a library key (HTML scraping is a TODO).
+- **Mojibake in EPUB content**: when Calibre imported a book with corrupt
+  metadata, it wrote that corruption into the EPUB's `content.opf` too. The
+  verifier cannot detect this via text matching (the corrupt title is present
+  in both DB and content). Mitigated upstream by the C4 detector.
+- **Scanned PDFs**: no text layer → no verification signal.
