@@ -40,7 +40,7 @@ class Config:
 	# LLM (Z.AI)
 	zai_api_key: str | None = field(default=None)
 	zai_base_url: str = "https://api.z.ai/api/paas/v4/"
-	zai_model: str = "glm-4.6"
+	zai_model: str = "glm-5.2"
 
 	# Verification thresholds
 	verify_fuzzy_strong: float = 0.8  # >= -> VERIFIED

@@ -49,13 +49,13 @@ Settings resolve from (highest precedence first):
 2. Environment variables (`BMF_LIBRARY`, `ZAI_API_KEY`, ...)
 3. Built-in defaults
 
-| Variable | Default | Purpose |
-|---|---|---|
+| Variable | Default                        | Purpose |
+|---|--------------------------------|---|
 | `BMF_LIBRARY` | `/mnt/share_nfs/Shared eBooks` | Library root |
-| `BMF_CACHE` | `bmf_cache.db` | SQLite cache path |
-| `BMF_REVIEW` | `review.yaml` | Review file path |
-| `ZAI_API_KEY` | — | Z.AI API key (LLM, optional) |
-| `ZAI_MODEL` | `glm-4.6` | Z.AI model |
+| `BMF_CACHE` | `bmf_cache.db`                 | SQLite cache path |
+| `BMF_REVIEW` | `review.yaml`                  | Review file path |
+| `ZAI_API_KEY` | —                              | Z.AI API key (LLM, optional) |
+| `ZAI_MODEL` | `glm-5.2`                      | Z.AI model |
 
 ## Optional external tools
 
