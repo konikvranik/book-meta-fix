@@ -123,10 +123,13 @@ def detect(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--llm-categories", default="ALL", help="Comma-separated categories to send to LLM, or 'ALL' (default). ALL = every category except C9 (legitimate anonyms like the Bible, where an LLM-invented author would be wrong). Each book is one LLM request that returns all fields at once, so the cost is per-book, not per-category.")
 @click.option("--workers", "-w", type=int, default=10, help="Parallel workers for I/O (extract/LLM/enrich). Default 10.")
 @click.option("--llm-min-interval", "llm_min_interval", type=float, default=None, help="Minimum seconds between LLM requests (RPM throttle, default 2.0 = ~30 RPM). Decoupled from --workers: cheap I/O still runs at full worker count. Lower (e.g. 1.0 = 60 RPM) on a higher Z.AI tier; raise (e.g. 4.0 = 15 RPM) if you still hit 429.")
+@click.option("--llm-model", "llm_model", default=None, help="Z.AI model for LLM fallback (default glm-5.2). Alternatives: glm-4.6, glm-4.5-air, glm-4.5-flash, glm-4.7-flash. See README 'LLM model choice' for the token/quality tradeoffs measured by scripts/llm_experiment.py.")
+@click.option("--llm-reasoning-effort", "llm_reasoning_effort", default=None, help="reasoning_effort for GLM-5.x models: low (default) | medium | max. Lower cuts reasoning tokens ~60%% vs max. Ignored by GLM-4.x (use --llm-thinking).")
+@click.option("--llm-thinking", "llm_thinking", default=None, help="thinking toggle for GLM-4.x models: disabled (default) | enabled. 'disabled' turns off chain-of-thought (3-4x fewer output tokens). Ignored by GLM-5.x (use --llm-reasoning-effort).")
 @click.option("--auto-apply", "auto_apply", is_flag=True, help="Auto-apply high-confidence LLM proposals directly (with snapshot + .bak). Lower-confidence go to review.yaml.")
 @click.option("--auto-apply-threshold", default="high", help="Confidence threshold for auto-apply: high (default) | medium | low.")
 @click.option("--snapshot-dir", default=None, help="Where to write the metadata tar.gz snapshot before auto-apply (default: CWD).")
-def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, skip_verify: bool, verify_ok: bool, no_strict_verify: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int, llm_min_interval: float | None, auto_apply: bool, auto_apply_threshold: str, snapshot_dir: Path | None) -> None:
+def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, skip_verify: bool, verify_ok: bool, no_strict_verify: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int, llm_min_interval: float | None, llm_model: str | None, llm_reasoning_effort: str | None, llm_thinking: str | None, auto_apply: bool, auto_apply_threshold: str, snapshot_dir: Path | None) -> None:
 	"""Run full pipeline and generate a review.yaml for NEEDS_REVIEW books."""
 	from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn
 
@@ -173,13 +176,21 @@ def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich:
 	if use_llm:
 		if llm_min_interval is not None:
 			cfg.llm_min_interval = llm_min_interval
+		if llm_model is not None:
+			cfg.zai_model = llm_model
+		if llm_reasoning_effort is not None:
+			cfg.zai_reasoning_effort = llm_reasoning_effort
+		if llm_thinking is not None:
+			cfg.zai_thinking = llm_thinking
 		llm_provider = get_provider(cfg)
 		if llm_provider is None:
 			console.print("[yellow]--llm given but no provider available (set ZAI_API_KEY or BMF_LLM_MOCK=1)[/yellow]")
 		else:
 			cats = tuple(c.strip() for c in llm_categories.split(",") if c.strip())
 			rpm = round(60.0 / cfg.llm_min_interval) if cfg.llm_min_interval > 0 else float("inf")
-			console.print(f"  LLM: [cyan]{llm_provider.name}[/cyan] for categories {cats} (≤{rpm} RPM, min {cfg.llm_min_interval}s between calls)")
+			is_glm5 = cfg.zai_model.lower().startswith("glm-5")
+			reason = f"reasoning_effort={cfg.zai_reasoning_effort}" if is_glm5 else f"thinking={cfg.zai_thinking}"
+			console.print(f"  LLM: [cyan]{llm_provider.name}[/cyan] model={cfg.zai_model} ({reason}) for categories {cats} (≤{rpm} RPM, min {cfg.llm_min_interval}s between calls)")
 
 	# Streaming review writer: appends each processed book to review.yaml as it
 	# completes (Unix-pipe style). The original is moved to .bak on

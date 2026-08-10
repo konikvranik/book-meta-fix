@@ -157,11 +157,23 @@ class ZaiProvider(LLMProvider):
 	# which is the safest match for the documented dynamic RPM cap.
 	DEFAULT_MIN_INTERVAL = 2.0
 
-	def __init__(self, api_key: str, base_url: str = "https://api.z.ai/api/paas/v4/", model: str = "glm-5.2", *, min_interval: float | None = None) -> None:
+	def __init__(self, api_key: str, base_url: str = "https://api.z.ai/api/paas/v4/", model: str = "glm-5.2", *, min_interval: float | None = None, reasoning_effort: str | None = None, thinking: str | None = None) -> None:
 		self.api_key = api_key
 		self.base_url = base_url
 		self.model = model
 		self._client = None
+		# Per-model reasoning controls. GLM-5.x exposes reasoning_effort
+		# (low|medium|max); GLM-4.x exposes a binary thinking toggle
+		# (enabled|disabled). We pick the right one based on the model family
+		# and forward it as extra_body to the OpenAI client (Z.AI reads it).
+		# See scripts/llm_experiment.py for the token/quality tradeoffs that
+		# informed the defaults (glm-5.2 + reasoning_effort=low).
+		self._extra_body: dict[str, Any] = {}
+		is_glm5 = model.lower().startswith("glm-5")
+		if is_glm5 and reasoning_effort:
+			self._extra_body["reasoning_effort"] = reasoning_effort
+		elif not is_glm5 and thinking:
+			self._extra_body["thinking"] = {"type": thinking}
 		# Rate limiter state (shared across worker threads). min_interval < 0
 		# disables throttling; floor at a tiny positive value keeps behavior sane.
 		interval = self.DEFAULT_MIN_INTERVAL if min_interval is None else min_interval
@@ -234,6 +246,9 @@ class ZaiProvider(LLMProvider):
 					# emit markdown fences; we tolerate both in _parse_llm_json.
 					temperature=0.1,
 					max_tokens=8000,
+					# Forward reasoning_effort (GLM-5.x) or thinking (GLM-4.x)
+					# as extra_body. Z.AI reads these to control CoT length.
+					extra_body=self._extra_body or None,
 				)
 			except Exception as e:  # noqa: BLE001
 				last_error = str(e)
@@ -340,6 +355,8 @@ def get_provider(config: Any) -> LLMProvider | None:  # noqa: ANN001
 			base_url=getattr(config, "zai_base_url", "https://api.z.ai/api/paas/v4/"),
 			model=getattr(config, "zai_model", "glm-5.2"),
 			min_interval=min_interval,
+			reasoning_effort=getattr(config, "zai_reasoning_effort", None),
+			thinking=getattr(config, "zai_thinking", None),
 		)
 	if os.environ.get("BMF_LLM_MOCK"):
 		return MockProvider()
