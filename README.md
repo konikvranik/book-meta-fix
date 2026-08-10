@@ -119,6 +119,68 @@ bmf report --databazeknih --limit 100 -o review.yaml
 echo 'BMF_DATABAZEKNIH=1' >> .env
 ```
 
+## How the fix pipeline picks a proposal
+
+For each NEEDS_REVIEW book, `bmf report` tries to recover correct metadata in
+**cheap-first order** so the LLM is reached only as a last resort:
+
+1. **Offline — page-text mining** (`text_meta`): reads the book's first-page
+   text (already extracted for verification) and mines title / authors / ISBN /
+   year / publisher using CZ/SK heuristics — ALL-CAPS title-page runs, explicit
+   `Název:` / `Autor:` / `Nakladatelství:` labels, the `Neznámý` placeholder
+   drop, CSS-leakage stripping. No network. On a 30-book sample this finds a
+   title for ~37% and any field for ~47% of NEEDS_REVIEW books.
+2. **Online by ISBN** (`extracted.isbn_from_text` > embedded ISBN): OpenLibrary
+   + Google Books.
+3. **Online by title + author** (text-mined > embedded > DB): this is the path
+   that reaches **databazeknih.cz** — the strongest CZ/SK source.
+4. **Embedded-OPF compare** (weakest; calibre may have overwritten the OPF).
+5. **LLM fallback** — only when 1–4 all miss.
+
+The LLM fallback model and its reasoning controls are configurable; see below.
+
+### LLM model choice
+
+`bmf report --llm` uses Z.AI's GLM API as the fallback. Five model settings
+were measured on a sample of hard CZ/SK books (`scripts/llm_experiment.py`):
+
+| Variant | ok% | in tok | out tok | reasoning | wall s | Cost ($/1M in/out) |
+|---|---|---|---|---|---|---|
+| **glm-5.2 reasoning_effort=low (default)** | 100% | 1529 | 346 | yes | 6.7 | 1.40 / 4.40 |
+| glm-4.6 thinking=disabled | 100% | 1522 | 139 | no | 3.0 | 0.60 / 2.20 |
+| glm-4.5-air thinking=disabled | 100% | 1522 | 122 | no | 6.5 | 0.20 / 1.10 |
+| glm-4.5-flash | 100% | 1527 | 96 | no | 7.6 | free |
+| glm-4.7-flash | 100% | 1522 | 147 | no | 3.4 | free |
+
+Non-reasoning models use 3–4× fewer output tokens, but on CZ/SK series they
+hallucinate more (returning the title of a different book by the same author,
+dropping diacritics, inventing authors). **GLM-5.2 with `reasoning_effort=low`
+is the default** — it keeps quality while cutting ~60% of reasoning tokens vs
+the model default. Switch when you know what you are doing:
+
+```bash
+# Cheapest, accepts lower CZ/SK quality (good when the LLM is a rare fallback)
+bmf report --llm --llm-model glm-4.5-flash
+
+# GLM-4.6 non-reasoning: cheaper than 5.2, better than flash on CZ
+bmf report --llm --llm-model glm-4.6   # thinking=disabled is the default for 4.x
+
+# More reasoning (slow, costly) for a hard batch
+bmf report --llm --llm-reasoning-effort max
+```
+
+| Knob | CLI | Env | Applies to |
+|---|---|---|---|
+| Model | `--llm-model` | `ZAI_MODEL` | all |
+| Reasoning effort | `--llm-reasoning-effort` | `ZAI_REASONING_EFFORT` | GLM-5.x (`low` default) |
+| Thinking toggle | `--llm-thinking` | `ZAI_THINKING` | GLM-4.x (`disabled` default) |
+
+Re-run the experiment yourself as Z.AI's lineup evolves:
+
+```bash
+.venv/bin/python scripts/llm_experiment.py --limit 10
+```
+
 ## Library layout expected
 
 ```
