@@ -425,12 +425,20 @@ def extract_via_ebook_meta(path: str | Path) -> ExtractedMeta:
 
 
 def _ebook_convert_to_text(path: str | Path) -> str | None:
-	"""Render a binary ebook (pdb/mobi/doc/...) to plain text via calibre's
-	`ebook-convert`. Returns None on failure / timeout / missing calibre.
+	"""Render a binary ebook (pdb/mobi/doc/...) to plain text.
 
-	Calibre writes the whole book; we keep only the first 8000 chars in the
-	caller. Runs with a 30s timeout per book.
+	For legacy MS Word ``.doc`` files (Composite Document File, which calibre
+	cannot read — it has no DOC input plugin), try ``catdoc`` first: it handles
+	CP1250/ISO-8859-2 content well and is ~instant. For every other format,
+	use calibre's ``ebook-convert`` (30s timeout). Returns None on failure.
 	"""
+	p = Path(path)
+	if p.suffix.lower() == ".doc":
+		text = _catdoc_to_text(p)
+		if text:
+			return text
+		# Fall through to ebook-convert (rarely works for .doc, but cheap to try).
+
 	ebook_convert = shutil.which("ebook-convert")
 	if not ebook_convert:
 		return None
@@ -440,7 +448,7 @@ def _ebook_convert_to_text(path: str | Path) -> str | None:
 		out = Path(tmp) / "out.txt"
 		try:
 			proc = subprocess.run(
-				[ebook_convert, str(path), str(out)],
+				[ebook_convert, str(p), str(out)],
 				capture_output=True, text=True, timeout=30,
 			)
 			if proc.returncode != 0 or not out.is_file():
@@ -449,6 +457,31 @@ def _ebook_convert_to_text(path: str | Path) -> str | None:
 			return text or None
 		except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
 			return None
+
+
+def _catdoc_to_text(path: str | Path) -> str | None:
+	"""Extract text from a legacy MS Word ``.doc`` via ``catdoc``.
+
+	``catdoc`` reads the OLE/CFB container and emits plain text with CP1250 /
+	ISO-8859-2 content decoded correctly — crucial for CZ/SK books where the
+	filename-as-title corruption is most common. Returns None if catdoc is not
+	installed or fails. Runs with a 15s timeout.
+	"""
+	catdoc = shutil.which("catdoc")
+	if not catdoc:
+		return None
+	try:
+		# -s disables garbled-char warnings on stderr; -d utf-8 forces UTF-8 out.
+		proc = subprocess.run(
+			[catdoc, "-d", "utf-8", str(path)],
+			capture_output=True, text=True, timeout=15,
+		)
+		if proc.returncode != 0:
+			return None
+		text = proc.stdout
+		return text.strip() or None
+	except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+		return None
 
 
 # ---------------------------------------------------------------------------
