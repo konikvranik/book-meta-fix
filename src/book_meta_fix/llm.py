@@ -169,7 +169,7 @@ class ZaiProvider(LLMProvider):
 
 		GLM-5.x is a reasoning model: it produces a `reasoning_content` (chain
 		of thought) BEFORE the final answer. The reasoning can consume many
-		tokens, so we set a generous max_tokens (4000) and read both fields.
+		tokens, so we set a generous max_tokens (8000) and read both fields.
 		Retries on empty/transient failures (rate limit, overload).
 		"""
 		import time
@@ -189,7 +189,7 @@ class ZaiProvider(LLMProvider):
 					# GLM-5.x reasoning models ignore response_format and may
 					# emit markdown fences; we tolerate both in _parse_llm_json.
 					temperature=0.1,
-					max_tokens=4000,
+					max_tokens=8000,
 				)
 				choice = resp.choices[0]
 				content = choice.message.content or ""
@@ -202,7 +202,7 @@ class ZaiProvider(LLMProvider):
 					reasoning = getattr(choice.message, "reasoning_content", None) or ""
 					if finish == "length":
 						log.warning(
-							"Z.AI ran out of tokens during reasoning (model=%s, max=4000). "
+							"Z.AI ran out of tokens during reasoning (model=%s, max=8000). "
 							"Consider a non-reasoning model.",
 							self.model,
 						)

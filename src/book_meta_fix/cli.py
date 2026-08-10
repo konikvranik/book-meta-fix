@@ -118,7 +118,7 @@ def detect(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--skip-verify", is_flag=True, help="Skip content verification")
 @click.option("--output", "-o", type=click.Path(path_type=Path), default=None, help="Output review file (default: review.yaml)")
 @click.option("--llm", "use_llm", is_flag=True, help="Enable LLM reconciliation (needs ZAI_API_KEY or BMF_LLM_MOCK=1)")
-@click.option("--llm-categories", default="C1,C4", help="Comma-separated categories to send to LLM (default: C1,C4)")
+@click.option("--llm-categories", default="C1,C2,C4", help="Comma-separated categories to send to LLM (default: C1,C2,C4). C2 (filename-as-title) is the bulk of a typical corrupted library; add C7,C8 to also cover glued-author and translator-as-author cases.")
 @click.option("--workers", "-w", type=int, default=10, help="Parallel workers for I/O (extract/LLM/enrich). Default 10.")
 @click.option("--auto-apply", "auto_apply", is_flag=True, help="Auto-apply high-confidence LLM proposals directly (with snapshot + .bak). Lower-confidence go to review.yaml.")
 @click.option("--auto-apply-threshold", default="high", help="Confidence threshold for auto-apply: high (default) | medium | low.")

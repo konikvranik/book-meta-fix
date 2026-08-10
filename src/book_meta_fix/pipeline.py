@@ -42,7 +42,7 @@ def run_pipeline(
 	skip_enrich: bool = False,
 	skip_verify: bool = False,
 	llm_provider: Any = None,
-	llm_categories: tuple[str, ...] = ("C1", "C4"),
+	llm_categories: tuple[str, ...] = ("C1", "C2", "C4"),
 	limit: int | None = None,
 	workers: int = 10,
 	progress_callback: Any = None,
