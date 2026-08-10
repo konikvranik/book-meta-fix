@@ -38,6 +38,16 @@ class TestBuildReviewFormat:
 		assert out.count("---") == 1
 		assert "id: 2" in out
 
+	def test_includes_auto_fixable_with_pre_filled_action(self):
+		"""AUTO_FIXABLE books (e.g. C6 Word lock-file) are emitted and their
+		diag.proposed["action"] is pre-filled so the user only confirms."""
+		diag = _diag(category="C6", verdict=Verdict.AUTO_FIXABLE)
+		diag.proposed = {"action": "delete", "reason": "word lockfile"}
+		items = [(_meta(1, "~$doc"), diag, None, None)]
+		out = build_review(items)
+		assert out.count("---") == 1
+		assert "action: delete" in out
+
 	def test_header_count_matches_emitted(self):
 		items = [(_meta(i), _diag(), None, None) for i in range(1, 4)]
 		out = build_review(items)

@@ -149,8 +149,9 @@ class ReviewWriter:
 		meta, diag, verification = result[0], result[1], result[2]
 		enriched = result[3] if len(result) > 3 else None
 		extracted = verification.extracted if verification else None
-		# Only NEEDS_REVIEW/UNFIXABLE books (or content-mismatch) go to review.
-		include = diag.verdict.value in ("NEEDS_REVIEW", "UNFIXABLE")
+		# NEEDS_REVIEW/UNFIXABLE/AUTO_FIXABLE books (or content-mismatch) go to
+		# review. AUTO_FIXABLE covers C6 (Word lock-file -> proposed delete).
+		include = diag.verdict.value in ("NEEDS_REVIEW", "UNFIXABLE", "AUTO_FIXABLE")
 		if verification and verification.result == "MISMATCH":
 			include = True
 		if not include:
@@ -212,6 +213,17 @@ class ReviewWriter:
 
 	def _build_entry(self, meta: Any, diag: Any, extracted: Any, enriched: Any, prior_entry: dict | None) -> dict:
 		"""Build a review entry dict, carrying over prior user edits."""
+		proposed = _build_proposed(meta, extracted, enriched)
+		# AUTO_FIXABLE detectors may carry an explicit action/proposal on
+		# diag.proposed (e.g. C6 Word lock-file -> {"action": "delete"}).
+		# Pre-fill it so the user only has to confirm. Merge any extra keys
+		# from diag.proposed into the entry's proposed block.
+		diag_proposed = getattr(diag, "proposed", None) or {}
+		action = diag_proposed.get("action") if diag.verdict == Verdict.AUTO_FIXABLE else None
+		if diag_proposed and diag.verdict == Verdict.AUTO_FIXABLE:
+			extra = {k: v for k, v in diag_proposed.items() if k != "action"}
+			if extra:
+				proposed = {**(proposed or {}), **extra}
 		entry: dict[str, Any] = {
 			"id": meta.calibre_id,
 			"path": _relative_path(meta, self.library_root),
@@ -221,8 +233,8 @@ class ReviewWriter:
 				"confidence": diag.confidence.value,
 			},
 			"current": _build_current(meta),
-			"proposed": _build_proposed(meta, extracted, enriched),
-			"action": None,
+			"proposed": proposed,
+			"action": action,
 		}
 		if prior_entry is not None:
 			if prior_entry.get("edited"):

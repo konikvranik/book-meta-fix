@@ -12,7 +12,7 @@ Corruption categories (from empirical study of the library):
 	    with other signals; alone too noisy — 47% of titles have '_')
 	C3  series/library/publisher as author  NEEDS_REVIEW
 	C4  encoding corruption (unrepairable)  NEEDS_REVIEW (LLM)
-	C5  placeholder record                  AUTO_FIXABLE (delete)
+	C5  placeholder record                  NEEDS_REVIEW (metadata corrupted; recover from page text)
 	C6  Word lock-file duplicate            AUTO_FIXABLE (delete)
 	C7  glued authors ("byXandY")           NEEDS_REVIEW
 	C8  translator mislabeled as author     NEEDS_REVIEW
@@ -149,14 +149,19 @@ def rule_c6_word_lockfile(meta: BookMeta) -> Diagnosis | None:
 
 
 def rule_c5_placeholder(meta: BookMeta) -> Diagnosis | None:
-	"""C5: literal placeholder record ('author'/'title'/'subject')."""
+	"""C5: literal placeholder record ('author'/'title'/'subject').
+
+	The metadata are corrupted (Calibre overwrote them with a placeholder), but
+	the book itself may still hold the real title/author. Reliable recovery
+	requires extracting metadata from the page text (a planned enhancement);
+	until then this needs a human in the loop.
+	"""
 	if _PLACEHOLDER_RE.match(meta.title) or any(_PLACEHOLDER_RE.match(a) for a in meta.authors):
 		return Diagnosis(
 			category="C5",
 			reason=f"placeholder record: author={meta.authors!r} title={meta.title!r}",
 			confidence=Confidence.HIGH,
-			verdict=Verdict.AUTO_FIXABLE,
-			proposed={"action": "delete", "reason": "empty placeholder, no real data"},
+			verdict=Verdict.NEEDS_REVIEW,
 		)
 	return None
 

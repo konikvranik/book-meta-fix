@@ -762,12 +762,19 @@ def _yaml_safe_load(path: Path):
 def apply_review(review_path: Path, library: Path, *, dry_run: bool = True) -> dict:
 	"""Parse a review.yaml and apply approved changes to the library.
 
-	Returns a summary dict: {applied, rejected, errors}.
+	Returns a summary dict: {applied, rejected, deleted, snapshot, errors}.
+
+	``action: delete`` removes the whole book folder. Because that is not
+	reversible via the per-file ``.bak`` that ``write_book_meta`` keeps, the
+	folders slated for deletion are first bundled into a single
+	``deletion_snapshot_<stamp>.tar.gz`` (in dry-run mode nothing is archived
+	and nothing is removed).
 	"""
 	from .models import Diagnosis  # local to avoid cycle
 
 	items = parse_review(review_path)
-	summary = {"applied": 0, "rejected": 0, "errors": [], "dry_run": dry_run}
+	summary = {"applied": 0, "rejected": 0, "deleted": 0, "snapshot": None, "errors": [], "dry_run": dry_run}
+	deleted_paths: list[Path] = []
 
 	for item in items:
 		if item.action is None:
@@ -776,7 +783,7 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True) -> d
 		if item.action == "reject":
 			summary["rejected"] += 1
 			continue
-		if item.action not in ("accept", "swap", "edit"):
+		if item.action not in ("accept", "swap", "edit", "delete"):
 			summary["errors"].append(f"id={item.id}: unknown action {item.action!r}")
 			continue
 
@@ -786,6 +793,12 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True) -> d
 			folder = library / item.path
 		if not folder.is_dir():
 			summary["errors"].append(f"id={item.id}: folder not found: {folder}")
+			continue
+
+		# delete: just collect — actual removal happens after a single tar.gz
+		# snapshot is taken, so the whole batch can be rolled back together.
+		if item.action == "delete":
+			deleted_paths.append(folder)
 			continue
 
 		# Build the desired metadata
@@ -803,7 +816,46 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True) -> d
 		except Exception as e:  # noqa: BLE001
 			summary["errors"].append(f"id={item.id}: write failed: {e}")
 
+	# Deletion pass: snapshot then remove. Dry-run reports without touching disk.
+	if deleted_paths:
+		summary["deleted"] = len(deleted_paths)
+		if not dry_run:
+			snap = _snapshot_deletions(deleted_paths, library)
+			summary["snapshot"] = str(snap) if snap else None
+			for folder in deleted_paths:
+				try:
+					import shutil
+
+					shutil.rmtree(folder)
+				except OSError as e:
+					summary["errors"].append(f"delete failed for {folder}: {e}")
+
 	return summary
+
+
+def _snapshot_deletions(folders: list[Path], library: Path) -> Path | None:
+	"""Bundle *folders* (whole book dirs) into a tar.gz next to the library.
+
+	Returns the snapshot path, or None if there was nothing to archive or the
+	archive could not be written (errors are logged, not raised — the caller
+	proceeds so a failed snapshot does not block the whole apply run).
+	"""
+	import tarfile
+	from datetime import datetime
+
+	if not folders:
+		return None
+	stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+	output = Path(f"deletion_snapshot_{stamp}.tar.gz")
+	try:
+		with tarfile.open(output, "w:gz") as tar:
+			for folder in folders:
+				tar.add(folder, arcname=str(folder.relative_to(library)) if folder.is_relative_to(library) else folder.name)
+		log.info("deletion snapshot: %d folders -> %s", len(folders), output)
+		return output
+	except OSError as e:
+		log.warning("could not write deletion snapshot %s: %s", output, e)
+		return None
 
 
 def _apply_action(meta: BookMeta, item) -> None:  # noqa: ANN001
