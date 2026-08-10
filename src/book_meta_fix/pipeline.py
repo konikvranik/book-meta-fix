@@ -296,7 +296,9 @@ def _process_book(
 				log.debug("deterministic fix failed for %s: %s", meta.path, e)
 				enriched = None
 			if enriched is not None:
-				stats["det_fixed" if enriched.source.startswith("embedded") else "online_fixed"] += 1
+				# 'embedded' (OPF compare) and 'content' (text_meta from page
+				# text) are both offline/deterministic; the rest are online.
+				stats["det_fixed" if enriched.source in ("embedded", "content") else "online_fixed"] += 1
 
 		# Step 4: LLM fallback only if deterministic + online failed AND the
 		# book has usable first-page text (LLM cannot work without it).
