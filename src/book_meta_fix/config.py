@@ -61,6 +61,18 @@ class Config:
 	# 'disabled' turns off chain-of-thought, drastically cutting output tokens.
 	# Override via ZAI_THINKING.
 	zai_thinking: str = "disabled"
+	# Self-correction loop: try the free Flash model first (with verify feedback),
+	# then the paid final model as fallback. Override via BMF_LLM_LOOP=0.
+	llm_loop: bool = True
+	# Flash (first-attempt, free) and final (paid fallback) models for the loop.
+	# Override via ZAI_FLASH_MODEL / ZAI_FINAL_MODEL. The single-call path uses
+	# zai_model when the loop is disabled.
+	zai_flash_model: str = "glm-4.5-flash"
+	zai_final_model: str = "glm-5.2"
+	# Leaky-bucket burst capacity: how many LLM calls may fire in a short burst
+	# before the smoother engages. Default 5; lower (e.g. 1) for stricter rate
+	# matching Z.AI's free-tier RPM. Override via BMF_LLM_BURST.
+	llm_burst: float = 5.0
 	# Minimum seconds between LLM requests (RPM throttle). Z.AI's coding plan
 	# applies a dynamic requests-per-minute limit; 429 'Rate limit reached for
 	# requests' (code 1302) trips when too many calls land inside a rolling
@@ -105,6 +117,17 @@ class Config:
 			cfg.zai_reasoning_effort = v.strip().lower()
 		if v := os.environ.get("ZAI_THINKING"):
 			cfg.zai_thinking = v.strip().lower()
+		if v := os.environ.get("ZAI_FLASH_MODEL"):
+			cfg.zai_flash_model = v.strip()
+		if v := os.environ.get("ZAI_FINAL_MODEL"):
+			cfg.zai_final_model = v.strip()
+		if (v := os.environ.get("BMF_LLM_LOOP")) is not None:
+			cfg.llm_loop = v.strip().lower() in ("1", "true", "yes", "on")
+		if (v := os.environ.get("BMF_LLM_BURST")) is not None:
+			try:
+				cfg.llm_burst = max(0.0, float(v))
+			except ValueError:
+				pass
 		if (v := os.environ.get("BMF_LLM_MIN_INTERVAL")) is not None:
 			try:
 				cfg.llm_min_interval = max(0.0, float(v))
