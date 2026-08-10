@@ -22,10 +22,63 @@ import json
 import logging
 import os
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
 log = logging.getLogger(__name__)
+
+
+class LeakyBucket:
+	"""Thread-safe leaky-bucket rate limiter (token bucket).
+
+	Better than a simple "min interval since last request" lock for concurrent
+	workers: it allows a short burst up to *capacity* requests, then refills at
+	one token every *interval* seconds, so the aggregate request rate is
+	bounded and roughly constant regardless of when worker threads arrive.
+	With the old lock-during-sleep throttle, N threads hitting the LLM phase
+	at once piled up on the lock and emitted requests back-to-back once each
+	woke; the bucket smooths that into a steady drip.
+
+	*capacity* (default 5) is the burst size; *interval* (seconds) is the
+	steady-state period between requests (so steady RPM ~= 60/interval).
+	"""
+
+	def __init__(self, *, capacity: float = 5.0, interval: float = 2.0) -> None:
+		self.capacity = max(0.0, capacity)
+		self.interval = max(0.0, interval)
+		self._tokens = self.capacity
+		self._last = time.monotonic()
+		self._lock = threading.Lock()
+
+	def acquire(self) -> None:
+		"""Block until a token is available, then consume one.
+
+		The lock is held only for the bookkeeping (computing the wait); the
+		actual sleep happens while still holding the lock so that concurrent
+		callers queue up rather than all sleeping the same short interval and
+		then racing. The total wait is bounded by (backlog * interval).
+		"""
+		if self.interval <= 0 or self.capacity <= 0:
+			return
+		while True:
+			with self._lock:
+				now = time.monotonic()
+				# Refill based on elapsed time since last update.
+				elapsed = now - self._last
+				self._tokens = min(self.capacity, self._tokens + elapsed / self.interval)
+				self._last = now
+				if self._tokens >= 1.0:
+					self._tokens -= 1.0
+					return
+				# Wait just enough for one token, then re-loop (another thread
+				# may grab it first; that's the queueing behaviour we want).
+				wait = (1.0 - self._tokens) * self.interval
+			# Sleep OUTSIDE the bookkeeping critical section would let another
+			# thread refill-check concurrently, but we *want* callers to queue,
+			# so we hold the lock through the sleep by re-acquiring on the next
+			# loop iteration. The sleep is the queue.
+			time.sleep(wait)
 
 
 @dataclass
@@ -139,8 +192,18 @@ def build_user_prompt(evidence: dict[str, Any]) -> str:
 		first_page,
 		"---",
 		"",
-		"Return the corrected metadata as JSON.",
 	]
+	# Self-correction feedback from a previous failed attempt (reconcile_loop).
+	# Tells the model exactly why its last answer was rejected so it can fix it.
+	feedback = evidence.get("feedback")
+	if feedback:
+		lines += [
+			"Your previous answer was REJECTED because:",
+			f"  {feedback}",
+			"Try again, correcting the problem. Read the first-page text carefully.",
+			"",
+		]
+	lines.append("Return the corrected metadata as JSON.")
 	return "\n".join(lines)
 
 
@@ -157,7 +220,7 @@ class ZaiProvider(LLMProvider):
 	# which is the safest match for the documented dynamic RPM cap.
 	DEFAULT_MIN_INTERVAL = 2.0
 
-	def __init__(self, api_key: str, base_url: str = "https://api.z.ai/api/paas/v4/", model: str = "glm-5.2", *, min_interval: float | None = None, reasoning_effort: str | None = None, thinking: str | None = None) -> None:
+	def __init__(self, api_key: str, base_url: str = "https://api.z.ai/api/paas/v4/", model: str = "glm-5.2", *, min_interval: float | None = None, reasoning_effort: str | None = None, thinking: str | None = None, burst: float = 5.0, flash_model: str | None = None, final_model: str | None = None) -> None:
 		self.api_key = api_key
 		self.base_url = base_url
 		self.model = model
@@ -174,30 +237,23 @@ class ZaiProvider(LLMProvider):
 			self._extra_body["reasoning_effort"] = reasoning_effort
 		elif not is_glm5 and thinking:
 			self._extra_body["thinking"] = {"type": thinking}
-		# Rate limiter state (shared across worker threads). min_interval < 0
-		# disables throttling; floor at a tiny positive value keeps behavior sane.
+		# Leaky-bucket rate limiter shared across ALL model calls (Flash + final
+		# + retries). Smooths bursty worker threads into a constant aggregate
+		# RPM so Z.AI's dynamic rate limit (429 code 1302) is not tripped.
 		interval = self.DEFAULT_MIN_INTERVAL if min_interval is None else min_interval
-		self._min_interval = max(0.0, interval)
-		self._last_request_at = 0.0
-		self._rate_lock = threading.Lock()
+		self._bucket = LeakyBucket(capacity=burst, interval=max(0.0, interval))
+		# Models used by reconcile_loop. flash_model is the free first-attempt
+		# model (default glm-4.5-flash); final_model is the paid high-quality
+		# fallback (default: self.model, i.e. glm-5.2 low).
+		self.flash_model = flash_model or "glm-4.5-flash"
+		self.final_model = final_model or model
 
-	def _throttle(self) -> None:
-		"""Block until at least _min_interval has passed since the last request.
-
-		Called before each HTTP call. Thread-safe: the lock serializes the
-		bookkeeping so the floor interval holds across concurrent workers.
-		"""
-		if self._min_interval <= 0:
-			return
-		import time
-
-		with self._rate_lock:
-			now = time.monotonic()
-			wait = self._last_request_at + self._min_interval - now
-			if wait > 0:
-				time.sleep(wait)
-				now = time.monotonic()
-			self._last_request_at = now
+	def _extra_body_for(self, model: str) -> dict[str, Any]:
+		"""Pick the right reasoning/thinking knobs for *model*."""
+		if model.lower().startswith("glm-5"):
+			effort = self._extra_body.get("reasoning_effort", "low")
+			return {"reasoning_effort": effort}
+		return {"thinking": {"type": "disabled"}}
 
 	def _get_client(self):
 		"""Lazy-init the OpenAI client (avoids import error if openai not installed)."""
@@ -209,92 +265,141 @@ class ZaiProvider(LLMProvider):
 			self._client = OpenAI(api_key=self.api_key, base_url=self.base_url)
 		return self._client
 
-	def reconcile(self, evidence: dict[str, Any]) -> ReconciledMeta | None:
-		"""Call the LLM with retry on empty/transient failures.
+	def _call(self, model: str, evidence: dict[str, Any], *, max_retries: int = 3) -> tuple[ReconciledMeta | None, str | None]:
+		"""Single LLM call to *model* with retry/backoff. Returns (result, error).
 
-		GLM-5.x is a reasoning model: it produces a `reasoning_content` (chain
-		of thought) BEFORE the final answer. The reasoning can consume many
-		tokens, so we set a generous max_tokens (8000) and read both fields.
-		Retries on empty/transient failures (rate limit, overload).
-
-		Request rate is throttled to _min_interval seconds between calls (default
-		2.0s = ~30 RPM) so that running many worker threads does not flood Z.AI
-		and trip its dynamic RPM limit (429 code 1302). The throttle fires before
-		each HTTP call; response parsing and retry backoff happen outside it.
+		On a transient failure (429 / empty / json-parse) retries with
+		exponential backoff. On a hard failure (length / exhausted) returns
+		(None, reason) so the caller can fall through to the next model.
 		"""
-		import time
-
-		max_retries = 3
 		prompt = build_user_prompt(evidence)
-		last_error = None
+		last_error: str | None = None
+		extra = self._extra_body_for(model)
 		for attempt in range(max_retries):
-			# Throttle BEFORE the HTTP call so the RPM floor holds across worker
-			# threads. _throttle() blocks (under a lock) until enough time has
-			# passed since the previous request, then stamps the timestamp.
-			# Retries also pass through here, so a flapping endpoint can't exceed
-			# the rate even while backing off.
-			self._throttle()
+			# Acquire a rate-limit token BEFORE the HTTP call. The bucket
+			# smooths concurrent workers; retries also acquire, so a flapping
+			# endpoint cannot exceed the configured rate while backing off.
+			self._bucket.acquire()
 			try:
 				client = self._get_client()
 				resp = client.chat.completions.create(
-					model=self.model,
+					model=model,
 					messages=[
 						{"role": "system", "content": SYSTEM_PROMPT},
 						{"role": "user", "content": prompt},
 					],
-					# GLM-5.x reasoning models ignore response_format and may
-					# emit markdown fences; we tolerate both in _parse_llm_json.
 					temperature=0.1,
 					max_tokens=8000,
-					# Forward reasoning_effort (GLM-5.x) or thinking (GLM-4.x)
-					# as extra_body. Z.AI reads these to control CoT length.
-					extra_body=self._extra_body or None,
+					extra_body=extra or None,
 				)
 			except Exception as e:  # noqa: BLE001
 				last_error = str(e)
-				# Transient 429s are already retried by the openai client's
-				# internal backoff; if we still see one, sleep a bit before the
-				# next attempt so the rate window can recover.
-				time.sleep(1.0 * (attempt + 1))
+				# Exponential backoff for transient (mostly 429) failures.
+				# Z.AI's free-tier cascade-cooldown bug can take several
+				# seconds to clear; 1s/2s/4s gives it room.
+				time.sleep(1.0 * (2 ** attempt))
 				continue
 
-			# --- response processing ---
 			choice = resp.choices[0]
 			content = choice.message.content or ""
-			# Reasoning models sometimes stash the answer only in content
-			# (after the thinking). If content is empty but finish_reason
-			# is "length", we ran out of tokens during reasoning — retry
-			# won't help, but we record it for debugging.
 			if not content.strip():
 				finish = choice.finish_reason
-				reasoning = getattr(choice.message, "reasoning_content", None) or ""
 				if finish == "length":
-					log.warning(
-						"Z.AI ran out of tokens during reasoning (model=%s, max=8000). "
-						"Consider a non-reasoning model.",
-						self.model,
-					)
-					last_error = "length (reasoning too long)"
-					# Don't retry — same prompt will hit the same limit.
-					break
-				log.debug("Z.AI returned empty content (attempt %d/%d)", attempt + 1, max_retries)
+					log.warning("Z.AI ran out of tokens during reasoning (model=%s). Consider a non-reasoning model.", model)
+					return None, "length (reasoning too long)"
+				log.debug("Z.AI returned empty content (model=%s, attempt %d/%d)", model, attempt + 1, max_retries)
 				last_error = "empty response"
 				time.sleep(1.0 * (attempt + 1))
 				continue
 			result = _parse_llm_json(content)
 			if result is not None:
-				# Attach the reasoning chain to the result for transparency.
 				reasoning = getattr(choice.message, "reasoning_content", None)
 				if reasoning and not result.reasoning:
-					result.reasoning = reasoning[-300:]  # last 300 chars
-				return result
+					result.reasoning = reasoning[-300:]
+				return result, None
 			last_error = "json parse failed"
 			if attempt < max_retries - 1:
 				time.sleep(0.5)
-				continue
-		if last_error:
-			log.warning("Z.AI reconcile gave up after %d attempts: %s", max_retries, last_error)
-		return None
+		return None, last_error
+
+	def reconcile(self, evidence: dict[str, Any]) -> ReconciledMeta | None:
+		"""Single LLM call to self.model (back-comat for callers not using the loop)."""
+		result, error = self._call(self.model, evidence)
+		if error and result is None:
+			log.warning("Z.AI reconcile gave up: %s", error)
+		return result
+
+	def reconcile_loop(self, evidence: dict[str, Any], extracted: Any = None, *, max_flash: int = 2, verifier: Any = None) -> tuple[ReconciledMeta | None, str]:
+		"""Self-correction loop: cheap Flash first, paid GLM-5.2 as the final fallback.
+
+		Flow (each LLM call goes through the shared leaky-bucket, so the
+		aggregate request rate stays constant regardless of loop depth):
+
+		  1. Flash (free, thinking off) up to *max_flash* times. After the
+		     first attempt, the verifier's feedback is injected into the
+		     evidence so the model can correct itself.
+		  2. If Flash is rate-limited (429 cascade) or still fails verify after
+		     *max_flash* attempts, the paid final_model (default glm-5.2 low)
+		     is tried once.
+		  3. If the final model also fails verify (or there is no text to
+		     verify against), the last non-empty proposal is returned with
+		     confidence="low" so the human reviewer still sees something.
+
+		Returns (result, source) where source is one of:
+		  'llm:flash'   — Flash passed verify
+		  'llm:loop'    — Flash passed verify after feedback
+		  'llm:high'    — final model passed verify
+		  'llm:low'     — nothing passed verify; last proposal returned as-is
+		  ''            — every call returned None (nothing to show)
+		"""
+		verifier_fn = verifier or _default_verifier
+		last_result: ReconciledMeta | None = None
+		# Try the free Flash model up to max_flash times, carrying feedback.
+		fb = ""
+		for attempt in range(max_flash):
+			attempt_ev = dict(evidence)
+			if fb:
+				attempt_ev["feedback"] = fb
+			result, error = self._call(self.flash_model, attempt_ev)
+			if result is not None:
+				last_result = result
+				if extracted is None:
+					# Nothing to verify against — accept the Flash result.
+					return result, "llm:flash" if attempt == 0 else "llm:loop"
+				passed, new_fb = verifier_fn(result, extracted)
+				if passed:
+					return result, "llm:flash" if attempt == 0 else "llm:loop"
+				fb = new_fb
+				log.debug("Flash attempt %d failed verify: %s", attempt + 1, new_fb[:120])
+			elif error and "rate" in (error or "").lower():
+				# Free-tier cascade: bail to the paid model immediately rather
+				# than burning more Flash attempts that will also 429.
+				log.info("Flash rate-limited (%s); falling back to %s", error, self.final_model)
+				break
+		# Final fallback: the paid high-quality model, one attempt.
+		result, error = self._call(self.final_model, evidence)
+		if result is not None:
+			if extracted is None:
+				return result, "llm:high"
+			passed, _ = verifier_fn(result, extracted)
+			if passed:
+				return result, "llm:high"
+			# Did not pass but we have a proposal — return it low-confidence.
+			result.confidence = "low"
+			return result, "llm:low"
+		# Every call returned None. Return the last Flash proposal (if any)
+		# low-confidence, else nothing.
+		if last_result is not None:
+			last_result.confidence = "low"
+			return last_result, "llm:low"
+		return None, ""
+
+
+def _default_verifier(proposal: Any, extracted: Any) -> tuple[bool, str]:
+	"""Default verify_proposal wrapper used when the caller does not inject one."""
+	from .verifier import verify_proposal
+
+	return verify_proposal(proposal, extracted)
 
 
 # ---------------------------------------------------------------------------
