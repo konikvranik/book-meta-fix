@@ -1,0 +1,428 @@
+"""Deterministic metadata extraction from a book's page text (NOT from OPF).
+
+The OPF metadata inside an EPUB may have been overwritten by calibre at import
+time, so it cannot be trusted as an independent source. This module mines the
+book's actual page text (the concatenated first-page text produced by
+``extractors._epub_first_page_text``) for title / authors / ISBN / year /
+publisher, using cheap offline heuristics. It is the first stage of the fix
+pipeline (cheap, no network) and runs before online lookup and the LLM
+fallback.
+
+The heuristics were calibrated against a sample of real CZ/SK title pages from
+this library. Key patterns (see scripts/llm_experiment.py and the title-page
+inspection notes):
+
+  - ``Neznámý`` is the library's placeholder-author string; it shows up as the
+    literal first token on most title pages and must be dropped.
+  - The title is very often ALL-CAPS on CZ/SK title pages
+    (``JÁDRO GALAXIE``, ``ZASTAVENÝ PŘÍVAL``).
+  - Some books carry explicit CZ field labels on a copyright page
+    (``Název:``, ``Autor:``, ``Nakladatelství:``, ``Vydalo``, ``Přeložil``).
+  - ``_strip_html`` leaks a ``Cover @page {...}`` CSS prefix that must be
+    stripped before any heuristics run.
+
+All extractors return ``None`` on no/low-confidence signal rather than
+guessing — guesses are the LLM fallback's job.
+"""
+from __future__ import annotations
+
+import logging
+import re
+from dataclasses import dataclass, field
+
+from .isbn import canonicalize
+
+log = logging.getLogger(__name__)
+
+# Lines/tokens that are pure noise on CZ/SK title pages and must never become a
+# title or author. Compared after case-folding.
+_PLACEHOLDER_TOKENS = {
+	"neznámý", "nezanmy", "unknown", "anonym", "anonymní", "autor", "title",
+	"subject", "name", "nc", "nc17",
+}
+
+# CSS / boilerplate that _strip_html leaks at the start of the first chunk.
+_CSS_RE = re.compile(r"@\w+\s*\{[^}]*\}|body\s*\{[^}]*\}|\{[^}]{0,200}\}", re.IGNORECASE)
+_COVER_PREFIX_RE = re.compile(r"^\s*cover\b", re.IGNORECASE)
+
+# Web-navigation noise (some community EPUBs embed site nav in the title page).
+_WEBNAV_RE = re.compile(r"(předchozí|další|obsah|hLavní\s+stránka|homepage|zpět|domů)", re.IGNORECASE)
+
+# Filename-derived garbage that leaks into the text (e.g. calibre used the file
+# name as the OPF title and it then shows on the title page).
+_FILENAME_GARBAGE_RE = re.compile(
+	r"microsoft\s+word\s*-\s*[^\s]*\.doc[x]?"
+	r"|^[a-z0-9_]+\.(docx?|epub|pdf|pdb|mobi|txt|rtf)$",
+	re.IGNORECASE,
+)
+
+# CZ/SK field labels on a copyright page. Capture group = the value. The value
+# stops at the next known label or at a newline, so glued-together copyright
+# lines like "Název: X Autor: Y Nakladatelství: Z" split correctly.
+_LABEL_VALUE_END = r"(?=\s+(?:název|titul|kniha|autor|author|nakladatelství|vydavatelstvo|vydalo|vydavatel|přeložil|preložil|přeložila|preložila|rok\s+vydání|vydáno|rok|original|původní|edice)\s*[:=]|\s*$|\n)"
+_LABEL_NAZEV = re.compile(r"(?:název|titul|kniha)\s*:\s*(.+?)" + _LABEL_VALUE_END, re.IGNORECASE)
+_LABEL_AUTOR = re.compile(r"(?:autor|author)\s*:\s*(.+?)" + _LABEL_VALUE_END, re.IGNORECASE)
+_LABEL_NAKLADATELSTVI = re.compile(
+	r"(?:nakladatelství|vydavatelstvo|vydalo|vydavatel)\s*:\s*(.+?)" + _LABEL_VALUE_END,
+	re.IGNORECASE,
+)
+_LABEL_PRELOZIL = re.compile(r"(?:přeložil[a]?|preložil[a]?|translated\s+by)\s+(.+?)" + _LABEL_VALUE_END, re.IGNORECASE)
+_LABEL_ROK = re.compile(r"(?:rok\s+vydání|vydáno|rok)\s*:\s*((?:1[89]|20)\d{2})\b", re.IGNORECASE)
+
+# CZ/SK diacritics letters — used to detect a "real" ALL-CAPS CZ/SK run (as
+# opposed to random uppercase noise). A run with at least one of these (or a
+# convincing length) is a strong title-page signal.
+_CZ_LETTERS = set("áčďéěíňóřšťúůýžôäĺľŕšťž")
+
+# 4-digit year near a publisher/copyright context.
+_YEAR_RE = re.compile(r"\b((?:1[89]|20)\d{2})\b")
+
+
+@dataclass
+class TextMeta:
+	"""Metadata mined from page text. Fields are None when no confident signal
+	was found — callers should treat None as 'unknown', not as 'empty'."""
+
+	title: str | None = None
+	authors: list[str] = field(default_factory=list)
+	isbn: str | None = None  # canonicalized
+	publisher: str | None = None
+	year: int | None = None
+	source: str = "content"  # always 'content' for this module
+
+	def has_any(self) -> bool:
+		return bool(self.title or self.authors or self.isbn or self.publisher or self.year)
+
+
+# ---------------------------------------------------------------------------
+# Normalization helpers
+# ---------------------------------------------------------------------------
+
+
+def _clean_page_text(text: str | None) -> str:
+	"""Strip CSS leakage, KEEP line structure. Returns '' for None.
+
+	Unlike a full whitespace collapse, this preserves newlines and the
+	extractor's ' | ' chunk separators so label regexes (Název: / Autor: / ...)
+	can anchor on line starts. Use _split_lines() to get the line list.
+	"""
+	if not text:
+		return ""
+	# Drop the `Cover @page {...} body {...}` CSS blob _strip_html leaks.
+	cleaned = _CSS_RE.sub(" ", text)
+	cleaned = _COVER_PREFIX_RE.sub(" ", cleaned)
+	# Normalize the ' | ' chunk separator the extractor uses into newlines so
+	# label regexes can anchor on ^ per logical line.
+	cleaned = re.sub(r"\s*\|\s*", "\n", cleaned)
+	# Collapse runs of spaces/tabs (but NOT newlines) within a line.
+	cleaned = re.sub(r"[ \t]+", " ", cleaned)
+	# Trim each line and drop leading/trailing blank lines.
+	lines = [ln.strip() for ln in cleaned.split("\n")]
+	cleaned = "\n".join(ln for ln in lines if ln)
+	return cleaned
+
+
+def _split_lines(text: str) -> list[str]:
+	"""Split cleaned text into logical lines (newlines already normalized)."""
+	if not text:
+		return []
+	return [ln for ln in text.split("\n") if ln.strip()]
+
+
+def _is_noise(line: str) -> bool:
+	"""True if a line is placeholder/garbage and must not become title/author."""
+	folded = line.strip().lower().strip(".:;,-–—!?'\"()")
+	if not folded:
+		return True
+	if folded in _PLACEHOLDER_TOKENS:
+		return True
+	# A line made entirely of placeholder tokens ("Neznámý Neznámý", "anonym unknown").
+	tokens = [t.lower().strip(".:;,-–—!?'\"()") for t in line.split()]
+	if tokens and all(t in _PLACEHOLDER_TOKENS for t in tokens):
+		return True
+	if _FILENAME_GARBAGE_RE.match(line):
+		return True
+	# Web-nav menus like "Předchozí | Další | Obsah | Hlavní stránka".
+	if _WEBNAV_RE.fullmatch(folded):
+		return True
+	# Pure punctuation / symbols (ASCII-art borders handled separately).
+	if not re.search(r"[A-Za-zÁ-ž]", line):
+		return True
+	return False
+
+
+def _has_cz_diacritic(s: str) -> bool:
+	return any(c in _CZ_LETTERS for c in s.lower())
+
+
+def _looks_like_title(line: str) -> bool:
+	"""Plausibility check for a candidate title."""
+	if not line or len(line) < 3:
+		return False
+	if _is_noise(line):
+		return False
+	# Too long => probably a sentence, not a title.
+	if len(line) > 120:
+		return False
+	return True
+
+
+def _looks_like_author(line: str) -> bool:
+	"""Plausibility check for a candidate author name.
+
+	A real author name is 1-5 tokens, each Capitalized or ALL-CAPS, optionally
+	with initials (J. R. R.), and not a sentence.
+	"""
+	if not line or _is_noise(line):
+		return False
+	# Strip trailing role markers.
+	cleaned = re.sub(r"\s*\([^)]*\)\s*$", "", line).strip(" .,;:-–—")
+	if not cleaned or len(cleaned) < 3 or len(cleaned) > 60:
+		return False
+	# Reject sentences (>= 6 tokens or contains sentence-like lowercased runs).
+	tokens = cleaned.split()
+	if len(tokens) > 5:
+		return False
+	# Must contain at least one token starting with an uppercase letter.
+	if not any(t and t[0].isupper() for t in tokens):
+		return False
+	# Reject if it looks like a sentence (lowercase verb-ish tokens).
+	if sum(1 for t in tokens if t.islower() and len(t) > 3) >= 3:
+		return False
+	return True
+
+
+# ---------------------------------------------------------------------------
+# Extractors
+# ---------------------------------------------------------------------------
+
+
+def extract_isbn_from_text(text: str | None) -> str | None:
+	"""Return a canonical ISBN-13/10 found in *text*, or None.
+
+	Reuses the project's isbn.extract_isbn (regex + checksum validation) so the
+	result is identical to the existing first-page ISBN scan.
+	"""
+	if not text:
+		return None
+	from .isbn import extract_isbn
+
+	raw = extract_isbn(text)
+	if raw is None:
+		return None
+	canon = canonicalize(raw)
+	return canon or None
+
+
+def extract_title_from_text(text: str | None) -> str | None:
+	"""Best-effort title from page text. Returns None if no confident signal."""
+	cleaned = _clean_page_text(text)
+	if not cleaned:
+		return None
+	lines = _split_lines(cleaned)
+
+	# Priority 1: explicit CZ/SK field label "Název: ..." / "Titul: ...".
+	m = _LABEL_NAZEV.search(cleaned)
+	if m:
+		val = m.group(1).strip().strip(".;,-–—")
+		# A label value may itself be "Název: X (Y)" — take the part before "(".
+		val = val.split("(")[0].strip()
+		if _looks_like_title(val):
+			return _normalize_title_case(val)
+
+	# Priority 2: ALL-CAPS run (>= 2 words, at least one CZ letter or >= 4
+	# letters) — the dominant CZ/SK title-page signal. Skip runs that are too
+	# long (likely author+title glued together); those are left to the author
+	# extractor and a weaker fallback.
+	for ln in lines:
+		if _is_noise(ln):
+			continue
+		title = _allcaps_title(ln)
+		if title:
+			return title
+
+	# Priority 3: ASCII-art bordered title like "*** ANGLIČTINA ***".
+	for ln in lines:
+		# Strip border characters and check what remains.
+		stripped = re.sub(r"^[*\-–—=_~#\s]+", "", ln)
+		stripped = re.sub(r"[*\-–—=_~#\s]+$", "", stripped)
+		if stripped and stripped != ln and _looks_like_title(stripped):
+			return _normalize_title_case(stripped)
+
+	# Priority 4: first non-noise, non-label line, if it looks title-ish and is
+	# short. This is the weakest signal — only used when nothing better fired.
+	for ln in lines[:4]:
+		if _is_noise(ln):
+			continue
+		if _LABEL_AUTOR.match(ln) or _LABEL_NAKLADATELSTVI.match(ln):
+			continue
+		if _looks_like_title(ln) and len(ln) <= 80:
+			return _normalize_title_case(ln)
+
+	return None
+
+
+def _allcaps_title(line: str) -> str | None:
+	"""If *line* is (mostly) an ALL-CAPS run of >= 2 words, return it as a
+	title (restored to title case). Otherwise None.
+
+	Skips lines with too many ALL-CAPS tokens (>= 7), which on CZ title pages
+	usually mean an author name and a title glued onto one line — splitting
+	those reliably is not possible without labels.
+	"""
+	tokens = line.split()
+	if len(tokens) < 2:
+		return None
+	# Count uppercase-dominant tokens (allowing CZ diacritics + punctuation).
+	upper_tokens = [
+		t for t in tokens
+		if t and (t.isupper() or t.rstrip(".,:;!?-–—\"'()").isupper())
+	]
+	if len(upper_tokens) < 2 or len(upper_tokens) >= 7:
+		return None
+	# Require at least one "heavy" token: >= 4 letters, or any CZ diacritic.
+	if not any(len(re.sub(r"[^A-Za-zÁ-ž]", "", t)) >= 4 or _has_cz_diacritic(t) for t in upper_tokens):
+		return None
+	# Drop trailing non-upper tokens (page numbers, "KAPITOLA PRVNÍ" continuations
+	# are kept as part of the title).
+	run = " ".join(upper_tokens)
+	if not _looks_like_title(run):
+		return None
+	return _normalize_title_case(run)
+
+
+def _normalize_title_case(s: str) -> str:
+	"""Restore sensible title case from an ALL-CAPS source.
+
+	Keeps the first letter of each word uppercase and lowercases the rest,
+	preserving CZ/SK diacritics. Does NOT lowercase short all-caps acronyms
+	that are likely intentional (e.g. "IBM", "USA") — heuristic: tokens of
+	<= 3 uppercase letters with no diacritics stay uppercase.
+	"""
+	words: list[str] = []
+	for w in s.split():
+		core = re.sub(r"[^A-Za-zÁ-ž]", "", w)
+		if core.isupper() and len(core) <= 3 and not _has_cz_diacritic(w):
+			words.append(w)  # acronym
+		else:
+			words.append(w[:1].upper() + w[1:].lower() if w else w)
+	return " ".join(words)
+
+
+def extract_authors_from_text(text: str | None) -> list[str]:
+	"""Best-effort author list from page text. Empty list if no signal."""
+	cleaned = _clean_page_text(text)
+	if not cleaned:
+		return []
+	lines = _split_lines(cleaned)
+	authors: list[str] = []
+
+	# Priority 1: explicit CZ label "Autor: ...".
+	for m in _LABEL_AUTOR.finditer(cleaned):
+		val = m.group(1).strip().strip(".;,-–—")
+		# Labels may list "Jmeno Prijmeni (role)" — keep the name part.
+		val = val.split("(")[0].strip()
+		if _looks_like_author(val):
+			authors.append(_normalize_title_case(val))
+	if authors:
+		return _dedupe(authors)
+
+	# Priority 2: ALL-CAPS run that looks like a person name (<= 4 tokens,
+	# appears as a standalone line, not the title). On CZ title pages the
+	# author is often the FIRST all-caps line and the title the SECOND, but
+	# ordering is unreliable, so we accept any all-caps name-like line that is
+	# NOT the chosen title.
+	title = extract_title_from_text(text)
+	title_norm = title.lower() if title else None
+	for ln in lines:
+		if _is_noise(ln):
+			continue
+		tokens = [t for t in ln.split() if t and (t.isupper() or t.rstrip(".,:;!?-–—\"'()").isupper())]
+		if len(tokens) < 2 or len(tokens) > 4:
+			continue
+		candidate = _normalize_title_case(" ".join(tokens))
+		if title_norm and candidate.lower() == title_norm:
+			continue  # this line is the title, not an author
+		if _looks_like_author(candidate):
+			authors.append(candidate)
+		if len(authors) >= 3:
+			break
+
+	return _dedupe(authors)
+
+
+def extract_publisher_from_text(text: str | None) -> str | None:
+	cleaned = _clean_page_text(text)
+	if not cleaned:
+		return None
+	m = _LABEL_NAKLADATELSTVI.search(cleaned)
+	if m:
+		val = m.group(1).strip()
+		# Cut at a comma followed by a year or a city — "Academia, 2014" /
+		# "Argo, Praha 1999" keep just the publisher name.
+		val = re.sub(r",\s.*$", "", val)
+		# Strip a trailing year.
+		val = re.sub(r"\s+(?:1[89]|20)\d{2}\s*$", "", val).strip()
+		# If an ALL-CAPS block leaked into the value, cut at the first run of
+		# >= 3 consecutive ALL-CAPS tokens.
+		val = re.sub(r"\s+[A-ZÁ-Ž]{2,}(?:\s+[A-ZÁ-Ž]{2,}){2,}.*$", "", val).strip()
+		val = val.strip(".;,-–—")
+		if val and len(val) <= 80:
+			return val
+	return None
+
+
+def extract_year_from_text(text: str | None) -> int | None:
+	cleaned = _clean_page_text(text)
+	if not cleaned:
+		return None
+	# Priority 1: explicit "Rok vydání: YYYY" / "Vydáno: YYYY".
+	m = _LABEL_ROK.search(cleaned)
+	if m:
+		try:
+			return int(m.group(1))
+		except ValueError:
+			pass
+	# Priority 2: a 4-digit year near a publisher/copyright marker.
+	for ctx in (_LABEL_NAKLADATELSTVI,):
+		lm = ctx.search(cleaned)
+		if lm:
+			# Look at the 40 chars around the label match for a year.
+			span_start = max(0, lm.start() - 20)
+			span_end = min(len(cleaned), lm.end() + 40)
+			ym = _YEAR_RE.search(cleaned[span_start:span_end])
+			if ym:
+				try:
+					return int(ym.group(1))
+				except ValueError:
+					pass
+	return None
+
+
+def extract_metadata_from_text(text: str | None) -> TextMeta:
+	"""Mine all fields from page text. Returns a TextMeta (fields None when no
+	confident signal). Always returns a TextMeta (possibly empty); never None."""
+	return TextMeta(
+		title=extract_title_from_text(text),
+		authors=extract_authors_from_text(text),
+		isbn=extract_isbn_from_text(text),
+		publisher=extract_publisher_from_text(text),
+		year=extract_year_from_text(text),
+	)
+
+
+# ---------------------------------------------------------------------------
+# Internal: dedupe
+# ---------------------------------------------------------------------------
+
+
+def _dedupe(items: list[str]) -> list[str]:
+	"""Case-insensitive dedupe, preserving order."""
+	seen: set[str] = set()
+	out: list[str] = []
+	for it in items:
+		key = it.lower().strip()
+		if key and key not in seen:
+			seen.add(key)
+			out.append(it)
+	return out
