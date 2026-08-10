@@ -222,7 +222,7 @@ Toggles:
 | Knob | CLI | Env | Default |
 |---|---|---|---|
 | Loop on/off | `--no-llm-loop` | `BMF_LLM_LOOP=0` | on |
-| Flash model | `--llm-flash-model` | `ZAI_FLASH_MODEL` | `glm-4.5-flash` |
+| Flash model | `--llm-flash-model` | `ZAI_FLASH_MODEL` | `glm-4.7-flash` |
 | Final model | `--llm-final-model` | `ZAI_FINAL_MODEL` | `glm-5.2` |
 | Burst capacity | `--llm-burst` | `BMF_LLM_BURST` | `5` |
 
