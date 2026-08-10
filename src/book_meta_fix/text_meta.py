@@ -39,6 +39,10 @@ log = logging.getLogger(__name__)
 _PLACEHOLDER_TOKENS = {
 	"neznámý", "nezanmy", "unknown", "anonym", "anonymní", "autor", "title",
 	"subject", "name", "nc", "nc17",
+	# CZ/SK structural sections that often appear ALL-CAPS on title pages and
+	# must not be absorbed into the title run.
+	"prolog", "epilog", "předmluva", "predmluva", "kapitola", "obsah",
+	"další", "předchozí", "úvod", "uvod", "doslov",
 }
 
 # CSS / boilerplate that _strip_html leaks at the start of the first chunk.
@@ -111,6 +115,9 @@ def _clean_page_text(text: str | None) -> str:
 	# Drop the `Cover @page {...} body {...}` CSS blob _strip_html leaks.
 	cleaned = _CSS_RE.sub(" ", text)
 	cleaned = _COVER_PREFIX_RE.sub(" ", cleaned)
+	# Collapse spaced-out ALL-CAPS ("D A R K O Ň" -> "DARKOŇ") before line
+	# splitting so the ALL-CAPS title heuristic can catch it.
+	cleaned = _collapse_spaced_caps(cleaned)
 	# Normalize the ' | ' chunk separator the extractor uses into newlines so
 	# label regexes can anchor on ^ per logical line.
 	cleaned = re.sub(r"\s*\|\s*", "\n", cleaned)
@@ -149,6 +156,25 @@ def _is_noise(line: str) -> bool:
 	if not re.search(r"[A-Za-zÁ-ž]", line):
 		return True
 	return False
+
+
+def _strip_leading_placeholder(s: str | None) -> str | None:
+	"""Drop a leading placeholder token ('Neznámý', 'Unknown', ...) from *s*.
+
+	These show up as the literal first token on most title pages and the
+	ALL-CAPS / first-line heuristics sometimes absorb them into the candidate
+	title (e.g. 'Neznámý 2002 Toyota Tundra ...'). Stripping the leading
+	placeholder turns that into the real title.
+	"""
+	if not s:
+		return s
+	tokens = s.split()
+	if not tokens:
+		return s
+	if tokens[0].lower().strip(".:;,-–—!?'\"()") in _PLACEHOLDER_TOKENS:
+		rest = " ".join(tokens[1:])
+		return rest or None
+	return s
 
 
 def _has_cz_diacritic(s: str) -> bool:
@@ -215,6 +241,15 @@ def extract_isbn_from_text(text: str | None) -> str | None:
 
 
 def extract_title_from_text(text: str | None) -> str | None:
+	"""Best-effort title from page text. Returns None if no confident signal.
+
+	Any leading placeholder token ('Neznámý', 'Unknown', ...) accidentally
+	absorbed into the candidate is stripped before returning.
+	"""
+	return _strip_leading_placeholder(_extract_title_from_text_raw(text))
+
+
+def _extract_title_from_text_raw(text: str | None) -> str | None:
 	"""Best-effort title from page text. Returns None if no confident signal."""
 	cleaned = _clean_page_text(text)
 	if not cleaned:
@@ -262,13 +297,41 @@ def extract_title_from_text(text: str | None) -> str | None:
 	return None
 
 
+# Spaced-out ALL-CAPS as used on some CZ/SK title pages: "D A R K O Ň N A
+# C E S T Á CH". Match a run of single capital letters separated by single
+# spaces, optionally ending in a 2-3 letter uppercase token (CZ digraphs
+# like "CH"). Requires a whitespace/start boundary on each side so it does
+# not eat into neighbouring words like the "ý" of "Neznámý". Requires at
+# least 5 single-letter tokens.
+_SPACED_CAPS_RE = re.compile(
+	r"(?:(?<=\s)|(?<=^))(?:[A-ZÁ-Ž]\s){4,}[A-ZÁ-Ž](?:[A-ZÁ-Ž]{1,2})?(?=\s|$)"
+)
+
+
+def _collapse_spaced_caps(text: str) -> str:
+	"""Collapse 'D A R K O Ň' -> 'DARKOŇ' so the ALL-CAPS heuristic can find it.
+
+	Only collapses runs of single-letter caps separated by single spaces; other
+	text is left untouched. Runs are rejoined into a single token.
+	"""
+
+	def _join(m: re.Match) -> str:
+		# Strip the spaces between single letters: "D A R K O Ň" -> "DARKOŇ".
+		return m.group(0).replace(" ", "")
+
+	return _SPACED_CAPS_RE.sub(_join, text)
+
+
 def _allcaps_title(line: str) -> str | None:
 	"""If *line* is (mostly) an ALL-CAPS run of >= 2 words, return it as a
 	title (restored to title case). Otherwise None.
 
 	Skips lines with too many ALL-CAPS tokens (>= 7), which on CZ title pages
 	usually mean an author name and a title glued onto one line — splitting
-	those reliably is not possible without labels.
+	those reliably is not possible without labels. Structural stop-words
+	(PROLOG, KAPITOLA, PŘEDMLUVA, ...) are dropped from the run before it is
+	considered, so 'ČAS PŘÍLIVU PROLOG' yields 'Čas Přílivu' rather than
+	'Čas Přílivu Prolog'.
 	"""
 	tokens = line.split()
 	if len(tokens) < 2:
@@ -278,6 +341,9 @@ def _allcaps_title(line: str) -> str | None:
 		t for t in tokens
 		if t and (t.isupper() or t.rstrip(".,:;!?-–—\"'()").isupper())
 	]
+	# Drop structural stop-words (PROLOG, KAPITOLA, ...) that often appear
+	# ALL-CAPS on title pages but are not part of the title.
+	upper_tokens = [t for t in upper_tokens if t.lower().strip(".:;,-–—!?'\"()") not in _PLACEHOLDER_TOKENS]
 	if len(upper_tokens) < 2 or len(upper_tokens) >= 7:
 		return None
 	# Require at least one "heavy" token: >= 4 letters, or any CZ diacritic.
