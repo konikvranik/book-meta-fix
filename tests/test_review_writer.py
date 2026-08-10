@@ -228,6 +228,61 @@ class TestAutoApply:
 		assert len(parsed) == 1
 
 
+class TestAutoFixable:
+	"""AUTO_FIXABLE books (C6 Word lock-file -> delete; MISSING_* -> no action)
+	must be appended to review.yaml instead of being silently dropped."""
+
+	def test_c6_delete_action_pre_filled(self, tmp_path):
+		"""C6 carries proposed={"action": "delete"} on the Diagnosis; the writer
+		pre-fills entry.action so the user only has to confirm."""
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		meta = _meta(1, title="~$doc")
+		diag = Diagnosis(
+			category="C6", reason="word lockfile", confidence=Confidence.HIGH,
+			verdict=Verdict.AUTO_FIXABLE,
+			proposed={"action": "delete", "reason": "duplicate of a Word lock file"},
+		)
+		summary = _submit_all_and_finish(w, [(meta, diag, None, None)])
+		assert summary["written"] == 1
+		parsed = parse_review(out)
+		assert len(parsed) == 1
+		assert parsed[0].action == "delete"
+		# Extra keys from diag.proposed merged into the proposed block.
+		assert parsed[0].proposed is not None
+		assert parsed[0].proposed.get("reason") == "duplicate of a Word lock file"
+
+	def test_missing_isbn_no_pre_filled_action(self, tmp_path):
+		"""MISSING_ISBN is AUTO_FIXABLE but has no diag.proposed["action"] — it
+		lands in review.yaml with action: null (enrichment fills proposed)."""
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		meta = _meta(1, title="Real Book")
+		diag = Diagnosis(category="MISSING_ISBN", reason="no isbn", confidence=Confidence.LOW, verdict=Verdict.AUTO_FIXABLE)
+		summary = _submit_all_and_finish(w, [(meta, diag, None, None)])
+		assert summary["written"] == 1
+		parsed = parse_review(out)
+		assert len(parsed) == 1 and parsed[0].action is None
+
+	def test_prior_user_decision_overrides_pre_filled_action(self, tmp_path):
+		"""If the user already set action on a C6 book in a prior run, that
+		decision wins over the pre-filled delete."""
+		out = tmp_path / "review.yaml"
+		seed = "---\nid: 1\ncurrent: {title: A}\naction: reject\n"
+		out.write_text(seed, encoding="utf-8")
+		w = ReviewWriter(out)
+		meta = _meta(1, title="~$doc")
+		diag = Diagnosis(
+			category="C6", reason="word lockfile", confidence=Confidence.HIGH,
+			verdict=Verdict.AUTO_FIXABLE,
+			proposed={"action": "delete"},
+		)
+		summary = _submit_all_and_finish(w, [(meta, diag, None, None)])
+		assert summary["skipped_user_decided"] == 1
+		parsed = parse_review(out)
+		assert parsed[0].action == "reject"  # user decision preserved
+
+
 class TestLegacyPriorLoading:
 	def test_loads_legacy_single_list_bak(self, tmp_path):
 		"""A .bak in the OLD single-list format must load as a prior map."""

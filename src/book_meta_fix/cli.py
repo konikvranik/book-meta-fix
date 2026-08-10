@@ -321,6 +321,9 @@ def apply(review_file: Path, library: Path | None, do_apply: bool) -> None:
 	t.add_row("Mode", "WRITE" if do_apply else "DRY-RUN")
 	t.add_row("Applied", str(summary["applied"]))
 	t.add_row("Rejected", str(summary["rejected"]))
+	t.add_row("Deleted", str(summary.get("deleted", 0)))
+	if summary.get("snapshot"):
+		t.add_row("Deletion snapshot", summary["snapshot"])
 	t.add_row("Errors", str(len(summary["errors"])))
 	console.print(t)
 	if summary["errors"]:

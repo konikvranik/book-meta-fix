@@ -29,7 +29,7 @@ from .models import BookMeta, Diagnosis
 
 log = logging.getLogger(__name__)
 
-Action = Literal["accept", "reject", "swap", "edit"]
+Action = Literal["accept", "reject", "swap", "edit", "delete"]
 
 
 @dataclass
@@ -57,6 +57,7 @@ def _header(count: int) -> str:
 		f"#   reject  - leave unchanged\n"
 		f"#   swap    - swap author <-> title (for C1 cases)\n"
 		f"#   edit    - apply fields under `edited` (uncomment and modify)\n"
+		f"#   delete  - remove the book folder (C6 ~$ Word lock-file; tar.gz-backed)\n"
 		f"# Then run: bmf apply review.yaml\n"
 		f"\n"
 	)
@@ -90,7 +91,17 @@ def _entry_dict(meta: BookMeta, diag: Diagnosis, extracted: Any, enriched: Any, 
 	"""Build a single review entry dict from a result tuple's components.
 
 	*prior* (when present) carries user edits (action/edited/notes) to preserve.
+	AUTO_FIXABLE detectors may carry an explicit action on diag.proposed (e.g.
+	C6 Word lock-file -> {"action": "delete"}); it is pre-filled so the user
+	only has to confirm, unless a prior decision overrides it.
 	"""
+	proposed = _build_proposed(meta, extracted, enriched)
+	diag_proposed = getattr(diag, "proposed", None) or {}
+	action = diag_proposed.get("action") if diag.verdict.value == "AUTO_FIXABLE" else None
+	if diag_proposed and diag.verdict.value == "AUTO_FIXABLE":
+		extra = {k: v for k, v in diag_proposed.items() if k != "action"}
+		if extra:
+			proposed = {**(proposed or {}), **extra}
 	entry: dict[str, Any] = {
 		"id": meta.calibre_id,
 		"path": _relative_path(meta, library_root),
@@ -100,8 +111,8 @@ def _entry_dict(meta: BookMeta, diag: Diagnosis, extracted: Any, enriched: Any, 
 			"confidence": diag.confidence.value,
 		},
 		"current": _build_current(meta),
-		"proposed": _build_proposed(meta, extracted, enriched),
-		"action": None,
+		"proposed": proposed,
+		"action": action,
 	}
 	if prior is not None:
 		if prior.get("action") is not None:
@@ -132,7 +143,8 @@ def build_review(
 	"""Build a review.yaml string from detected books.
 
 	*items* is a list of (meta, diagnosis, extracted, enriched) tuples where
-	`extracted` and `enriched` may be None. Only NEEDS_REVIEW books are emitted.
+	`extracted` and `enriched` may be None. NEEDS_REVIEW, UNFIXABLE and
+	AUTO_FIXABLE books are emitted (the last may carry a pre-filled action).
 
 	Tuples may carry an optional 5th element: a prior-entry dict with user
 	edits (action / edited / notes) to preserve across re-runs.
@@ -143,7 +155,7 @@ def build_review(
 	for item in items:
 		meta, diag, extracted, enriched = item[0], item[1], item[2], item[3]
 		prior = item[4] if len(item) > 4 else None
-		if diag.verdict.value not in ("NEEDS_REVIEW", "UNFIXABLE"):
+		if diag.verdict.value not in ("NEEDS_REVIEW", "UNFIXABLE", "AUTO_FIXABLE"):
 			continue
 		entries.append(_entry_dict(meta, diag, extracted, enriched, prior, library_root))
 
