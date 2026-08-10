@@ -61,6 +61,25 @@ bmf epubgen --apply
 > statistics. The scan uses a SQLite cache (`bmf_cache.db`) so repeated runs
 > are fast; pass `--no-cache` to force a full re-parse.
 
+### Streaming `review.yaml` (live results)
+
+`bmf report` writes `review.yaml` **incrementally** — as each book finishes
+processing, its entry is appended to the file, Unix-pipe style. You can
+`tail -f review.yaml` and watch the proposals arrive while the run continues.
+On start, the existing `review.yaml` is moved to `review.yaml.bak` (so user
+decisions from a prior run are preserved); on clean finish the `.bak` is
+deleted. If the run is interrupted (Ctrl-C, crash), the `.bak` is kept so you
+can recover the pre-run state.
+
+- **Ctrl-C is safe**: results collected so far are already in the file, and
+  `finish()` carries over any prior entries the run didn't reach (e.g. with
+  `--limit`). Nothing a user previously decided is silently dropped.
+- **`--auto-apply` is inline**: high-confidence proposals are written to
+  `metadata.json`/`metadata.opf` as they're produced, and those books are
+  omitted from `review.yaml` (which only holds what still needs a human).
+- **Format**: multi-document YAML (`---` per entry). `bmf apply` reads both
+  the new multi-doc form and the legacy single-list form.
+
 ## Commands
 
 | Command | What it does |

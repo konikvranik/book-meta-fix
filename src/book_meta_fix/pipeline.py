@@ -47,6 +47,7 @@ def run_pipeline(
 	workers: int = 10,
 	progress_callback: Any = None,
 	only_needs_review: bool = True,
+	review_writer: Any = None,
 ) -> list[tuple[BookMeta, "Diagnosis", "Verification | None", "EnrichedMeta | None"]]:  # noqa: F821
 	"""Run the full pipeline over the whole library.
 
@@ -65,6 +66,10 @@ def run_pipeline(
 	extraction, online lookup, LLM call) runs in a ThreadPoolExecutor with
 	this many workers. Output order matches input order.
 	*progress_callback* (if given) is called with (i, total) after each book.
+
+	*review_writer* (optional): if a ReviewWriter is supplied, each processed
+	result is also streamed to review.yaml via ``review_writer.submit()`` as it
+	completes (Unix-pipe style), instead of writing the whole file at the end.
 	"""
 	from concurrent.futures import ThreadPoolExecutor
 
@@ -115,6 +120,18 @@ def run_pipeline(
 			diag = Diagnosis(category="ERROR", reason=f"processing failed: {e}", verdict=Verdict.NEEDS_REVIEW, confidence=Confidence.HIGH)
 			return (meta, diag, None, None)
 
+	def _stream(result: tuple | None) -> tuple | None:
+		"""Push a result to the streaming writer (if any), then return it.
+
+		None results (catastrophic worker failure) are not streamed.
+		"""
+		if review_writer is not None and result is not None:
+			try:
+				review_writer.submit(result)
+			except Exception:  # noqa: BLE001
+				log.debug("review writer submit failed (non-fatal)", exc_info=True)
+		return result
+
 	# No point spawning a pool of 10 if we only have 3 books.
 	n_workers = max(1, min(workers, total))
 	interrupted = False
@@ -123,7 +140,7 @@ def run_pipeline(
 		results = []
 		for i, meta in enumerate(books):
 			try:
-				results.append(_process_safe(meta))
+				results.append(_stream(_process_safe(meta)))
 			except KeyboardInterrupt:
 				interrupted = True
 				log.warning("interrupted by user (Ctrl-C) after %d/%d books; keeping partial results", i, total)
@@ -148,7 +165,7 @@ def run_pipeline(
 					# fut.result() blocks until this book finishes. On Ctrl-C we
 					# cancel everything still pending and break, keeping the
 					# results collected so far.
-					results.append(fut.result())
+					results.append(_stream(fut.result()))
 				except KeyboardInterrupt:
 					interrupted = True
 					log.warning("interrupted by user (Ctrl-C) after %d/%d books; cancelling pending work, keeping partial results", i, total)
@@ -723,13 +740,23 @@ def _proposed_to_enriched(proposed: dict):  # noqa: ANN202
 
 
 def _yaml_safe_load(path: Path):
-	"""Load a YAML file, returning None on empty/invalid."""
+	"""Load a review YAML file (multi-doc or legacy single-list) into a flat
+	list of entry dicts. Returns None on empty/invalid."""
 	import yaml
 
 	try:
-		return yaml.safe_load(path.read_text(encoding="utf-8"))
+		docs = list(yaml.safe_load_all(path.read_text(encoding="utf-8")))
 	except yaml.YAMLError:
 		return None
+	entries = []
+	for doc in docs:
+		if doc is None:
+			continue
+		if isinstance(doc, list):
+			entries.extend(doc)
+		elif isinstance(doc, dict):
+			entries.append(doc)
+	return entries if entries else None
 
 
 def apply_review(review_path: Path, library: Path, *, dry_run: bool = True) -> dict:
