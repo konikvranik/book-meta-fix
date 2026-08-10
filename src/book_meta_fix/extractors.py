@@ -48,17 +48,31 @@ class ExtractedMeta:
 
 	Any field may be None if the format doesn't carry it. `source_format`
 	records which file format these came from.
+
+	The ``title`` / ``authors`` / ``isbn`` / ``publisher`` / ``language``
+	fields are sourced from the EMBEDDED metadata block (EPUB content.opf,
+	pdfinfo, ebook-meta) — which calibre may have corrupted. The
+	``*_from_text`` fields are mined from the book's actual page text by
+	``text_meta.extract_metadata_from_text`` and are independent of the
+	embedded block, so callers can prefer them when the embedded values look
+	broken (see pipeline._is_better).
 	"""
 
 	title: str | None = None
 	authors: list[str] = field(default_factory=list)
-	isbn: str | None = None  # canonicalized, validated
+	isbn: str | None = None  # canonicalized, validated, from embedded metadata
 	publisher: str | None = None
 	language: str | None = None
 	# ISBN found by scanning the first N pages of text (not from embedded metadata)
 	isbn_from_text: str | None = None
 	# First-page text sample (for fuzzy title/author matching in verifier)
 	first_page_text: str | None = None
+	# Metadata mined from first_page_text by text_meta (independent of the
+	# embedded OPF block, which calibre may have overwritten).
+	title_from_text: str | None = None
+	authors_from_text: list[str] = field(default_factory=list)
+	publisher_from_text: str | None = None
+	year_from_text: int | None = None
 	# Which extractor produced this
 	source_format: str = ""
 	# Any error encountered during extraction
@@ -143,10 +157,27 @@ def extract_epub(path: str | Path) -> ExtractedMeta:
 			if lang is not None and lang.text:
 				result.language = lang.text.strip()
 
-			# 3. First-page text for ISBN-from-content + fuzzy matching
+			# 3. First-page text for ISBN-from-content + fuzzy matching +
+			#    deterministic metadata extraction (text_meta). We ALWAYS scan
+			#    the text for an ISBN (even when the embedded OPF carried one),
+			#    because the embedded ISBN may be the wrong one calibre wrote
+			#    back — the text-scan is independent and can flag the mismatch.
 			result.first_page_text = _epub_first_page_text(zf, opf_path)
-			if result.first_page_text and not result.isbn:
+			if result.first_page_text:
 				result.isbn_from_text = extract_isbn(result.first_page_text[:3000])
+				# Mine title/authors/publisher/year from the page text. These are
+				# independent of the OPF block above and feed the pipeline's
+				# deterministic fix stage.
+				from .text_meta import extract_metadata_from_text
+
+				tm = extract_metadata_from_text(result.first_page_text)
+				result.title_from_text = tm.title
+				result.authors_from_text = tm.authors
+				result.publisher_from_text = tm.publisher
+				result.year_from_text = tm.year
+				# Prefer the text-mined ISBN when canonicalization differed.
+				if tm.isbn and not result.isbn_from_text:
+					result.isbn_from_text = tm.isbn
 	except zipfile.BadZipFile:
 		result.error = "bad zip / not an epub"
 	except Exception as e:  # noqa: BLE001
@@ -275,8 +306,18 @@ def extract_pdf(path: str | Path) -> ExtractedMeta:
 			if proc.returncode == 0 and proc.stdout:
 				text = proc.stdout[:5000]
 				result.first_page_text = text
-				if not result.isbn:
-					result.isbn_from_text = extract_isbn(text)
+				# Always scan the text for an ISBN (independent of pdfinfo's
+				# embedded value) and mine the other text-based fields.
+				result.isbn_from_text = extract_isbn(text)
+				from .text_meta import extract_metadata_from_text
+
+				tm = extract_metadata_from_text(text)
+				result.title_from_text = tm.title
+				result.authors_from_text = tm.authors
+				result.publisher_from_text = tm.publisher
+				result.year_from_text = tm.year
+				if tm.isbn and not result.isbn_from_text:
+					result.isbn_from_text = tm.isbn
 		except (subprocess.TimeoutExpired, FileNotFoundError) as e:
 			log.debug("pdftotext failed for %s: %s", path, e)
 

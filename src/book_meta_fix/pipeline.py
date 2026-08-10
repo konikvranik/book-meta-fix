@@ -396,42 +396,87 @@ def _try_deterministic_fix(
 	enricher: Enricher | None,
 	skip_enrich: bool,
 ) -> "EnrichedMeta | None":  # noqa: F821
-	"""Try cheap fixes: online lookup by ISBN, then embedded metadata.
+	"""Try cheap fixes before falling back to the LLM. Cheap-first order:
+
+	  A. Offline metadata mined from the book's page text (text_meta) — no I/O.
+	  B. Online lookup by ISBN (text-scan ISBN > embedded ISBN > DB ISBN).
+	  C. Online lookup by title + author (text-mined > embedded > DB).
+	  D. Embedded-OPF compare (only if cleaner than DB; calibre may have
+	     corrupted it, so this is the weakest signal and runs last).
 
 	Returns an EnrichedMeta if we found something better than the current
-	(broken) metadata, else None.
+	(broken) metadata, else None (caller falls back to the LLM).
 	"""
-	# Prefer ISBN found in the book's text over the (likely missing/wrong) DB ISBN
-	content_isbn = extracted.isbn or extracted.isbn_from_text
+	from .enrichers import EnrichedMeta
 
-	# --- 2a. Online lookup by ISBN (cached, ~1s) ---
+	# Best available ISBN independent of the (possibly calibre-corrupted) DB:
+	# prefer the one scanned from the page text, then the embedded-OPF one.
+	content_isbn = extracted.isbn_from_text or extracted.isbn
+
+	# Best available title/author for an online title-search: prefer text-mined
+	# (independent of OPF), then embedded, then DB.
+	best_title = extracted.title_from_text or extracted.title or meta.title
+	best_authors = extracted.authors_from_text or extracted.authors or meta.authors
+	best_author = best_authors[0] if best_authors else None
+
+	# --- Phase B: online lookup by ISBN (cached, ~1s) ---
+	# databazeknih is title-only, so this hits OpenLibrary / Google Books.
 	if content_isbn and enricher is not None and not skip_enrich:
 		online = enricher.lookup(isbn=content_isbn)
-		if online is not None:
-			# Only accept if it brings something the DB doesn't have
-			if _is_better(online.title, meta.title) or _is_better(online.isbn, meta.isbn) or _is_better(online.year, meta.year):
-				return online
+		if online is not None and _online_is_useful(online, meta):
+			return online
 
-	# --- 2b/2c. Embedded metadata from content (if cleaner than DB) ---
-	# Note: embedded EPUB metadata is often a copy of the broken DB (calibre
-	# wrote it back). So we ONLY trust embedded if it's clearly cleaner:
-	# title without underscores, author that isn't "Neznamy", etc.
-	proposal_title = extracted.title if _is_better(extracted.title, meta.title) else None
-	proposal_authors = extracted.authors if any(_is_better(a, m) for a, m in zip(extracted.authors, meta.authors)) else None
-	# Drop authors that are obvious garbage even in the extracted data
-	if proposal_authors:
-		proposal_authors = [a for a in proposal_authors if a and a != "Neznamy" and "_" not in a]
+	# --- Phase C: online lookup by title + author ---
+	# This is the path that reaches databazeknih.cz (the strongest CZ/SK
+	# source) as well as OpenLibrary's title search. Skipped when we have no
+	# title to search on.
+	if best_title and enricher is not None and not skip_enrich:
+		online = enricher.lookup(title=best_title, author=best_author)
+		if online is not None and _online_is_useful(online, meta):
+			return online
 
-	if proposal_title or proposal_authors or (content_isbn and content_isbn != meta.isbn):
-		from .enrichers import EnrichedMeta
+	# --- Phase A: offline metadata mined from the book's page text ---
+	# Build a proposal from the text-mined fields when they are cleaner than
+	# the DB. These come from extractors.ExtractedMeta.*_from_text, populated
+	# by text_meta.extract_metadata_from_text over first_page_text.
+	proposal_title = extracted.title_from_text if _is_better(extracted.title_from_text, meta.title) else None
+	proposal_authors = [a for a in extracted.authors_from_text if _is_better(a, meta.authors[0] if meta.authors else None)] or None
+	proposal_isbn = content_isbn if (content_isbn and content_isbn != meta.isbn and _is_better(content_isbn, meta.isbn)) else None
+	proposal_publisher = extracted.publisher_from_text if _is_better(extracted.publisher_from_text, meta.publisher) else None
+	proposal_year = extracted.year_from_text if _is_better(extracted.year_from_text, meta.year) else None
 
+	# --- Phase D: embedded-OPF compare (weakest; calibre may have corrupted it) ---
+	# Only fill fields that Phase A did not already fill.
+	if proposal_title is None:
+		proposal_title = extracted.title if _is_better(extracted.title, meta.title) else None
+	if proposal_authors is None:
+		embedded_authors = extracted.authors if any(_is_better(a, m) for a, m in zip(extracted.authors, meta.authors)) else None
+		if embedded_authors:
+			proposal_authors = [a for a in embedded_authors if a and a != "Neznamy" and "_" not in a] or None
+
+	if proposal_title or proposal_authors or proposal_isbn or proposal_publisher or proposal_year:
 		return EnrichedMeta(
 			title=proposal_title,
 			authors=proposal_authors or [],
-			isbn=content_isbn if content_isbn != meta.isbn else None,
-			source="embedded",
+			isbn=proposal_isbn,
+			publisher=proposal_publisher,
+			year=proposal_year,
+			source="content",
 		)
 	return None
+
+
+def _online_is_useful(online: "EnrichedMeta", meta: BookMeta) -> bool:  # noqa: F821
+	"""Does an online result bring something the DB doesn't already have?
+
+	Accepts the online record if ANY of its fields is better than the DB's
+	(title/author/isbn/year/publisher/genres). This is the gate that keeps us
+	from overwriting good metadata with a no-op online hit.
+	"""
+	return any(
+		_is_better(getattr(online, f, None), getattr(meta, f, None))
+		for f in ("title", "isbn", "year", "publisher")
+	) or bool(getattr(online, "genres", None))
 
 
 def _is_better(candidate: object | None, current: object | None) -> bool:
