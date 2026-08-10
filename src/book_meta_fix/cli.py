@@ -187,6 +187,8 @@ def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich:
 	)
 	task_id = progress.add_task("processing", total=None)
 	progress.start()
+	results: list = []
+	interrupted = False
 	try:
 		def _cb(done: int, total: int) -> None:
 			if progress.tasks[0].total is None and total:
@@ -202,12 +204,23 @@ def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich:
 			workers=workers,
 			progress_callback=_cb,
 		)
+	except KeyboardInterrupt:
+		# A second Ctrl-C (or one that escaped run_pipeline's internal handler).
+		# We may have partial results in `results` already if run_pipeline was
+		# mid-return; otherwise fall through with whatever we have. Don't raise —
+		# write the review file from partial results below.
+		interrupted = True
+		console.print("\n[yellow]Interrupted (Ctrl-C). Writing partial results to review file…[/yellow]")
 	finally:
 		progress.stop()
 		if cache is not None:
 			cache.close()
 		if enricher is not None:
 			enricher.close()
+
+	if interrupted and not results:
+		console.print("[red]No results collected before interruption; nothing to write.[/red]")
+		return
 
 	# Print pipeline summary
 	_print_pipeline_summary(results)
