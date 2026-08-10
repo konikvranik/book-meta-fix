@@ -35,6 +35,12 @@ def _setup_logging(verbose: bool) -> None:
 		format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
 		datefmt="%H:%M:%S",
 	)
+	# Silence chatty third-party HTTP/SDK loggers unless --verbose. These log
+	# every request at INFO (httpx) and every retry at INFO (openai), which
+	# drowns the progress bar and our own logs during LLM runs.
+	if not verbose:
+		for name in ("httpx", "openai", "openai._base_client", "urllib3", "httpcore"):
+			logging.getLogger(name).setLevel(logging.WARNING)
 
 
 @click.group()
