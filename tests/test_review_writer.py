@@ -70,6 +70,83 @@ class TestBasicAppend:
 		assert not (tmp_path / "review.yaml.bak").exists()
 
 
+class TestMediumConfidencePrefill:
+	"""Medium-confidence proposals (llm:flash/loop, openlibrary, content) get
+	action: accept pre-filled ONLY when they don't change title or author.
+	Proposals that change title/author stay action=None for individual review.
+	"""
+
+	def test_flash_adding_only_isbn_gets_accept(self, tmp_path):
+		"""llm:flash proposal that keeps title/author and only adds ISBN ->
+		prefilled accept (the added metadata is easy to bulk-verify)."""
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		enriched = EnrichedMeta(
+			title="T", authors=["A"], isbn="9781111111111", source="llm:flash",
+		)
+		_submit_all_and_finish(w, [_result(1, title="T", enriched=enriched)])
+		parsed = parse_review(out)
+		assert parsed[0].action == "accept"
+
+	def test_flash_adding_only_genres_gets_accept(self, tmp_path):
+		"""llm:flash that adds only genres (no title/author/isbn change) is the
+		most common case in the real library (~700 books) — prefill accept."""
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		enriched = EnrichedMeta(
+			title="T", authors=["A"], genres=["fantasy"], source="llm:flash",
+		)
+		_submit_all_and_finish(w, [_result(1, title="T", enriched=enriched)])
+		parsed = parse_review(out)
+		assert parsed[0].action == "accept"
+
+	def test_flash_changing_title_stays_none(self, tmp_path):
+		"""llm:flash proposing a different title -> action stays None for review."""
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		enriched = EnrichedMeta(
+			title="New Title", authors=["A"], source="llm:flash",
+		)
+		_submit_all_and_finish(w, [_result(1, title="Old Title", enriched=enriched)])
+		parsed = parse_review(out)
+		assert parsed[0].action is None
+
+	def test_flash_changing_author_stays_none(self, tmp_path):
+		"""llm:flash proposing a different author -> action stays None."""
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		enriched = EnrichedMeta(
+			title="T", authors=["New Author"], source="llm:flash",
+		)
+		_submit_all_and_finish(w, [_result(1, title="T", enriched=enriched)])
+		parsed = parse_review(out)
+		assert parsed[0].action is None
+
+	def test_openlibrary_preserving_identity_gets_accept(self, tmp_path):
+		"""openlibrary is medium-confidence; same rule applies."""
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		enriched = EnrichedMeta(
+			title="T", authors=["A"], isbn="9782222222222", source="openlibrary",
+		)
+		_submit_all_and_finish(w, [_result(1, title="T", enriched=enriched)])
+		parsed = parse_review(out)
+		assert parsed[0].action == "accept"
+
+	def test_llm_low_never_prefilled(self, tmp_path):
+		"""llm:low (failed verify_proposal) is always action=None, even when
+		it preserves identity — we don't trust a proposal the LLM's own verify
+		already rejected."""
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		enriched = EnrichedMeta(
+			title="T", authors=["A"], genres=["x"], source="llm:low",
+		)
+		_submit_all_and_finish(w, [_result(1, title="T", enriched=enriched)])
+		parsed = parse_review(out)
+		assert parsed[0].action is None
+
+
 class TestBackupLifecycle:
 	def test_moves_original_to_bak_on_construct(self, tmp_path):
 		out = tmp_path / "review.yaml"
