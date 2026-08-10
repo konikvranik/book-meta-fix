@@ -37,7 +37,10 @@ Rule = Callable[[BookMeta], "Diagnosis | None"]
 
 # Czech/Slovak "anonymous" spellings — almost always signal a corrupted record,
 # NOT a genuine anonymous work. Genuine anonym (Bible etc.) is whitelisted below.
-_ANONYM_SPELLINGS = {"anonym", "anonymous", "neznamy", "neznámý", "neznamy", "unknown", ""}
+# Compared case-insensitively (callers .lower() before checking membership).
+_ANONYM_SPELLINGS = {
+	"", "anonym", "anonymní", "anonymni", "anonymous", "neznamy", "neznámý", "unknown",
+}
 
 # Titles that indicate a GENUINE anonymous work (religion/folklore).
 _REAL_ANONYM_RE = re.compile(r"\b(bible|bibl[ei]|kralick|[mn]ový?\s+z[áa]kon|knihy\s+moj|koran|quran|edda)\b", re.IGNORECASE)
@@ -354,10 +357,30 @@ def rule_c9_anonym(meta: BookMeta) -> Diagnosis | None:
 	whitelisted; everything else with an anonym spelling is flagged because
 	99.7% of such records in this library are corrupted (lost author), not
 	truly anonymous.
+
+	The anonym signal must come from the actual metadata (authors list), not
+	merely from the author_folder. ~15% of the library lives in a 'Neznamy/'
+	folder but already carries a real author in metadata.json (calibre was
+	fixed at some point, the folder was never moved). Flagging those as C9
+	is a false positive — the metadata is already correct.
 	"""
-	# Check both the authors list and the author_folder
-	all_author_strings = [meta.author_folder, *meta.authors]
-	is_anonym = any(a.strip().lower() in _ANONYM_SPELLINGS for a in all_author_strings if a)
+	# A real (non-anonym) author in the metadata means the record is fine,
+	# regardless of what folder it happens to live in.
+	has_real_author = any(
+		a.strip().lower() not in _ANONYM_SPELLINGS
+		for a in meta.authors
+		if a
+	)
+	if has_real_author:
+		return None
+	# No real author in metadata — check whether the folder signals anonym.
+	# (author_folder alone, without an anonym authors[], is still C9 because
+	# the metadata has no author at all and the folder confirms it.)
+	is_anonym = any(
+		a.strip().lower() in _ANONYM_SPELLINGS
+		for a in (meta.author_folder, *meta.authors)
+		if a
+	)
 	if not is_anonym:
 		return None
 	# Whitelist: title looks like a genuine religious/folkloric anonymous work
