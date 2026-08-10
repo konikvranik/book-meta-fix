@@ -243,9 +243,10 @@ class ZaiProvider(LLMProvider):
 		interval = self.DEFAULT_MIN_INTERVAL if min_interval is None else min_interval
 		self._bucket = LeakyBucket(capacity=burst, interval=max(0.0, interval))
 		# Models used by reconcile_loop. flash_model is the free first-attempt
-		# model (default glm-4.5-flash); final_model is the paid high-quality
+		# model (default glm-4.7-flash — best CZ/SK quality among free models
+		# per scripts/llm_experiment.py); final_model is the paid high-quality
 		# fallback (default: self.model, i.e. glm-5.2 low).
-		self.flash_model = flash_model or "glm-4.5-flash"
+		self.flash_model = flash_model or "glm-4.7-flash"
 		self.final_model = final_model or model
 
 	def _extra_body_for(self, model: str) -> dict[str, Any]:

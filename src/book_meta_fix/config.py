@@ -67,7 +67,7 @@ class Config:
 	# Flash (first-attempt, free) and final (paid fallback) models for the loop.
 	# Override via ZAI_FLASH_MODEL / ZAI_FINAL_MODEL. The single-call path uses
 	# zai_model when the loop is disabled.
-	zai_flash_model: str = "glm-4.5-flash"
+	zai_flash_model: str = "glm-4.7-flash"
 	zai_final_model: str = "glm-5.2"
 	# Leaky-bucket burst capacity: how many LLM calls may fire in a short burst
 	# before the smoother engages. Default 5; lower (e.g. 1) for stricter rate
