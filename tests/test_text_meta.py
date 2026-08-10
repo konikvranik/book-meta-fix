@@ -155,3 +155,98 @@ class TestExtractMetadataFromText:
 	def test_has_any_true_when_title_found(self):
 		m = extract_metadata_from_text("Neznámý JÁDRO GALAXIE")
 		assert m.has_any()
+
+
+class TestBlockStructuredTitlePage:
+	"""Title pages where title and author sit on separate lines (the common
+	EPUB case after _strip_html preserves block structure). These used to fail
+	when _strip_html collapsed everything to one line."""
+
+	def test_title_and_author_on_separate_lines(self):
+		"""CONAN on line 1, subtitle on line 2, author on line 3 — the real
+		Conan title-page structure from the library."""
+		text = (
+			"Neznámý\n"
+			"CONAN\n"
+			"A sedm dní do úplňku\n"
+			"A.S. Pergill\n"
+			"PROLOG\n"
+			"Obloha byla černá, pouze přísvit na jihovýchodě naznačoval brzký východ měsíce."
+		)
+		m = extract_metadata_from_text(text)
+		assert m.title == "Conan"
+		assert "A.S. Pergill" in m.authors
+
+	def test_allcaps_title_isolated_on_its_own_line(self):
+		"""When the ALL-CAPS title is on its own line (not glued to the first
+		paragraph), the heuristic finds it even with a long subtitle below."""
+		text = (
+			"Neznámý\n"
+			"MICHAL SCOTT ROHAN\n"
+			"KOVÁRNA UPROSTŘED HVOZDU\n"
+			"Druhá kniha Zimních letopisů\n"
+			"Předmluva\n"
+			"Mezi mládím a zralostí"
+		)
+		m = extract_metadata_from_text(text)
+		# At least one of the two ALL-CAPS lines (author or title) is found.
+		# Both lines look like names/titles to the heuristic, so we accept
+		# either; the point of this test is that block structure isolation
+		# works — the title is no longer glued to the paragraph below.
+		assert m.title is not None
+		assert "Rohan" in m.title or any("Rohan" in a for a in m.authors)
+
+
+class TestAuthorRejection:
+	"""The tightened _looks_like_author must reject sentence fragments and
+	acronym noise that the old loose check accepted."""
+
+	def test_rejects_czech_sentence(self):
+		"""First sentence of a book must not be mistaken for an author name."""
+		text = "Neznámý\nObloha byla černá, pouze přísvit naznačoval brzký východ měsíce."
+		m = extract_metadata_from_text(text)
+		# No author should be hallucinated from a sentence.
+		for a in m.authors:
+			assert "Obloha" not in a
+
+	def test_rejects_dialogue_line(self):
+		"""Dialogue ('"Pojď sem!"') must not be mistaken for an author."""
+		text = (
+			"Neznámý\n"
+			'DARKOŇ NA CESTÁCH\n'
+			'“Pojď sem!”\n'
+			'“Grauuh?” ozvalo se vzdáleně z lesa.'
+		)
+		m = extract_metadata_from_text(text)
+		for a in m.authors:
+			assert "Pojď" not in a
+			assert "sem" not in a
+
+	def test_rejects_acronym_fragment(self):
+		"""Single-letter tokens without dots are prose fragments, not initials."""
+		text = "Neznámý\nS A K Z K\nNějaký další text"
+		m = extract_metadata_from_text(text)
+		assert m.authors == []
+
+	def test_accepts_initials_with_dots(self):
+		"""J. R. R. Tolkien (dots!) must still be accepted."""
+		text = (
+			"Neznámý\n"
+			"PÁN PRSTENŮ\n"
+			"J. R. R. Tolkien\n"
+			"Předmluva"
+		)
+		m = extract_metadata_from_text(text)
+		assert "J. R. R. Tolkien" in m.authors
+
+	def test_accepts_mixed_case_author_line(self):
+		"""A Capitalized author name (not ALL-CAPS) on the title page should
+		be found — the old priority-2 only matched ALL-CAPS lines."""
+		text = (
+			"Neznámý\n"
+			"ZASTAVENÝ PŘÍVAL\n"
+			"Agatha Christie\n"
+			"První kapitola"
+		)
+		m = extract_metadata_from_text(text)
+		assert "Agatha Christie" in m.authors

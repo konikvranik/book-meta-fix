@@ -232,7 +232,15 @@ def _epub_first_page_text(zf: zipfile.ZipFile, opf_path: str) -> str | None:
 
 
 def _strip_html(raw: bytes) -> str:
-	"""Crude HTML tag stripper + encoding detection for EPUB content files."""
+	"""Crude HTML tag stripper + encoding detection for EPUB content files.
+
+	Preserves block structure: ``</p>``, ``</div>``, ``</h1>`` and ``<br>``
+	become newlines so downstream per-line heuristics in text_meta (ALL-CAPS
+	title detection, ``Název:`` label regexes) can anchor on line starts.
+	Collapsing everything to one line (the previous behaviour) glued the
+	title page together with the first paragraph, so the title run could
+	never be isolated.
+	"""
 	# Detect encoding from XML declaration
 	encoding = "utf-8"
 	if raw[:5] == b"<?xml":
@@ -243,6 +251,13 @@ def _strip_html(raw: bytes) -> str:
 		text = raw.decode(encoding, errors="replace")
 	except (LookupError, UnicodeDecodeError):
 		text = raw.decode("utf-8", errors="replace")
+	# Insert newlines at block boundaries BEFORE removing tags, so the line
+	# structure of the title page survives the tag strip.
+	text = re.sub(
+		r"</(p|div|h[1-6]|li|tr|td|th|section|article|header|footer|body|blockquote)\s*>",
+		"\n", text, flags=re.IGNORECASE,
+	)
+	text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
 	# Remove tags
 	text = re.sub(r"<[^>]+>", " ", text)
 	# Unescape basic entities
@@ -254,7 +269,11 @@ def _strip_html(raw: bytes) -> str:
 		.replace("&quot;", '"')
 		.replace("&#8217;", "'")
 	)
-	return re.sub(r"\s+", " ", text).strip()
+	# Collapse spaces/tabs within a line, but keep newlines.
+	text = re.sub(r"[ \t]+", " ", text)
+	# Collapse 3+ consecutive newlines to 2.
+	text = re.sub(r"\n{3,}", "\n\n", text)
+	return text.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -332,10 +351,14 @@ def extract_pdf(path: str | Path) -> ExtractedMeta:
 
 
 def extract_via_ebook_meta(path: str | Path) -> ExtractedMeta:
-	"""Use calibre's `ebook-meta` to extract embedded metadata.
+	"""Use calibre's `ebook-meta` for embedded metadata + `ebook-convert` for
+	page text.
 
-	This is the only realistic option for binary/opaque formats (pdb, mobi, doc).
-	Returns empty ExtractedMeta if calibre is not installed.
+	This is the realistic option for binary/opaque formats (pdb, mobi, doc).
+	`ebook-meta` returns the embedded title/author/publisher/isbn (which
+	calibre may have corrupted, same as OPF), and `ebook-convert` renders the
+	book to plain text so text_meta heuristics can mine a title/ISBN from the
+	actual page content. Returns empty ExtractedMeta if calibre is not installed.
 	"""
 	result = ExtractedMeta(source_format="ebook-meta")
 	ebook_meta = shutil.which("ebook-meta")
@@ -377,7 +400,55 @@ def extract_via_ebook_meta(path: str | Path) -> ExtractedMeta:
 							break
 	except (subprocess.TimeoutExpired, FileNotFoundError) as e:
 		result.error = f"ebook-meta error: {e}"
+		return result
+
+	# Render the book to plain text via `ebook-convert` so text_meta can mine
+	# a title / ISBN / publisher from the page content (independent of the
+	# embedded block, which for pdb/doc is often the filename). This is the
+	# same role _epub_first_page_text plays for EPUBs. We keep only the first
+	# ~8000 chars to bound runtime and memory.
+	page_text = _ebook_convert_to_text(path)
+	if page_text:
+		result.first_page_text = page_text[:8000]
+		result.isbn_from_text = extract_isbn(result.first_page_text[:3000])
+		from .text_meta import extract_metadata_from_text
+
+		tm = extract_metadata_from_text(result.first_page_text)
+		result.title_from_text = tm.title
+		result.authors_from_text = tm.authors
+		result.publisher_from_text = tm.publisher
+		result.year_from_text = tm.year
+		if tm.isbn and not result.isbn_from_text:
+			result.isbn_from_text = tm.isbn
+
 	return result
+
+
+def _ebook_convert_to_text(path: str | Path) -> str | None:
+	"""Render a binary ebook (pdb/mobi/doc/...) to plain text via calibre's
+	`ebook-convert`. Returns None on failure / timeout / missing calibre.
+
+	Calibre writes the whole book; we keep only the first 8000 chars in the
+	caller. Runs with a 30s timeout per book.
+	"""
+	ebook_convert = shutil.which("ebook-convert")
+	if not ebook_convert:
+		return None
+	import tempfile
+
+	with tempfile.TemporaryDirectory(prefix="bmf-conv-") as tmp:
+		out = Path(tmp) / "out.txt"
+		try:
+			proc = subprocess.run(
+				[ebook_convert, str(path), str(out)],
+				capture_output=True, text=True, timeout=30,
+			)
+			if proc.returncode != 0 or not out.is_file():
+				return None
+			text = out.read_text(encoding="utf-8", errors="replace")
+			return text or None
+		except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+			return None
 
 
 # ---------------------------------------------------------------------------
