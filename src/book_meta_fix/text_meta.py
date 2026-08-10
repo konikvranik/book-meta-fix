@@ -196,24 +196,54 @@ def _looks_like_title(line: str) -> bool:
 def _looks_like_author(line: str) -> bool:
 	"""Plausibility check for a candidate author name.
 
-	A real author name is 1-5 tokens, each Capitalized or ALL-CAPS, optionally
-	with initials (J. R. R.), and not a sentence.
+	A real author name is 1-4 tokens, each Capitalized or ALL-CAPS, optionally
+	with initials (J. R. R.), and not a sentence. We reject:
+
+	  - sentences (>= 2 lowercase words of length >= 3: \"Obloha byla černá\")
+	  - acronym fragments from prose (\"V Z\", \"S A K Z K\"): single-letter
+	    tokens without trailing dots are not initials
+	  - titles starting with a digit (\"451 stupňů Fahrenheita\")
 	"""
 	if not line or _is_noise(line):
 		return False
-	# Strip trailing role markers.
+	# Strip trailing role markers / parentheticals.
 	cleaned = re.sub(r"\s*\([^)]*\)\s*$", "", line).strip(" .,;:-–—")
 	if not cleaned or len(cleaned) < 3 or len(cleaned) > 60:
 		return False
-	# Reject sentences (>= 6 tokens or contains sentence-like lowercased runs).
+	# Reject dialogue / sentence fragments that carry quotes or end in
+	# sentence punctuation (a name never ends in "!" "?" "..." or quotes).
+	if re.search(r'[!?“”"\']|(\.\.\.)', cleaned):
+		return False
+	# Reject if the raw line had closing dialogue punctuation we stripped.
+	if re.search(r'[“”"\'][!\?]', line):
+		return False
+	# Reject leading digit (titles like "451 stupňů Fahrenheita").
+	if cleaned[0].isdigit():
+		return False
 	tokens = cleaned.split()
-	if len(tokens) > 5:
+	if len(tokens) > 4:
 		return False
-	# Must contain at least one token starting with an uppercase letter.
+	# Reject sentences: >= 1 lowercase word of length >= 3 mixed with a
+	# Capitalized word. A real author name has every word Capitalized or
+	# an initial (A. S.); a sentence capitalizes only the first word and
+	# keeps verbs/nouns lowercase ("Probudila se bolestí", "Darkoň je
+	# bytost", "Obloha byla černá"). One lowercase word of length >= 3
+	# next to a capitalized one is a reliable sentence signal in CZ/SK.
+	alpha_tokens = [t for t in tokens if re.sub(r"[^A-Za-zÁ-ž]", "", t)]
+	capitalized = [t for t in alpha_tokens if t[:1].isupper()]
+	lower_words = [t for t in alpha_tokens if t.islower() and len(re.sub(r"[^A-Za-zÁ-ž]", "", t)) >= 3]
+	if lower_words and capitalized:
+		return False
+	# Reject acronym fragments: lines of only single-letter tokens without
+	# dots ("V Z", "S A K Z K"). A real initial has a trailing dot ("A. S.").
+	non_punct = [t for t in tokens if re.sub(r"[^A-Za-zÁ-ž]", "", t)]
+	if non_punct and all(
+		len(re.sub(r"[^A-Za-zÁ-ž]", "", t)) <= 1 and not t.endswith(".")
+		for t in non_punct
+	):
+		return False
+	# Must contain at least one Capitalized token (a name part).
 	if not any(t and t[0].isupper() for t in tokens):
-		return False
-	# Reject if it looks like a sentence (lowercase verb-ish tokens).
-	if sum(1 for t in tokens if t.islower() and len(t) > 3) >= 3:
 		return False
 	return True
 
@@ -393,24 +423,52 @@ def extract_authors_from_text(text: str | None) -> list[str]:
 	if authors:
 		return _dedupe(authors)
 
-	# Priority 2: ALL-CAPS run that looks like a person name (<= 4 tokens,
-	# appears as a standalone line, not the title). On CZ title pages the
-	# author is often the FIRST all-caps line and the title the SECOND, but
-	# ordering is unreliable, so we accept any all-caps name-like line that is
-	# NOT the chosen title.
+	# Priority 2: a short standalone line on the title page that looks like a
+	# person name. We scan only the first ~8 lines (the title-page region
+	# before the first paragraph) and accept any 1-4 token Capitalized /
+	# ALL-CAPS / initials line that is NOT the chosen title. ALL-CAPS lines
+	# are normalized to title case first so "KAREL ČAPEK" matches.
 	title = extract_title_from_text(text)
 	title_norm = title.lower() if title else None
-	for ln in lines:
+	for ln in lines[:8]:
 		if _is_noise(ln):
 			continue
-		tokens = [t for t in ln.split() if t and (t.isupper() or t.rstrip(".,:;!?-–—\"'()").isupper())]
-		if len(tokens) < 2 or len(tokens) > 4:
+		tokens = ln.split()
+		if len(tokens) < 1 or len(tokens) > 4:
 			continue
-		candidate = _normalize_title_case(" ".join(tokens))
+		# Drop a leading placeholder ("Neznámý") before re-casing, so that
+		# a title page line "Neznámý ZASTAVENÝ PŘÍVAL" (where "Neznámý" is the
+		# library placeholder-author marker, not a real name) does not get
+		# absorbed as an author candidate.
+		ln_stripped = _strip_leading_placeholder(ln) or ""
+		if not ln_stripped:
+			continue
+		# Validate on the RAW (pre-normalization) form first: a mixed-case
+		# line with lowercase words of length >= 3 is a sentence fragment
+		# ("Nějaký další text"), not a name. Only after the raw check passes
+		# do we re-case ALL-CAPS to title case so "KAREL ČAPEK" reads as a name.
+		if not _looks_like_author(ln_stripped):
+			# ALL-CAPS lines pass _looks_like_author on raw form (no lowercase
+			# words), so this branch only catches mixed-case rejects. Try the
+			# normalized form as a last resort only if the line was ALL-CAPS
+			# (where normalization is lossless and safe).
+			if not ln_stripped.isupper():
+				continue
+			candidate = _normalize_title_case(ln_stripped)
+			if not _looks_like_author(candidate):
+				continue
+		else:
+			candidate = _normalize_title_case(ln_stripped)
 		if title_norm and candidate.lower() == title_norm:
 			continue  # this line is the title, not an author
-		if _looks_like_author(candidate):
-			authors.append(candidate)
+		# Also reject if the candidate contains the title as a suffix/prefix
+		# (e.g. placeholder + title collapsed onto one line).
+		if title_norm and (
+			candidate.lower().startswith(title_norm + " ")
+			or candidate.lower().endswith(" " + title_norm)
+		):
+			continue
+		authors.append(candidate)
 		if len(authors) >= 3:
 			break
 
