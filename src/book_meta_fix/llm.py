@@ -149,24 +149,43 @@ class ZaiProvider(LLMProvider):
 
 	name = "zai"
 
-	# Module-level concurrency cap for LLM calls. The pipeline runs many worker
-	# threads (default 10) for cheap I/O (extraction, online lookup), but Z.AI's
-	# coding-plan rate limit is low enough that 10 concurrent LLM requests
-	# trigger 429 'Rate limit reached for requests' (code 1302). This semaphore
-	# decouples LLM concurrency from worker count: cheap I/O stays fast, while
-	# at most MAX_CONCURRENT_LLM calls are in flight at once.
-	MAX_CONCURRENT_LLM = 3
-	_llm_semaphore: threading.Semaphore | None = None  # lazily bound per-instance
+	# Default minimum interval between LLM requests, in seconds. Z.AI's coding
+	# plan applies a dynamic RPM (requests-per-minute) limit; 429 'Rate limit
+	# reached for requests' (code 1302) fires when too many calls land inside a
+	# rolling window. A floor interval of 2.0s caps us at ~30 RPM regardless of
+	# how many worker threads are firing calls or how fast the API responds,
+	# which is the safest match for the documented dynamic RPM cap.
+	DEFAULT_MIN_INTERVAL = 2.0
 
-	def __init__(self, api_key: str, base_url: str = "https://api.z.ai/api/paas/v4/", model: str = "glm-5.2", *, max_concurrent_llm: int | None = None) -> None:
+	def __init__(self, api_key: str, base_url: str = "https://api.z.ai/api/paas/v4/", model: str = "glm-5.2", *, min_interval: float | None = None) -> None:
 		self.api_key = api_key
 		self.base_url = base_url
 		self.model = model
 		self._client = None
-		# Each instance gets its own semaphore so the cap is per-process.
-		# max_concurrent_llm overrides the class default (e.g. from CLI/config).
-		cap = max_concurrent_llm if max_concurrent_llm is not None else self.MAX_CONCURRENT_LLM
-		self._llm_semaphore = threading.Semaphore(max(1, cap))
+		# Rate limiter state (shared across worker threads). min_interval < 0
+		# disables throttling; floor at a tiny positive value keeps behavior sane.
+		interval = self.DEFAULT_MIN_INTERVAL if min_interval is None else min_interval
+		self._min_interval = max(0.0, interval)
+		self._last_request_at = 0.0
+		self._rate_lock = threading.Lock()
+
+	def _throttle(self) -> None:
+		"""Block until at least _min_interval has passed since the last request.
+
+		Called before each HTTP call. Thread-safe: the lock serializes the
+		bookkeeping so the floor interval holds across concurrent workers.
+		"""
+		if self._min_interval <= 0:
+			return
+		import time
+
+		with self._rate_lock:
+			now = time.monotonic()
+			wait = self._last_request_at + self._min_interval - now
+			if wait > 0:
+				time.sleep(wait)
+				now = time.monotonic()
+			self._last_request_at = now
 
 	def _get_client(self):
 		"""Lazy-init the OpenAI client (avoids import error if openai not installed)."""
@@ -186,10 +205,10 @@ class ZaiProvider(LLMProvider):
 		tokens, so we set a generous max_tokens (8000) and read both fields.
 		Retries on empty/transient failures (rate limit, overload).
 
-		Concurrency is capped by a semaphore (default 3) so that running many
-		worker threads does not flood Z.AI and trigger 429s. Each attempt
-		acquires the semaphore only for the HTTP call, releasing it during
-		sleep/retry backoff so other workers can proceed.
+		Request rate is throttled to _min_interval seconds between calls (default
+		2.0s = ~30 RPM) so that running many worker threads does not flood Z.AI
+		and trip its dynamic RPM limit (429 code 1302). The throttle fires before
+		each HTTP call; response parsing and retry backoff happen outside it.
 		"""
 		import time
 
@@ -197,10 +216,12 @@ class ZaiProvider(LLMProvider):
 		prompt = build_user_prompt(evidence)
 		last_error = None
 		for attempt in range(max_retries):
-			# Hold the concurrency cap ONLY across the blocking HTTP call —
-			# release it before any sleep/processing so other workers can fire
-			# their requests while this one backs off / parses.
-			self._llm_semaphore.acquire()
+			# Throttle BEFORE the HTTP call so the RPM floor holds across worker
+			# threads. _throttle() blocks (under a lock) until enough time has
+			# passed since the previous request, then stamps the timestamp.
+			# Retries also pass through here, so a flapping endpoint can't exceed
+			# the rate even while backing off.
+			self._throttle()
 			try:
 				client = self._get_client()
 				resp = client.chat.completions.create(
@@ -221,10 +242,8 @@ class ZaiProvider(LLMProvider):
 				# next attempt so the rate window can recover.
 				time.sleep(1.0 * (attempt + 1))
 				continue
-			finally:
-				self._llm_semaphore.release()
 
-			# --- response processing happens OUTSIDE the semaphore ---
+			# --- response processing ---
 			choice = resp.choices[0]
 			content = choice.message.content or ""
 			# Reasoning models sometimes stash the answer only in content
@@ -312,14 +331,15 @@ def get_provider(config: Any) -> LLMProvider | None:  # noqa: ANN001
 	"""
 	api_key = getattr(config, "zai_api_key", None) or os.environ.get("ZAI_API_KEY")
 	if api_key:
-		# max concurrent LLM calls (decoupled from worker count). Falls back to
-		# the class default if unset. Lower this if you still hit 429s.
-		max_concurrent = getattr(config, "llm_concurrency", None)
+		# Minimum seconds between LLM requests (RPM throttle). Falls back to the
+		# class default (~30 RPM) if unset. Lower (e.g. 1.0 = 60 RPM) only on a
+		# higher Z.AI tier; raise (e.g. 4.0 = 15 RPM) if you still hit 429s.
+		min_interval = getattr(config, "llm_min_interval", None)
 		return ZaiProvider(
 			api_key=api_key,
 			base_url=getattr(config, "zai_base_url", "https://api.z.ai/api/paas/v4/"),
 			model=getattr(config, "zai_model", "glm-5.2"),
-			max_concurrent_llm=max_concurrent,
+			min_interval=min_interval,
 		)
 	if os.environ.get("BMF_LLM_MOCK"):
 		return MockProvider()

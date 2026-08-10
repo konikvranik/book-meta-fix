@@ -46,11 +46,13 @@ class Config:
 	zai_api_key: str | None = field(default=None)
 	zai_base_url: str = "https://api.z.ai/api/coding/paas/v4/"
 	zai_model: str = "glm-5.2"
-	# Max concurrent LLM calls (decoupled from --workers, which drives cheap I/O
-	# too). Z.AI's coding-plan request-rate limit is low; capping concurrency to
-	# 3 avoids 429 'Rate limit reached for requests' (code 1302) when many worker
-	# threads would otherwise fire LLM calls simultaneously.
-	llm_concurrency: int = 3
+	# Minimum seconds between LLM requests (RPM throttle). Z.AI's coding plan
+	# applies a dynamic requests-per-minute limit; 429 'Rate limit reached for
+	# requests' (code 1302) trips when too many calls land inside a rolling
+	# window. A 2.0s floor caps us at ~30 RPM regardless of worker count or API
+	# response speed. Lower (e.g. 1.0) on a higher tier; raise (e.g. 4.0) if you
+	# still hit 429s.
+	llm_min_interval: float = 2.0
 
 	# Verification thresholds
 	verify_fuzzy_strong: float = 0.8  # >= -> VERIFIED
@@ -84,9 +86,9 @@ class Config:
 			cfg.zai_base_url = v
 		if v := os.environ.get("ZAI_MODEL"):
 			cfg.zai_model = v
-		if (v := os.environ.get("BMF_LLM_CONCURRENCY")) is not None:
+		if (v := os.environ.get("BMF_LLM_MIN_INTERVAL")) is not None:
 			try:
-				cfg.llm_concurrency = max(1, int(v))
+				cfg.llm_min_interval = max(0.0, float(v))
 			except ValueError:
 				pass
 		return cfg
