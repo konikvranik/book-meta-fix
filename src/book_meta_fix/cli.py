@@ -130,7 +130,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich:
 
 	from .enrichers import Enricher
 	from .llm import get_provider
-	from .pipeline import auto_apply_results, generate_review, run_pipeline
+	from .pipeline import run_pipeline
 
 	cfg = Config.from_env()
 	if library is not None:
@@ -176,6 +176,25 @@ def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich:
 			rpm = round(60.0 / cfg.llm_min_interval) if cfg.llm_min_interval > 0 else float("inf")
 			console.print(f"  LLM: [cyan]{llm_provider.name}[/cyan] for categories {cats} (≤{rpm} RPM, min {cfg.llm_min_interval}s between calls)")
 
+	# Streaming review writer: appends each processed book to review.yaml as it
+	# completes (Unix-pipe style). The original is moved to .bak on
+	# construction so user decisions are preserved; finish() carries over any
+	# unprocessed prior entries and deletes .bak on success. Auto-apply (if
+	# --auto-apply) happens inline: high-confidence proposals are written to
+	# metadata files directly and omitted from review.yaml.
+	from .review_writer import ReviewWriter
+	from .writers import snapshot_metadata
+
+	# Safety snapshot before any metadata writes (auto-apply path).
+	if auto_apply:
+		snap_path = snapshot_metadata(cfg.library, output=Path(snapshot_dir) / f"metadata_snapshot.tar.gz" if snapshot_dir else None)
+		console.print(f"[dim]Snapshot: {snap_path}[/dim]")
+
+	review_writer = ReviewWriter(
+		out, library_root=cfg.library,
+		apply_threshold=auto_apply_threshold if auto_apply else None,
+	)
+
 	# Progress bar (updated from worker threads via callback)
 	progress = Progress(
 		SpinnerColumn(),
@@ -204,53 +223,49 @@ def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich:
 			limit=limit,
 			workers=workers,
 			progress_callback=_cb,
+			review_writer=review_writer,
 		)
 	except KeyboardInterrupt:
 		# A second Ctrl-C (or one that escaped run_pipeline's internal handler).
-		# We may have partial results in `results` already if run_pipeline was
-		# mid-return; otherwise fall through with whatever we have. Don't raise —
-		# write the review file from partial results below.
+		# The streaming writer has already flushed everything up to the point of
+		# interruption; finish() below carries over prior unprocessed entries.
 		interrupted = True
-		console.print("\n[yellow]Interrupted (Ctrl-C). Writing partial results to review file…[/yellow]")
+		console.print("\n[yellow]Interrupted (Ctrl-C). Finalizing review file with partial results…[/yellow]")
 	finally:
 		progress.stop()
 		if cache is not None:
 			cache.close()
 		if enricher is not None:
 			enricher.close()
+		# Always finalize the writer — even on Ctrl-C/error — so the review file
+		# is consistent and prior decisions are carried over. keep_backup when
+		# interrupted, so the user can recover the pre-run state if needed.
+		try:
+			summary = review_writer.finish(keep_backup=interrupted)
+		except Exception as e:  # noqa: BLE001
+			console.print(f"[red]review writer finalize failed: {e}[/red]")
+			summary = {"written": 0, "applied": 0, "skipped_low_conf": 0, "skipped_no_proposal": 0, "skipped_user_decided": 0, "remaining_count": 0, "backup_path": None, "threshold": None}
 
-	if interrupted and not results:
-		console.print("[red]No results collected before interruption; nothing to write.[/red]")
-		return
-
-	# Print pipeline summary
+	# Print pipeline summary (from the results list — still populated for stats)
 	_print_pipeline_summary(results)
 
-	# Auto-apply high-confidence proposals (if --auto-apply)
+	# Streaming auto-apply / review summary
+	console.print()
+	t = Table(title="Review & auto-apply results", show_header=True, header_style="bold cyan")
+	t.add_column("Metric", style="bold")
+	t.add_column("Count", justify="right")
 	if auto_apply:
-		from .writers import snapshot_metadata
-
-		# Create safety snapshot before any writes
-		snap_path = snapshot_metadata(cfg.library, output=Path(snapshot_dir) / f"metadata_snapshot.tar.gz" if snapshot_dir else None)
-		console.print(f"[dim]Snapshot: {snap_path}[/dim]")
-		summary = auto_apply_results(results, library_root=cfg.library, threshold=auto_apply_threshold, dry_run=False)
-		console.print()
-		t = Table(title="Auto-apply results", show_header=True, header_style="bold cyan")
-		t.add_column("Metric", style="bold")
-		t.add_column("Count", justify="right")
-		t.add_row("Threshold", auto_apply_threshold)
-		t.add_row("Applied (written)", str(summary["applied"]))
+		t.add_row("Auto-apply threshold", auto_apply_threshold)
+		t.add_row("Applied (written to metadata)", str(summary["applied"]))
 		t.add_row("Skipped (low confidence)", str(summary["skipped_low_conf"]))
 		t.add_row("Skipped (no proposal)", str(summary["skipped_no_proposal"]))
-		t.add_row("Remaining for review", str(len(summary["remaining"])))
-		console.print(t)
-		# Use remaining (non-applied) results for the review file
-		results = summary["remaining"]
-
-	# Generate the review file
-	n = generate_review(results, library_root=cfg.library, output=out)
+	t.add_row("Skipped (user already decided)", str(summary["skipped_user_decided"]))
+	t.add_row("Written to review", str(summary["written"]))
+	console.print(t)
+	if summary.get("backup_path"):
+		console.print(f"[yellow]Backup kept at {summary['backup_path']} (run did not finish cleanly)[/yellow]")
 	console.print()
-	console.print(f"[bold green]Wrote {n} review entries to {out}[/bold green]")
+	console.print(f"[bold green]Wrote {summary['written']} review entries to {out}[/bold green]")
 	console.print(f"Edit the file, set `action` for each entry, then run: [bold]bmf apply {out}[/bold]")
 
 
