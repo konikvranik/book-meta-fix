@@ -193,9 +193,13 @@ def _build_proposed(
 			source_parts.append("embedded")
 
 	if enriched is not None:
-		# LLM proposals are pre-vetted: trust them without _looks_better gate.
-		# The LLM already decided the new value is better than current.
-		trust_blindly = enriched.source.startswith("llm:")
+		# LLM proposals and databazeknih hits are pre-vetted: trust their
+		# title/author without the _looks_better gate. The LLM already reasoned
+		# about the right value; databazeknih already fuzzy-matched the book
+		# (score >= 70) before returning it, so a title it returns IS the title
+		# of the matched book — even if the DB title (a filename-as-title C2
+		# case) does not look "broken" to _looks_better.
+		trust_blindly = enriched.source.startswith("llm:") or enriched.source == "databazeknih"
 		if enriched.title and "title" not in proposed and (trust_blindly or _looks_better(enriched.title, meta.title)):
 			proposed["title"] = enriched.title
 			source_parts.append(enriched.source)

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -63,21 +64,38 @@ def write_book_meta(meta: BookMeta, *, dry_run: bool = True, backup: bool = True
 # ---------------------------------------------------------------------------
 
 
+def _sanitize_xml_text(s: str | None) -> str | None:
+	"""Strip XML-illegal control characters from a string field.
+
+	lxml rejects control chars (other than \\t \\n \\r) when building OPF, and
+	some LLM/online proposals carry them (mojibake from a first-page scan, a
+	rogue NUL byte). We strip them here so a single bad field does not abort
+	the whole apply run. Returns None unchanged; non-strings are stringified.
+	"""
+	if s is None:
+		return None
+	if not isinstance(s, str):
+		s = str(s)
+	# XML 1.0 allows \t \n \r and any char >= \x20 (plus \x85/\xa0 as XML 1.1).
+	# Strip everything else.
+	return re.sub(r"[^\x09\x0a\x0d\x20-\ud7ff\ue000-\ufffd]", "", s)
+
+
 def _render_json(meta: BookMeta) -> str:
 	"""Render BookMeta back to the Audiobookshelf metadata.json schema."""
 	data = {
 		"tags": meta.tags,
 		"chapters": [],
-		"title": meta.title,
-		"subtitle": meta.subtitle,
-		"authors": meta.authors,
+		"title": _sanitize_xml_text(meta.title),
+		"subtitle": _sanitize_xml_text(meta.subtitle),
+		"authors": [_sanitize_xml_text(a) for a in meta.authors] if meta.authors else [],
 		"narrators": [],
 		"series": meta.series if isinstance(meta.series, list) else [],
 		"genres": meta.genres,
 		"publishedYear": str(meta.year) if meta.year else None,
 		"publishedDate": None,
-		"publisher": meta.publisher,
-		"description": meta.description,
+		"publisher": _sanitize_xml_text(meta.publisher),
+		"description": _sanitize_xml_text(meta.description),
 		"isbn": meta.isbn,
 		"asin": None,
 		"language": meta.language,
@@ -120,30 +138,30 @@ def _render_opf(meta: BookMeta) -> str:
 
 	# Title
 	if meta.title:
-		etree.SubElement(md, "{%s}title" % NS_DC).text = meta.title
+		etree.SubElement(md, "{%s}title" % NS_DC).text = _sanitize_xml_text(meta.title)
 		# title_sort (sort under first letter, ignore leading "the/a")
 		etree.SubElement(
 			md, "{%s}meta" % NS_OPF,
-			attrib={"name": "calibre:title_sort", "content": meta.title},
+			attrib={"name": "calibre:title_sort", "content": _sanitize_xml_text(meta.title) or ""},
 		)
 
 	# Authors (with file-as)
 	for author in meta.authors:
-		file_as = _file_as(author)
+		file_as = _sanitize_xml_text(_file_as(author)) or ""
 		etree.SubElement(
 			md, "{%s}creator" % NS_DC,
 			attrib={"{%s}file-as" % NS_OPF: file_as, "{%s}role" % NS_OPF: "aut"},
-		).text = author
+		).text = _sanitize_xml_text(author) or ""
 
 	# Publisher / date / language
 	if meta.publisher:
-		etree.SubElement(md, "{%s}publisher" % NS_DC).text = meta.publisher
+		etree.SubElement(md, "{%s}publisher" % NS_DC).text = _sanitize_xml_text(meta.publisher)
 	if meta.year:
 		etree.SubElement(md, "{%s}date" % NS_DC).text = f"{meta.year}-01-01T00:00:00+00:00"
 	if meta.language:
-		etree.SubElement(md, "{%s}language" % NS_DC).text = meta.language
+		etree.SubElement(md, "{%s}language" % NS_DC).text = _sanitize_xml_text(meta.language)
 	if meta.description:
-		etree.SubElement(md, "{%s}description" % NS_DC).text = meta.description
+		etree.SubElement(md, "{%s}description" % NS_DC).text = _sanitize_xml_text(meta.description)
 
 	# Contributor (us)
 	etree.SubElement(
