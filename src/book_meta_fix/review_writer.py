@@ -190,12 +190,35 @@ class ReviewWriter:
 		self._processed.add(bid)
 
 	def _confidence(self, enriched: Any) -> str:
-		"""Confidence label from an EnrichedMeta.source ('llm:high'|'embedded'|...)."""
+		"""Confidence label from an EnrichedMeta.source ('llm:high'|'embedded'|...).
+
+		High-confidence sources (only these pre-fill action: accept without
+		--auto-apply, and only these are auto-applied with --auto-apply high):
+		  - 'embedded'    — OPF metadata, deterministic
+		  - 'databazeknih' — authoritative CZ/SK source, fuzzy-match-gated
+		  - 'llm:high'    — paid reasoning model, verify_proposal-validated
+
+		Medium-confidence (pre-filled only with --auto-apply-threshold medium):
+		  - 'openlibrary' / 'google_books' — international, weaker CZ coverage
+		  - 'llm:medium'  — Flash model that passed verify_proposal
+
+		Low (never pre-filled, never auto-applied at high threshold):
+		  - 'content'     — text_meta heuristic; can hallucinate (e.g. 'Osoby A
+		    Obsazení' from a dramatis personae section). Reliable for
+		    verification, NOT reliable enough to auto-apply.
+		  - 'llm:low'     — proposal that failed verify_proposal
+		"""
 		src = getattr(enriched, "source", "") or ""
 		if src.startswith("llm:"):
 			return src.split(":", 1)[1] if ":" in src else "low"
-		if src.startswith("embedded"):
-			return "high"  # deterministic fixes are trustworthy
+		if src == "embedded":
+			return "high"
+		if src == "databazeknih":
+			return "high"
+		if src in ("openlibrary", "google_books"):
+			return "medium"
+		if src == "content":
+			return "medium"  # heuristic; useful but not auto-apply-safe
 		return "low"
 
 	def _apply_to_metadata(self, meta: Any, enriched: Any) -> bool:
@@ -224,6 +247,17 @@ class ReviewWriter:
 			extra = {k: v for k, v in diag_proposed.items() if k != "action"}
 			if extra:
 				proposed = {**(proposed or {}), **extra}
+		# High-confidence enriched proposal (offline extraction, databazeknih,
+		# LLM high) -> pre-fill action: accept so the user can approve it in
+		# bulk via `bmf apply`. This only fires when --auto-apply is OFF (with
+		# --auto-apply on, high-confidence books are written directly and never
+		# reach review.yaml). Without a proposal there is nothing to accept.
+		# Threshold is fixed at 'high' (rank 3) regardless of the auto-apply
+		# threshold, because _min_rank is 0 when --auto-apply is off.
+		if action is None and enriched is not None and proposed:
+			conf = self._confidence(enriched)
+			if self._confidence_rank.get(conf, 0) >= self._confidence_rank["high"]:
+				action = "accept"
 		entry: dict[str, Any] = {
 			"id": meta.calibre_id,
 			"path": _relative_path(meta, self.library_root),
