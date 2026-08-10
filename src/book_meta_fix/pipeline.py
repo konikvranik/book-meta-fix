@@ -117,11 +117,17 @@ def run_pipeline(
 
 	# No point spawning a pool of 10 if we only have 3 books.
 	n_workers = max(1, min(workers, total))
+	interrupted = False
 	if n_workers == 1:
 		# Serial path — keeps stack traces readable for debugging
 		results = []
 		for i, meta in enumerate(books):
-			results.append(_process_safe(meta))
+			try:
+				results.append(_process_safe(meta))
+			except KeyboardInterrupt:
+				interrupted = True
+				log.warning("interrupted by user (Ctrl-C) after %d/%d books; keeping partial results", i, total)
+				break
 			if progress_callback is not None:
 				progress_callback(i + 1, total)
 	else:
@@ -133,23 +139,42 @@ def run_pipeline(
 			# raise — but we guard anyway in case the pool itself fails.
 			futures = [pool.submit(_process_safe, meta) for meta in books]
 			for i, fut in enumerate(futures):
+				if interrupted:
+					# We've already stopped reading new results; cancel pending
+					# futures so the pool can wind down without waiting on them.
+					fut.cancel()
+					continue
 				try:
+					# fut.result() blocks until this book finishes. On Ctrl-C we
+					# cancel everything still pending and break, keeping the
+					# results collected so far.
 					results.append(fut.result())
+				except KeyboardInterrupt:
+					interrupted = True
+					log.warning("interrupted by user (Ctrl-C) after %d/%d books; cancelling pending work, keeping partial results", i, total)
+					# Cancel futures not yet started; in-flight LLM/HTTP calls
+					# will finish on their own (we can't safely kill a thread),
+					# but we won't wait for or count their results.
+					for f in futures[i + 1 :]:
+						f.cancel()
 				except Exception as e:  # noqa: BLE001
 					stats["errors"] += 1
 					log.exception("worker future failed unexpectedly: %s", e)
 					results.append(None)
-				if progress_callback is not None:
+				if not interrupted and progress_callback is not None:
 					progress_callback(i + 1, total)
 
 	# Drop any None placeholders from a catastrophic worker failure (kept above
 	# only to preserve order/count); generate_review iterates results as-is.
 	results = [r for r in results if r is not None]
 
+	if interrupted:
+		log.warning("pipeline interrupted: returning %d partial results (of %d books) for review", len(results), total)
 	log.info(
-		"pipeline: %d ok, %d needs_review (det=%d, online=%d, llm=%d, llm_skipped=%d, llm_no_result=%d, unfixed=%d, errors=%d)",
+		"pipeline: %d ok, %d needs_review (det=%d, online=%d, llm=%d, llm_skipped=%d, llm_no_result=%d, unfixed=%d, errors=%d)%s",
 		stats["ok"], stats["needs_review"], stats["det_fixed"], stats["online_fixed"],
 		stats["llm_fixed"], stats["llm_skipped_no_text"], stats["llm_no_result"], stats["unfixed"], stats["errors"],
+		" [INTERRUPTED]" if interrupted else "",
 	)
 	return results
 

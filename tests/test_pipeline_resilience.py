@@ -139,3 +139,129 @@ class TestPipelineResilience:
 		summary_lines = [r.getMessage() for r in caplog.records if "pipeline:" in r.getMessage() and "errors=" in r.getMessage()]
 		assert summary_lines, "expected a pipeline summary log line mentioning errors="
 		assert "errors=1" in summary_lines[-1]
+
+
+class TestInterruptHandling:
+	"""Ctrl-C (KeyboardInterrupt) must yield partial results, not raise."""
+
+	def test_serial_interrupt_returns_partial_results(self, tmp_path):
+		"""In the serial path, a KeyboardInterrupt on the 3rd book must return
+		the first 2 results and not propagate."""
+		books = [_make_book(i, f"B{i}") for i in range(1, 6)]  # ids 1..5
+		from book_meta_fix import pipeline as pmod
+
+		def fake_scan(library, cache=None):
+			return books
+
+		def fake_detect(meta):
+			from book_meta_fix.models import Confidence, Diagnosis
+			return Diagnosis(category="C2", reason="test", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
+
+		call_count = [0]
+
+		def fake_extract(meta):
+			call_count[0] += 1
+			# Interrupt on the 3rd book (id=3).
+			if meta.calibre_id == 3:
+				raise KeyboardInterrupt
+			return None
+
+		with patch.object(pmod, "scan_library", fake_scan), \
+			 patch.object(pmod, "detect_fn", fake_detect), \
+			 patch.object(pmod, "_safe_extract", fake_extract):
+			# workers=1 forces the serial path.
+			results = run_pipeline(tmp_path, cache=None, workers=1)
+
+		ids = [r[0].calibre_id for r in results]
+		assert ids == [1, 2]  # 3rd was interrupted, 4/5 never started
+
+	def test_threaded_interrupt_returns_partial_results(self, tmp_path):
+		"""In the threaded path, a KeyboardInterrupt out of fut.result() (which
+		is how a real Ctrl-C surfaces during a blocking result() call) must be
+		caught: already-collected results are returned and pending futures are
+		cancelled, without propagating the exception."""
+		books = [_make_book(i, f"B{i}") for i in range(1, 6)]
+		from book_meta_fix import pipeline as pmod
+		from concurrent.futures import ThreadPoolExecutor as _RealPool
+
+		def fake_scan(library, cache=None):
+			return books
+
+		def fake_detect(meta):
+			from book_meta_fix.models import Confidence, Diagnosis
+			return Diagnosis(category="C2", reason="test", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
+
+		# Replace ThreadPoolExecutor with a fake whose submitted futures behave
+		# like the real ones, but the THIRD future's .result() raises
+		# KeyboardInterrupt — emulating a Ctrl-C landing on the main thread
+		# while it's blocked in fut.result(). This avoids sending a real SIGINT
+		# (which would also kill the pytest runner).
+		from book_meta_fix.models import Confidence, Diagnosis
+
+		def _ok_result(meta):
+			"""Build the same tuple shape _process_book would return."""
+			diag = Diagnosis(category="C2", reason="ok", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
+			return (meta, diag, None, None)
+
+		class FakeFuture:
+			def __init__(self, meta, fail_with_keyboard_interrupt):
+				self._meta = meta
+				self._kbd = fail_with_keyboard_interrupt
+
+			def result(self, timeout=None):
+				if self._kbd:
+					raise KeyboardInterrupt
+				return _ok_result(self._meta)
+
+			def cancel(self):
+				return True
+
+		class FakePool:
+			def __init__(self, max_workers):
+				self._counter = 0
+
+			def submit(self, fn, meta):
+				self._counter += 1
+				# Make the 3rd submitted future raise KeyboardInterrupt.
+				return FakeFuture(meta, fail_with_keyboard_interrupt=(self._counter == 3))
+
+			def __enter__(self):
+				return self
+
+			def __exit__(self, *a):
+				return False
+
+		with patch.object(pmod, "scan_library", fake_scan), \
+			 patch.object(pmod, "detect_fn", fake_detect), \
+			 patch("concurrent.futures.ThreadPoolExecutor", FakePool):
+			results = run_pipeline(tmp_path, cache=None, workers=2)
+
+		# Books 1 and 2 completed before the interrupt; book 3 raised KbdInt;
+		# books 4 and 5 were cancelled (never collected). So we expect exactly
+		# the first two results, in order.
+		ids = [r[0].calibre_id for r in results]
+		assert ids == [1, 2]
+
+	def test_no_crash_when_interrupted_before_any_result(self, tmp_path):
+		"""Ctrl-C before the first book completes still returns cleanly (empty
+		results list) rather than raising."""
+		from book_meta_fix import pipeline as pmod
+		books = [_make_book(1, "B1")]
+
+		def fake_scan(library, cache=None):
+			return books
+
+		def fake_detect(meta):
+			from book_meta_fix.models import Confidence, Diagnosis
+			return Diagnosis(category="C2", reason="test", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
+
+		def fake_extract(meta):
+			raise KeyboardInterrupt
+
+		with patch.object(pmod, "scan_library", fake_scan), \
+			 patch.object(pmod, "detect_fn", fake_detect), \
+			 patch.object(pmod, "_safe_extract", fake_extract):
+			results = run_pipeline(tmp_path, cache=None, workers=1)
+
+		assert results == []
+
