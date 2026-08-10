@@ -5,7 +5,7 @@ _is_better -> _looks_broken and raised TypeError.
 """
 from __future__ import annotations
 
-from book_meta_fix.pipeline import _is_better, _looks_broken
+from book_meta_fix.pipeline import _is_better, _llm_wants, _looks_broken
 
 
 class TestLooksBroken:
@@ -89,3 +89,35 @@ class TestIsBetter:
 
 	def test_isbn_string_vs_none(self):
 		assert _is_better("9788073099992", None) is True
+
+
+class TestLlmWants:
+	def test_all_includes_every_category_except_c9(self):
+		# 'ALL' must cover C1..C8, C10 but NOT C9 (legitimate anonyms).
+		for cat in ("C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C10"):
+			assert _llm_wants(cat, ("ALL",)) is True, f"{cat} should be included by ALL"
+		assert _llm_wants("C9", ("ALL",)) is False
+
+	def test_explicit_list_only_matches_listed(self):
+		cats = ("C1", "C4")
+		assert _llm_wants("C1", cats) is True
+		assert _llm_wants("C4", cats) is True
+		# Unlisted categories are excluded even if they exist.
+		assert _llm_wants("C2", cats) is False
+		assert _llm_wants("C9", cats) is False
+
+	def test_empty_tuple_excludes_everything(self):
+		for cat in ("C1", "C2", "C9"):
+			assert _llm_wants(cat, ()) is False
+
+	def test_all_with_explicit_exclusion(self):
+		# 'ALL' minus a manually-listed exclusion isn't a feature (the tuple is
+		# union-style), but ALL alone already excludes C9. Verify the sentinel
+		# takes precedence: ALL in tuple -> C9 excluded regardless of others.
+		assert _llm_wants("C9", ("ALL", "C9")) is False
+
+	def test_unknown_category_with_all(self):
+		# A category we've never heard of (e.g. 'ERROR', custom detectors)
+		# still gets sent under ALL — only C9 is special-cased.
+		assert _llm_wants("ERROR", ("ALL",)) is True
+		assert _llm_wants("CUSTOM_X", ("ALL",)) is True

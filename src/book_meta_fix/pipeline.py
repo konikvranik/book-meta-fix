@@ -42,7 +42,7 @@ def run_pipeline(
 	skip_enrich: bool = False,
 	skip_verify: bool = False,
 	llm_provider: Any = None,
-	llm_categories: tuple[str, ...] = ("C1", "C2", "C4"),
+	llm_categories: tuple[str, ...] = ("ALL",),
 	limit: int | None = None,
 	workers: int = 10,
 	progress_callback: Any = None,
@@ -197,7 +197,11 @@ def _process_book(
 
 		# Step 4: LLM fallback only if deterministic + online failed AND the
 		# book has usable first-page text (LLM cannot work without it).
-		if enriched is None and llm_provider is not None and diag.category in llm_categories:
+		# llm_categories gates WHICH books the LLM is asked about: each book is
+		# one request that returns all fields at once (cost is per-book, not
+		# per-category). 'ALL' expands to every category except C9 (legitimate
+		# anonyms like the Bible — an LLM-invented author there would be wrong).
+		if enriched is None and llm_provider is not None and _llm_wants(diag.category, llm_categories):
 			# Pre-filter: skip LLM if no first-page text or only CSS noise.
 			# This is the #1 cost saver — books with empty/CSS-only content
 			# would waste an API call for nothing.
@@ -238,6 +242,24 @@ def _safe_extract(meta: BookMeta) -> ExtractedMeta | None:
 	except Exception as e:  # noqa: BLE001
 		log.debug("extract failed for %s: %s", meta.path, e)
 		return None
+
+
+# Categories that 'ALL' deliberately excludes: a known-good state where sending
+# the book to the LLM would risk inventing a wrong author rather than fixing one.
+_LLM_ALL_EXCLUDE = frozenset({"C9"})
+
+
+def _llm_wants(category: str, llm_categories: tuple[str, ...]) -> bool:
+	"""Should a book in *category* be sent to the LLM?
+
+	- Explicit category list (e.g. ('C1','C2')): category must be in the tuple.
+	- 'ALL': every category EXCEPT those in _LLM_ALL_EXCLUDE (currently C9 —
+	  legitimate anonyms like the Bible/Koran; an LLM there would fabricate an
+	  author). 'ALL' may be combined with explicit inclusions/exclusions.
+	"""
+	if "ALL" in llm_categories:
+		return category not in _LLM_ALL_EXCLUDE
+	return category in llm_categories
 
 
 def _has_usable_text(text: str | None) -> bool:
