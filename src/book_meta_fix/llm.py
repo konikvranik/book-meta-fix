@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -148,11 +149,24 @@ class ZaiProvider(LLMProvider):
 
 	name = "zai"
 
-	def __init__(self, api_key: str, base_url: str = "https://api.z.ai/api/paas/v4/", model: str = "glm-5.2") -> None:
+	# Module-level concurrency cap for LLM calls. The pipeline runs many worker
+	# threads (default 10) for cheap I/O (extraction, online lookup), but Z.AI's
+	# coding-plan rate limit is low enough that 10 concurrent LLM requests
+	# trigger 429 'Rate limit reached for requests' (code 1302). This semaphore
+	# decouples LLM concurrency from worker count: cheap I/O stays fast, while
+	# at most MAX_CONCURRENT_LLM calls are in flight at once.
+	MAX_CONCURRENT_LLM = 3
+	_llm_semaphore: threading.Semaphore | None = None  # lazily bound per-instance
+
+	def __init__(self, api_key: str, base_url: str = "https://api.z.ai/api/paas/v4/", model: str = "glm-5.2", *, max_concurrent_llm: int | None = None) -> None:
 		self.api_key = api_key
 		self.base_url = base_url
 		self.model = model
 		self._client = None
+		# Each instance gets its own semaphore so the cap is per-process.
+		# max_concurrent_llm overrides the class default (e.g. from CLI/config).
+		cap = max_concurrent_llm if max_concurrent_llm is not None else self.MAX_CONCURRENT_LLM
+		self._llm_semaphore = threading.Semaphore(max(1, cap))
 
 	def _get_client(self):
 		"""Lazy-init the OpenAI client (avoids import error if openai not installed)."""
@@ -171,6 +185,11 @@ class ZaiProvider(LLMProvider):
 		of thought) BEFORE the final answer. The reasoning can consume many
 		tokens, so we set a generous max_tokens (8000) and read both fields.
 		Retries on empty/transient failures (rate limit, overload).
+
+		Concurrency is capped by a semaphore (default 3) so that running many
+		worker threads does not flood Z.AI and trigger 429s. Each attempt
+		acquires the semaphore only for the HTTP call, releasing it during
+		sleep/retry backoff so other workers can proceed.
 		"""
 		import time
 
@@ -178,6 +197,10 @@ class ZaiProvider(LLMProvider):
 		prompt = build_user_prompt(evidence)
 		last_error = None
 		for attempt in range(max_retries):
+			# Hold the concurrency cap ONLY across the blocking HTTP call —
+			# release it before any sleep/processing so other workers can fire
+			# their requests while this one backs off / parses.
+			self._llm_semaphore.acquire()
 			try:
 				client = self._get_client()
 				resp = client.chat.completions.create(
@@ -191,43 +214,50 @@ class ZaiProvider(LLMProvider):
 					temperature=0.1,
 					max_tokens=8000,
 				)
-				choice = resp.choices[0]
-				content = choice.message.content or ""
-				# Reasoning models sometimes stash the answer only in content
-				# (after the thinking). If content is empty but finish_reason
-				# is "length", we ran out of tokens during reasoning — retry
-				# won't help, but we record it for debugging.
-				if not content.strip():
-					finish = choice.finish_reason
-					reasoning = getattr(choice.message, "reasoning_content", None) or ""
-					if finish == "length":
-						log.warning(
-							"Z.AI ran out of tokens during reasoning (model=%s, max=8000). "
-							"Consider a non-reasoning model.",
-							self.model,
-						)
-						last_error = "length (reasoning too long)"
-						# Don't retry — same prompt will hit the same limit.
-						break
-					log.debug("Z.AI returned empty content (attempt %d/%d)", attempt + 1, max_retries)
-					last_error = "empty response"
-					time.sleep(1.0 * (attempt + 1))
-					continue
-				result = _parse_llm_json(content)
-				if result is not None:
-					# Attach the reasoning chain to the result for transparency.
-					reasoning = getattr(choice.message, "reasoning_content", None)
-					if reasoning and not result.reasoning:
-						result.reasoning = reasoning[-300:]  # last 300 chars
-					return result
-				last_error = "json parse failed"
-				if attempt < max_retries - 1:
-					time.sleep(0.5)
-					continue
 			except Exception as e:  # noqa: BLE001
-				log.debug("Z.AI reconcile error (attempt %d/%d): %s", attempt + 1, max_retries, e)
 				last_error = str(e)
+				# Transient 429s are already retried by the openai client's
+				# internal backoff; if we still see one, sleep a bit before the
+				# next attempt so the rate window can recover.
 				time.sleep(1.0 * (attempt + 1))
+				continue
+			finally:
+				self._llm_semaphore.release()
+
+			# --- response processing happens OUTSIDE the semaphore ---
+			choice = resp.choices[0]
+			content = choice.message.content or ""
+			# Reasoning models sometimes stash the answer only in content
+			# (after the thinking). If content is empty but finish_reason
+			# is "length", we ran out of tokens during reasoning — retry
+			# won't help, but we record it for debugging.
+			if not content.strip():
+				finish = choice.finish_reason
+				reasoning = getattr(choice.message, "reasoning_content", None) or ""
+				if finish == "length":
+					log.warning(
+						"Z.AI ran out of tokens during reasoning (model=%s, max=8000). "
+						"Consider a non-reasoning model.",
+						self.model,
+					)
+					last_error = "length (reasoning too long)"
+					# Don't retry — same prompt will hit the same limit.
+					break
+				log.debug("Z.AI returned empty content (attempt %d/%d)", attempt + 1, max_retries)
+				last_error = "empty response"
+				time.sleep(1.0 * (attempt + 1))
+				continue
+			result = _parse_llm_json(content)
+			if result is not None:
+				# Attach the reasoning chain to the result for transparency.
+				reasoning = getattr(choice.message, "reasoning_content", None)
+				if reasoning and not result.reasoning:
+					result.reasoning = reasoning[-300:]  # last 300 chars
+				return result
+			last_error = "json parse failed"
+			if attempt < max_retries - 1:
+				time.sleep(0.5)
+				continue
 		if last_error:
 			log.warning("Z.AI reconcile gave up after %d attempts: %s", max_retries, last_error)
 		return None
@@ -282,10 +312,14 @@ def get_provider(config: Any) -> LLMProvider | None:  # noqa: ANN001
 	"""
 	api_key = getattr(config, "zai_api_key", None) or os.environ.get("ZAI_API_KEY")
 	if api_key:
+		# max concurrent LLM calls (decoupled from worker count). Falls back to
+		# the class default if unset. Lower this if you still hit 429s.
+		max_concurrent = getattr(config, "llm_concurrency", None)
 		return ZaiProvider(
 			api_key=api_key,
 			base_url=getattr(config, "zai_base_url", "https://api.z.ai/api/paas/v4/"),
 			model=getattr(config, "zai_model", "glm-5.2"),
+			max_concurrent_llm=max_concurrent,
 		)
 	if os.environ.get("BMF_LLM_MOCK"):
 		return MockProvider()

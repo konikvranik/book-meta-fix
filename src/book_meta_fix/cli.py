@@ -120,10 +120,11 @@ def detect(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--llm", "use_llm", is_flag=True, help="Enable LLM reconciliation (needs ZAI_API_KEY or BMF_LLM_MOCK=1)")
 @click.option("--llm-categories", default="ALL", help="Comma-separated categories to send to LLM, or 'ALL' (default). ALL = every category except C9 (legitimate anonyms like the Bible, where an LLM-invented author would be wrong). Each book is one LLM request that returns all fields at once, so the cost is per-book, not per-category.")
 @click.option("--workers", "-w", type=int, default=10, help="Parallel workers for I/O (extract/LLM/enrich). Default 10.")
+@click.option("--llm-concurrency", "llm_concurrency", type=int, default=None, help="Max concurrent LLM calls (decoupled from --workers). Default 3. Lower to 2 if you still hit Z.AI 429 'Rate limit reached'. Cheap I/O (extract/enrich) still runs at full --workers.")
 @click.option("--auto-apply", "auto_apply", is_flag=True, help="Auto-apply high-confidence LLM proposals directly (with snapshot + .bak). Lower-confidence go to review.yaml.")
 @click.option("--auto-apply-threshold", default="high", help="Confidence threshold for auto-apply: high (default) | medium | low.")
 @click.option("--snapshot-dir", default=None, help="Where to write the metadata tar.gz snapshot before auto-apply (default: CWD).")
-def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, skip_verify: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int, auto_apply: bool, auto_apply_threshold: str, snapshot_dir: Path | None) -> None:
+def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, skip_verify: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int, llm_concurrency: int | None, auto_apply: bool, auto_apply_threshold: str, snapshot_dir: Path | None) -> None:
 	"""Run full pipeline and generate a review.yaml for NEEDS_REVIEW books."""
 	from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn
 
@@ -165,12 +166,14 @@ def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich:
 	# LLM provider
 	llm_provider = None
 	if use_llm:
+		if llm_concurrency is not None:
+			cfg.llm_concurrency = llm_concurrency
 		llm_provider = get_provider(cfg)
 		if llm_provider is None:
 			console.print("[yellow]--llm given but no provider available (set ZAI_API_KEY or BMF_LLM_MOCK=1)[/yellow]")
 		else:
 			cats = tuple(c.strip() for c in llm_categories.split(",") if c.strip())
-			console.print(f"  LLM: [cyan]{llm_provider.name}[/cyan] for categories {cats}")
+			console.print(f"  LLM: [cyan]{llm_provider.name}[/cyan] for categories {cats} (max {cfg.llm_concurrency} concurrent)")
 
 	# Progress bar (updated from worker threads via callback)
 	progress = Progress(
