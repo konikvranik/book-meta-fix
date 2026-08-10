@@ -182,7 +182,6 @@ class TestInterruptHandling:
 		cancelled, without propagating the exception."""
 		books = [_make_book(i, f"B{i}") for i in range(1, 6)]
 		from book_meta_fix import pipeline as pmod
-		from concurrent.futures import ThreadPoolExecutor as _RealPool
 
 		def fake_scan(library, cache=None):
 			return books
@@ -191,15 +190,12 @@ class TestInterruptHandling:
 			from book_meta_fix.models import Confidence, Diagnosis
 			return Diagnosis(category="C2", reason="test", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
 
-		# Replace ThreadPoolExecutor with a fake whose submitted futures behave
-		# like the real ones, but the THIRD future's .result() raises
-		# KeyboardInterrupt — emulating a Ctrl-C landing on the main thread
-		# while it's blocked in fut.result(). This avoids sending a real SIGINT
-		# (which would also kill the pytest runner).
+		# Pipeline now reads futures via concurrent.futures.as_completed. We
+		# patch BOTH ThreadPoolExecutor (so no real threads spawn) and
+		# as_completed (so we control the iteration order and the interrupt).
 		from book_meta_fix.models import Confidence, Diagnosis
 
 		def _ok_result(meta):
-			"""Build the same tuple shape _process_book would return."""
 			diag = Diagnosis(category="C2", reason="ok", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
 			return (meta, diag, None, None)
 
@@ -222,7 +218,6 @@ class TestInterruptHandling:
 
 			def submit(self, fn, meta):
 				self._counter += 1
-				# Make the 3rd submitted future raise KeyboardInterrupt.
 				return FakeFuture(meta, fail_with_keyboard_interrupt=(self._counter == 3))
 
 			def __enter__(self):
@@ -231,14 +226,19 @@ class TestInterruptHandling:
 			def __exit__(self, *a):
 				return False
 
+		# Yield the futures in submit order; the 3rd raises on result().
+		def fake_as_completed(futures):
+			return list(futures.keys())
+
 		with patch.object(pmod, "scan_library", fake_scan), \
 			 patch.object(pmod, "detect_fn", fake_detect), \
-			 patch("concurrent.futures.ThreadPoolExecutor", FakePool):
+			 patch("book_meta_fix.pipeline.ThreadPoolExecutor", FakePool), \
+			 patch("book_meta_fix.pipeline.as_completed", fake_as_completed):
 			results = run_pipeline(tmp_path, cache=None, workers=2)
 
 		# Books 1 and 2 completed before the interrupt; book 3 raised KbdInt;
 		# books 4 and 5 were cancelled (never collected). So we expect exactly
-		# the first two results, in order.
+		# the first two results (order is completion order = submit order here).
 		ids = [r[0].calibre_id for r in results]
 		assert ids == [1, 2]
 

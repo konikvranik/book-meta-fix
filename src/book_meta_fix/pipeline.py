@@ -19,6 +19,7 @@ Cost-aware fix strategy for NEEDS_REVIEW books (cheap first, LLM last):
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -86,8 +87,6 @@ def run_pipeline(
 	result is also streamed to review.yaml via ``review_writer.submit()`` as it
 	completes (Unix-pipe style), instead of writing the whole file at the end.
 	"""
-	from concurrent.futures import ThreadPoolExecutor
-
 	all_books = scan_library(library, cache=cache)
 	# Apply the detector cheaply to filter out already-OK books (incremental).
 	# This is fast (no I/O — just regex/heuristics over metadata).
@@ -111,7 +110,8 @@ def run_pipeline(
 	total = len(books)
 	stats = {
 		"ok": 0, "needs_review": 0, "det_fixed": 0, "online_fixed": 0,
-		"llm_fixed": 0, "llm_skipped_no_text": 0, "llm_no_result": 0, "llm_error": 0,
+		"llm_fixed": 0, "llm_flash_fixed": 0, "llm_final_fixed": 0, "llm_low_confidence": 0,
+		"llm_skipped_no_text": 0, "llm_no_result": 0, "llm_error": 0,
 		"unfixed": 0, "errors": 0, "content_mismatch": 0,
 	}
 
@@ -173,36 +173,37 @@ def run_pipeline(
 	else:
 		results = []
 		with ThreadPoolExecutor(max_workers=n_workers) as pool:
-			# submit + as_completed would give fastest-first ordering, but we
-			# want input-order output, so we submit all and read futures in order.
-			# _process_safe already swallows exceptions, so fut.result() won't
-			# raise — but we guard anyway in case the pool itself fails.
-			futures = [pool.submit(_process_safe, meta) for meta in books]
-			for i, fut in enumerate(futures):
-				if interrupted:
-					# We've already stopped reading new results; cancel pending
-					# futures so the pool can wind down without waiting on them.
-					fut.cancel()
-					continue
-				try:
-					# fut.result() blocks until this book finishes. On Ctrl-C we
-					# cancel everything still pending and break, keeping the
-					# results collected so far.
-					results.append(_stream(fut.result()))
-				except KeyboardInterrupt:
-					interrupted = True
-					log.warning("interrupted by user (Ctrl-C) after %d/%d books; cancelling pending work, keeping partial results", i, total)
-					# Cancel futures not yet started; in-flight LLM/HTTP calls
-					# will finish on their own (we can't safely kill a thread),
-					# but we won't wait for or count their results.
-					for f in futures[i + 1 :]:
-						f.cancel()
-				except Exception as e:  # noqa: BLE001
-					stats["errors"] += 1
-					log.exception("worker future failed unexpectedly: %s", e)
-					results.append(None)
-				if not interrupted and progress_callback is not None:
-					progress_callback(i + 1, total)
+			# Submit all, then read results AS THEY COMPLETE (as_completed).
+			# Reading futures in submit order blocked the progress bar on the
+			# slowest in-flight book: 9 cheap books would finish while we
+			# waited on the 1 slow LLM call, then the bar jumped 1 -> 10 at
+			# once. as_completed updates the bar the instant each book is done,
+			# which is what the user wants to see. Review.yaml order becomes
+			# completion-order (not input-order); that's fine because each
+			# entry carries its id and the file is a multi-doc stream.
+			futures = {pool.submit(_process_safe, meta): meta for meta in books}
+			done = 0
+			try:
+				for fut in as_completed(futures):
+					try:
+						results.append(_stream(fut.result()))
+					except KeyboardInterrupt:
+						interrupted = True
+						break
+					except Exception as e:  # noqa: BLE001
+						stats["errors"] += 1
+						log.exception("worker future failed unexpectedly: %s", e)
+						results.append(None)
+					finally:
+						done += 1
+						if progress_callback is not None:
+							progress_callback(done, total)
+			except KeyboardInterrupt:
+				interrupted = True
+			if interrupted:
+				log.warning("interrupted by user (Ctrl-C) after %d/%d books; cancelling pending work, keeping partial results", done, total)
+				for f in futures:
+					f.cancel()
 
 	# Drop any None placeholders from a catastrophic worker failure (kept above
 	# only to preserve order/count); generate_review iterates results as-is.
@@ -211,9 +212,10 @@ def run_pipeline(
 	if interrupted:
 		log.warning("pipeline interrupted: returning %d partial results (of %d books) for review", len(results), total)
 	log.info(
-		"pipeline: %d ok, %d needs_review (content_mismatch=%d, det=%d, online=%d, llm=%d, llm_skipped=%d, llm_no_result=%d, unfixed=%d, errors=%d)%s",
+		"pipeline: %d ok, %d needs_review (content_mismatch=%d, det=%d, online=%d, llm_flash=%d, llm_final=%d, llm_low=%d, llm_other=%d, llm_skipped=%d, llm_no_result=%d, unfixed=%d, errors=%d)%s",
 		stats["ok"], stats["needs_review"], stats["content_mismatch"], stats["det_fixed"], stats["online_fixed"],
-		stats["llm_fixed"], stats["llm_skipped_no_text"], stats["llm_no_result"], stats["unfixed"], stats["errors"],
+		stats["llm_flash_fixed"], stats["llm_final_fixed"], stats["llm_low_confidence"], stats["llm_fixed"],
+		stats["llm_skipped_no_text"], stats["llm_no_result"], stats["unfixed"], stats["errors"],
 		" [INTERRUPTED]" if interrupted else "",
 	)
 	return results
@@ -316,10 +318,22 @@ def _process_book(
 			else:
 				try:
 					evidence = _build_llm_evidence(meta, diag, extracted)
-					reconciled = llm_provider.reconcile(evidence)
+					# reconcile_loop tries the free Flash model first (with
+					# verify_proposal feedback between attempts), then the paid
+					# final model. Falls back to plain reconcile() for mock
+					# providers that don't implement the loop (back-compat).
+					reconciled, llm_src = _llm_reconcile_with_loop(llm_provider, evidence, extracted)
 					if reconciled is not None and _reconciled_is_useful(reconciled, meta):
-						enriched = _reconciled_to_enriched(reconciled)
-						stats["llm_fixed"] += 1
+						enriched = _reconciled_to_enriched(reconciled, source=llm_src)
+						# Bucket the result by how it was obtained.
+						if llm_src in ("llm:flash", "llm:loop"):
+							stats["llm_flash_fixed"] += 1
+						elif llm_src == "llm:high":
+							stats["llm_final_fixed"] += 1
+						elif llm_src == "llm:low":
+							stats["llm_low_confidence"] += 1
+						else:
+							stats["llm_fixed"] += 1
 					else:
 						stats["llm_no_result"] += 1
 				except Exception as e:  # noqa: BLE001
@@ -597,8 +611,13 @@ def _reconciled_is_useful(r, meta: BookMeta) -> bool:  # noqa: ANN001
 	return False
 
 
-def _reconciled_to_enriched(r) -> "EnrichedMeta":  # noqa: F821
-	"""Convert a ReconciledMeta into the EnrichedMeta shape used by review.py."""
+def _reconciled_to_enriched(r, *, source: str | None = None) -> "EnrichedMeta":  # noqa: F821
+	"""Convert a ReconciledMeta into the EnrichedMeta shape used by review.py.
+
+	*source* overrides the default ``llm:<confidence>`` tag — used when the
+	result came through reconcile_loop, which already labels it
+	``llm:flash``/``llm:loop``/``llm:high``/``llm:low``.
+	"""
 	from .enrichers import EnrichedMeta
 
 	return EnrichedMeta(
@@ -612,8 +631,24 @@ def _reconciled_to_enriched(r) -> "EnrichedMeta":  # noqa: F821
 		series=r.series,
 		series_index=r.series_index,
 		genres=r.genres,
-		source=f"llm:{r.confidence}",
+		source=source or f"llm:{r.confidence}",
 	)
+
+
+def _llm_reconcile_with_loop(provider: Any, evidence: dict, extracted: Any) -> tuple[Any, str]:  # noqa: F821
+	"""Run the LLM, preferring the self-correction loop when available.
+
+	Providers that implement ``reconcile_loop`` (ZaiProvider) get the Flash +
+	verify-feedback + final-model flow. Other providers (MockProvider) fall back
+	to a single ``reconcile`` call tagged ``llm:medium``.
+
+	Returns (ReconciledMeta | None, source) where source is one of
+	llm:flash / llm:loop / llm:high / llm:low / llm:medium / ''.
+	"""
+	if hasattr(provider, "reconcile_loop"):
+		return provider.reconcile_loop(evidence, extracted)
+	result = provider.reconcile(evidence)
+	return result, ("llm:medium" if result is not None else "")
 
 
 def auto_apply_results(
