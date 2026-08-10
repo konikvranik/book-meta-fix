@@ -48,6 +48,8 @@ def run_pipeline(
 	progress_callback: Any = None,
 	only_needs_review: bool = True,
 	review_writer: Any = None,
+	verify_ok: bool = False,
+	strict_verify: bool = True,
 ) -> list[tuple[BookMeta, "Diagnosis", "Verification | None", "EnrichedMeta | None"]]:  # noqa: F821
 	"""Run the full pipeline over the whole library.
 
@@ -56,7 +58,20 @@ def run_pipeline(
 	*only_needs_review* (default True): skip books that the detector already
 	classifies as OK or VERIFIED. This makes the pipeline incremental —
 	repeated runs only touch books that still need work. Set to False to
-	force a full re-scan (e.g. when detector rules change).
+	force a full re-scan (e.g. when detector rules change). Overridden by
+	*verify_ok*: when verify_ok is True, OK books are kept so they can be
+	checked against their content (audit mode).
+
+	*verify_ok* (default False): when True, OK books are verified against
+	their content via :func:`verify`. A MISMATCH (or an UNCERTAIN, when
+	*strict_verify* is True) reclassifies the book to NEEDS_REVIEW and runs
+	the same enrichment/LLM fix path as for detector-flagged books. This is
+	an audit mode — it reads every OK book's content, so it is much slower
+	than the default incremental run.
+
+	*strict_verify* (default True): only meaningful with *verify_ok*. When
+	True, UNCERTAIN (fuzzy title match 0.5–0.8) is also treated as a
+	mismatch and reclassified; when False only a clear MISMATCH (< 0.5) is.
 
 	If *limit* is given, it caps the number of books processed AFTER the
 	only_needs_review filter. So `--limit 500` means "process at most 500
@@ -76,7 +91,9 @@ def run_pipeline(
 	all_books = scan_library(library, cache=cache)
 	# Apply the detector cheaply to filter out already-OK books (incremental).
 	# This is fast (no I/O — just regex/heuristics over metadata).
-	if only_needs_review:
+	# verify_ok overrides this: OK books must be kept so they can be verified
+	# against their content (audit mode).
+	if only_needs_review and not verify_ok:
 		books = [b for b in all_books if detect_fn(b).verdict != Verdict.OK]
 		log.info(
 			"pipeline: %d total books, %d already OK -> %d to process",
@@ -84,13 +101,18 @@ def run_pipeline(
 		)
 	else:
 		books = list(all_books)
+		if verify_ok:
+			log.info(
+				"pipeline: %d total books, verify-ok mode (OK books kept for content check)",
+				len(all_books),
+			)
 	if limit is not None:
 		books = books[:limit]
 	total = len(books)
 	stats = {
 		"ok": 0, "needs_review": 0, "det_fixed": 0, "online_fixed": 0,
 		"llm_fixed": 0, "llm_skipped_no_text": 0, "llm_no_result": 0, "llm_error": 0,
-		"unfixed": 0, "errors": 0,
+		"unfixed": 0, "errors": 0, "content_mismatch": 0,
 	}
 
 	# Per-book work closure. The shared enricher/llm are thread-safe:
@@ -101,6 +123,7 @@ def run_pipeline(
 		return _process_book(
 			meta, enricher=enricher, skip_enrich=skip_enrich, skip_verify=skip_verify,
 			llm_provider=llm_provider, llm_categories=llm_categories, stats=stats,
+			verify_ok=verify_ok, strict_verify=strict_verify,
 		)
 
 	def _process_safe(meta: BookMeta):
@@ -188,8 +211,8 @@ def run_pipeline(
 	if interrupted:
 		log.warning("pipeline interrupted: returning %d partial results (of %d books) for review", len(results), total)
 	log.info(
-		"pipeline: %d ok, %d needs_review (det=%d, online=%d, llm=%d, llm_skipped=%d, llm_no_result=%d, unfixed=%d, errors=%d)%s",
-		stats["ok"], stats["needs_review"], stats["det_fixed"], stats["online_fixed"],
+		"pipeline: %d ok, %d needs_review (content_mismatch=%d, det=%d, online=%d, llm=%d, llm_skipped=%d, llm_no_result=%d, unfixed=%d, errors=%d)%s",
+		stats["ok"], stats["needs_review"], stats["content_mismatch"], stats["det_fixed"], stats["online_fixed"],
 		stats["llm_fixed"], stats["llm_skipped_no_text"], stats["llm_no_result"], stats["unfixed"], stats["errors"],
 		" [INTERRUPTED]" if interrupted else "",
 	)
@@ -205,27 +228,65 @@ def _process_book(
 	llm_provider: Any,
 	llm_categories: tuple[str, ...],
 	stats: dict,
+	verify_ok: bool = False,
+	strict_verify: bool = True,
 ) -> tuple[BookMeta, "Diagnosis", "Verification | None", "EnrichedMeta | None"]:  # noqa: F821
-	"""Process one book end-to-end. Thread-safe (no shared mutable state except *stats*)."""
+	"""Process one book end-to-end. Thread-safe (no shared mutable state except *stats*).
+
+	*verify_ok*: when True, OK books (detectors found nothing wrong) are still
+	checked against the book's content via :func:`verify`. A MISMATCH (or, with
+	*strict_verify*, also an UNCERTAIN) reclassifies the book to NEEDS_REVIEW
+	so the same enrichment/LLM fix path runs as for detector-flagged books.
+	"""
 	diag = detect_fn(meta)
 	verification = None
 	enriched = None
+	# Carries an already-extracted ExtractedMeta into the fix path, so a book
+	# that was verified (and reclassified) doesn't get extracted a second time.
+	preextracted: ExtractedMeta | None = None
+
+	# --- OK books: optionally verify against content, else stay OK ---
+	if diag.verdict == Verdict.OK and meta.primary_file:
+		if verify_ok and not skip_verify:
+			try:
+				verification = verify(meta)
+			except Exception as e:  # noqa: BLE001
+				log.debug("verify failed for %s: %s", meta.path, e)
+			if verification is not None:
+				mismatch = verification.result == "MISMATCH"
+				uncertain = verification.result == "UNCERTAIN" and strict_verify
+				if mismatch or uncertain:
+					# Reclassify OK -> NEEDS_REVIEW so the fix path below runs.
+					# Keep the extracted content from verify() to reuse it.
+					preextracted = verification.extracted
+					diag = Diagnosis(
+						category="CONTENT_MISMATCH",
+						reason=f"metadata neodpovídají obsahu ({verification.result}: {verification.reason})",
+						confidence=Confidence.HIGH,
+						verdict=Verdict.NEEDS_REVIEW,
+					)
+					stats["content_mismatch"] += 1
+				else:
+					# VERIFIED / NO_CONTENT / non-strict UNCERTAIN -> stays OK.
+					stats["ok"] += 1
+					return (meta, diag, verification, None)
+			else:
+				# verify() failed — treat as OK (can't say it's broken).
+				stats["ok"] += 1
+				return (meta, diag, None, None)
+		else:
+			stats["ok"] += 1
+			return (meta, diag, None, None)
 
 	is_needs_review = diag.verdict == Verdict.NEEDS_REVIEW or diag.category in ("MISSING_ISBN", "MISSING_YEAR")
 
-	# --- OK books: just verify against content ---
-	if diag.verdict == Verdict.OK and not skip_verify and meta.primary_file:
-		try:
-			verification = verify(meta)
-		except Exception as e:  # noqa: BLE001
-			log.debug("verify failed for %s: %s", meta.path, e)
-		stats["ok"] += 1
-
 	# --- NEEDS_REVIEW books: try cheap fixes first, LLM last ---
-	elif is_needs_review:
+	if is_needs_review:
 		stats["needs_review"] += 1
-		# Extract content once (reused by both deterministic fixes and LLM)
-		extracted = _safe_extract(meta)
+		# Extract content once (reused by both deterministic fixes and LLM).
+		# Prefer content already extracted during verify() to avoid a second
+		# read of the book file.
+		extracted = preextracted if preextracted is not None else _safe_extract(meta)
 
 		# Step 2a-2c: deterministic fixes from extracted content + online lookup
 		if extracted is not None:
@@ -836,10 +897,10 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True) -> d
 def _snapshot_deletions(folders: list[Path], library: Path) -> Path | None:
 	"""Bundle *folders* (whole book dirs) into a tar.gz next to the library.
 
-	Returns the snapshot path, or None if there was nothing to archive or the
-	archive could not be written (errors are logged, not raised — the caller
-	proceeds so a failed snapshot does not block the whole apply run).
-	"""
+    Returns the snapshot path, or None if there was nothing to archive or the
+    archive could not be written (errors are logged, not raised — the caller
+    proceeds so a failed snapshot does not block the whole apply run).
+    """
 	import tarfile
 	from datetime import datetime
 
