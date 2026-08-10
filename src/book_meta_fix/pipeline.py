@@ -277,7 +277,7 @@ def _try_deterministic_fix(
 	return None
 
 
-def _is_better(candidate: str | None, current: str | None) -> bool:
+def _is_better(candidate: object | None, current: object | None) -> bool:
 	"""Is *candidate* a better (cleaner) value than *current*?
 
 	A candidate is "better" if EITHER:
@@ -287,11 +287,20 @@ def _is_better(candidate: str | None, current: str | None) -> bool:
 	    (e.g. "Čas přílivu" beats "Cas prilivu" — same text, but with proper
 	    diacritics). This catches the common case where Calibre stripped
 	    diacritics but didn't replace it with underscores.
+
+	Both arguments may be str, int (e.g. year), or None. Non-string truthy
+	values are treated as always-good (they can't carry textual corruption);
+	the diacritics check only applies to strings.
 	"""
 	if not candidate:
 		return False
 	if not current:
 		return True
+	# Non-string values (e.g. year as int) can't be "broken" textually, and
+	# any truthy value beats a falsy current (handled above). Treat the
+	# candidate as good and the current as not-broken unless it's a string.
+	if not isinstance(candidate, str) or not isinstance(current, str):
+		return isinstance(current, str) and _looks_broken(current) and not (isinstance(candidate, str) and _looks_broken(candidate))
 	candidate_bad = _looks_broken(candidate)
 	current_bad = _looks_broken(current)
 	if current_bad and not candidate_bad:
@@ -308,8 +317,15 @@ def _is_better(candidate: str | None, current: str | None) -> bool:
 _BROKEN_VALUES = {"Neznamy", "Unknown", "anonym", "Anonymous", "Neznámý", ""}
 
 
-def _looks_broken(s: str) -> bool:
-	"""Does *s* have obvious corruption signals?"""
+def _looks_broken(s: str | object) -> bool:
+	"""Does *s* have obvious corruption signals?
+
+	Accepts any type and stringifies it, so callers can safely pass ints
+	(e.g. year) without a TypeError.
+	"""
+	if s is None:
+		return True
+	s = str(s)
 	if not s or s in _BROKEN_VALUES:
 		return True
 	if "_" in s:
