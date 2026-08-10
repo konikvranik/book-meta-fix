@@ -26,7 +26,7 @@ from .detectors import detect as detect_fn
 from .enrichers import Enricher
 from .extractors import ExtractedMeta, extract
 from .library import Cache, scan_library
-from .models import BookMeta, Verdict
+from .models import BookMeta, Confidence, Diagnosis, Verdict
 from .review import build_review, parse_review
 from .verifier import verify
 from .writers import write_book_meta
@@ -85,7 +85,7 @@ def run_pipeline(
 	stats = {
 		"ok": 0, "needs_review": 0, "det_fixed": 0, "online_fixed": 0,
 		"llm_fixed": 0, "llm_skipped_no_text": 0, "llm_no_result": 0, "llm_error": 0,
-		"unfixed": 0,
+		"unfixed": 0, "errors": 0,
 	}
 
 	# Per-book work closure. The shared enricher/llm are thread-safe:
@@ -98,13 +98,30 @@ def run_pipeline(
 			llm_provider=llm_provider, llm_categories=llm_categories, stats=stats,
 		)
 
+	def _process_safe(meta: BookMeta):
+		"""Wrap _process so one book's failure never aborts the whole run.
+
+		On exception we log, count it, and return a minimal tuple so the book
+		still appears in the review report (with NEEDS_REVIEW diagnosis and no
+		proposal). This preserves any LLM tokens already spent on other books:
+		they are reflected in the report rather than thrown away by a crash.
+		"""
+		try:
+			return _process(meta)
+		except Exception as e:  # noqa: BLE001
+			stats["errors"] += 1
+			log.exception("unhandled error processing %s (calibre_id=%s); recording as NEEDS_REVIEW with no proposal", meta.path, meta.calibre_id)
+			# Build a NEEDS_REVIEW diagnosis so the book still lands in the report.
+			diag = Diagnosis(category="ERROR", reason=f"processing failed: {e}", verdict=Verdict.NEEDS_REVIEW, confidence=Confidence.HIGH)
+			return (meta, diag, None, None)
+
 	# No point spawning a pool of 10 if we only have 3 books.
 	n_workers = max(1, min(workers, total))
 	if n_workers == 1:
 		# Serial path — keeps stack traces readable for debugging
 		results = []
 		for i, meta in enumerate(books):
-			results.append(_process(meta))
+			results.append(_process_safe(meta))
 			if progress_callback is not None:
 				progress_callback(i + 1, total)
 	else:
@@ -112,16 +129,27 @@ def run_pipeline(
 		with ThreadPoolExecutor(max_workers=n_workers) as pool:
 			# submit + as_completed would give fastest-first ordering, but we
 			# want input-order output, so we submit all and read futures in order.
-			futures = [pool.submit(_process, meta) for meta in books]
+			# _process_safe already swallows exceptions, so fut.result() won't
+			# raise — but we guard anyway in case the pool itself fails.
+			futures = [pool.submit(_process_safe, meta) for meta in books]
 			for i, fut in enumerate(futures):
-				results.append(fut.result())
+				try:
+					results.append(fut.result())
+				except Exception as e:  # noqa: BLE001
+					stats["errors"] += 1
+					log.exception("worker future failed unexpectedly: %s", e)
+					results.append(None)
 				if progress_callback is not None:
 					progress_callback(i + 1, total)
 
+	# Drop any None placeholders from a catastrophic worker failure (kept above
+	# only to preserve order/count); generate_review iterates results as-is.
+	results = [r for r in results if r is not None]
+
 	log.info(
-		"pipeline: %d ok, %d needs_review (det=%d, online=%d, llm=%d, llm_skipped=%d, llm_no_result=%d, unfixed=%d)",
+		"pipeline: %d ok, %d needs_review (det=%d, online=%d, llm=%d, llm_skipped=%d, llm_no_result=%d, unfixed=%d, errors=%d)",
 		stats["ok"], stats["needs_review"], stats["det_fixed"], stats["online_fixed"],
-		stats["llm_fixed"], stats["llm_skipped_no_text"], stats["llm_no_result"], stats["unfixed"],
+		stats["llm_fixed"], stats["llm_skipped_no_text"], stats["llm_no_result"], stats["unfixed"], stats["errors"],
 	)
 	return results
 
@@ -159,7 +187,11 @@ def _process_book(
 
 		# Step 2a-2c: deterministic fixes from extracted content + online lookup
 		if extracted is not None:
-			enriched = _try_deterministic_fix(meta, diag, extracted, enricher, skip_enrich)
+			try:
+				enriched = _try_deterministic_fix(meta, diag, extracted, enricher, skip_enrich)
+			except Exception as e:  # noqa: BLE001
+				log.debug("deterministic fix failed for %s: %s", meta.path, e)
+				enriched = None
 			if enriched is not None:
 				stats["det_fixed" if enriched.source.startswith("embedded") else "online_fixed"] += 1
 
