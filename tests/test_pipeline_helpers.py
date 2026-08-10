@@ -1,0 +1,91 @@
+"""Unit tests for pipeline helper functions (_is_better, _looks_broken).
+
+Regression coverage for the crash where an int (year) was passed into
+_is_better -> _looks_broken and raised TypeError.
+"""
+from __future__ import annotations
+
+from book_meta_fix.pipeline import _is_better, _looks_broken
+
+
+class TestLooksBroken:
+	def test_clean_string_not_broken(self):
+		assert _looks_broken("1984") is False
+		assert _looks_broken("Karel Čapek") is False
+
+	def test_underscores_broken(self):
+		assert _looks_broken("apek_Karel") is True
+
+	def test_file_extension_broken(self):
+		assert _looks_broken("title.epub") is True
+		assert _looks_broken("title.pdf") is True
+
+	def test_high_symbol_mojibake_broken(self):
+		# High control/symbol chars (U+2000+) read as broken. Low Latin-1
+		# mojibake like "Ä" (U+00C4) is NOT caught here — that's the encoding
+		# module's job.
+		assert _looks_broken("title\u2200end") is True  # ∀ U+2200
+		assert _looks_broken("a\u202Eb") is True  # RLO U+202E (right-to-left override)
+
+	def test_placeholder_values_broken(self):
+		for v in ("Neznamy", "Unknown", "Neznámý", ""):
+			assert _looks_broken(v) is True
+
+	def test_none_broken(self):
+		assert _looks_broken(None) is True
+
+	def test_int_does_not_crash(self):
+		"""Regression: int (year) must not raise TypeError."""
+		assert _looks_broken(2020) is False
+		# int 0 stringifies to "0", which is not in _BROKEN_VALUES and carries
+		# no corruption signal — so it reads as not-broken. That's acceptable
+		# (an unusual year, but not textual corruption).
+		assert _looks_broken(0) is False
+
+	def test_stringifies_arbitrary_types(self):
+		# A float year, or any object — must not crash.
+		assert _looks_broken(2020.0) is False
+
+
+class TestIsBetter:
+	def test_clean_beats_underscored(self):
+		assert _is_better("Karel Čapek", "apek_Karel") is True
+
+	def test_diacritics_beats_stripped(self):
+		# "Čas přílivu" beats "Cas prilivu" (same text, diacritics restored)
+		assert _is_better("Čas přílivu", "Cas prilivu") is True
+
+	def test_stripped_does_not_beat_diacritics(self):
+		assert _is_better("Cas prilivu", "Čas přílivu") is False
+
+	def test_both_clean_not_better(self):
+		assert _is_better("1984", "1984") is False
+		assert _is_better("Babička", "Babička") is False
+
+	def test_none_candidate_never_better(self):
+		assert _is_better(None, "anything") is False
+
+	def test_candidate_beats_none_current(self):
+		assert _is_better("1984", None) is True
+
+	def test_int_year_beats_none_current(self):
+		"""Regression: online.year (int) vs missing meta.year."""
+		assert _is_better(2020, None) is True
+
+	def test_int_year_vs_int_year_not_better(self):
+		assert _is_better(2020, 2020) is False
+
+	def test_int_year_does_not_crash_against_string(self):
+		"""Regression for the actual crash: _is_better(online.year, meta.year)
+		where online.year is an int and meta.year is None/int."""
+		# This is the exact call shape that crashed (pipeline.py:255).
+		# Must not raise TypeError.
+		result = _is_better(2020, None)
+		assert result is True
+		result = _is_better(2020, 0)  # current falsy int
+		assert result is True
+		result = _is_better(2020, 2020)
+		assert result is False
+
+	def test_isbn_string_vs_none(self):
+		assert _is_better("9788073099992", None) is True
