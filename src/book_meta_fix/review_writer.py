@@ -192,33 +192,38 @@ class ReviewWriter:
 	def _confidence(self, enriched: Any) -> str:
 		"""Confidence label from an EnrichedMeta.source ('llm:high'|'embedded'|...).
 
+		Returns one of the three rank labels used by _confidence_rank:
+		'high' | 'medium' | 'low'.
+
 		High-confidence sources (only these pre-fill action: accept without
 		--auto-apply, and only these are auto-applied with --auto-apply high):
 		  - 'embedded'    — OPF metadata, deterministic
 		  - 'databazeknih' — authoritative CZ/SK source, fuzzy-match-gated
 		  - 'llm:high'    — paid reasoning model, verify_proposal-validated
 
-		Medium-confidence (pre-filled only with --auto-apply-threshold medium):
+		Medium-confidence (pre-filled when the proposal preserves title/author;
+		auto-applied with --auto-apply-threshold medium):
 		  - 'openlibrary' / 'google_books' — international, weaker CZ coverage
-		  - 'llm:medium'  — Flash model that passed verify_proposal
+		  - 'llm:flash' / 'llm:loop' / 'llm:medium' — Flash model that passed
+		    verify_proposal (title+author fuzzy-match the book's page text)
+		  - 'content'     — text_meta heuristic; useful but not auto-apply-safe
 
 		Low (never pre-filled, never auto-applied at high threshold):
-		  - 'content'     — text_meta heuristic; can hallucinate (e.g. 'Osoby A
-		    Obsazení' from a dramatis personae section). Reliable for
-		    verification, NOT reliable enough to auto-apply.
 		  - 'llm:low'     — proposal that failed verify_proposal
+		  - unknown sources
 		"""
 		src = getattr(enriched, "source", "") or ""
 		if src.startswith("llm:"):
-			return src.split(":", 1)[1] if ":" in src else "low"
-		if src == "embedded":
+			tier = src.split(":", 1)[1] if ":" in src else "low"
+			# Flash and the loop variants are medium (passed verify_proposal);
+			# 'high' and 'low' pass through unchanged.
+			if tier in ("flash", "loop", "medium"):
+				return "medium"
+			return tier  # 'high' or 'low'
+		if src in ("embedded", "databazeknih"):
 			return "high"
-		if src == "databazeknih":
-			return "high"
-		if src in ("openlibrary", "google_books"):
+		if src in ("openlibrary", "google_books", "content"):
 			return "medium"
-		if src == "content":
-			return "medium"  # heuristic; useful but not auto-apply-safe
 		return "low"
 
 	def _apply_to_metadata(self, meta: Any, enriched: Any) -> bool:
@@ -258,6 +263,17 @@ class ReviewWriter:
 			conf = self._confidence(enriched)
 			if self._confidence_rank.get(conf, 0) >= self._confidence_rank["high"]:
 				action = "accept"
+			elif self._confidence_rank.get(conf, 0) >= self._confidence_rank["medium"]:
+				# Medium-confidence (llm:flash/loop, openlibrary, google_books,
+				# content): pre-fill accept ONLY when the proposal does not change
+				# title or author. When the LLM agrees with the existing title/
+				# author (both already passed verify_proposal against the book's
+				# text), the only risk is in the *added* metadata (isbn/year/
+				# genres/series) — which a human can bulk-verify far more easily
+				# than a title/author swap. Proposals that change title or author
+				# stay action=None so they get individual review.
+				if self._proposal_preserves_identity(proposed, meta):
+					action = "accept"
 		entry: dict[str, Any] = {
 			"id": meta.calibre_id,
 			"path": _relative_path(meta, self.library_root),
@@ -288,6 +304,26 @@ class ReviewWriter:
 			self._fh.flush()
 			os.fsync(self._fh.fileno())
 		self._written += 1
+
+	@staticmethod
+	def _proposal_preserves_identity(proposed: dict, meta: Any) -> bool:
+		"""Does *proposed* leave the book's title and author unchanged?
+
+		A medium-confidence proposal (e.g. llm:flash) that agrees with the
+		existing title/author is safe to pre-fill as accept: the only changes
+		are *added* metadata (isbn/year/genres/series), which a human can
+		bulk-verify. A proposal that changes title or author must stay
+		action=None for individual review.
+		"""
+		pt = proposed.get("title")
+		pa = proposed.get("author")
+		cur_title = getattr(meta, "title", None)
+		cur_authors = getattr(meta, "authors", None) or []
+		cur_author = cur_authors[0] if cur_authors else None
+		# Absent in the proposal means "no change" for that field.
+		title_ok = pt is None or pt == cur_title
+		author_ok = pa is None or pa == cur_author
+		return title_ok and author_ok
 
 	# ------------------------------------------------------------------
 	# Lifecycle: finish
