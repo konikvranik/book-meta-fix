@@ -188,3 +188,33 @@ class TestEnricherLookupOrder:
 		assert em2 is not None
 		assert em2.genres == ["Sci-fi", "antiutopie"]
 		assert call_count[0] == 1  # second lookup served from cache
+
+	def test_cached_negative_returns_none_not_sentinel_string(self, tmp_path, monkeypatch):
+		"""Regression: a cached '__NOT_FOUND__' must return None, not the
+		sentinel string. Previously `cached or None` returned "__NOT_FOUND__"
+		(because a non-empty string is truthy), which then crashed callers
+		expecting an EnrichedMeta (AttributeError: 'str' has no attribute
+		'source')."""
+		call_count = [0]
+
+		def fake_ol_isbn(isbn):
+			call_count[0] += 1
+			return None  # always a miss
+
+		monkeypatch.setattr(enrichers, "lookup_openlibrary_isbn", fake_ol_isbn)
+		monkeypatch.setattr(enrichers, "lookup_google_books_isbn", lambda isbn: None)
+
+		cache = tmp_path / "cache.db"
+		# First lookup: miss, caches the negative as __NOT_FOUND__.
+		e1 = Enricher(cache_db=cache, openlibrary_enabled=True, google_books_enabled=True, databazeknih_enabled=False)
+		em1 = e1.lookup(isbn="9788073099992")
+		assert em1 is None
+		e1.close()
+
+		# Second lookup: served from cache. MUST be None, not "__NOT_FOUND__".
+		e2 = Enricher(cache_db=cache, openlibrary_enabled=True, google_books_enabled=True, databazeknih_enabled=False)
+		em2 = e2.lookup(isbn="9788073099992")
+		assert em2 is None
+		assert em2 != "__NOT_FOUND__"
+		# The source was not re-queried (cached negative short-circuits).
+		assert call_count[0] == 1
