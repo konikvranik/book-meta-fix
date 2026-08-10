@@ -51,6 +51,7 @@ def run_pipeline(
 	review_writer: Any = None,
 	verify_ok: bool = False,
 	strict_verify: bool = True,
+	llm_loop: bool = True,
 ) -> list[tuple[BookMeta, "Diagnosis", "Verification | None", "EnrichedMeta | None"]]:  # noqa: F821
 	"""Run the full pipeline over the whole library.
 
@@ -123,7 +124,7 @@ def run_pipeline(
 		return _process_book(
 			meta, enricher=enricher, skip_enrich=skip_enrich, skip_verify=skip_verify,
 			llm_provider=llm_provider, llm_categories=llm_categories, stats=stats,
-			verify_ok=verify_ok, strict_verify=strict_verify,
+			verify_ok=verify_ok, strict_verify=strict_verify, llm_loop=llm_loop,
 		)
 
 	def _process_safe(meta: BookMeta):
@@ -232,6 +233,7 @@ def _process_book(
 	stats: dict,
 	verify_ok: bool = False,
 	strict_verify: bool = True,
+	llm_loop: bool = True,
 ) -> tuple[BookMeta, "Diagnosis", "Verification | None", "EnrichedMeta | None"]:  # noqa: F821
 	"""Process one book end-to-end. Thread-safe (no shared mutable state except *stats*).
 
@@ -322,7 +324,7 @@ def _process_book(
 					# verify_proposal feedback between attempts), then the paid
 					# final model. Falls back to plain reconcile() for mock
 					# providers that don't implement the loop (back-compat).
-					reconciled, llm_src = _llm_reconcile_with_loop(llm_provider, evidence, extracted)
+					reconciled, llm_src = _llm_reconcile_with_loop(llm_provider, evidence, extracted, loop=llm_loop)
 					if reconciled is not None and _reconciled_is_useful(reconciled, meta):
 						enriched = _reconciled_to_enriched(reconciled, source=llm_src)
 						# Bucket the result by how it was obtained.
@@ -635,17 +637,17 @@ def _reconciled_to_enriched(r, *, source: str | None = None) -> "EnrichedMeta": 
 	)
 
 
-def _llm_reconcile_with_loop(provider: Any, evidence: dict, extracted: Any) -> tuple[Any, str]:  # noqa: F821
+def _llm_reconcile_with_loop(provider: Any, evidence: dict, extracted: Any, *, loop: bool = True) -> tuple[Any, str]:  # noqa: F821
 	"""Run the LLM, preferring the self-correction loop when available.
 
-	Providers that implement ``reconcile_loop`` (ZaiProvider) get the Flash +
-	verify-feedback + final-model flow. Other providers (MockProvider) fall back
-	to a single ``reconcile`` call tagged ``llm:medium``.
+	When *loop* is False (config BMF_LLM_LOOP=0 or --no-llm-loop), a single
+	``reconcile`` call is made instead of the Flash+feedback+final flow.
+	Providers that don't implement ``reconcile_loop`` always use ``reconcile``.
 
 	Returns (ReconciledMeta | None, source) where source is one of
 	llm:flash / llm:loop / llm:high / llm:low / llm:medium / ''.
 	"""
-	if hasattr(provider, "reconcile_loop"):
+	if loop and hasattr(provider, "reconcile_loop"):
 		return provider.reconcile_loop(evidence, extracted)
 	result = provider.reconcile(evidence)
 	return result, ("llm:medium" if result is not None else "")

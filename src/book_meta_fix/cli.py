@@ -126,10 +126,14 @@ def detect(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--llm-model", "llm_model", default=None, help="Z.AI model for LLM fallback (default glm-5.2). Alternatives: glm-4.6, glm-4.5-air, glm-4.5-flash, glm-4.7-flash. See README 'LLM model choice' for the token/quality tradeoffs measured by scripts/llm_experiment.py.")
 @click.option("--llm-reasoning-effort", "llm_reasoning_effort", default=None, help="reasoning_effort for GLM-5.x models: low (default) | medium | max. Lower cuts reasoning tokens ~60%% vs max. Ignored by GLM-4.x (use --llm-thinking).")
 @click.option("--llm-thinking", "llm_thinking", default=None, help="thinking toggle for GLM-4.x models: disabled (default) | enabled. 'disabled' turns off chain-of-thought (3-4x fewer output tokens). Ignored by GLM-5.x (use --llm-reasoning-effort).")
+@click.option("--no-llm-loop", "no_llm_loop", is_flag=True, help="Disable the self-correction loop. Default: loop on — try the free Flash model first (with verify feedback), then the paid final model as fallback. With this flag, a single LLM call (the configured --llm-model) is used as before.")
+@click.option("--llm-flash-model", "llm_flash_model", default=None, help="Free first-attempt model for the loop (default glm-4.5-flash). Alternatives: glm-4.7-flash, glm-4.5-air.")
+@click.option("--llm-final-model", "llm_final_model", default=None, help="Paid high-quality fallback for the loop (default glm-5.2). Used when Flash fails verify or is rate-limited.")
+@click.option("--llm-burst", "llm_burst", type=float, default=None, help="Leaky-bucket burst capacity: how many LLM calls may fire in a short burst before the rate smoother engages (default 5). Lower (e.g. 1) for stricter matching of Z.AI's free-tier RPM; higher if you have a paid plan.")
 @click.option("--auto-apply", "auto_apply", is_flag=True, help="Auto-apply high-confidence LLM proposals directly (with snapshot + .bak). Lower-confidence go to review.yaml.")
 @click.option("--auto-apply-threshold", default="high", help="Confidence threshold for auto-apply: high (default) | medium | low.")
 @click.option("--snapshot-dir", default=None, help="Where to write the metadata tar.gz snapshot before auto-apply (default: CWD).")
-def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, skip_verify: bool, verify_ok: bool, no_strict_verify: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int, llm_min_interval: float | None, llm_model: str | None, llm_reasoning_effort: str | None, llm_thinking: str | None, auto_apply: bool, auto_apply_threshold: str, snapshot_dir: Path | None) -> None:
+def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, skip_verify: bool, verify_ok: bool, no_strict_verify: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int, llm_min_interval: float | None, llm_model: str | None, llm_reasoning_effort: str | None, llm_thinking: str | None, no_llm_loop: bool, llm_flash_model: str | None, llm_final_model: str | None, llm_burst: float | None, auto_apply: bool, auto_apply_threshold: str, snapshot_dir: Path | None) -> None:
 	"""Run full pipeline and generate a review.yaml for NEEDS_REVIEW books."""
 	from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn
 
@@ -182,6 +186,14 @@ def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich:
 			cfg.zai_reasoning_effort = llm_reasoning_effort
 		if llm_thinking is not None:
 			cfg.zai_thinking = llm_thinking
+		if no_llm_loop:
+			cfg.llm_loop = False
+		if llm_flash_model is not None:
+			cfg.zai_flash_model = llm_flash_model
+		if llm_final_model is not None:
+			cfg.zai_final_model = llm_final_model
+		if llm_burst is not None:
+			cfg.llm_burst = llm_burst
 		llm_provider = get_provider(cfg)
 		if llm_provider is None:
 			console.print("[yellow]--llm given but no provider available (set ZAI_API_KEY or BMF_LLM_MOCK=1)[/yellow]")
@@ -242,6 +254,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich:
 			review_writer=review_writer,
 			verify_ok=verify_ok,
 			strict_verify=not no_strict_verify,
+			llm_loop=cfg.llm_loop,
 		)
 	except KeyboardInterrupt:
 		# A second Ctrl-C (or one that escaped run_pipeline's internal handler).

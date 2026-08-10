@@ -462,6 +462,9 @@ def get_provider(config: Any) -> LLMProvider | None:  # noqa: ANN001
 			min_interval=min_interval,
 			reasoning_effort=getattr(config, "zai_reasoning_effort", None),
 			thinking=getattr(config, "zai_thinking", None),
+			burst=getattr(config, "llm_burst", 5.0),
+			flash_model=getattr(config, "zai_flash_model", None),
+			final_model=getattr(config, "zai_final_model", None),
 		)
 	if os.environ.get("BMF_LLM_MOCK"):
 		return MockProvider()
