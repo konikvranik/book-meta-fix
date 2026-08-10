@@ -116,6 +116,8 @@ def detect(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--skip-enrich", is_flag=True, default=True, help="Skip online enrichment (offline mode)")
 @click.option("--databazeknih", "use_databazeknih", is_flag=True, help="Enable databazeknih.cz lookup (CZ/SK genres + metadata). Implies --no-skip-enrich.")
 @click.option("--skip-verify", is_flag=True, help="Skip content verification")
+@click.option("--verify-ok", "verify_ok", is_flag=True, help="Audit: also verify books the detectors marked OK against their content. Reads every OK book's file (slower). A MISMATCH reclassifies it to NEEDS_REVIEW and seeks a fix (enrichment + LLM). Use periodically to catch corruption the structural detectors miss.")
+@click.option("--no-strict-verify", "no_strict_verify", is_flag=True, help="With --verify-ok: only reclassify a clear MISMATCH (fuzzy title < 0.5). By default (without this flag) UNCERTAIN (0.5–0.8) is also reclassified.")
 @click.option("--output", "-o", type=click.Path(path_type=Path), default=None, help="Output review file (default: review.yaml)")
 @click.option("--llm", "use_llm", is_flag=True, help="Enable LLM reconciliation (needs ZAI_API_KEY or BMF_LLM_MOCK=1)")
 @click.option("--llm-categories", default="ALL", help="Comma-separated categories to send to LLM, or 'ALL' (default). ALL = every category except C9 (legitimate anonyms like the Bible, where an LLM-invented author would be wrong). Each book is one LLM request that returns all fields at once, so the cost is per-book, not per-category.")
@@ -124,7 +126,7 @@ def detect(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--auto-apply", "auto_apply", is_flag=True, help="Auto-apply high-confidence LLM proposals directly (with snapshot + .bak). Lower-confidence go to review.yaml.")
 @click.option("--auto-apply-threshold", default="high", help="Confidence threshold for auto-apply: high (default) | medium | low.")
 @click.option("--snapshot-dir", default=None, help="Where to write the metadata tar.gz snapshot before auto-apply (default: CWD).")
-def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, skip_verify: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int, llm_min_interval: float | None, auto_apply: bool, auto_apply_threshold: str, snapshot_dir: Path | None) -> None:
+def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, skip_verify: bool, verify_ok: bool, no_strict_verify: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int, llm_min_interval: float | None, auto_apply: bool, auto_apply_threshold: str, snapshot_dir: Path | None) -> None:
 	"""Run full pipeline and generate a review.yaml for NEEDS_REVIEW books."""
 	from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn
 
@@ -149,6 +151,9 @@ def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich:
 	console.print(f"[bold]Running pipeline[/bold] on {cfg.library} ({workers} workers)")
 	if cfg.databazeknih_enabled:
 		console.print("  [cyan]databazeknih.cz[/cyan] lookup enabled (genres + metadata)")
+	if verify_ok:
+		strict = not no_strict_verify
+		console.print(f"  [cyan]--verify-ok[/cyan] audit: OK books checked against content (strict={strict})")
 
 	cache: Cache | None = None
 	if not no_cache:
@@ -224,6 +229,8 @@ def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich:
 			workers=workers,
 			progress_callback=_cb,
 			review_writer=review_writer,
+			verify_ok=verify_ok,
+			strict_verify=not no_strict_verify,
 		)
 	except KeyboardInterrupt:
 		# A second Ctrl-C (or one that escaped run_pipeline's internal handler).
