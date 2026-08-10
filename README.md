@@ -181,6 +181,59 @@ Re-run the experiment yourself as Z.AI's lineup evolves:
 .venv/bin/python scripts/llm_experiment.py --limit 10
 ```
 
+### LLM self-correction loop
+
+When the deterministic stages (offline text mining, online lookup) miss, the
+LLM fallback runs a **self-correction loop** (on by default) instead of a
+single expensive call:
+
+```
+ 1. GLM-4.5-Flash (free, thinking off)  →  verify_proposal(title, author vs first-page text)
+       │ passed  →  accept (source llm:flash)              [the common case — 0 USD]
+       │ failed  →  inject feedback into the next attempt
+       ▼
+ 2. GLM-4.5-Flash with feedback  (max 2 Flash attempts)   [still 0 USD]
+       │ passed  →  accept (source llm:loop)
+       │ failed / 429  →  fall through
+       ▼
+ 3. GLM-5.2 reasoning_effort=low  (paid, high quality)    [only the hard cases]
+       │ passed  →  accept (source llm:high)
+       │ failed  →  return last proposal as confidence=low (still reviewed by the human)
+```
+
+`verify_proposal` checks both **title** and **author** against the book's
+first-page text (fuzzy, accent-insensitive), plus an exact ISBN comparison. On
+failure it returns a short reason ("the title 'X' is not found in the book's
+first-page text (fuzzy 0.41)") that is appended to the next attempt's prompt.
+Books with no readable text (image-only title pages, scanned PDFs) skip
+verification and accept the Flash result as-is.
+
+**Rate limiting**: all calls (Flash + final + retries) go through a shared
+leaky-bucket smoother (default capacity 5, one token every `--llm-min-interval`
+seconds). This keeps the aggregate request rate constant regardless of when
+worker threads arrive, which avoids tripping Z.AI's dynamic RPM limit (429 code
+1302). Free-tier Flash models are throttled more aggressively than paid ones
+and share Z.AI's cascade-cooldown bug (one model getting rate-limited can take
+the others down with it); on a Flash 429 the loop falls through to the paid
+final model immediately rather than burning more free-tier attempts.
+
+Toggles:
+
+| Knob | CLI | Env | Default |
+|---|---|---|---|
+| Loop on/off | `--no-llm-loop` | `BMF_LLM_LOOP=0` | on |
+| Flash model | `--llm-flash-model` | `ZAI_FLASH_MODEL` | `glm-4.5-flash` |
+| Final model | `--llm-final-model` | `ZAI_FINAL_MODEL` | `glm-5.2` |
+| Burst capacity | `--llm-burst` | `BMF_LLM_BURST` | `5` |
+
+```bash
+# Single fast cheap call, no loop (e.g. for a quick test run)
+bmf report --llm --no-llm-loop --llm-model glm-4.5-flash
+
+# Stricter rate matching for a free plan (1 call/burst, 2s apart)
+bmf report --llm --llm-burst 1 --llm-min-interval 2.0
+```
+
 ## Library layout expected
 
 ```
