@@ -531,7 +531,37 @@ def _is_better(candidate: object | None, current: object | None) -> bool:
 		if _has_cz_diacritics(candidate) and not _has_cz_diacritics(current):
 			if _strip_diacritics(candidate).lower() == _strip_diacritics(current).lower():
 				return True
+		# Title-case check: candidate has each word capitalised (title case)
+		# while current is all-lowercase — same text but better casing. Common
+		# case where the DB stored the title lowercase but the title page (and
+		# thus text_meta) recovered proper title case. Only fires when the two
+		# are equal ignoring case, to avoid spurious "improvements".
+		if _is_better_title_case(candidate, current):
+			return True
 	return False
+
+
+def _is_better_title_case(candidate: str, current: str) -> bool:
+	"""True when *candidate* is the same text as *current* but better capitalised.
+
+	Catches the common CZ/SK case where calibre stored a sentence-case title
+	(``Čas přílivu`` — only the first word capitalised) but text_meta mined
+	proper title case from the title page (``Čas Přílivu``). Treats that as an
+	improvement worth proposing. Only fires when the two are equal ignoring
+	case, to avoid spurious "improvements".
+	"""
+	if not candidate or not current:
+		return False
+	if candidate.lower() != current.lower():
+		return False
+	cand_words = candidate.split()
+	cur_words = current.split()
+	if len(cand_words) < 2 or len(cand_words) != len(cur_words):
+		return False
+	# Count words (beyond the first) that start uppercase in each.
+	def _capitalised_beyond_first(words: list[str]) -> int:
+		return sum(1 for w in words[1:] if w[:1].isupper())
+	return _capitalised_beyond_first(cand_words) > _capitalised_beyond_first(cur_words)
 
 
 _BROKEN_VALUES = {"Neznamy", "Unknown", "anonym", "Anonymous", "Neznámý", ""}
