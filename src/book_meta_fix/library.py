@@ -20,8 +20,10 @@ from .readers import read_book_folder
 
 log = logging.getLogger(__name__)
 
-# Top-level directory names to skip entirely
-_EXCLUDE_DIRS = {"temp_calibre"}
+# Top-level directory names to skip entirely.
+# `needfix` is where bmf organize moves broken books (default), so we must
+# not re-scan them as part of the main library.
+_EXCLUDE_DIRS = {"temp_calibre", "needfix"}
 
 # A book folder is recognized by having metadata.opf OR metadata.json
 _META_FILES = ("metadata.opf", "metadata.json")
