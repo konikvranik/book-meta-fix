@@ -588,6 +588,101 @@ def _canonicalize_or_none(raw: str | None) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Comic archive extractor (.cbz / .cbr / .cb7)
+# ---------------------------------------------------------------------------
+
+
+def _read_comicinfo_xml(path: str | Path) -> bytes | None:
+	"""Return the ComicInfo.xml bytes from a comic archive, or None.
+
+	.cbz is a ZIP (pure-Python); .cbr is RAR and .cb7 is 7z — extracted via
+	`7z` (handles both) with `unar` as a fallback. Comics carry no text layer,
+	so ComicInfo.xml is the only non-vision metadata source.
+	"""
+	p = Path(path)
+	if p.suffix.lower() == ".cbz":
+		try:
+			with zipfile.ZipFile(p) as zf:
+				for name in zf.namelist():
+					if name.lower().rsplit("/", 1)[-1] == "comicinfo.xml":
+						return zf.read(name)
+		except Exception:  # noqa: BLE001
+			return None
+		return None
+	# .cbr (RAR) / .cb7 (7z) — extract ComicInfo.xml via 7z, fallback unar.
+	import tempfile
+
+	commands: list = []
+	if shutil.which("7z"):
+		sevenz = shutil.which("7z")
+		commands.append(lambda tmp: [sevenz, "e", "-y", "-bso0", "-bsp0", f"-o{tmp}", str(p), "ComicInfo.xml"])
+	if shutil.which("unar"):
+		unar = shutil.which("unar")
+		commands.append(lambda tmp: [unar, "-f", "-q", "-o", tmp, str(p), "ComicInfo.xml"])
+	for build in commands:
+		with tempfile.TemporaryDirectory(prefix="bmf-comic-") as tmp:
+			try:
+				subprocess.run(build(tmp), capture_output=True, timeout=30)
+			except Exception:  # noqa: BLE001
+				continue
+			f = Path(tmp) / "ComicInfo.xml"
+			if f.is_file():
+				try:
+					return f.read_bytes()
+				except OSError:
+					continue
+	return None
+
+
+def extract_comic(path: str | Path) -> ExtractedMeta:
+	"""Extract metadata from a comic archive's ComicInfo.xml.
+
+	Comics (.cbz/.cbr/.cb7) are image-only — there is no text layer to mine,
+	so first_page_text is always None and identity cannot be text-verified.
+	ComicInfo.xml (when present) is the file's own metadata declaration (like
+	an EPUB's OPF) and provides title/authors/publisher/year/ISBN. Cover-image
+	OCR (vision) is a separate, later path for comics without ComicInfo.xml.
+	"""
+	result = ExtractedMeta(source_format=Path(path).suffix.lower().lstrip("."))
+	xml = _read_comicinfo_xml(path)
+	if not xml:
+		result.error = "no ComicInfo.xml"
+		return result
+	try:
+		root = etree.fromstring(xml)
+	except Exception as e:  # noqa: BLE001
+		result.error = f"ComicInfo.xml parse: {e}"
+		return result
+
+	def _text(tag: str) -> str | None:
+		el = root.find(tag)
+		return el.text.strip() if el is not None and el.text and el.text.strip() else None
+
+	title = _text("Title")
+	series = _text("Series")
+	number = _text("Number")
+	if not title and series:  # fall back to "Series #Number"
+		title = f"{series} #{number}" if number else series
+	result.title = title
+	creator = _text("Writer") or _text("Penciller")
+	if creator:
+		result.authors = [a.strip() for a in re.split(r"[;,]", creator) if a.strip()]
+	result.publisher = _text("Publisher")
+	year = _text("Year")
+	if year and year.isdigit():
+		result.year_from_text = int(year)
+	result.language = _text("LanguageISO")
+	isbn = _text("ISBN")
+	if isbn:
+		canon = _canonicalize_or_none(isbn)
+		if canon:
+			result.isbn = canon
+	if not (result.title or result.authors or result.isbn):
+		result.error = "ComicInfo.xml has no usable fields"
+	return result
+
+
+# ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
@@ -606,6 +701,10 @@ _EXTRACTORS = {
 	".rtf": extract_via_ebook_meta,
 	".lit": extract_via_ebook_meta,
 	".djvu": extract_via_ebook_meta,
+	# Comics — image archives with optional ComicInfo.xml metadata
+	".cbz": extract_comic,
+	".cbr": extract_comic,
+	".cb7": extract_comic,
 }
 
 
