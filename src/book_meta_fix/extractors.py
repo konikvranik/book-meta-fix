@@ -541,6 +541,8 @@ _EXTRACTORS = {
 	".pdb": extract_via_ebook_meta,
 	".mobi": extract_via_ebook_meta,
 	".azw": extract_via_ebook_meta,
+	".azw3": extract_via_ebook_meta,
+	".prc": extract_via_ebook_meta,
 	".doc": extract_via_ebook_meta,
 	".rtf": extract_via_ebook_meta,
 	".lit": extract_via_ebook_meta,

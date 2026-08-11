@@ -48,7 +48,7 @@ _ANONYM_SPELLINGS = {
 _REAL_ANONYM_RE = re.compile(r"\b(bible|bibl[ei]|kralick|[mn]ový?\s+z[áa]kon|knihy\s+moj|koran|quran|edda)\b", re.IGNORECASE)
 
 # Filename-like patterns in the title
-_EXTENSION_RE = re.compile(r"\.(docx?|epub|pdf|pdb|mobi|azw|lit|rtf|txt|djvu|fm|prz)\b", re.IGNORECASE)
+_EXTENSION_RE = re.compile(r"\.(docx?|epub|pdf|pdb|mobi|azw3|azw|prc|lit|rtf|txt|djvu|fm|prz)\b", re.IGNORECASE)
 _WORD_TMP_RE = re.compile(r"^microsoft\s+word\s*-\s*", re.IGNORECASE)
 # Truncated-title markers (Calibre's slugify leaves these behind)
 _TRUNCATED_RE = re.compile(r"[_]n[_]?_$|_txt$|_n$")
@@ -294,7 +294,7 @@ def rule_c2_filename_title(meta: BookMeta) -> Diagnosis | None:
 
 		stem = os.path.basename(meta.primary_file)
 		# Strip extension
-		for ext in (".epub", ".pdb", ".pdf", ".mobi", ".doc", ".rtf", ".txt", ".lit", ".djvu"):
+		for ext in (".azw3", ".azw", ".prc", ".epub", ".pdb", ".pdf", ".mobi", ".doc", ".rtf", ".txt", ".lit", ".djvu"):
 			if stem.lower().endswith(ext):
 				stem = stem[: -len(ext)]
 				break

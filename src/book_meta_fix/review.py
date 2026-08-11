@@ -255,7 +255,7 @@ def _looks_better(candidate: str | None, current: str | None) -> bool:
 	if not current:
 		return True
 	# Current is suspect if it has filename/encoding artifacts
-	current_bad = ("_" in current or ".epub" in current.lower() or ".pdb" in current.lower() or any(ord(c) > 0x2000 and c not in "„“”‘’–—" for c in current))
+	current_bad = ("_" in current or ".epub" in current.lower() or ".pdb" in current.lower() or ".mobi" in current.lower() or ".azw" in current.lower() or ".azw3" in current.lower() or ".prc" in current.lower() or ".pdf" in current.lower() or any(ord(c) > 0x2000 and c not in "„“”‘’–—" for c in current))
 	candidate_bad = ("_" in candidate or any(ord(c) > 0x2000 and c not in "„“”‘’–—" for c in candidate))
 	return current_bad and not candidate_bad
 

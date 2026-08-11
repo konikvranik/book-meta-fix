@@ -25,16 +25,18 @@ log = logging.getLogger(__name__)
 # We prefer formats that carry structure + metadata, fall back to plain text.
 _FORMAT_PRIORITY = {
 	".pdb": 1,  # PalmDOC: ebook-convert handles it well
-	".mobi": 2,
-	".azw": 3,
-	".lit": 4,
-	".pdf": 5,  # PDF→EPUB is lossy but works
-	".doc": 6,
-	".docx": 7,
-	".rtf": 8,
-	".html": 9,
-	".htm": 9,
-	".txt": 10,  # last resort — no structure, encoding-sensitive
+	".prc": 2,  # Palm Resource: MOBI-like, well-handled
+	".mobi": 3,
+	".azw": 4,
+	".azw3": 5,  # KF8: newer Kindle, good source
+	".lit": 6,
+	".pdf": 7,  # PDF→EPUB is lossy but works
+	".doc": 8,
+	".docx": 9,
+	".rtf": 10,
+	".html": 11,
+	".htm": 11,
+	".txt": 12,  # last resort — no structure, encoding-sensitive
 }
 
 

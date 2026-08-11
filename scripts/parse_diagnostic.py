@@ -37,7 +37,7 @@ log = logging.getLogger("parse_diag")
 
 def _book_file(folder: Path) -> Path | None:
     """Return the primary book file in a folder (epub > pdf > txt > other)."""
-    prio = [".epub", ".pdf", ".txt", ".pdb", ".mobi", ".azw", ".doc", ".rtf"]
+    prio = [".epub", ".pdf", ".txt", ".pdb", ".prc", ".mobi", ".azw", ".azw3", ".doc", ".rtf"]
     files = [f for f in folder.iterdir() if f.is_file()]
     for ext in prio:
         for f in files:
