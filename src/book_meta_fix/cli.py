@@ -254,6 +254,10 @@ def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich:
 	progress.start()
 	results: list = []
 	interrupted = False
+	# Populated by run_pipeline (passed in) so we can print a fix-source
+	# breakdown after the run. The dict is seeded with all keys inside
+	# run_pipeline, so it's safe to read here even on early failure.
+	pipe_stats: dict = {}
 	try:
 		def _cb(done: int, total: int) -> None:
 			if progress.tasks[0].total is None and total:
@@ -272,6 +276,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich:
 			verify_ok=verify_ok,
 			strict_verify=not no_strict_verify,
 			llm_loop=cfg.llm_loop,
+			stats=pipe_stats,
 		)
 	except KeyboardInterrupt:
 		# A second Ctrl-C (or one that escaped run_pipeline's internal handler).
@@ -295,7 +300,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich:
 			summary = {"written": 0, "applied": 0, "skipped_low_conf": 0, "skipped_no_proposal": 0, "skipped_user_decided": 0, "remaining_count": 0, "backup_path": None, "threshold": None}
 
 	# Print pipeline summary (from the results list — still populated for stats)
-	_print_pipeline_summary(results)
+	_print_pipeline_summary(results, pipe_stats)
 
 	# Streaming auto-apply / review summary
 	console.print()
@@ -317,8 +322,13 @@ def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich:
 	console.print(f"Edit the file, set `action` for each entry, then run: [bold]bmf apply {out}[/bold]")
 
 
-def _print_pipeline_summary(results) -> None:  # noqa: ANN001
-	"""Print a summary table of the pipeline's verdicts."""
+def _print_pipeline_summary(results, stats: dict | None = None) -> None:  # noqa: ANN001
+	"""Print a summary table of the pipeline's verdicts and fix sources.
+
+	*stats* (from run_pipeline) drives the fix-source breakdown table; when
+	None (e.g. when run_pipeline wasn't used), only the verdict/verification
+	tables are printed.
+	"""
 	from collections import Counter
 
 	verdict_counter: Counter[str] = Counter()
@@ -346,6 +356,89 @@ def _print_pipeline_summary(results) -> None:  # noqa: ANN001
 	for r, n in verify_counter.most_common():
 		t.add_row(r, str(n))
 	console.print(t)
+
+	if stats:
+		_print_fix_source_summary(stats)
+
+
+def _print_fix_source_summary(stats: dict) -> None:
+	"""Print a breakdown of how NEEDS_REVIEW books were fixed (offline / online
+	/ LLM / unfixed). Driven by the stats dict filled by run_pipeline.
+
+	Each row is a fix source; the right column shows how many books that source
+	fixed. Rows with zero counts are hidden to keep the table readable.
+	"""
+	# Parent rows first, then their breakdown (indented with └). Zero-count
+	# sub-rows are dropped below to keep the table tight.
+	offline_total = stats.get("det_fixed", 0)
+	online_total = stats.get("online_fixed", 0)
+	llm_total = stats.get("llm_flash_fixed", 0) + stats.get("llm_final_fixed", 0) + stats.get("llm_low_confidence", 0)
+
+	ordered: list[tuple[str, int, bool]] = [
+		("Offline fixes", offline_total, False),
+		("  └ text-mined (content)", stats.get("offline_content", 0), True),
+		("  └ embedded OPF", stats.get("offline_embedded", 0), True),
+		("Online fixes", online_total, False),
+		("  └ databazeknih.cz", stats.get("online_databazeknih", 0), True),
+		("  └ openlibrary.org", stats.get("online_openlibrary", 0), True),
+		("  └ Google Books", stats.get("online_google_books", 0), True),
+		("LLM fixes", llm_total, False),
+		("  └ fast model (flash)", stats.get("llm_flash_fixed", 0), True),
+		("  └ fallback model", stats.get("llm_final_fixed", 0), True),
+		("  └ low confidence", stats.get("llm_low_confidence", 0), True),
+	]
+	# Drop all-zero sub-rows to keep the table tight, but always show parents.
+	ordered = [
+		(label, n, sub) for (label, n, sub) in ordered
+		if not sub or n > 0
+	]
+
+	unfixed = stats.get("unfixed", 0)
+	llm_skipped = stats.get("llm_skipped_no_text", 0)
+	llm_no_result = stats.get("llm_no_result", 0)
+	llm_error = stats.get("llm_error", 0)
+	proposed_total = offline_total + online_total + llm_total
+
+	console.print()
+	t = Table(title="Fix sources (how NEEDS_REVIEW books were resolved)", show_header=True, header_style="bold cyan")
+	t.add_column("Source", style="bold")
+	t.add_column("Count", justify="right")
+	for label, n, _sub in ordered:
+		t.add_row(label, str(n))
+	t.add_section()
+	t.add_row("Proposed (any source)", str(proposed_total), style="bold")
+	t.add_row("Unfixed (no proposal found)", str(unfixed), style="yellow")
+	console.print(t)
+
+	# LLM cost detail: how many books the LLM was asked about vs. how many it
+	# actually fixed. Only shown when an LLM provider was in play.
+	if any(stats.get(k) for k in ("llm_flash_fixed", "llm_final_fixed", "llm_low_confidence", "llm_skipped_no_text", "llm_no_result", "llm_error")):
+		llm_asked = llm_total + llm_no_result + llm_error
+		console.print()
+		t = Table(title="LLM usage", show_header=True, header_style="bold cyan")
+		t.add_column("Metric", style="bold")
+		t.add_column("Count", justify="right")
+		t.add_row("LLM calls made", str(llm_asked))
+		t.add_row("Skipped (no usable text)", str(llm_skipped))
+		t.add_row("No useful result", str(llm_no_result))
+		if llm_error:
+			t.add_row("LLM errors", str(llm_error), style="red")
+		console.print(t)
+
+	# Covers: only show when cover detection ran (counts > 0).
+	covers_gen = stats.get("covers_generated", 0)
+	covers_missing = stats.get("covers_missing", 0)
+	if covers_gen or covers_missing:
+		console.print()
+		t = Table(title="Covers", show_header=True, header_style="bold cyan")
+		t.add_column("Category", style="bold")
+		t.add_column("Count", justify="right")
+		t.add_row("Generated (calibre placeholder)", str(covers_gen), style="yellow")
+		t.add_row("Missing cover", str(covers_missing))
+		console.print(t)
+
+	if stats.get("errors"):
+		console.print(f"\n[red]Processing errors: {stats['errors']}[/red]")
 
 
 @main.command()

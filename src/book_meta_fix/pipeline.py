@@ -52,10 +52,16 @@ def run_pipeline(
 	verify_ok: bool = False,
 	strict_verify: bool = True,
 	llm_loop: bool = True,
+	stats: dict | None = None,
 ) -> list[tuple[BookMeta, "Diagnosis", "Verification | None", "EnrichedMeta | None"]]:  # noqa: F821
 	"""Run the full pipeline over the whole library.
 
 	Returns a list of (meta, diagnosis, verification, enriched) tuples.
+
+	*stats* (optional): if a dict is passed in, it is populated with a
+	breakdown of how books were processed (offline/online/LLM fix sources,
+	skips, errors, cover detections). The caller can then print a summary
+	table. When None (default), an internal dict is used and discarded.
 
 	*only_needs_review* (default True): skip books that the detector already
 	classifies as OK or VERIFIED. This makes the pipeline incremental —
@@ -109,13 +115,29 @@ def run_pipeline(
 	if limit is not None:
 		books = books[:limit]
 	total = len(books)
-	stats = {
+	# Per-source fix counters, filled as books are processed. When the caller
+	# passes a stats dict we merge into it (so the CLI can print a summary
+	# table); otherwise we keep a throwaway local dict for the log line.
+	_stats = {
 		"ok": 0, "needs_review": 0, "det_fixed": 0, "online_fixed": 0,
 		"llm_fixed": 0, "llm_flash_fixed": 0, "llm_final_fixed": 0, "llm_low_confidence": 0,
 		"llm_skipped_no_text": 0, "llm_no_result": 0, "llm_error": 0,
 		"unfixed": 0, "errors": 0, "content_mismatch": 0,
 		"covers_generated": 0, "covers_missing": 0,
+		# Online fix source breakdown (sub-rows of online_fixed).
+		"online_databazeknih": 0, "online_openlibrary": 0, "online_google_books": 0,
+		# Offline fix source breakdown (sub-rows of det_fixed).
+		"offline_content": 0, "offline_embedded": 0,
+		"total": total,
 	}
+	if stats is not None:
+		# Seed any missing keys so the caller's dict always has the full set,
+		# while preserving any caller-provided starting values.
+		for k, v in _stats.items():
+			stats.setdefault(k, v)
+		stats_ref = stats
+	else:
+		stats_ref = _stats
 
 	# Per-book work closure. The shared enricher/llm are thread-safe:
 	# - openai client uses an internal httpx Client (thread-safe)
@@ -124,7 +146,7 @@ def run_pipeline(
 	def _process(meta: BookMeta):
 		return _process_book(
 			meta, enricher=enricher, skip_enrich=skip_enrich, skip_verify=skip_verify,
-			llm_provider=llm_provider, llm_categories=llm_categories, stats=stats,
+			llm_provider=llm_provider, llm_categories=llm_categories, stats=stats_ref,
 			verify_ok=verify_ok, strict_verify=strict_verify, llm_loop=llm_loop,
 		)
 
@@ -139,7 +161,7 @@ def run_pipeline(
 		try:
 			return _process(meta)
 		except Exception as e:  # noqa: BLE001
-			stats["errors"] += 1
+			stats_ref["errors"] += 1
 			log.exception("unhandled error processing %s (calibre_id=%s); recording as NEEDS_REVIEW with no proposal", meta.path, meta.calibre_id)
 			# Build a NEEDS_REVIEW diagnosis so the book still lands in the report.
 			diag = Diagnosis(category="ERROR", reason=f"processing failed: {e}", verdict=Verdict.NEEDS_REVIEW, confidence=Confidence.HIGH)
@@ -193,7 +215,7 @@ def run_pipeline(
 						interrupted = True
 						break
 					except Exception as e:  # noqa: BLE001
-						stats["errors"] += 1
+						stats_ref["errors"] += 1
 						log.exception("worker future failed unexpectedly: %s", e)
 						results.append(None)
 					finally:
@@ -215,10 +237,10 @@ def run_pipeline(
 		log.warning("pipeline interrupted: returning %d partial results (of %d books) for review", len(results), total)
 	log.info(
 		"pipeline: %d ok, %d needs_review (content_mismatch=%d, det=%d, online=%d, llm_flash=%d, llm_final=%d, llm_low=%d, llm_other=%d, llm_skipped=%d, llm_no_result=%d, unfixed=%d, covers_gen=%d, covers_missing=%d, errors=%d)%s",
-		stats["ok"], stats["needs_review"], stats["content_mismatch"], stats["det_fixed"], stats["online_fixed"],
-		stats["llm_flash_fixed"], stats["llm_final_fixed"], stats["llm_low_confidence"], stats["llm_fixed"],
-		stats["llm_skipped_no_text"], stats["llm_no_result"], stats["unfixed"],
-		stats["covers_generated"], stats["covers_missing"], stats["errors"],
+		stats_ref["ok"], stats_ref["needs_review"], stats_ref["content_mismatch"], stats_ref["det_fixed"], stats_ref["online_fixed"],
+		stats_ref["llm_flash_fixed"], stats_ref["llm_final_fixed"], stats_ref["llm_low_confidence"], stats_ref["llm_fixed"],
+		stats_ref["llm_skipped_no_text"], stats_ref["llm_no_result"], stats_ref["unfixed"],
+		stats_ref["covers_generated"], stats_ref["covers_missing"], stats_ref["errors"],
 		" [INTERRUPTED]" if interrupted else "",
 	)
 	return results
@@ -309,7 +331,17 @@ def _process_book(
 			if enriched is not None:
 				# 'embedded' (OPF compare) and 'content' (text_meta from page
 				# text) are both offline/deterministic; the rest are online.
-				stats["det_fixed" if enriched.source in ("embedded", "content") else "online_fixed"] += 1
+				# Bucket by fix source for the post-report stats table.
+				if enriched.source in ("embedded", "content"):
+					stats["det_fixed"] = stats.get("det_fixed", 0) + 1
+					if enriched.source == "content":
+						stats["offline_content"] = stats.get("offline_content", 0) + 1
+					else:
+						stats["offline_embedded"] = stats.get("offline_embedded", 0) + 1
+				else:
+					stats["online_fixed"] = stats.get("online_fixed", 0) + 1
+					key = f"online_{enriched.source}"  # databazeknih/openlibrary/google_books
+					stats[key] = stats.get(key, 0) + 1
 
 		# Step 4: LLM fallback only if deterministic + online failed AND the
 		# book has usable first-page text (LLM cannot work without it).
