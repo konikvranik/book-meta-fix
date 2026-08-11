@@ -23,12 +23,18 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from .detectors import _is_anonym_spelling
 from .models import BookMeta, Verdict
 
 log = logging.getLogger(__name__)
 
 DEFAULT_PATH_PATTERN = "{author}/{title} ({id})"
 DEFAULT_NEEDFIX_DIR = "needfix"
+
+# Canonical folder name for books whose author is an anonym spelling
+# ("Neznamy", "neznámý - neuveden", "Unknown", …). All variants collapse here
+# so the library has a single anonym tree instead of one per spelling.
+ANONYM_AUTHOR_NAME = "Anonym"
 
 # Characters forbidden in file/folder names on Windows + most filesystems.
 # Also strip leading/trailing dots and spaces (filesystem-specific issues).
@@ -62,7 +68,12 @@ def compute_target_path(meta: BookMeta, pattern: str, library: Path) -> Path:
 		{series}      — series name (or empty)
 		{series_index}— index within series (or empty)
 	"""
-	author = meta.authors[0] if meta.authors else "Anonym"
+	author = meta.authors[0] if meta.authors else ANONYM_AUTHOR_NAME
+	# Collapse every anonym spelling ("Neznamy", "neznámý - neuveden",
+	# "Unknown", …) into one canonical folder so the library has a single
+	# anonym tree.
+	if _is_anonym_spelling(author):
+		author = ANONYM_AUTHOR_NAME
 	author_sort = _author_sort(author)
 	title = meta.title or "Untitled"
 	title_sort = _title_sort(title)
@@ -246,6 +257,11 @@ def compute_needfix_path(meta: BookMeta, library: Path, needfix_dir: str) -> Pat
 
 	If the book is already under needfix/ (re-diagnosed in a later run), the
 	existing prefix is stripped first to avoid a double needfix/needfix/ path.
+
+	Anonym author folders ("Neznamy", "neznámý - neuveden", "Unknown", …) are
+	collapsed to the canonical ANONYM_AUTHOR_NAME so all anonym books live
+	under a single needfix/<Anonym>/ tree regardless of the spelling variant
+	in their metadata.
 	"""
 	try:
 		rel = Path(meta.path).relative_to(library)
@@ -258,6 +274,10 @@ def compute_needfix_path(meta: BookMeta, library: Path, needfix_dir: str) -> Pat
 		parts = rel.parts
 		if len(parts) > 1 and parts[0] == needfix_dir:
 			rel = Path(*parts[1:])
+	# Canonicalize the author folder: any anonym spelling -> "Anonym".
+	parts = rel.parts
+	if len(parts) > 1 and _is_anonym_spelling(parts[0]):
+		rel = Path(ANONYM_AUTHOR_NAME, *parts[1:])
 	return library / needfix_dir / rel
 
 

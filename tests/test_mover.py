@@ -13,9 +13,11 @@ from pathlib import Path
 
 from book_meta_fix.models import BookMeta, Verdict
 from book_meta_fix.mover import (
+	ANONYM_AUTHOR_NAME,
 	DEFAULT_NEEDFIX_DIR,
 	DEFAULT_PATH_PATTERN,
 	compute_needfix_path,
+	compute_target_path,
 	organize,
 )
 
@@ -205,3 +207,52 @@ class TestPruneEmptyParents:
 		# Nothing moved, nothing pruned.
 		assert src.is_dir()
 		assert (tmp_path / "Bad Author").is_dir()
+
+
+class TestAnonymCanonicalFolder:
+	"""All anonym spellings ('Neznamy', 'neznámý - neuveden', 'Unknown',
+	'Anonymous', 'autor neuveden') must collapse into a single canonical
+	'Anonym/' folder during organize(), so the library has one anonym tree
+	instead of one per spelling variant."""
+
+	def test_target_path_canonicalizes_anonym_variants(self, tmp_path: Path) -> None:
+		"""compute_target_path maps every anonym spelling to <lib>/Anonym/..."""
+		for variant in ("Neznamy", "neznámý - neuveden", "Unknown",
+		                 "Anonymous", "anonym", "autor neuveden"):
+			meta = _book(1, path=str(tmp_path / variant / "Book (1)"),
+			             title="Book", authors=[variant])
+			dest = compute_target_path(meta, DEFAULT_PATH_PATTERN, tmp_path)
+			assert dest == tmp_path / ANONYM_AUTHOR_NAME / "Book (1)", (
+				f"variant {variant!r} should map to {ANONYM_AUTHOR_NAME}/")
+
+	def test_needfix_path_canonicalizes_anonym_variants(self, tmp_path: Path) -> None:
+		"""compute_needfix_path maps every anonym spelling to needfix/Anonym/..."""
+		for variant in ("Neznamy", "neznámý - neuveden", "Unknown", "Anonymous"):
+			meta = _book(1, path=str(tmp_path / variant / "Book (1)"),
+			             title="Book", authors=[variant])
+			# BookMeta needs author_folder/title_folder for the needfix fallback path
+			meta.author_folder = variant
+			meta.title_folder = "Book (1)"
+			dest = compute_needfix_path(meta, tmp_path, DEFAULT_NEEDFIX_DIR)
+			assert dest == tmp_path / DEFAULT_NEEDFIX_DIR / ANONYM_AUTHOR_NAME / "Book (1)", (
+				f"variant {variant!r} should map to {DEFAULT_NEEDFIX_DIR}/{ANONYM_AUTHOR_NAME}/")
+
+	def test_real_author_not_canonicalized(self, tmp_path: Path) -> None:
+		"""A real author name must NOT be rewritten to 'Anonym'."""
+		meta = _book(1, path=str(tmp_path / "Karel Čapek" / "R.U.R. (1)"),
+		             title="R.U.R.", authors=["Karel Čapek"])
+		dest = compute_target_path(meta, DEFAULT_PATH_PATTERN, tmp_path)
+		assert "Karel Čapek" in dest.parts
+		assert ANONYM_AUTHOR_NAME not in dest.parts
+
+	def test_organize_moves_neznamy_book_to_anonym(self, tmp_path: Path) -> None:
+		"""End-to-end: an OK book in a 'Neznamy/' folder lands in 'Anonym/'."""
+		src = tmp_path / "Neznamy" / "Some Book (1)"
+		src.mkdir(parents=True)
+		(src / "metadata.opf").touch()
+		meta = _book(1, path=str(src), title="Some Book", authors=["Neznamy"])
+
+		organize([(meta, Verdict.OK)], tmp_path, dry_run=False)
+
+		assert (tmp_path / ANONYM_AUTHOR_NAME / "Some Book (1)").is_dir()
+		assert not (tmp_path / "Neznamy").exists()

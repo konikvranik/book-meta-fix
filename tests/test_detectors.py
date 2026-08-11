@@ -15,6 +15,7 @@ accent-stripped), so only genuine filename-as-title cases fire.
 from __future__ import annotations
 
 from book_meta_fix.detectors import (
+	_is_anonym_spelling,
 	detect,
 	rule_c12_bad_author,
 	rule_c2_filename_title,
@@ -256,3 +257,71 @@ class TestC12BadAuthor:
 		m = _meta(author_folder="anthony burgess", authors=["anthony burgess"])
 		d = detect(m)
 		assert d.category == "C12"
+
+
+class TestAnonymSpellings:
+	"""_is_anonym_spelling and the C9 detector must recognize the full range
+	of anonym spellings found in the library ('Neznamy', 'neznámý - neuveden')
+	AND defensible variants not yet seen ('autor neuveden', 'Neznámý autor',
+	'enznámý' typo) — while leaving real-name phrases like 'Neznámý vojín'
+	(Unknown Soldier) alone."""
+
+	def test_basic_spellings(self):
+		"""The canonical spellings are all recognized."""
+		for s in ("anonym", "anonymní", "anonymous", "neznamy", "neznámý",
+		          "neuveden", "unknown", ""):
+			assert _is_anonym_spelling(s), f"{s!r} should be anonym"
+
+	def test_compound_phrase_is_anonym(self):
+		"""'neznámý - neuveden' — compound of two anonym spellings joined by
+		a separator. Found in the real library (Bible - Nový zákon)."""
+		assert _is_anonym_spelling("neznámý - neuveden") is True
+
+	def test_compound_with_autor_is_anonym(self):
+		"""'autor neuveden' and 'Neznámý autor' — 'autor' is a neutral token
+		that, combined with an anonym spelling, denotes anonym."""
+		assert _is_anonym_spelling("autor neuveden") is True
+		assert _is_anonym_spelling("Neznámý autor") is True
+
+	def test_enznamy_typo_is_anonym(self):
+		"""'enznámý' is a common typo of 'neznámý' (transposed first letters)."""
+		assert _is_anonym_spelling("enznámý") is True
+
+	def test_unknown_soldier_not_anonym(self):
+		"""'Neznámý vojín' (Unknown Soldier) is NOT anonym — 'vojín' is a real
+		noun. This is the key false-positive the user warned about."""
+		assert _is_anonym_spelling("neznámý vojín") is False
+		assert _is_anonym_spelling("Neznámý vojín") is False
+
+	def test_bare_autor_is_not_anonym(self):
+		"""The bare word 'autor' is a placeholder, not an anonym spelling —
+		it must be caught by C5 (_PLACEHOLDER_RE), not reach C9 via this path."""
+		assert _is_anonym_spelling("autor") is False
+
+	def test_real_author_not_anonym(self):
+		"""A real person name is never an anonym spelling."""
+		assert _is_anonym_spelling("Karel Čapek") is False
+		assert _is_anonym_spelling("Agatha Christie") is False
+
+	def test_none_not_anonym(self):
+		"""Defensive: None input returns False, not an exception."""
+		assert _is_anonym_spelling(None) is False
+
+	def test_detect_routes_compound_anonym_to_c9(self):
+		"""End-to-end: detect() returns C9 for a 'autor neuveden' author."""
+		m = _meta(author_folder="autor neuveden", authors=["autor neuveden"])
+		d = detect(m)
+		assert d.category == "C9"
+
+	def test_bible_in_neznamy_neuveden_is_ok(self):
+		"""Regression for the real library: Bible with author 'neznámý - neuveden'
+		is a genuine anonymous work and must be C9 verdict OK (whitelisted), not
+		C12 (all-lowercase) or C9 NEEDS_REVIEW."""
+		m = _meta(
+			author_folder="neznámý - neuveden",
+			authors=["neznámý - neuveden"],
+			title="Bible - Nový zákon",
+		)
+		d = detect(m)
+		assert d.category == "C9"
+		assert d.verdict.value == "OK"

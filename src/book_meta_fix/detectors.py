@@ -42,9 +42,46 @@ Rule = Callable[[BookMeta], "Diagnosis | None"]
 # Czech/Slovak "anonymous" spellings — almost always signal a corrupted record,
 # NOT a genuine anonymous work. Genuine anonym (Bible etc.) is whitelisted below.
 # Compared case-insensitively (callers .lower() before checking membership).
+#
+# 'autor' is included so compound phrases like "autor neuveden" or
+# "neznámý autor" are recognized as anonym. The bare word "autor" alone is
+# caught earlier by _PLACEHOLDER_RE (rule_c5), so it never reaches C9.
 _ANONYM_SPELLINGS = {
-	"", "anonym", "anonymní", "anonymni", "anonymous", "neznamy", "neznámý", "unknown",
+	"", "anonym", "anonymní", "anonymni", "anonymous",
+	"neznamy", "neznámý", "enznámý",  # last is a common typo of neznámý
+	"neuveden", "neuvedeno", "neuvedený", "neuvedeny",
+	"autor",  # only meaningful inside a compound (e.g. "autor neuveden")
+	"unknown", "unbekannt",
 }
+
+# Separators that join multiple anonym spellings into one field, e.g.
+# "neznámý - neuveden", "anonym / neuveden". A field whose tokens (after
+# splitting on these) are ALL anonym spellings is itself an anonym spelling.
+_ANONYM_SEP_RE = re.compile(r"[\s,/;-]+")
+
+
+def _is_anonym_spelling(name: str) -> bool:
+	"""True if *name* denotes 'anonymous' (exact match, or a compound of only
+	anonym spellings joined by separators like '-' or '/').
+
+	Handles 'neznámý - neuveden', 'autor neuveden', 'anonym/neuveden', etc.
+	without enumerating every combination. The bare token 'autor' is in the
+	set ONLY so compounds resolve; a standalone 'autor' is intercepted earlier
+	by _PLACEHOLDER_RE (rule_c5), so it never reaches C9 via this path.
+	"""
+	if name is None:
+		return False
+	low = name.strip().lower()
+	if low in _ANONYM_SPELLINGS:
+		# A bare 'autor' is a placeholder, not an anonym spelling — leave it
+		# to C5. Only accept it as part of a compound (handled below).
+		if low == "autor":
+			return False
+		return True
+	tokens = [t for t in _ANONYM_SEP_RE.split(low) if t]
+	# Must split into >1 token (a single token is covered by the set above)
+	# and every token must be a known anonym spelling.
+	return len(tokens) > 1 and all(t in _ANONYM_SPELLINGS for t in tokens)
 
 # Titles that indicate a GENUINE anonymous work (religion/folklore).
 _REAL_ANONYM_RE = re.compile(r"\b(bible|bibl[ei]|kralick|[mn]ový?\s+z[áa]kon|knihy\s+moj|koran|quran|edda)\b", re.IGNORECASE)
@@ -56,7 +93,7 @@ _WORD_TMP_RE = re.compile(r"^microsoft\s+word\s*-\s*", re.IGNORECASE)
 _TRUNCATED_RE = re.compile(r"[_]n[_]?_$|_txt$|_n$")
 
 # Placeholder record: literally "title" / "author" / "subject"
-_PLACEHOLDER_RE = re.compile(r"^(title|author|subject|name|unknown)$", re.IGNORECASE)
+_PLACEHOLDER_RE = re.compile(r"^(title|author|autor|subject|name|unknown)$", re.IGNORECASE)
 
 # Word lock-file prefix
 _WORD_LOCK_RE = re.compile(r"^~\$")
@@ -188,7 +225,7 @@ def rule_c12_bad_author(meta: BookMeta) -> Diagnosis | None:
 			continue
 		# Leave anonym spellings to C9, which knows the genuine-anonym whitelist
 		# (Bible, Koran, …). Otherwise C12 swallows them as "all-lowercase".
-		if candidate.strip().lower() in _ANONYM_SPELLINGS:
+		if _is_anonym_spelling(candidate):
 			continue
 		if _BAD_AUTHOR_PREFIX_RE.match(candidate):
 			reasons.append(f"artefact prefix in author: {candidate!r}")
@@ -435,7 +472,7 @@ def rule_c9_anonym(meta: BookMeta) -> Diagnosis | None:
 	# A real (non-anonym) author in the metadata means the record is fine,
 	# regardless of what folder it happens to live in.
 	has_real_author = any(
-		a.strip().lower() not in _ANONYM_SPELLINGS
+		not _is_anonym_spelling(a)
 		for a in meta.authors
 		if a
 	)
@@ -445,7 +482,7 @@ def rule_c9_anonym(meta: BookMeta) -> Diagnosis | None:
 	# (author_folder alone, without an anonym authors[], is still C9 because
 	# the metadata has no author at all and the folder confirms it.)
 	is_anonym = any(
-		a.strip().lower() in _ANONYM_SPELLINGS
+		_is_anonym_spelling(a)
 		for a in (meta.author_folder, *meta.authors)
 		if a
 	)
