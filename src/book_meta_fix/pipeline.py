@@ -19,6 +19,7 @@ Cost-aware fix strategy for NEEDS_REVIEW books (cheap first, LLM last):
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +27,7 @@ from .detectors import detect as detect_fn
 from .enrichers import Enricher
 from .extractors import ExtractedMeta, extract
 from .library import Cache, scan_library
-from .models import BookMeta, Verdict
+from .models import BookMeta, Confidence, Diagnosis, Verdict
 from .review import build_review, parse_review
 from .verifier import verify
 from .writers import write_book_meta
@@ -42,20 +43,43 @@ def run_pipeline(
 	skip_enrich: bool = False,
 	skip_verify: bool = False,
 	llm_provider: Any = None,
-	llm_categories: tuple[str, ...] = ("C1", "C4"),
+	llm_categories: tuple[str, ...] = ("ALL",),
 	limit: int | None = None,
 	workers: int = 10,
 	progress_callback: Any = None,
 	only_needs_review: bool = True,
+	review_writer: Any = None,
+	verify_ok: bool = False,
+	strict_verify: bool = True,
+	llm_loop: bool = True,
+	stats: dict | None = None,
 ) -> list[tuple[BookMeta, "Diagnosis", "Verification | None", "EnrichedMeta | None"]]:  # noqa: F821
 	"""Run the full pipeline over the whole library.
 
 	Returns a list of (meta, diagnosis, verification, enriched) tuples.
 
+	*stats* (optional): if a dict is passed in, it is populated with a
+	breakdown of how books were processed (offline/online/LLM fix sources,
+	skips, errors, cover detections). The caller can then print a summary
+	table. When None (default), an internal dict is used and discarded.
+
 	*only_needs_review* (default True): skip books that the detector already
 	classifies as OK or VERIFIED. This makes the pipeline incremental —
 	repeated runs only touch books that still need work. Set to False to
-	force a full re-scan (e.g. when detector rules change).
+	force a full re-scan (e.g. when detector rules change). Overridden by
+	*verify_ok*: when verify_ok is True, OK books are kept so they can be
+	checked against their content (audit mode).
+
+	*verify_ok* (default False): when True, OK books are verified against
+	their content via :func:`verify`. A MISMATCH (or an UNCERTAIN, when
+	*strict_verify* is True) reclassifies the book to NEEDS_REVIEW and runs
+	the same enrichment/LLM fix path as for detector-flagged books. This is
+	an audit mode — it reads every OK book's content, so it is much slower
+	than the default incremental run.
+
+	*strict_verify* (default True): only meaningful with *verify_ok*. When
+	True, UNCERTAIN (fuzzy title match 0.5–0.8) is also treated as a
+	mismatch and reclassified; when False only a clear MISMATCH (< 0.5) is.
 
 	If *limit* is given, it caps the number of books processed AFTER the
 	only_needs_review filter. So `--limit 500` means "process at most 500
@@ -65,13 +89,17 @@ def run_pipeline(
 	extraction, online lookup, LLM call) runs in a ThreadPoolExecutor with
 	this many workers. Output order matches input order.
 	*progress_callback* (if given) is called with (i, total) after each book.
-	"""
-	from concurrent.futures import ThreadPoolExecutor
 
+	*review_writer* (optional): if a ReviewWriter is supplied, each processed
+	result is also streamed to review.yaml via ``review_writer.submit()`` as it
+	completes (Unix-pipe style), instead of writing the whole file at the end.
+	"""
 	all_books = scan_library(library, cache=cache)
 	# Apply the detector cheaply to filter out already-OK books (incremental).
 	# This is fast (no I/O — just regex/heuristics over metadata).
-	if only_needs_review:
+	# verify_ok overrides this: OK books must be kept so they can be verified
+	# against their content (audit mode).
+	if only_needs_review and not verify_ok:
 		books = [b for b in all_books if detect_fn(b).verdict != Verdict.OK]
 		log.info(
 			"pipeline: %d total books, %d already OK -> %d to process",
@@ -79,14 +107,37 @@ def run_pipeline(
 		)
 	else:
 		books = list(all_books)
+		if verify_ok:
+			log.info(
+				"pipeline: %d total books, verify-ok mode (OK books kept for content check)",
+				len(all_books),
+			)
 	if limit is not None:
 		books = books[:limit]
 	total = len(books)
-	stats = {
+	# Per-source fix counters, filled as books are processed. When the caller
+	# passes a stats dict we merge into it (so the CLI can print a summary
+	# table); otherwise we keep a throwaway local dict for the log line.
+	_stats = {
 		"ok": 0, "needs_review": 0, "det_fixed": 0, "online_fixed": 0,
-		"llm_fixed": 0, "llm_skipped_no_text": 0, "llm_no_result": 0, "llm_error": 0,
-		"unfixed": 0,
+		"llm_fixed": 0, "llm_flash_fixed": 0, "llm_final_fixed": 0, "llm_low_confidence": 0,
+		"llm_skipped_no_text": 0, "llm_no_result": 0, "llm_error": 0,
+		"unfixed": 0, "errors": 0, "content_mismatch": 0,
+		"covers_generated": 0, "covers_missing": 0,
+		# Online fix source breakdown (sub-rows of online_fixed).
+		"online_databazeknih": 0, "online_openlibrary": 0, "online_google_books": 0,
+		# Offline fix source breakdown (sub-rows of det_fixed).
+		"offline_content": 0, "offline_embedded": 0,
+		"total": total,
 	}
+	if stats is not None:
+		# Seed any missing keys so the caller's dict always has the full set,
+		# while preserving any caller-provided starting values.
+		for k, v in _stats.items():
+			stats.setdefault(k, v)
+		stats_ref = stats
+	else:
+		stats_ref = _stats
 
 	# Per-book work closure. The shared enricher/llm are thread-safe:
 	# - openai client uses an internal httpx Client (thread-safe)
@@ -95,33 +146,102 @@ def run_pipeline(
 	def _process(meta: BookMeta):
 		return _process_book(
 			meta, enricher=enricher, skip_enrich=skip_enrich, skip_verify=skip_verify,
-			llm_provider=llm_provider, llm_categories=llm_categories, stats=stats,
+			llm_provider=llm_provider, llm_categories=llm_categories, stats=stats_ref,
+			verify_ok=verify_ok, strict_verify=strict_verify, llm_loop=llm_loop,
 		)
+
+	def _process_safe(meta: BookMeta):
+		"""Wrap _process so one book's failure never aborts the whole run.
+
+		On exception we log, count it, and return a minimal tuple so the book
+		still appears in the review report (with NEEDS_REVIEW diagnosis and no
+		proposal). This preserves any LLM tokens already spent on other books:
+		they are reflected in the report rather than thrown away by a crash.
+		"""
+		try:
+			return _process(meta)
+		except Exception as e:  # noqa: BLE001
+			stats_ref["errors"] += 1
+			log.exception("unhandled error processing %s (calibre_id=%s); recording as NEEDS_REVIEW with no proposal", meta.path, meta.calibre_id)
+			# Build a NEEDS_REVIEW diagnosis so the book still lands in the report.
+			diag = Diagnosis(category="ERROR", reason=f"processing failed: {e}", verdict=Verdict.NEEDS_REVIEW, confidence=Confidence.HIGH)
+			return (meta, diag, None, None)
+
+	def _stream(result: tuple | None) -> tuple | None:
+		"""Push a result to the streaming writer (if any), then return it.
+
+		None results (catastrophic worker failure) are not streamed.
+		"""
+		if review_writer is not None and result is not None:
+			try:
+				review_writer.submit(result)
+			except Exception:  # noqa: BLE001
+				log.debug("review writer submit failed (non-fatal)", exc_info=True)
+		return result
 
 	# No point spawning a pool of 10 if we only have 3 books.
 	n_workers = max(1, min(workers, total))
+	interrupted = False
 	if n_workers == 1:
 		# Serial path — keeps stack traces readable for debugging
 		results = []
 		for i, meta in enumerate(books):
-			results.append(_process(meta))
+			try:
+				results.append(_stream(_process_safe(meta)))
+			except KeyboardInterrupt:
+				interrupted = True
+				log.warning("interrupted by user (Ctrl-C) after %d/%d books; keeping partial results", i, total)
+				break
 			if progress_callback is not None:
 				progress_callback(i + 1, total)
 	else:
 		results = []
 		with ThreadPoolExecutor(max_workers=n_workers) as pool:
-			# submit + as_completed would give fastest-first ordering, but we
-			# want input-order output, so we submit all and read futures in order.
-			futures = [pool.submit(_process, meta) for meta in books]
-			for i, fut in enumerate(futures):
-				results.append(fut.result())
-				if progress_callback is not None:
-					progress_callback(i + 1, total)
+			# Submit all, then read results AS THEY COMPLETE (as_completed).
+			# Reading futures in submit order blocked the progress bar on the
+			# slowest in-flight book: 9 cheap books would finish while we
+			# waited on the 1 slow LLM call, then the bar jumped 1 -> 10 at
+			# once. as_completed updates the bar the instant each book is done,
+			# which is what the user wants to see. Review.yaml order becomes
+			# completion-order (not input-order); that's fine because each
+			# entry carries its id and the file is a multi-doc stream.
+			futures = {pool.submit(_process_safe, meta): meta for meta in books}
+			done = 0
+			try:
+				for fut in as_completed(futures):
+					try:
+						results.append(_stream(fut.result()))
+					except KeyboardInterrupt:
+						interrupted = True
+						break
+					except Exception as e:  # noqa: BLE001
+						stats_ref["errors"] += 1
+						log.exception("worker future failed unexpectedly: %s", e)
+						results.append(None)
+					finally:
+						done += 1
+						if progress_callback is not None:
+							progress_callback(done, total)
+			except KeyboardInterrupt:
+				interrupted = True
+			if interrupted:
+				log.warning("interrupted by user (Ctrl-C) after %d/%d books; cancelling pending work, keeping partial results", done, total)
+				for f in futures:
+					f.cancel()
 
+	# Drop any None placeholders from a catastrophic worker failure (kept above
+	# only to preserve order/count); generate_review iterates results as-is.
+	results = [r for r in results if r is not None]
+
+	if interrupted:
+		log.warning("pipeline interrupted: returning %d partial results (of %d books) for review", len(results), total)
 	log.info(
-		"pipeline: %d ok, %d needs_review (det=%d, online=%d, llm=%d, llm_skipped=%d, llm_no_result=%d, unfixed=%d)",
-		stats["ok"], stats["needs_review"], stats["det_fixed"], stats["online_fixed"],
-		stats["llm_fixed"], stats["llm_skipped_no_text"], stats["llm_no_result"], stats["unfixed"],
+		"pipeline: %d ok, %d needs_review (content_mismatch=%d, det=%d, online=%d, llm_flash=%d, llm_final=%d, llm_low=%d, llm_other=%d, llm_skipped=%d, llm_no_result=%d, unfixed=%d, covers_gen=%d, covers_missing=%d, errors=%d)%s",
+		stats_ref["ok"], stats_ref["needs_review"], stats_ref["content_mismatch"], stats_ref["det_fixed"], stats_ref["online_fixed"],
+		stats_ref["llm_flash_fixed"], stats_ref["llm_final_fixed"], stats_ref["llm_low_confidence"], stats_ref["llm_fixed"],
+		stats_ref["llm_skipped_no_text"], stats_ref["llm_no_result"], stats_ref["unfixed"],
+		stats_ref["covers_generated"], stats_ref["covers_missing"], stats_ref["errors"],
+		" [INTERRUPTED]" if interrupted else "",
 	)
 	return results
 
@@ -135,37 +255,101 @@ def _process_book(
 	llm_provider: Any,
 	llm_categories: tuple[str, ...],
 	stats: dict,
+	verify_ok: bool = False,
+	strict_verify: bool = True,
+	llm_loop: bool = True,
 ) -> tuple[BookMeta, "Diagnosis", "Verification | None", "EnrichedMeta | None"]:  # noqa: F821
-	"""Process one book end-to-end. Thread-safe (no shared mutable state except *stats*)."""
+	"""Process one book end-to-end. Thread-safe (no shared mutable state except *stats*).
+
+	*verify_ok*: when True, OK books (detectors found nothing wrong) are still
+	checked against the book's content via :func:`verify`. A MISMATCH (or, with
+	*strict_verify*, also an UNCERTAIN) reclassifies the book to NEEDS_REVIEW
+	so the same enrichment/LLM fix path runs as for detector-flagged books.
+	"""
 	diag = detect_fn(meta)
 	verification = None
 	enriched = None
+	# Count cover-specific diagnoses for the pipeline summary.
+	if diag.category == "C11":
+		stats["covers_generated"] += 1
+	elif diag.category == "MISSING_COVER":
+		stats["covers_missing"] += 1
+	# Carries an already-extracted ExtractedMeta into the fix path, so a book
+	# that was verified (and reclassified) doesn't get extracted a second time.
+	preextracted: ExtractedMeta | None = None
 
-	is_needs_review = diag.verdict == Verdict.NEEDS_REVIEW or diag.category in ("MISSING_ISBN", "MISSING_YEAR")
+	# --- OK books: optionally verify against content, else stay OK ---
+	if diag.verdict == Verdict.OK and meta.primary_file:
+		if verify_ok and not skip_verify:
+			try:
+				verification = verify(meta)
+			except Exception as e:  # noqa: BLE001
+				log.debug("verify failed for %s: %s", meta.path, e)
+			if verification is not None:
+				mismatch = verification.result == "MISMATCH"
+				uncertain = verification.result == "UNCERTAIN" and strict_verify
+				if mismatch or uncertain:
+					# Reclassify OK -> NEEDS_REVIEW so the fix path below runs.
+					# Keep the extracted content from verify() to reuse it.
+					preextracted = verification.extracted
+					diag = Diagnosis(
+						category="CONTENT_MISMATCH",
+						reason=f"metadata neodpovídají obsahu ({verification.result}: {verification.reason})",
+						confidence=Confidence.HIGH,
+						verdict=Verdict.NEEDS_REVIEW,
+					)
+					stats["content_mismatch"] += 1
+				else:
+					# VERIFIED / NO_CONTENT / non-strict UNCERTAIN -> stays OK.
+					stats["ok"] += 1
+					return (meta, diag, verification, None)
+			else:
+				# verify() failed — treat as OK (can't say it's broken).
+				stats["ok"] += 1
+				return (meta, diag, None, None)
+		else:
+			stats["ok"] += 1
+			return (meta, diag, None, None)
 
-	# --- OK books: just verify against content ---
-	if diag.verdict == Verdict.OK and not skip_verify and meta.primary_file:
-		try:
-			verification = verify(meta)
-		except Exception as e:  # noqa: BLE001
-			log.debug("verify failed for %s: %s", meta.path, e)
-		stats["ok"] += 1
+	is_needs_review = diag.verdict == Verdict.NEEDS_REVIEW or diag.category in ("MISSING_ISBN", "MISSING_YEAR", "MISSING_COVER")
 
 	# --- NEEDS_REVIEW books: try cheap fixes first, LLM last ---
-	elif is_needs_review:
+	if is_needs_review:
 		stats["needs_review"] += 1
-		# Extract content once (reused by both deterministic fixes and LLM)
-		extracted = _safe_extract(meta)
+		# Extract content once (reused by both deterministic fixes and LLM).
+		# Prefer content already extracted during verify() to avoid a second
+		# read of the book file.
+		extracted = preextracted if preextracted is not None else _safe_extract(meta)
 
 		# Step 2a-2c: deterministic fixes from extracted content + online lookup
 		if extracted is not None:
-			enriched = _try_deterministic_fix(meta, diag, extracted, enricher, skip_enrich)
+			try:
+				enriched = _try_deterministic_fix(meta, diag, extracted, enricher, skip_enrich)
+			except Exception as e:  # noqa: BLE001
+				log.debug("deterministic fix failed for %s: %s", meta.path, e)
+				enriched = None
 			if enriched is not None:
-				stats["det_fixed" if enriched.source.startswith("embedded") else "online_fixed"] += 1
+				# 'embedded' (OPF compare) and 'content' (text_meta from page
+				# text) are both offline/deterministic; the rest are online.
+				# Bucket by fix source for the post-report stats table.
+				if enriched.source in ("embedded", "content"):
+					stats["det_fixed"] = stats.get("det_fixed", 0) + 1
+					if enriched.source == "content":
+						stats["offline_content"] = stats.get("offline_content", 0) + 1
+					else:
+						stats["offline_embedded"] = stats.get("offline_embedded", 0) + 1
+				else:
+					stats["online_fixed"] = stats.get("online_fixed", 0) + 1
+					key = f"online_{enriched.source}"  # databazeknih/openlibrary/google_books
+					stats[key] = stats.get(key, 0) + 1
 
 		# Step 4: LLM fallback only if deterministic + online failed AND the
 		# book has usable first-page text (LLM cannot work without it).
-		if enriched is None and llm_provider is not None and diag.category in llm_categories:
+		# llm_categories gates WHICH books the LLM is asked about: each book is
+		# one request that returns all fields at once (cost is per-book, not
+		# per-category). 'ALL' expands to every category except C9 (legitimate
+		# anonyms like the Bible — an LLM-invented author there would be wrong).
+		if enriched is None and llm_provider is not None and _llm_wants(diag.category, llm_categories):
 			# Pre-filter: skip LLM if no first-page text or only CSS noise.
 			# This is the #1 cost saver — books with empty/CSS-only content
 			# would waste an API call for nothing.
@@ -175,10 +359,22 @@ def _process_book(
 			else:
 				try:
 					evidence = _build_llm_evidence(meta, diag, extracted)
-					reconciled = llm_provider.reconcile(evidence)
+					# reconcile_loop tries the free Flash model first (with
+					# verify_proposal feedback between attempts), then the paid
+					# final model. Falls back to plain reconcile() for mock
+					# providers that don't implement the loop (back-compat).
+					reconciled, llm_src = _llm_reconcile_with_loop(llm_provider, evidence, extracted, loop=llm_loop)
 					if reconciled is not None and _reconciled_is_useful(reconciled, meta):
-						enriched = _reconciled_to_enriched(reconciled)
-						stats["llm_fixed"] += 1
+						enriched = _reconciled_to_enriched(reconciled, source=llm_src)
+						# Bucket the result by how it was obtained.
+						if llm_src in ("llm:flash", "llm:loop"):
+							stats["llm_flash_fixed"] += 1
+						elif llm_src == "llm:high":
+							stats["llm_final_fixed"] += 1
+						elif llm_src == "llm:low":
+							stats["llm_low_confidence"] += 1
+						else:
+							stats["llm_fixed"] += 1
 					else:
 						stats["llm_no_result"] += 1
 				except Exception as e:  # noqa: BLE001
@@ -206,6 +402,24 @@ def _safe_extract(meta: BookMeta) -> ExtractedMeta | None:
 	except Exception as e:  # noqa: BLE001
 		log.debug("extract failed for %s: %s", meta.path, e)
 		return None
+
+
+# Categories that 'ALL' deliberately excludes: a known-good state where sending
+# the book to the LLM would risk inventing a wrong author rather than fixing one.
+_LLM_ALL_EXCLUDE = frozenset({"C9"})
+
+
+def _llm_wants(category: str, llm_categories: tuple[str, ...]) -> bool:
+	"""Should a book in *category* be sent to the LLM?
+
+	- Explicit category list (e.g. ('C1','C2')): category must be in the tuple.
+	- 'ALL': every category EXCEPT those in _LLM_ALL_EXCLUDE (currently C9 —
+	  legitimate anonyms like the Bible/Koran; an LLM there would fabricate an
+	  author). 'ALL' may be combined with explicit inclusions/exclusions.
+	"""
+	if "ALL" in llm_categories:
+		return category not in _LLM_ALL_EXCLUDE
+	return category in llm_categories
 
 
 def _has_usable_text(text: str | None) -> bool:
@@ -239,45 +453,93 @@ def _try_deterministic_fix(
 	enricher: Enricher | None,
 	skip_enrich: bool,
 ) -> "EnrichedMeta | None":  # noqa: F821
-	"""Try cheap fixes: online lookup by ISBN, then embedded metadata.
+	"""Try cheap fixes before falling back to the LLM. Cheap-first order:
+
+	  A. Offline metadata mined from the book's page text (text_meta) — no I/O.
+	  B. Online lookup by ISBN (text-scan ISBN > embedded ISBN > DB ISBN).
+	  C. Online lookup by title + author (text-mined > embedded > DB).
+	  D. Embedded-OPF compare (only if cleaner than DB; calibre may have
+	     corrupted it, so this is the weakest signal and runs last).
 
 	Returns an EnrichedMeta if we found something better than the current
-	(broken) metadata, else None.
+	(broken) metadata, else None (caller falls back to the LLM).
 	"""
-	# Prefer ISBN found in the book's text over the (likely missing/wrong) DB ISBN
-	content_isbn = extracted.isbn or extracted.isbn_from_text
+	from .enrichers import EnrichedMeta
 
-	# --- 2a. Online lookup by ISBN (cached, ~1s) ---
+	# Best available ISBN independent of the (possibly calibre-corrupted) DB:
+	# prefer the one scanned from the page text, then the embedded-OPF one.
+	content_isbn = extracted.isbn_from_text or extracted.isbn
+
+	# Best available title/author for an online title-search: prefer text-mined
+	# (independent of OPF), then embedded, then DB.
+	best_title = extracted.title_from_text or extracted.title or meta.title
+	best_authors = extracted.authors_from_text or extracted.authors or meta.authors
+	best_author = best_authors[0] if best_authors else None
+
+	# --- Phase B: online lookup by ISBN (cached, ~1s) ---
+	# databazeknih is title-only, so this hits OpenLibrary / Google Books.
 	if content_isbn and enricher is not None and not skip_enrich:
 		online = enricher.lookup(isbn=content_isbn)
-		if online is not None:
-			# Only accept if it brings something the DB doesn't have
-			if _is_better(online.title, meta.title) or _is_better(online.isbn, meta.isbn) or _is_better(online.year, meta.year):
-				return online
+		if online is not None and _online_is_useful(online, meta):
+			return online
 
-	# --- 2b/2c. Embedded metadata from content (if cleaner than DB) ---
-	# Note: embedded EPUB metadata is often a copy of the broken DB (calibre
-	# wrote it back). So we ONLY trust embedded if it's clearly cleaner:
-	# title without underscores, author that isn't "Neznamy", etc.
-	proposal_title = extracted.title if _is_better(extracted.title, meta.title) else None
-	proposal_authors = extracted.authors if any(_is_better(a, m) for a, m in zip(extracted.authors, meta.authors)) else None
-	# Drop authors that are obvious garbage even in the extracted data
-	if proposal_authors:
-		proposal_authors = [a for a in proposal_authors if a and a != "Neznamy" and "_" not in a]
+	# --- Phase C: online lookup by title + author ---
+	# This is the path that reaches databazeknih.cz (the strongest CZ/SK
+	# source) as well as OpenLibrary's title search. Skipped when we have no
+	# title to search on.
+	if best_title and enricher is not None and not skip_enrich:
+		online = enricher.lookup(title=best_title, author=best_author)
+		if online is not None and _online_is_useful(online, meta):
+			return online
 
-	if proposal_title or proposal_authors or (content_isbn and content_isbn != meta.isbn):
-		from .enrichers import EnrichedMeta
+	# --- Phase A: offline metadata mined from the book's page text ---
+	# Build a proposal from the text-mined fields when they are cleaner than
+	# the DB. These come from extractors.ExtractedMeta.*_from_text, populated
+	# by text_meta.extract_metadata_from_text over first_page_text.
+	proposal_title = extracted.title_from_text if _is_better(extracted.title_from_text, meta.title) else None
+	proposal_authors = [a for a in extracted.authors_from_text if _is_better(a, meta.authors[0] if meta.authors else None)] or None
+	proposal_isbn = content_isbn if (content_isbn and content_isbn != meta.isbn and _is_better(content_isbn, meta.isbn)) else None
+	proposal_publisher = extracted.publisher_from_text if _is_better(extracted.publisher_from_text, meta.publisher) else None
+	proposal_year = extracted.year_from_text if _is_better(extracted.year_from_text, meta.year) else None
 
+	# --- Phase D: embedded-OPF compare (weakest; calibre may have corrupted it) ---
+	# Only fill fields that Phase A did not already fill.
+	if proposal_title is None:
+		proposal_title = extracted.title if _is_better(extracted.title, meta.title) else None
+	if proposal_authors is None:
+		embedded_authors = extracted.authors if any(_is_better(a, m) for a, m in zip(extracted.authors, meta.authors)) else None
+		if embedded_authors:
+			proposal_authors = [a for a in embedded_authors if a and a != "Neznamy" and "_" not in a] or None
+
+	if proposal_title or proposal_authors or proposal_isbn or proposal_publisher or proposal_year:
 		return EnrichedMeta(
 			title=proposal_title,
 			authors=proposal_authors or [],
-			isbn=content_isbn if content_isbn != meta.isbn else None,
-			source="embedded",
+			isbn=proposal_isbn,
+			publisher=proposal_publisher,
+			year=proposal_year,
+			source="content",
 		)
 	return None
 
 
-def _is_better(candidate: str | None, current: str | None) -> bool:
+def _online_is_useful(online: "EnrichedMeta", meta: BookMeta) -> bool:  # noqa: F821
+	"""Does an online result bring something the DB doesn't already have?
+
+	Accepts the online record if ANY of its fields is better than the DB's
+	(title/author/isbn/year/publisher/genres), OR it has a cover_url (the one
+	field that may be useful even when all text metadata already matches —
+	the book's cover may be a generated placeholder that needs replacement).
+	This is the gate that keeps us from overwriting good metadata with a
+	no-op online hit.
+	"""
+	return any(
+		_is_better(getattr(online, f, None), getattr(meta, f, None))
+		for f in ("title", "isbn", "year", "publisher")
+	) or bool(getattr(online, "genres", None)) or bool(getattr(online, "cover_url", None))
+
+
+def _is_better(candidate: object | None, current: object | None) -> bool:
 	"""Is *candidate* a better (cleaner) value than *current*?
 
 	A candidate is "better" if EITHER:
@@ -287,11 +549,20 @@ def _is_better(candidate: str | None, current: str | None) -> bool:
 	    (e.g. "Čas přílivu" beats "Cas prilivu" — same text, but with proper
 	    diacritics). This catches the common case where Calibre stripped
 	    diacritics but didn't replace it with underscores.
+
+	Both arguments may be str, int (e.g. year), or None. Non-string truthy
+	values are treated as always-good (they can't carry textual corruption);
+	the diacritics check only applies to strings.
 	"""
 	if not candidate:
 		return False
 	if not current:
 		return True
+	# Non-string values (e.g. year as int) can't be "broken" textually, and
+	# any truthy value beats a falsy current (handled above). Treat the
+	# candidate as good and the current as not-broken unless it's a string.
+	if not isinstance(candidate, str) or not isinstance(current, str):
+		return isinstance(current, str) and _looks_broken(current) and not (isinstance(candidate, str) and _looks_broken(candidate))
 	candidate_bad = _looks_broken(candidate)
 	current_bad = _looks_broken(current)
 	if current_bad and not candidate_bad:
@@ -302,14 +573,51 @@ def _is_better(candidate: str | None, current: str | None) -> bool:
 		if _has_cz_diacritics(candidate) and not _has_cz_diacritics(current):
 			if _strip_diacritics(candidate).lower() == _strip_diacritics(current).lower():
 				return True
+		# Title-case check: candidate has each word capitalised (title case)
+		# while current is all-lowercase — same text but better casing. Common
+		# case where the DB stored the title lowercase but the title page (and
+		# thus text_meta) recovered proper title case. Only fires when the two
+		# are equal ignoring case, to avoid spurious "improvements".
+		if _is_better_title_case(candidate, current):
+			return True
 	return False
+
+
+def _is_better_title_case(candidate: str, current: str) -> bool:
+	"""True when *candidate* is the same text as *current* but better capitalised.
+
+	Catches the common CZ/SK case where calibre stored a sentence-case title
+	(``Čas přílivu`` — only the first word capitalised) but text_meta mined
+	proper title case from the title page (``Čas Přílivu``). Treats that as an
+	improvement worth proposing. Only fires when the two are equal ignoring
+	case, to avoid spurious "improvements".
+	"""
+	if not candidate or not current:
+		return False
+	if candidate.lower() != current.lower():
+		return False
+	cand_words = candidate.split()
+	cur_words = current.split()
+	if len(cand_words) < 2 or len(cand_words) != len(cur_words):
+		return False
+	# Count words (beyond the first) that start uppercase in each.
+	def _capitalised_beyond_first(words: list[str]) -> int:
+		return sum(1 for w in words[1:] if w[:1].isupper())
+	return _capitalised_beyond_first(cand_words) > _capitalised_beyond_first(cur_words)
 
 
 _BROKEN_VALUES = {"Neznamy", "Unknown", "anonym", "Anonymous", "Neznámý", ""}
 
 
-def _looks_broken(s: str) -> bool:
-	"""Does *s* have obvious corruption signals?"""
+def _looks_broken(s: str | object) -> bool:
+	"""Does *s* have obvious corruption signals?
+
+	Accepts any type and stringifies it, so callers can safely pass ints
+	(e.g. year) without a TypeError.
+	"""
+	if s is None:
+		return True
+	s = str(s)
 	if not s or s in _BROKEN_VALUES:
 		return True
 	if "_" in s:
@@ -377,8 +685,13 @@ def _reconciled_is_useful(r, meta: BookMeta) -> bool:  # noqa: ANN001
 	return False
 
 
-def _reconciled_to_enriched(r) -> "EnrichedMeta":  # noqa: F821
-	"""Convert a ReconciledMeta into the EnrichedMeta shape used by review.py."""
+def _reconciled_to_enriched(r, *, source: str | None = None) -> "EnrichedMeta":  # noqa: F821
+	"""Convert a ReconciledMeta into the EnrichedMeta shape used by review.py.
+
+	*source* overrides the default ``llm:<confidence>`` tag — used when the
+	result came through reconcile_loop, which already labels it
+	``llm:flash``/``llm:loop``/``llm:high``/``llm:low``.
+	"""
 	from .enrichers import EnrichedMeta
 
 	return EnrichedMeta(
@@ -392,8 +705,24 @@ def _reconciled_to_enriched(r) -> "EnrichedMeta":  # noqa: F821
 		series=r.series,
 		series_index=r.series_index,
 		genres=r.genres,
-		source=f"llm:{r.confidence}",
+		source=source or f"llm:{r.confidence}",
 	)
+
+
+def _llm_reconcile_with_loop(provider: Any, evidence: dict, extracted: Any, *, loop: bool = True) -> tuple[Any, str]:  # noqa: F821
+	"""Run the LLM, preferring the self-correction loop when available.
+
+	When *loop* is False (config BMF_LLM_LOOP=0 or --no-llm-loop), a single
+	``reconcile`` call is made instead of the Flash+feedback+final flow.
+	Providers that don't implement ``reconcile_loop`` always use ``reconcile``.
+
+	Returns (ReconciledMeta | None, source) where source is one of
+	llm:flash / llm:loop / llm:high / llm:low / llm:medium / ''.
+	"""
+	if loop and hasattr(provider, "reconcile_loop"):
+		return provider.reconcile_loop(evidence, extracted)
+	result = provider.reconcile(evidence)
+	return result, ("llm:medium" if result is not None else "")
 
 
 def auto_apply_results(
@@ -628,24 +957,41 @@ def _proposed_to_enriched(proposed: dict):  # noqa: ANN202
 
 
 def _yaml_safe_load(path: Path):
-	"""Load a YAML file, returning None on empty/invalid."""
+	"""Load a review YAML file (multi-doc or legacy single-list) into a flat
+	list of entry dicts. Returns None on empty/invalid."""
 	import yaml
 
 	try:
-		return yaml.safe_load(path.read_text(encoding="utf-8"))
+		docs = list(yaml.safe_load_all(path.read_text(encoding="utf-8")))
 	except yaml.YAMLError:
 		return None
+	entries = []
+	for doc in docs:
+		if doc is None:
+			continue
+		if isinstance(doc, list):
+			entries.extend(doc)
+		elif isinstance(doc, dict):
+			entries.append(doc)
+	return entries if entries else None
 
 
 def apply_review(review_path: Path, library: Path, *, dry_run: bool = True) -> dict:
 	"""Parse a review.yaml and apply approved changes to the library.
 
-	Returns a summary dict: {applied, rejected, errors}.
+	Returns a summary dict: {applied, rejected, deleted, snapshot, errors}.
+
+	``action: delete`` removes the whole book folder. Because that is not
+	reversible via the per-file ``.bak`` that ``write_book_meta`` keeps, the
+	folders slated for deletion are first bundled into a single
+	``deletion_snapshot_<stamp>.tar.gz`` (in dry-run mode nothing is archived
+	and nothing is removed).
 	"""
 	from .models import Diagnosis  # local to avoid cycle
 
 	items = parse_review(review_path)
-	summary = {"applied": 0, "rejected": 0, "errors": [], "dry_run": dry_run}
+	summary = {"applied": 0, "rejected": 0, "deleted": 0, "snapshot": None, "errors": [], "dry_run": dry_run}
+	deleted_paths: list[Path] = []
 
 	for item in items:
 		if item.action is None:
@@ -654,7 +1000,7 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True) -> d
 		if item.action == "reject":
 			summary["rejected"] += 1
 			continue
-		if item.action not in ("accept", "swap", "edit"):
+		if item.action not in ("accept", "swap", "edit", "delete"):
 			summary["errors"].append(f"id={item.id}: unknown action {item.action!r}")
 			continue
 
@@ -664,6 +1010,12 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True) -> d
 			folder = library / item.path
 		if not folder.is_dir():
 			summary["errors"].append(f"id={item.id}: folder not found: {folder}")
+			continue
+
+		# delete: just collect — actual removal happens after a single tar.gz
+		# snapshot is taken, so the whole batch can be rolled back together.
+		if item.action == "delete":
+			deleted_paths.append(folder)
 			continue
 
 		# Build the desired metadata
@@ -681,11 +1033,55 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True) -> d
 		except Exception as e:  # noqa: BLE001
 			summary["errors"].append(f"id={item.id}: write failed: {e}")
 
+	# Deletion pass: snapshot then remove. Dry-run reports without touching disk.
+	if deleted_paths:
+		summary["deleted"] = len(deleted_paths)
+		if not dry_run:
+			snap = _snapshot_deletions(deleted_paths, library)
+			summary["snapshot"] = str(snap) if snap else None
+			for folder in deleted_paths:
+				try:
+					import shutil
+
+					shutil.rmtree(folder)
+				except OSError as e:
+					summary["errors"].append(f"delete failed for {folder}: {e}")
+
 	return summary
 
 
+def _snapshot_deletions(folders: list[Path], library: Path) -> Path | None:
+	"""Bundle *folders* (whole book dirs) into a tar.gz next to the library.
+
+    Returns the snapshot path, or None if there was nothing to archive or the
+    archive could not be written (errors are logged, not raised — the caller
+    proceeds so a failed snapshot does not block the whole apply run).
+    """
+	import tarfile
+	from datetime import datetime
+
+	if not folders:
+		return None
+	stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+	output = Path(f"deletion_snapshot_{stamp}.tar.gz")
+	try:
+		with tarfile.open(output, "w:gz") as tar:
+			for folder in folders:
+				tar.add(folder, arcname=str(folder.relative_to(library)) if folder.is_relative_to(library) else folder.name)
+		log.info("deletion snapshot: %d folders -> %s", len(folders), output)
+		return output
+	except OSError as e:
+		log.warning("could not write deletion snapshot %s: %s", output, e)
+		return None
+
+
 def _apply_action(meta: BookMeta, item) -> None:  # noqa: ANN001
-	"""Mutate *meta* in place according to the review item's action."""
+	"""Mutate *meta* in place according to the review item's action.
+
+	Cover downloads are handled inline (not deferred to write_book_meta) because
+	they involve a network fetch — the caller (apply_review) wraps this in a
+	try/except and reports download failures via the summary dict.
+	"""
 	if item.action == "accept" and item.proposed:
 		# Apply all proposed fields
 		if "title" in item.proposed:
@@ -698,6 +1094,23 @@ def _apply_action(meta: BookMeta, item) -> None:  # noqa: ANN001
 			meta.year = item.proposed["year"]
 		if "publisher" in item.proposed:
 			meta.publisher = item.proposed["publisher"]
+		if "language" in item.proposed:
+			meta.language = item.proposed["language"]
+		if "genres" in item.proposed:
+			genres = item.proposed["genres"]
+			meta.genres = genres if isinstance(genres, list) else [genres]
+		# Cover replacement: download cover_url to cover.jpg. This is a network
+		# I/O side effect inside the metadata-mutation function, but it's the
+		# cleanest place — _apply_action is the single point where proposed
+		# values are committed to the book. write_book_meta (called next) will
+		# then emit the OPF <guide> cover reference automatically.
+		if "cover_url" in item.proposed:
+			from .covers import download_cover
+
+			cover_path = Path(meta.path) / "cover.jpg"
+			ok = download_cover(item.proposed["cover_url"], cover_path)
+			if not ok:
+				log.warning("cover download failed for id=%s url=%s", item.id, item.proposed["cover_url"])
 	elif item.action == "swap":
 		# Swap author <-> title
 		old_title = meta.title

@@ -45,7 +45,41 @@ class Config:
 	# Override via ZAI_BASE_URL if you have a PaaS key.
 	zai_api_key: str | None = field(default=None)
 	zai_base_url: str = "https://api.z.ai/api/coding/paas/v4/"
+	# Default fallback model. GLM-5.2 with reasoning_effort=low was the most
+	# consistent on CZ/SK metadata extraction in the model experiment (see
+	# scripts/llm_experiment.py + README). Non-reasoning alternatives
+	# (glm-4.6/glm-4.5-air/glm-4.5-flash/glm-4.7-flash with thinking disabled)
+	# use ~3-4x fewer output tokens but hallucinate more on CZ/SK series and
+	# diacritics. Override via ZAI_MODEL.
 	zai_model: str = "glm-5.2"
+	# Reasoning effort for GLM-5.x models (low|medium|max). Ignored by GLM-4.x
+	# (use zai_thinking for those). 'low' keeps quality while cutting ~60% of
+	# reasoning tokens vs the default. Override via ZAI_REASONING_EFFORT.
+	zai_reasoning_effort: str = "low"
+	# Thinking toggle for GLM-4.6/4.5-Air/4.5-Flash/4.7-Flash (enabled|disabled).
+	# Only applied when the model is NOT a GLM-5.x (which uses reasoning_effort).
+	# 'disabled' turns off chain-of-thought, drastically cutting output tokens.
+	# Override via ZAI_THINKING.
+	zai_thinking: str = "disabled"
+	# Self-correction loop: try the free Flash model first (with verify feedback),
+	# then the paid final model as fallback. Override via BMF_LLM_LOOP=0.
+	llm_loop: bool = True
+	# Flash (first-attempt, free) and final (paid fallback) models for the loop.
+	# Override via ZAI_FLASH_MODEL / ZAI_FINAL_MODEL. The single-call path uses
+	# zai_model when the loop is disabled.
+	zai_flash_model: str = "glm-4.7-flash"
+	zai_final_model: str = "glm-5.2"
+	# Leaky-bucket burst capacity: how many LLM calls may fire in a short burst
+	# before the smoother engages. Default 5; lower (e.g. 1) for stricter rate
+	# matching Z.AI's free-tier RPM. Override via BMF_LLM_BURST.
+	llm_burst: float = 5.0
+	# Minimum seconds between LLM requests (RPM throttle). Z.AI's coding plan
+	# applies a dynamic requests-per-minute limit; 429 'Rate limit reached for
+	# requests' (code 1302) trips when too many calls land inside a rolling
+	# window. A 2.0s floor caps us at ~30 RPM regardless of worker count or API
+	# response speed. Lower (e.g. 1.0) on a higher tier; raise (e.g. 4.0) if you
+	# still hit 429.
+	llm_min_interval: float = 2.0
 
 	# Verification thresholds
 	verify_fuzzy_strong: float = 0.8  # >= -> VERIFIED
@@ -79,6 +113,26 @@ class Config:
 			cfg.zai_base_url = v
 		if v := os.environ.get("ZAI_MODEL"):
 			cfg.zai_model = v
+		if v := os.environ.get("ZAI_REASONING_EFFORT"):
+			cfg.zai_reasoning_effort = v.strip().lower()
+		if v := os.environ.get("ZAI_THINKING"):
+			cfg.zai_thinking = v.strip().lower()
+		if v := os.environ.get("ZAI_FLASH_MODEL"):
+			cfg.zai_flash_model = v.strip()
+		if v := os.environ.get("ZAI_FINAL_MODEL"):
+			cfg.zai_final_model = v.strip()
+		if (v := os.environ.get("BMF_LLM_LOOP")) is not None:
+			cfg.llm_loop = v.strip().lower() in ("1", "true", "yes", "on")
+		if (v := os.environ.get("BMF_LLM_BURST")) is not None:
+			try:
+				cfg.llm_burst = max(0.0, float(v))
+			except ValueError:
+				pass
+		if (v := os.environ.get("BMF_LLM_MIN_INTERVAL")) is not None:
+			try:
+				cfg.llm_min_interval = max(0.0, float(v))
+			except ValueError:
+				pass
 		return cfg
 
 

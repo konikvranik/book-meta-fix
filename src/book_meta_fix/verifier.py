@@ -179,6 +179,89 @@ def _title_in_text(title: str, text: str, window: int = 4000) -> float:
 	return fuzz.partial_ratio(title_norm, text_norm) / 100.0
 
 
+def _author_in_text(author: str, text: str, window: int = 4000) -> float:
+	"""Check whether *author* appears (fuzzily) within the first *window* chars.
+
+	Same technique as _title_in_text: partial_ratio of the normalised author
+	against the normalised text. On CZ/SK title pages the author name usually
+	appears verbatim (often in ALL-CAPS); the normalisation folds case and
+	diacritics so 'BOŽENA NĚMCOVÁ' matches 'Božena Němcová'.
+	"""
+	author_norm = _normalize(author)
+	text_norm = _normalize(text[:window])
+	if not author_norm or not text_norm:
+		return 0.0
+	if author_norm in text_norm:
+		return 1.0
+	# For short author names token_sort_ratio is slightly more tolerant of
+	# reordered name parts (e.g. "May Karel" vs "Karel May"), but we still
+	# anchor on partial_ratio so a name inside a longer line is found.
+	return max(
+		fuzz.partial_ratio(author_norm, text_norm),
+		fuzz.token_sort_ratio(author_norm, text_norm[: len(author_norm) * 4 + 40]),
+	) / 100.0
+
+
+def verify_proposal(proposal, extracted, *, fuzzy_strong: float = 0.8) -> tuple[bool, str]:
+	"""Validate a proposed title/author against the book's actual page text.
+
+	*proposal* may be a ReconciledMeta (LLM) or EnrichedMeta (online) — both
+	carry ``title`` and ``authors``. *extracted* is the ExtractedMeta produced
+	by extract(); its ``first_page_text`` is the independent signal we trust.
+
+	Returns ``(passed, feedback)``:
+	  - (True, "")  — the title AND at least one author fuzzy-match the text
+                     (>= fuzzy_strong), or there is no text to check against
+                     (image-only title page; accept as low-confidence).
+	  - (False, msg) — at least one field did not match; *msg* is a short,
+                       human/LLM-readable reason that can be fed back into the
+                       next LLM attempt.
+
+	The ISBN, when present on both sides, is also compared exactly — a mismatch
+	there is an instant fail.
+	"""
+	first_page = getattr(extracted, "first_page_text", None) or ""
+	if not first_page.strip():
+		# No readable text (image-only cover, scanned PDF, opaque format): we
+		# have nothing to validate against. Accept rather than loop forever.
+		return True, ""
+
+	title = getattr(proposal, "title", None)
+	authors = getattr(proposal, "authors", None) or []
+
+	# ISBN exact check (independent, strong signal).
+	proposal_isbn = getattr(proposal, "isbn", None)
+	text_isbn = getattr(extracted, "isbn_from_text", None)
+	if proposal_isbn and text_isbn:
+		from .isbn import canonicalize
+
+		if canonicalize(proposal_isbn) and canonicalize(text_isbn) and canonicalize(proposal_isbn) != canonicalize(text_isbn):
+			return False, f"proposed ISBN {proposal_isbn} differs from the ISBN scanned from the book's text ({text_isbn}); the proposal is for a different book."
+
+	reasons: list[str] = []
+	title_ok = True
+	if title:
+		score = _title_in_text(title, first_page)
+		if score < fuzzy_strong:
+			title_ok = False
+			reasons.append(f"the title {title!r} is not found in the book's first-page text (fuzzy {score:.2f}); read the first-page text carefully and use the title that actually appears there")
+
+	author_ok = True
+	if authors:
+		# Accept if ANY proposed author matches (LLM sometimes returns author + translator).
+		best = max((_author_in_text(a, first_page) for a in authors if a), default=0.0)
+		if best < fuzzy_strong:
+			author_ok = False
+			reasons.append(f"none of the proposed authors {authors!r} appear in the first-page text (best fuzzy {best:.2f}); the real author's name is printed on the title page")
+
+	if title_ok and author_ok:
+		return True, ""
+	if not reasons:
+		# Both fields empty / unusable — nothing to validate, accept.
+		return True, ""
+	return False, "; ".join(reasons)
+
+
 def _fuzzy_match(a: str, b: str) -> float:
 	"""Fuzzy similarity of two strings (accent-insensitive, case-insensitive)."""
 	return fuzz.token_sort_ratio(_normalize(a), _normalize(b)) / 100.0
