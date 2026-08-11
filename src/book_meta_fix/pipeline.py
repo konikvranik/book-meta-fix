@@ -23,12 +23,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
-from .detectors import detect as detect_fn
+from .detectors import all_diagnoses, detect as detect_fn
 from .enrichers import Enricher
 from .extractors import ExtractedMeta, extract
 from .library import Cache, scan_library
 from .models import BookMeta, Confidence, Diagnosis, Verdict
-from .review import build_review, parse_review
+from .review import _COVER_CATEGORIES, build_review, parse_review, prune_review
 from .verifier import verify
 from .writers import write_book_meta
 
@@ -269,11 +269,15 @@ def _process_book(
 	diag = detect_fn(meta)
 	verification = None
 	enriched = None
-	# Count cover-specific diagnoses for the pipeline summary.
-	if diag.category == "C11":
-		stats["covers_generated"] += 1
-	elif diag.category == "MISSING_COVER":
-		stats["covers_missing"] += 1
+	# Count cover-specific diagnoses for the pipeline summary. Iterate all
+	# diagnoses (primary + additional) so a book whose primary issue is, say,
+	# C2 but that also has a generated cover is still counted here — matching
+	# what apply will actually do.
+	for d in all_diagnoses(diag):
+		if d.category == "C11":
+			stats["covers_generated"] += 1
+		elif d.category == "MISSING_COVER":
+			stats["covers_missing"] += 1
 	# Carries an already-extracted ExtractedMeta into the fix path, so a book
 	# that was verified (and reclassified) doesn't get extracted a second time.
 	preextracted: ExtractedMeta | None = None
@@ -291,13 +295,17 @@ def _process_book(
 				if mismatch or uncertain:
 					# Reclassify OK -> NEEDS_REVIEW so the fix path below runs.
 					# Keep the extracted content from verify() to reuse it.
+					# Preserve additional diagnoses (e.g. a generated cover found
+					# by detect) so they're still reported alongside the mismatch.
 					preextracted = verification.extracted
+					saved_additional = list(diag.additional)
 					diag = Diagnosis(
 						category="CONTENT_MISMATCH",
 						reason=f"metadata neodpovídají obsahu ({verification.result}: {verification.reason})",
 						confidence=Confidence.HIGH,
 						verdict=Verdict.NEEDS_REVIEW,
 					)
+					diag.additional = saved_additional
 					stats["content_mismatch"] += 1
 				else:
 					# VERIFIED / NO_CONTENT / non-strict UNCERTAIN -> stays OK.
@@ -979,19 +987,27 @@ def _yaml_safe_load(path: Path):
 def apply_review(review_path: Path, library: Path, *, dry_run: bool = True) -> dict:
 	"""Parse a review.yaml and apply approved changes to the library.
 
-	Returns a summary dict: {applied, rejected, deleted, snapshot, errors}.
+	Returns a summary dict: {applied, rejected, deleted, pruned, remaining,
+	snapshot, errors, dry_run}.
 
 	``action: delete`` removes the whole book folder. Because that is not
 	reversible via the per-file ``.bak`` that ``write_book_meta`` keeps, the
 	folders slated for deletion are first bundled into a single
 	``deletion_snapshot_<stamp>.tar.gz`` (in dry-run mode nothing is archived
 	and nothing is removed).
+
+	After a successful WRITE run, successfully-applied entries (accept/swap/
+	edit/delete without error) are pruned from review.yaml so the file reflects
+	only remaining work; pending (action: null), rejected, and errored entries
+	are kept. Dry-run never prunes.
 	"""
 	from .models import Diagnosis  # local to avoid cycle
 
 	items = parse_review(review_path)
-	summary = {"applied": 0, "rejected": 0, "deleted": 0, "snapshot": None, "errors": [], "dry_run": dry_run}
-	deleted_paths: list[Path] = []
+	summary = {"applied": 0, "rejected": 0, "deleted": 0, "pruned": 0, "remaining": None, "snapshot": None, "errors": [], "dry_run": dry_run}
+	succeeded_ids: set = set()  # ids of entries committed this run → pruned
+	# delete collects (folder, id) so removal success can be tracked per entry.
+	deletions: list[tuple[Path, int | None]] = []
 
 	for item in items:
 		if item.action is None:
@@ -1015,7 +1031,7 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True) -> d
 		# delete: just collect — actual removal happens after a single tar.gz
 		# snapshot is taken, so the whole batch can be rolled back together.
 		if item.action == "delete":
-			deleted_paths.append(folder)
+			deletions.append((folder, item.id))
 			continue
 
 		# Build the desired metadata
@@ -1030,22 +1046,33 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True) -> d
 				summary["errors"].append(f"id={item.id}: {result['error']}")
 			else:
 				summary["applied"] += 1
+				if not dry_run and item.id is not None:
+					succeeded_ids.add(item.id)
 		except Exception as e:  # noqa: BLE001
 			summary["errors"].append(f"id={item.id}: write failed: {e}")
 
 	# Deletion pass: snapshot then remove. Dry-run reports without touching disk.
-	if deleted_paths:
+	if deletions:
+		deleted_paths = [p for p, _ in deletions]
 		summary["deleted"] = len(deleted_paths)
 		if not dry_run:
 			snap = _snapshot_deletions(deleted_paths, library)
 			summary["snapshot"] = str(snap) if snap else None
-			for folder in deleted_paths:
+			for folder, did in deletions:
 				try:
 					import shutil
 
 					shutil.rmtree(folder)
+					if did is not None:
+						succeeded_ids.add(did)
 				except OSError as e:
 					summary["errors"].append(f"delete failed for {folder}: {e}")
+
+	# Pruning: drop successfully-applied entries from review.yaml. Only in WRITE
+	# mode — dry-run must leave the file untouched.
+	if not dry_run and succeeded_ids:
+		summary["remaining"] = prune_review(review_path, succeeded_ids)
+		summary["pruned"] = len(succeeded_ids)
 
 	return summary
 
@@ -1099,18 +1126,29 @@ def _apply_action(meta: BookMeta, item) -> None:  # noqa: ANN001
 		if "genres" in item.proposed:
 			genres = item.proposed["genres"]
 			meta.genres = genres if isinstance(genres, list) else [genres]
-		# Cover replacement: download cover_url to cover.jpg. This is a network
-		# I/O side effect inside the metadata-mutation function, but it's the
-		# cleanest place — _apply_action is the single point where proposed
-		# values are committed to the book. write_book_meta (called next) will
-		# then emit the OPF <guide> cover reference automatically.
-		if "cover_url" in item.proposed:
-			from .covers import download_cover
+		# Cover replacement: download cover_url to cover.jpg — but only when the
+		# book has a cover diagnosis (C11 placeholder / MISSING_COVER) among ANY
+		# of its diagnoses, not just the primary. A book whose primary issue is
+		# C2 but that also has a generated cover must get its cover replaced in
+		# the same pass. cover_url rides along on every enriched book's proposed
+		# block in older review.yaml files, so this gate also neutralises those
+		# legacy entries. Idempotent: a re-run must not re-download a fixed cover.
+		diag_dicts = item.diagnoses or ([item.diagnosis] if item.diagnosis else [])
+		cats = {d.get("category") for d in diag_dicts}
+		if "cover_url" in item.proposed and cats & set(_COVER_CATEGORIES):
+			from .covers import analyze_cover, download_cover
 
 			cover_path = Path(meta.path) / "cover.jpg"
-			ok = download_cover(item.proposed["cover_url"], cover_path)
-			if not ok:
-				log.warning("cover download failed for id=%s url=%s", item.id, item.proposed["cover_url"])
+			if "C11" in cats and cover_path.is_file() and not analyze_cover(cover_path).is_generated:
+				# Placeholder already replaced with a real cover.
+				log.info("cover already replaced, skipping id=%s", item.id)
+			elif "MISSING_COVER" in cats and cover_path.is_file():
+				# Missing cover already filled.
+				log.info("cover already present, skipping id=%s", item.id)
+			else:
+				ok = download_cover(item.proposed["cover_url"], cover_path)
+				if not ok:
+					log.warning("cover download failed for id=%s url=%s", item.id, item.proposed["cover_url"])
 	elif item.action == "swap":
 		# Swap author <-> title
 		old_title = meta.title

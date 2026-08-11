@@ -87,6 +87,13 @@ class Diagnosis:
 	# When verdict in (AUTO_FIXABLE, NEEDS_REVIEW), proposed may hold a fix
 	proposed: dict[str, Any] | None = None
 	proposed_source: str | None = None  # 'embedded' / 'obalkyknih' / 'llm' / ...
+	# Other problems found on the same book (the rules below the primary in
+	# priority order that also matched). detect() returns the first match as
+	# the primary and stashes the rest here, so one book can carry several
+	# diagnoses — e.g. C2 (filename-as-title) + C11 (generated cover). Consumers
+	# that care about "any problem of kind X" use all_diagnoses() rather than
+	# the single category. See detectors.detect_all.
+	additional: list[Diagnosis] = field(default_factory=list)
 
 	def to_dict(self) -> dict[str, Any]:
 		return {

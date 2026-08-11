@@ -465,6 +465,9 @@ def apply(review_file: Path, library: Path | None, do_apply: bool) -> None:
 	t.add_row("Deleted", str(summary.get("deleted", 0)))
 	if summary.get("snapshot"):
 		t.add_row("Deletion snapshot", summary["snapshot"])
+	if summary.get("pruned"):
+		t.add_row("Pruned from review", str(summary["pruned"]))
+		t.add_row("Remaining in review", str(summary["remaining"]))
 	t.add_row("Errors", str(len(summary["errors"])))
 	console.print(t)
 	if summary["errors"]:
@@ -711,33 +714,40 @@ def _print_scan_summary(books) -> None:  # noqa: ANN001
 
 
 def _print_detect_summary(results, category_filter: str | None, samples: int) -> None:  # noqa: ANN001
-	"""Print detector results: category counts + sample books per category."""
+	"""Print detector results: category counts + sample books per category.
+
+	A book with several diagnoses appears once per matching category (counts
+	do not sum to the book total) — this surfaces every problem rather than only
+	the highest-priority one.
+	"""
 	from collections import defaultdict
 
-	# Aggregate by category
+	from .detectors import all_diagnoses
+
+	# Aggregate by category — a book lands in every category it matches.
 	by_cat: dict[str, list] = defaultdict(list)
 	for meta, diag in results:
-		by_cat[diag.category].append((meta, diag))
+		for d in all_diagnoses(diag):
+			by_cat[d.category].append((meta, d))
 
 	# Sort: corruption categories first, then OK, then MISSING_*
-	cat_order = ["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C12", "C11", "OK", "MISSING_ISBN", "MISSING_YEAR"]
+	cat_order = ["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C12", "C11", "MISSING_COVER", "OK", "MISSING_ISBN", "MISSING_YEAR"]
 	all_cats = sorted(by_cat.keys(), key=lambda c: cat_order.index(c) if c in cat_order else 999)
 
 	total = len(results)
 	console.print()
-	console.print(f"[bold green]Detected {total} books[/bold green]")
+	console.print(f"[bold green]Detected {total} books[/bold green]  [dim](a book may appear in multiple categories)[/dim]")
 
 	# Summary table
 	t = Table(title="Detection summary", show_header=True, header_style="bold cyan")
 	t.add_column("Category", style="bold")
 	t.add_column("Count", justify="right")
-	t.add_column("%", justify="right")
 	t.add_column("Verdict", style="magenta")
 	for cat in all_cats:
 		n = len(by_cat[cat])
 		# Pick a representative verdict (the first one in the bucket)
 		verdict = by_cat[cat][0][1].verdict.value
-		t.add_row(cat, str(n), f"{n / total * 100:.1f}%", verdict)
+		t.add_row(cat, str(n), verdict)
 	console.print(t)
 
 	# Samples per category (filtered if --category given)
