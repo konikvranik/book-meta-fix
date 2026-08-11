@@ -220,6 +220,45 @@ _RESULT_RE = _re.compile(
 	r'''<a\s+class=["']new["'][^>]*?type=["']book["'][^>]*?href=["'](/prehled-knihy/[^"']+)["'][^>]*>([^<]+)</a>''',
 	_re.IGNORECASE,
 )
+# A whole search-result row: <p class='new'> ... anchor + pozn note ... </p>.
+# Used to associate each result's title with its trailing year/author note.
+_RESULT_BLOCK_RE = _re.compile(
+	r"<p[^>]*class=['\"]new['\"][^>]*>(.*?)</p>",
+	_re.DOTALL | _re.IGNORECASE,
+)
+# Leading 4-digit year inside <span class='pozn'>YEAR, Author</span>.
+_POZN_YEAR_RE = _re.compile(r"<span[^>]*class=['\"]pozn['\"][^>]*>\s*(\d{4})")
+
+
+def _parse_search_results(html: str) -> list[tuple[str, str, int | None]]:
+	"""Parse search results into (path, title, year) tuples.
+
+	The year comes from the trailing <span class='pozn'>YEAR, Author</span> note
+	in each result's <p> block; None when the note lacks a leading year.
+	"""
+	results: list[tuple[str, str, int | None]] = []
+	seen: set[str] = set()
+	for block_m in _RESULT_BLOCK_RE.finditer(html):
+		block = block_m.group(1)
+		am = _RESULT_RE.search(block)
+		if am is None:
+			continue
+		path = am.group(1)
+		rtitle = am.group(2).strip()
+		if path in seen or not rtitle:
+			continue
+		seen.add(path)
+		year: int | None = None
+		pm = _POZN_YEAR_RE.search(block)
+		if pm:
+			try:
+				year = int(pm.group(1))
+			except ValueError:  # noqa: BLE001
+				year = None
+		results.append((path, rtitle, year))
+		if len(results) >= 10:
+			break
+	return results
 # JSON-LD <script type="application/ld+json"> { ... } </script>
 _JSONLD_RE = _re.compile(
 	r'<script type="application/ld\+json">\s*(\{.*?\})\s*</script>',
@@ -264,13 +303,16 @@ def _http_get_html(url: str, *, timeout: float = 15.0, rate: float = 1.0) -> str
 		return None
 
 
-def _search_databazeknih(title: str, author: str | None) -> str | None:
+def _search_databazeknih(title: str, author: str | None, year: int | None = None) -> str | None:
 	"""Search databazeknih.cz, return the best-matching detail path
 	('/prehled-knihy/<slug>-<id>') or None.
 
-	Strategy: query with title (+ author if given). Take the first result and
-	validate it with a fuzzy title match so we don't pull genres for the wrong
-	book (search is title-keyword based and returns many near-misses).
+	Strategy: query with title (+ author surname). Among results that fuzzy-
+	match the title (>= 70), prefer one whose publication year matches *year*
+	(±1) so the right edition is chosen among same-titled results. Falls back
+	to the best fuzzy match when no year is known or none matches (same work,
+	different edition) — this maximises autodetection without rejecting same-
+	work editions.
 	"""
 	from urllib.parse import quote_plus
 
@@ -286,38 +328,32 @@ def _search_databazeknih(title: str, author: str | None) -> str | None:
 	if html is None:
 		return None
 
-	# Each search result renders as:
-	#   <a class='new' type='book' href='/prehled-knihy/<slug>-<id>'>Title</a>
-	# Parse these directly — the href and visible title live in the same anchor,
-	# which is far more reliable than correlating the cover-link to its title.
-	pairs: list[tuple[str, str]] = []
-	seen: set[str] = set()
-	for m in _RESULT_RE.finditer(html):
-		path = m.group(1)
-		result_title = m.group(2).strip()
-		if path in seen or not result_title:
-			continue
-		seen.add(path)
-		pairs.append((path, result_title))
-		if len(pairs) >= 10:
-			break
-
-	if not pairs:
+	results = _parse_search_results(html)
+	if not results:
 		return None
 
-	# Pick the best fuzzy title match (not necessarily the first result).
-	best_path: str | None = None
-	best_score = -1.0
-	for path, result_title in pairs:
-		score = fuzz.token_sort_ratio(title.lower(), result_title.lower())
-		if score > best_score:
-			best_score = score
-			best_path = path
-	# Require a reasonable match — otherwise we'd attach genres from a wrong book.
-	if best_path is None or best_score < 70:
-		log.debug("databazeknih search '%s' best match score %.0f < 70, skipping", title, best_score)
+	# Keep candidates with a reasonable fuzzy title match (>= 70) so we don't
+	# attach genres from a wrong book (search is keyword-based, many near-misses).
+	candidates = [
+		(fuzz.token_sort_ratio(title.lower(), rtitle.lower()), path, ryear)
+		for path, rtitle, ryear in results
+	]
+	candidates = [c for c in candidates if c[0] >= 70]
+	if not candidates:
+		log.debug("databazeknih search '%s' best match score < 70, skipping", title)
 		return None
-	return best_path
+
+	# Prefer an edition whose year matches the target (±1) among the candidates;
+	# this disambiguates editions of the same work. If none matches, keep all
+	# (same work, other edition) rather than rejecting.
+	if year is not None:
+		year_matches = [c for c in candidates if c[2] is not None and abs(c[2] - year) <= 1]
+		if year_matches:
+			candidates = year_matches
+
+	# Best fuzzy title among the (optionally year-filtered) candidates.
+	candidates.sort(key=lambda c: c[0], reverse=True)
+	return candidates[0][1]
 
 
 def _parse_jsonld(html: str) -> dict | None:
@@ -387,17 +423,19 @@ def _parse_databazeknih_detail(html: str) -> EnrichedMeta | None:
 	return em
 
 
-def lookup_databazeknih(*, title: str, author: str | None = None) -> EnrichedMeta | None:
+def lookup_databazeknih(*, title: str, author: str | None = None, year: int | None = None) -> EnrichedMeta | None:
 	"""Scrape databazeknih.cz for a book's metadata + genres (by title search).
 
 	Two HTTP calls: (1) search by title to find the detail page, (2) fetch the
 	detail page and parse its JSON-LD (schema.org Book) plus the user 'Štítky'.
+	When *year* is given, the search prefers an edition published in that year
+	(±1) among the title-matching candidates.
 
 	Returns None if the book can't be confidently matched (fuzzy title < 70).
 	"""
 	from urllib.parse import urljoin
 
-	path = _search_databazeknih(title, author)
+	path = _search_databazeknih(title, author, year=year)
 	if path is None:
 		return None
 
@@ -475,20 +513,22 @@ class Enricher:
 			)
 			self._cache_conn.commit()
 
-	def lookup(self, *, isbn: str | None = None, title: str | None = None, author: str | None = None) -> EnrichedMeta | None:
+	def lookup(self, *, isbn: str | None = None, title: str | None = None, author: str | None = None, year: int | None = None) -> EnrichedMeta | None:
 		"""Try sources in order. Returns first hit or None.
 
 		Order (gated by *_enabled flags):
 		  1. databazeknih.cz by ISBN (exact; best for CZ/SK + genres)
-		  2. databazeknih.cz by title (fuzzy >= 70)
+		  2. databazeknih.cz by title (fuzzy >= 70; prefers year-matching edition)
 		  3. OpenLibrary by ISBN
 		  4. Google Books by ISBN
 		  5. OpenLibrary by title
 
-		databazeknih by ISBN goes first: it's an exact match and the only way to
-		reach the strongest CZ/SK source when the library title is corrupt.
+		*year* is used only by the databazeknih title search to disambiguate
+		editions; ISBN lookups are exact. databazeknih by ISBN goes first: it's
+		an exact match and the only way to reach the strongest CZ/SK source when
+		the library title is corrupt.
 		"""
-		cache_key = self._cache_key(isbn=isbn, title=title, author=author)
+		cache_key = self._cache_key(isbn=isbn, title=title, author=author, year=year)
 		cached = self._cache_get(cache_key)
 		if cached is not None:
 			# _cache_get returns one of:
@@ -508,7 +548,7 @@ class Enricher:
 			result = lookup_databazeknih_isbn(isbn)
 		# databazeknih by title (search). Best CZ/SK source + genres.
 		if result is None and self.databazeknih_enabled and title:
-			result = lookup_databazeknih(title=title, author=author)
+			result = lookup_databazeknih(title=title, author=author, year=year)
 		# ISBN-based lookups (authoritative when available).
 		if result is None and isbn:
 			if self.openlibrary_enabled:
@@ -528,9 +568,9 @@ class Enricher:
 			self._cache_conn.close()
 			self._cache_conn = None
 
-	def _cache_key(self, *, isbn: str | None, title: str | None, author: str | None) -> str:
+	def _cache_key(self, *, isbn: str | None, title: str | None, author: str | None, year: int | None = None) -> str:
 		isbn_c = canonicalize(isbn) if isbn else None
-		return json.dumps({"isbn": isbn_c, "title": (title or "").lower()[:80], "author": (author or "").lower()[:50]}, sort_keys=True)
+		return json.dumps({"isbn": isbn_c, "title": (title or "").lower()[:80], "author": (author or "").lower()[:50], "year": year}, sort_keys=True)
 
 	def _cache_get(self, key: str) -> EnrichedMeta | None | str:
 		"""Returns: EnrichedMeta on hit, None on miss, '__NOT_FOUND__' on cached negative."""

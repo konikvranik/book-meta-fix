@@ -577,7 +577,9 @@ def _online_fill(identity: IdentityResult, enricher: Enricher | None, skip_enric
 	if identity.has_isbn:
 		online = enricher.lookup(isbn=identity.isbn)
 	elif identity.has_title_author:
-		online = enricher.lookup(title=identity.title, author=identity.authors[0])
+		# Pass the identity's year so the databazeknih title search can
+		# disambiguate editions (prefer the matching publication year).
+		online = enricher.lookup(title=identity.title, author=identity.authors[0], year=identity.year)
 	else:
 		return None
 	if online is None:

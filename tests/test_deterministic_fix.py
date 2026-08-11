@@ -97,7 +97,7 @@ class TestLlmNotCalledWhenOfflineSucceeds:
 		from book_meta_fix import pipeline as pmod
 
 		class StubEnricher:
-			def lookup(self, *, isbn=None, title=None, author=None):
+			def lookup(self, *, isbn=None, title=None, author=None, year=None):
 				if title:  # title-based lookup (Phase C)
 					return EnrichedMeta(title="Jádro Galaxie", authors=["Gregory Benford"], source="databazeknih")
 				return None
@@ -206,7 +206,7 @@ class TestStatsSourceBreakdown:
 		from book_meta_fix import pipeline as pmod
 
 		class StubEnricher:
-			def lookup(self, *, isbn=None, title=None, author=None):
+			def lookup(self, *, isbn=None, title=None, author=None, year=None):
 				if title:
 					return EnrichedMeta(title="Jádro Galaxie", source="databazeknih")
 				return None
@@ -235,7 +235,7 @@ class TestStatsSourceBreakdown:
 		from book_meta_fix import pipeline as pmod
 
 		class StubEnricher:
-			def lookup(self, *, isbn=None, title=None, author=None):
+			def lookup(self, *, isbn=None, title=None, author=None, year=None):
 				if title:
 					return EnrichedMeta(title="Jádro Galaxie", source="openlibrary")
 				return None
@@ -341,7 +341,7 @@ class TestOnlineFill:
 		seen = {}
 
 		class Stub:
-			def lookup(self, *, isbn=None, title=None, author=None):
+			def lookup(self, *, isbn=None, title=None, author=None, year=None):
 				seen["isbn"] = isbn
 				return EnrichedMeta(title="X", source="databazeknih", isbn=isbn)
 
@@ -356,7 +356,7 @@ class TestOnlineFill:
 		from book_meta_fix.pipeline import _online_fill
 
 		class Stub:
-			def lookup(self, *, isbn=None, title=None, author=None):
+			def lookup(self, *, isbn=None, title=None, author=None, year=None):
 				return EnrichedMeta(title="Jádro Galaxie", authors=["Někdo Úplně Jiný"], source="databazeknih")
 
 		assert _online_fill(self._identity_title(), Stub(), skip_enrich=False) is None
@@ -366,7 +366,7 @@ class TestOnlineFill:
 		from book_meta_fix.pipeline import _online_fill
 
 		class Stub:
-			def lookup(self, *, isbn=None, title=None, author=None):
+			def lookup(self, *, isbn=None, title=None, author=None, year=None):
 				return EnrichedMeta(title="Jádro Galaxie", authors=["Gregory Benford"], source="databazeknih")
 
 		em = _online_fill(self._identity_title(), Stub(), skip_enrich=False)
