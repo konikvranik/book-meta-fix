@@ -291,7 +291,7 @@ def extract_pdf(path: str | Path) -> ExtractedMeta:
 	if pdfinfo:
 		try:
 			proc = subprocess.run(
-				[pdfinfo, path], capture_output=True, text=True, timeout=10
+				[pdfinfo, path], capture_output=True, encoding="utf-8", errors="replace", timeout=10
 			)
 			if proc.returncode == 0:
 				for line in proc.stdout.splitlines():
@@ -320,7 +320,7 @@ def extract_pdf(path: str | Path) -> ExtractedMeta:
 		try:
 			proc = subprocess.run(
 				[pdftotext, "-f", "1", "-l", "3", path, "-"],
-				capture_output=True, text=True, timeout=15,
+				capture_output=True, encoding="utf-8", errors="replace", timeout=15,
 			)
 			if proc.returncode == 0 and proc.stdout:
 				text = proc.stdout[:5000]
@@ -367,7 +367,7 @@ def extract_via_ebook_meta(path: str | Path) -> ExtractedMeta:
 		return result
 	try:
 		proc = subprocess.run(
-			[ebook_meta, str(path)], capture_output=True, text=True, timeout=15
+			[ebook_meta, str(path)], capture_output=True, encoding="utf-8", errors="replace", timeout=15
 		)
 		if proc.returncode != 0:
 			result.error = f"ebook-meta exited {proc.returncode}"
@@ -449,7 +449,7 @@ def _ebook_convert_to_text(path: str | Path) -> str | None:
 		try:
 			proc = subprocess.run(
 				[ebook_convert, str(p), str(out)],
-				capture_output=True, text=True, timeout=30,
+				capture_output=True, encoding="utf-8", errors="replace", timeout=30,
 			)
 			if proc.returncode != 0 or not out.is_file():
 				return None
@@ -472,9 +472,11 @@ def _catdoc_to_text(path: str | Path) -> str | None:
 		return None
 	try:
 		# -s disables garbled-char warnings on stderr; -d utf-8 forces UTF-8 out.
+		# errors="replace" because catdoc occasionally emits a byte it can't map
+		# even with -d utf-8, which would otherwise crash the whole extraction.
 		proc = subprocess.run(
 			[catdoc, "-d", "utf-8", str(path)],
-			capture_output=True, text=True, timeout=15,
+			capture_output=True, encoding="utf-8", errors="replace", timeout=15,
 		)
 		if proc.returncode != 0:
 			return None

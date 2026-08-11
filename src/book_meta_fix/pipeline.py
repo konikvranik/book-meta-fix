@@ -402,20 +402,49 @@ def _process_book(
 
 
 def _safe_extract(meta: BookMeta) -> ExtractedMeta | None:
-	"""Extract content metadata from the primary book file.
+	"""Extract content from the book, falling back to sibling formats.
 
-	We use only the primary file (highest-priority format present) rather than
-	trying all formats, because empirical testing showed multi-format extraction
-	is 6.5x slower and produces a higher-scored result in 0% of cases — calibre
-	writes identical metadata to all formats on import.
+	The primary file (highest-preference format) is tried first. If it yields no
+	usable page text — a corrupt epub (bad zip), an image-only PDF, a .doc whose
+	catdoc output is empty — the book's other formats are tried until one yields
+	usable text. This recovers content when the primary format is broken but a
+	sibling (often the calibre source format) is fine.
+
+	Multi-format extraction is slower, so siblings are only tried when the
+	primary failed — never all formats up front.
 	"""
 	if not meta.primary_file:
 		return None
-	try:
-		return extract(meta.primary_file)
-	except Exception as e:  # noqa: BLE001
-		log.debug("extract failed for %s: %s", meta.path, e)
-		return None
+
+	def _try(path: str) -> ExtractedMeta | None:
+		try:
+			return extract(path)
+		except Exception as e:  # noqa: BLE001
+			log.debug("extract failed for %s: %s", path, e)
+			return None
+
+	primary = _try(meta.primary_file)
+	if primary is not None and _has_usable_text(primary.first_page_text):
+		return primary
+
+	# Fallback: try sibling formats for usable page text.
+	primary_suffix = Path(meta.primary_file).suffix.lower()
+	folder = Path(meta.path)
+	if folder.is_dir() and meta.formats:
+		for entry in sorted(folder.iterdir(), key=lambda e: e.name):
+			if not entry.is_file():
+				continue
+			suf = entry.suffix.lower()
+			if suf == primary_suffix or suf not in meta.formats:
+				continue
+			other = _try(str(entry))
+			if other is not None and _has_usable_text(other.first_page_text):
+				log.info("extraction fallback %s -> %s for %s", primary_suffix, suf, meta.path)
+				return other
+
+	# No sibling yielded usable text either; return whatever the primary gave
+	# (it may still carry embedded metadata even without page text).
+	return primary
 
 
 # Categories that 'ALL' deliberately excludes: a known-good state where sending
