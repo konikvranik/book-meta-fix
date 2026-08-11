@@ -3,7 +3,10 @@
 A "library" is a directory of Calibre-style book folders:
     <library>/<Author>/<Title> (<id>)/ {metadata.json, metadata.opf, *.epub, cover.jpg}
 
-Traversal excludes Calibre scratch dirs, MS-Word lock files, and dotfiles.
+Traversal excludes Calibre scratch dirs, dotfiles, and (concrete) MS-Word
+lock FILES. Author directories whose name starts with ``~$`` are NOT pruned:
+a book whose author metadata was polluted to ``~$Foo`` lives under such a
+folder and must stay visible so the C6 detector can flag it for review.
 Results are cached in a SQLite database so repeated runs skip unchanged folders.
 """
 from __future__ import annotations
@@ -75,13 +78,20 @@ def _scandir_sorted(path: Path):
 	return sorted(entries, key=lambda p: p.name)
 
 
-def _is_excluded(name: str) -> bool:
-	"""Should this entry be skipped?"""
+def _is_excluded(name: str, *, is_file: bool = False) -> bool:
+	"""Should this entry be skipped?
+
+	For directories, the ``~$`` (MS-Word lock-file) prefix is NOT excluded —
+	a book whose author metadata got polluted to ``~$Foo`` lands in a
+	``~$Foo/`` author folder, and the C6 detector must be able to see it.
+	Only concrete ``~$`` files (the lock files themselves) are pruned, when
+	*is_file* is True.
+	"""
 	if name in _EXCLUDE_DIRS:
 		return True
 	if name.startswith("calibre-"):  # calibre-* scratch dirs
 		return True
-	if name.startswith("~$"):  # MS-Word lock files
+	if is_file and name.startswith("~$"):  # MS-Word lock FILES only
 		return True
 	if name.startswith("."):  # dotfiles / hidden
 		return True

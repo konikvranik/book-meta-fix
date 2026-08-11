@@ -720,7 +720,7 @@ def _print_detect_summary(results, category_filter: str | None, samples: int) ->
 		by_cat[diag.category].append((meta, diag))
 
 	# Sort: corruption categories first, then OK, then MISSING_*
-	cat_order = ["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "OK", "MISSING_ISBN", "MISSING_YEAR"]
+	cat_order = ["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C12", "C11", "OK", "MISSING_ISBN", "MISSING_YEAR"]
 	all_cats = sorted(by_cat.keys(), key=lambda c: cat_order.index(c) if c in cat_order else 999)
 
 	total = len(results)

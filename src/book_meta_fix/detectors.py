@@ -19,6 +19,8 @@ Corruption categories (from empirical study of the library):
 	C9  anonym (mostly fake — real anonym is whitelisted) NEEDS_REVIEW
 	C10 long comma-separated author list    NEEDS_REVIEW (mostly real multi-author)
 	C11 generated cover (calibre placeholder) NEEDS_REVIEW (download replacement)
+	C12 author slug/artefact pollution      NEEDS_REVIEW (lost capitalization,
+	    leading _ or *, etc. — author recoverable from content/online)
 	EXTRA: missing ISBN / year              AUTO_FIXABLE (enrichable)
 	EXTRA: missing cover / generated cover  AUTO_FIXABLE / NEEDS_REVIEW (download)
 """
@@ -58,6 +60,15 @@ _PLACEHOLDER_RE = re.compile(r"^(title|author|subject|name|unknown)$", re.IGNORE
 
 # Word lock-file prefix
 _WORD_LOCK_RE = re.compile(r"^~\$")
+
+# Suspicious author-folder prefixes: leading underscore, asterisk, or other
+# non-name artefacts (e.g. "_ antologie", "* antologie", "_ Neznámý").
+_BAD_AUTHOR_PREFIX_RE = re.compile(r"^[_*]")
+
+# All-lowercase author: a real person name always has at least one capital
+# letter (the surname initial). All-lowercase signals filename-slug pollution
+# (e.g. "anthony burgess", "jsvoboda").
+_ALL_LOWER_RE = re.compile(r"^[^A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ]+$")
 
 # Glued-author patterns: "byX...andY", "XandY" without spaces around connectives
 _GLUED_RE = re.compile(r"\b(by[A-Z]|[a-z]and[A-Z]|[a-z]and\s|[A-Z][a-z]+[a-z]and[A-Z])")
@@ -141,14 +152,57 @@ def _looks_foreign_name(name: str) -> bool:
 
 
 def rule_c6_word_lockfile(meta: BookMeta) -> Diagnosis | None:
-	"""C6: MS-Word lock-file duplicate (~$ prefix)."""
-	if _WORD_LOCK_RE.match(meta.author_folder):
+	"""C6: MS-Word lock-file duplicate (~$ prefix).
+
+	The ``~$`` prefix can show up on the author_folder (the book was created
+	from a Word lock file) or directly in the authors metadata. The walker
+	does NOT prune ``~$`` directories so this rule can see them.
+	"""
+	if _WORD_LOCK_RE.match(meta.author_folder) or any(_WORD_LOCK_RE.match(a) for a in meta.authors):
 		return Diagnosis(
 			category="C6",
-			reason=f"author_folder začíná '~$' (Word lock-file dup): {meta.author_folder!r}",
+			reason=f"author začíná '~$' (Word lock-file dup): {meta.author_folder!r} / {meta.authors!r}",
 			confidence=Confidence.HIGH,
 			verdict=Verdict.AUTO_FIXABLE,
 			proposed={"action": "delete", "reason": "duplicate of a Word lock file"},
+		)
+	return None
+
+
+def rule_c12_bad_author(meta: BookMeta) -> Diagnosis | None:
+	"""C12: author field carries filename-slug / artefact pollution.
+
+	Catches names that are clearly not a real person name:
+	  - leading ``_`` or ``*`` (slug leftovers, e.g. "_ antologie",
+	    "* antologie")
+	  - all-lowercase (a real name always has a capital initial), e.g.
+	    "anthony burgess", "jsvoboda"
+
+	Checked against both ``meta.authors`` and ``meta.author_folder``. These
+	are NEEDS_REVIEW (not auto-fixable): the right author has to be looked
+	up from the book content or an online source.
+	"""
+	reasons: list[str] = []
+	for candidate in (meta.author_folder, *meta.authors):
+		if not candidate:
+			continue
+		# Leave anonym spellings to C9, which knows the genuine-anonym whitelist
+		# (Bible, Koran, …). Otherwise C12 swallows them as "all-lowercase".
+		if candidate.strip().lower() in _ANONYM_SPELLINGS:
+			continue
+		if _BAD_AUTHOR_PREFIX_RE.match(candidate):
+			reasons.append(f"artefact prefix in author: {candidate!r}")
+		elif _ALL_LOWER_RE.match(candidate.strip()) and any(c.isalpha() for c in candidate):
+			# all-lowercase AND has at least one letter (exclude empty/punct)
+			reasons.append(f"all-lowercase author (lost capitalization): {candidate!r}")
+		if reasons:
+			break  # one signal is enough; report the first
+	if reasons:
+		return Diagnosis(
+			category="C12",
+			reason="; ".join(reasons),
+			confidence=Confidence.HIGH,
+			verdict=Verdict.NEEDS_REVIEW,
 		)
 	return None
 
@@ -505,6 +559,7 @@ def rule_missing_cover(meta: BookMeta) -> Diagnosis | None:
 # author and title). Once C2 fires, C1 is skipped.
 RULES: list[Rule] = [
 	rule_c6_word_lockfile,
+	rule_c12_bad_author,
 	rule_c5_placeholder,
 	rule_c4_encoding,
 	rule_c2_filename_title,  # before C1 — filename pollution masks swap signals
