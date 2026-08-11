@@ -670,5 +670,69 @@ def _print_detect_summary(results, category_filter: str | None, samples: int) ->
 		console.print(t)
 
 
+# Shell-completion script generation.
+#
+# Click 8+ ships completion backends for bash, zsh, and fish that respond to a
+# magic env var (_BMF_COMPLETE=<shell>_complete) at runtime. The classes below
+# render the *installer* script each shell needs sourced once so that the
+# runtime completion mechanism is wired into the user's shell.
+#
+# Usage:
+#   bmf install-completion bash        # prints the script (eval it, or >> ~/.bashrc)
+#   eval "$(bmf install-completion zsh)"
+_PROG = "bmf"
+_COMPLETE_VAR = f"_{_PROG.upper()}_COMPLETE"
+
+
+@main.command("install-completion")
+@click.argument("shell", type=click.Choice(["bash", "zsh", "fish"]))
+@click.option("--output", "-o", type=click.Path(path_type=Path), default=None, help="Write the script to a file instead of stdout.")
+def install_completion(shell: str, output: Path | None) -> None:
+	"""Print a shell-completion script for tab-completion of bmf commands and options.
+
+	\b
+	Install it (pick the line for your shell):
+
+	  bash:
+	    eval "$(bmf install-completion bash)"
+
+	  zsh:
+	    eval "$(bmf install-completion zsh)"
+
+	  fish:
+	    bmf install-completion fish > ~/.config/fish/completions/bmf.fish
+
+	With -o the script is written to a file instead of stdout, e.g.:
+
+	  bmf install-completion bash -o ~/.local/share/bash-completion/completions/bmf.sh
+
+	After sourcing, type 'bmf <Tab>' to complete subcommands and flags.
+	"""
+	from click.shell_completion import BashComplete, FishComplete, ZshComplete
+
+	classes = {"bash": BashComplete, "zsh": ZshComplete, "fish": FishComplete}
+	cls = classes[shell]
+	script = cls(
+		cli=main,
+		ctx_args={},
+		prog_name=_PROG,
+		complete_var=_COMPLETE_VAR,
+	).source()
+
+	if output is not None:
+		output.write_text(script, encoding="utf-8")
+		console.print(f"[green]Completion script written to[/green] {output}")
+		# Shell-specific activation hint.
+		if shell == "bash":
+			console.print(f"[dim]Run: source {output}[/dim]")
+		elif shell == "zsh":
+			console.print(f"[dim]Run: source {output} (or add to your ~/.zshrc)[/dim]")
+		elif shell == "fish":
+			console.print(f"[dim]Fish loads it automatically from ~/.config/fish/completions/[/dim]")
+	else:
+		# Print raw script to stdout (not via rich) so 'eval "$(bmf ...)"' works.
+		click.echo(script)
+
+
 if __name__ == "__main__":
 	main()
