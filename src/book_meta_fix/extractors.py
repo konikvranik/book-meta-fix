@@ -48,17 +48,31 @@ class ExtractedMeta:
 
 	Any field may be None if the format doesn't carry it. `source_format`
 	records which file format these came from.
+
+	The ``title`` / ``authors`` / ``isbn`` / ``publisher`` / ``language``
+	fields are sourced from the EMBEDDED metadata block (EPUB content.opf,
+	pdfinfo, ebook-meta) — which calibre may have corrupted. The
+	``*_from_text`` fields are mined from the book's actual page text by
+	``text_meta.extract_metadata_from_text`` and are independent of the
+	embedded block, so callers can prefer them when the embedded values look
+	broken (see pipeline._is_better).
 	"""
 
 	title: str | None = None
 	authors: list[str] = field(default_factory=list)
-	isbn: str | None = None  # canonicalized, validated
+	isbn: str | None = None  # canonicalized, validated, from embedded metadata
 	publisher: str | None = None
 	language: str | None = None
 	# ISBN found by scanning the first N pages of text (not from embedded metadata)
 	isbn_from_text: str | None = None
 	# First-page text sample (for fuzzy title/author matching in verifier)
 	first_page_text: str | None = None
+	# Metadata mined from first_page_text by text_meta (independent of the
+	# embedded OPF block, which calibre may have overwritten).
+	title_from_text: str | None = None
+	authors_from_text: list[str] = field(default_factory=list)
+	publisher_from_text: str | None = None
+	year_from_text: int | None = None
 	# Which extractor produced this
 	source_format: str = ""
 	# Any error encountered during extraction
@@ -143,10 +157,27 @@ def extract_epub(path: str | Path) -> ExtractedMeta:
 			if lang is not None and lang.text:
 				result.language = lang.text.strip()
 
-			# 3. First-page text for ISBN-from-content + fuzzy matching
+			# 3. First-page text for ISBN-from-content + fuzzy matching +
+			#    deterministic metadata extraction (text_meta). We ALWAYS scan
+			#    the text for an ISBN (even when the embedded OPF carried one),
+			#    because the embedded ISBN may be the wrong one calibre wrote
+			#    back — the text-scan is independent and can flag the mismatch.
 			result.first_page_text = _epub_first_page_text(zf, opf_path)
-			if result.first_page_text and not result.isbn:
+			if result.first_page_text:
 				result.isbn_from_text = extract_isbn(result.first_page_text[:3000])
+				# Mine title/authors/publisher/year from the page text. These are
+				# independent of the OPF block above and feed the pipeline's
+				# deterministic fix stage.
+				from .text_meta import extract_metadata_from_text
+
+				tm = extract_metadata_from_text(result.first_page_text)
+				result.title_from_text = tm.title
+				result.authors_from_text = tm.authors
+				result.publisher_from_text = tm.publisher
+				result.year_from_text = tm.year
+				# Prefer the text-mined ISBN when canonicalization differed.
+				if tm.isbn and not result.isbn_from_text:
+					result.isbn_from_text = tm.isbn
 	except zipfile.BadZipFile:
 		result.error = "bad zip / not an epub"
 	except Exception as e:  # noqa: BLE001
@@ -201,7 +232,15 @@ def _epub_first_page_text(zf: zipfile.ZipFile, opf_path: str) -> str | None:
 
 
 def _strip_html(raw: bytes) -> str:
-	"""Crude HTML tag stripper + encoding detection for EPUB content files."""
+	"""Crude HTML tag stripper + encoding detection for EPUB content files.
+
+	Preserves block structure: ``</p>``, ``</div>``, ``</h1>`` and ``<br>``
+	become newlines so downstream per-line heuristics in text_meta (ALL-CAPS
+	title detection, ``Název:`` label regexes) can anchor on line starts.
+	Collapsing everything to one line (the previous behaviour) glued the
+	title page together with the first paragraph, so the title run could
+	never be isolated.
+	"""
 	# Detect encoding from XML declaration
 	encoding = "utf-8"
 	if raw[:5] == b"<?xml":
@@ -212,6 +251,13 @@ def _strip_html(raw: bytes) -> str:
 		text = raw.decode(encoding, errors="replace")
 	except (LookupError, UnicodeDecodeError):
 		text = raw.decode("utf-8", errors="replace")
+	# Insert newlines at block boundaries BEFORE removing tags, so the line
+	# structure of the title page survives the tag strip.
+	text = re.sub(
+		r"</(p|div|h[1-6]|li|tr|td|th|section|article|header|footer|body|blockquote)\s*>",
+		"\n", text, flags=re.IGNORECASE,
+	)
+	text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
 	# Remove tags
 	text = re.sub(r"<[^>]+>", " ", text)
 	# Unescape basic entities
@@ -223,7 +269,11 @@ def _strip_html(raw: bytes) -> str:
 		.replace("&quot;", '"')
 		.replace("&#8217;", "'")
 	)
-	return re.sub(r"\s+", " ", text).strip()
+	# Collapse spaces/tabs within a line, but keep newlines.
+	text = re.sub(r"[ \t]+", " ", text)
+	# Collapse 3+ consecutive newlines to 2.
+	text = re.sub(r"\n{3,}", "\n\n", text)
+	return text.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -275,8 +325,18 @@ def extract_pdf(path: str | Path) -> ExtractedMeta:
 			if proc.returncode == 0 and proc.stdout:
 				text = proc.stdout[:5000]
 				result.first_page_text = text
-				if not result.isbn:
-					result.isbn_from_text = extract_isbn(text)
+				# Always scan the text for an ISBN (independent of pdfinfo's
+				# embedded value) and mine the other text-based fields.
+				result.isbn_from_text = extract_isbn(text)
+				from .text_meta import extract_metadata_from_text
+
+				tm = extract_metadata_from_text(text)
+				result.title_from_text = tm.title
+				result.authors_from_text = tm.authors
+				result.publisher_from_text = tm.publisher
+				result.year_from_text = tm.year
+				if tm.isbn and not result.isbn_from_text:
+					result.isbn_from_text = tm.isbn
 		except (subprocess.TimeoutExpired, FileNotFoundError) as e:
 			log.debug("pdftotext failed for %s: %s", path, e)
 
@@ -291,10 +351,14 @@ def extract_pdf(path: str | Path) -> ExtractedMeta:
 
 
 def extract_via_ebook_meta(path: str | Path) -> ExtractedMeta:
-	"""Use calibre's `ebook-meta` to extract embedded metadata.
+	"""Use calibre's `ebook-meta` for embedded metadata + `ebook-convert` for
+	page text.
 
-	This is the only realistic option for binary/opaque formats (pdb, mobi, doc).
-	Returns empty ExtractedMeta if calibre is not installed.
+	This is the realistic option for binary/opaque formats (pdb, mobi, doc).
+	`ebook-meta` returns the embedded title/author/publisher/isbn (which
+	calibre may have corrupted, same as OPF), and `ebook-convert` renders the
+	book to plain text so text_meta heuristics can mine a title/ISBN from the
+	actual page content. Returns empty ExtractedMeta if calibre is not installed.
 	"""
 	result = ExtractedMeta(source_format="ebook-meta")
 	ebook_meta = shutil.which("ebook-meta")
@@ -336,7 +400,88 @@ def extract_via_ebook_meta(path: str | Path) -> ExtractedMeta:
 							break
 	except (subprocess.TimeoutExpired, FileNotFoundError) as e:
 		result.error = f"ebook-meta error: {e}"
+		return result
+
+	# Render the book to plain text via `ebook-convert` so text_meta can mine
+	# a title / ISBN / publisher from the page content (independent of the
+	# embedded block, which for pdb/doc is often the filename). This is the
+	# same role _epub_first_page_text plays for EPUBs. We keep only the first
+	# ~8000 chars to bound runtime and memory.
+	page_text = _ebook_convert_to_text(path)
+	if page_text:
+		result.first_page_text = page_text[:8000]
+		result.isbn_from_text = extract_isbn(result.first_page_text[:3000])
+		from .text_meta import extract_metadata_from_text
+
+		tm = extract_metadata_from_text(result.first_page_text)
+		result.title_from_text = tm.title
+		result.authors_from_text = tm.authors
+		result.publisher_from_text = tm.publisher
+		result.year_from_text = tm.year
+		if tm.isbn and not result.isbn_from_text:
+			result.isbn_from_text = tm.isbn
+
 	return result
+
+
+def _ebook_convert_to_text(path: str | Path) -> str | None:
+	"""Render a binary ebook (pdb/mobi/doc/...) to plain text.
+
+	For legacy MS Word ``.doc`` files (Composite Document File, which calibre
+	cannot read — it has no DOC input plugin), try ``catdoc`` first: it handles
+	CP1250/ISO-8859-2 content well and is ~instant. For every other format,
+	use calibre's ``ebook-convert`` (30s timeout). Returns None on failure.
+	"""
+	p = Path(path)
+	if p.suffix.lower() == ".doc":
+		text = _catdoc_to_text(p)
+		if text:
+			return text
+		# Fall through to ebook-convert (rarely works for .doc, but cheap to try).
+
+	ebook_convert = shutil.which("ebook-convert")
+	if not ebook_convert:
+		return None
+	import tempfile
+
+	with tempfile.TemporaryDirectory(prefix="bmf-conv-") as tmp:
+		out = Path(tmp) / "out.txt"
+		try:
+			proc = subprocess.run(
+				[ebook_convert, str(p), str(out)],
+				capture_output=True, text=True, timeout=30,
+			)
+			if proc.returncode != 0 or not out.is_file():
+				return None
+			text = out.read_text(encoding="utf-8", errors="replace")
+			return text or None
+		except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+			return None
+
+
+def _catdoc_to_text(path: str | Path) -> str | None:
+	"""Extract text from a legacy MS Word ``.doc`` via ``catdoc``.
+
+	``catdoc`` reads the OLE/CFB container and emits plain text with CP1250 /
+	ISO-8859-2 content decoded correctly — crucial for CZ/SK books where the
+	filename-as-title corruption is most common. Returns None if catdoc is not
+	installed or fails. Runs with a 15s timeout.
+	"""
+	catdoc = shutil.which("catdoc")
+	if not catdoc:
+		return None
+	try:
+		# -s disables garbled-char warnings on stderr; -d utf-8 forces UTF-8 out.
+		proc = subprocess.run(
+			[catdoc, "-d", "utf-8", str(path)],
+			capture_output=True, text=True, timeout=15,
+		)
+		if proc.returncode != 0:
+			return None
+		text = proc.stdout
+		return text.strip() or None
+	except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+		return None
 
 
 # ---------------------------------------------------------------------------

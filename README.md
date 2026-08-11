@@ -61,6 +61,25 @@ bmf epubgen --apply
 > statistics. The scan uses a SQLite cache (`bmf_cache.db`) so repeated runs
 > are fast; pass `--no-cache` to force a full re-parse.
 
+### Streaming `review.yaml` (live results)
+
+`bmf report` writes `review.yaml` **incrementally** — as each book finishes
+processing, its entry is appended to the file, Unix-pipe style. You can
+`tail -f review.yaml` and watch the proposals arrive while the run continues.
+On start, the existing `review.yaml` is moved to `review.yaml.bak` (so user
+decisions from a prior run are preserved); on clean finish the `.bak` is
+deleted. If the run is interrupted (Ctrl-C, crash), the `.bak` is kept so you
+can recover the pre-run state.
+
+- **Ctrl-C is safe**: results collected so far are already in the file, and
+  `finish()` carries over any prior entries the run didn't reach (e.g. with
+  `--limit`). Nothing a user previously decided is silently dropped.
+- **`--auto-apply` is inline**: high-confidence proposals are written to
+  `metadata.json`/`metadata.opf` as they're produced, and those books are
+  omitted from `review.yaml` (which only holds what still needs a human).
+- **Format**: multi-document YAML (`---` per entry). `bmf apply` reads both
+  the new multi-doc form and the legacy single-list form.
+
 ## Commands
 
 | Command | What it does |
@@ -100,7 +119,154 @@ bmf report --databazeknih --limit 100 -o review.yaml
 echo 'BMF_DATABAZEKNIH=1' >> .env
 ```
 
-## Library layout expected
+## How the fix pipeline picks a proposal
+
+For each NEEDS_REVIEW book, `bmf report` tries to recover correct metadata in
+**cheap-first order** so the LLM is reached only as a last resort:
+
+1. **Offline — page-text mining** (`text_meta`): reads the book's first-page
+   text (already extracted for verification) and mines title / authors / ISBN /
+   year / publisher using CZ/SK heuristics — ALL-CAPS title-page runs, explicit
+   `Název:` / `Autor:` / `Nakladatelství:` labels, the `Neznámý` placeholder
+   drop, CSS-leakage stripping. No network. On a 30-book sample this finds a
+   title for ~37% and any field for ~47% of NEEDS_REVIEW books.
+2. **Online by ISBN** (`extracted.isbn_from_text` > embedded ISBN): OpenLibrary
+   + Google Books.
+3. **Online by title + author** (text-mined > embedded > DB): this is the path
+   that reaches **databazeknih.cz** — the strongest CZ/SK source.
+4. **Embedded-OPF compare** (weakest; calibre may have overwritten the OPF).
+5. **LLM fallback** — only when 1–4 all miss.
+
+The LLM fallback model and its reasoning controls are configurable; see below.
+
+### LLM model choice
+
+`bmf report --llm` uses Z.AI's GLM API as the fallback. Five model settings
+were measured on a sample of hard CZ/SK books (`scripts/llm_experiment.py`):
+
+| Variant | ok% | in tok | out tok | reasoning | wall s | Cost ($/1M in/out) |
+|---|---|---|---|---|---|---|
+| **glm-5.2 reasoning_effort=low (default)** | 100% | 1529 | 346 | yes | 6.7 | 1.40 / 4.40 |
+| glm-4.6 thinking=disabled | 100% | 1522 | 139 | no | 3.0 | 0.60 / 2.20 |
+| glm-4.5-air thinking=disabled | 100% | 1522 | 122 | no | 6.5 | 0.20 / 1.10 |
+| glm-4.5-flash | 100% | 1527 | 96 | no | 7.6 | free |
+| glm-4.7-flash | 100% | 1522 | 147 | no | 3.4 | free |
+
+Non-reasoning models use 3–4× fewer output tokens, but on CZ/SK series they
+hallucinate more (returning the title of a different book by the same author,
+dropping diacritics, inventing authors). **GLM-5.2 with `reasoning_effort=low`
+is the default** — it keeps quality while cutting ~60% of reasoning tokens vs
+the model default. Switch when you know what you are doing:
+
+```bash
+# Cheapest, accepts lower CZ/SK quality (good when the LLM is a rare fallback)
+bmf report --llm --llm-model glm-4.5-flash
+
+# GLM-4.6 non-reasoning: cheaper than 5.2, better than flash on CZ
+bmf report --llm --llm-model glm-4.6   # thinking=disabled is the default for 4.x
+
+# More reasoning (slow, costly) for a hard batch
+bmf report --llm --llm-reasoning-effort max
+```
+
+| Knob | CLI | Env | Applies to |
+|---|---|---|---|
+| Model | `--llm-model` | `ZAI_MODEL` | all |
+| Reasoning effort | `--llm-reasoning-effort` | `ZAI_REASONING_EFFORT` | GLM-5.x (`low` default) |
+| Thinking toggle | `--llm-thinking` | `ZAI_THINKING` | GLM-4.x (`disabled` default) |
+
+Re-run the experiment yourself as Z.AI's lineup evolves:
+
+```bash
+.venv/bin/python scripts/llm_experiment.py --limit 10
+```
+
+### LLM self-correction loop
+
+When the deterministic stages (offline text mining, online lookup) miss, the
+LLM fallback runs a **self-correction loop** (on by default) instead of a
+single expensive call:
+
+```
+ 1. GLM-4.5-Flash (free, thinking off)  →  verify_proposal(title, author vs first-page text)
+       │ passed  →  accept (source llm:flash)              [the common case — 0 USD]
+       │ failed  →  inject feedback into the next attempt
+       ▼
+ 2. GLM-4.5-Flash with feedback  (max 2 Flash attempts)   [still 0 USD]
+       │ passed  →  accept (source llm:loop)
+       │ failed / 429  →  fall through
+       ▼
+ 3. GLM-5.2 reasoning_effort=low  (paid, high quality)    [only the hard cases]
+       │ passed  →  accept (source llm:high)
+       │ failed  →  return last proposal as confidence=low (still reviewed by the human)
+```
+
+`verify_proposal` checks both **title** and **author** against the book's
+first-page text (fuzzy, accent-insensitive), plus an exact ISBN comparison. On
+failure it returns a short reason ("the title 'X' is not found in the book's
+first-page text (fuzzy 0.41)") that is appended to the next attempt's prompt.
+Books with no readable text (image-only title pages, scanned PDFs) skip
+verification and accept the Flash result as-is.
+
+**Rate limiting**: all calls (Flash + final + retries) go through a shared
+leaky-bucket smoother (default capacity 5, one token every `--llm-min-interval`
+seconds). This keeps the aggregate request rate constant regardless of when
+worker threads arrive, which avoids tripping Z.AI's dynamic RPM limit (429 code
+1302). Free-tier Flash models are throttled more aggressively than paid ones
+and share Z.AI's cascade-cooldown bug (one model getting rate-limited can take
+the others down with it); on a Flash 429 the loop falls through to the paid
+final model immediately rather than burning more free-tier attempts.
+
+Toggles:
+
+| Knob | CLI | Env | Default |
+|---|---|---|---|
+| Loop on/off | `--no-llm-loop` | `BMF_LLM_LOOP=0` | on |
+| Flash model | `--llm-flash-model` | `ZAI_FLASH_MODEL` | `glm-4.7-flash` |
+| Final model | `--llm-final-model` | `ZAI_FINAL_MODEL` | `glm-5.2` |
+| Burst capacity | `--llm-burst` | `BMF_LLM_BURST` | `5` |
+
+```bash
+# Single fast cheap call, no loop (e.g. for a quick test run)
+bmf report --llm --no-llm-loop --llm-model glm-4.5-flash
+
+# Stricter rate matching for a free plan (1 call/burst, 2s apart)
+bmf report --llm --llm-burst 1 --llm-min-interval 2.0
+```
+
+## Cover replacement
+
+Calibre's default "Generate cover" produces a placeholder image (solid
+background + rendered title/author text) at exactly 1200×1600. The pipeline
+detects these by pixel analysis — **no LLM involved** — and proposes a
+replacement from databazeknih.cz when one is available.
+
+**Detection** (`covers.py` + `rule_generated_cover`): three signals, each adds
+confidence; a cover is classified as generated at confidence ≥ 0.5:
+
+| Signal | Weight | What it means |
+|--------|--------|---------------|
+| Dimensions == 1200×1600 | +0.5 | Calibre default template signature |
+| Few unique colours (< ~50 at 64-colour quantization) | +0.3 | Solid background + text |
+| Dominant colour covers > 60% of pixels | +0.2 | Flat background |
+
+**Categories:**
+- `C11` — generated cover detected (NEEDS_REVIEW). Replacement proposed when a `cover_url` is available.
+- `MISSING_COVER` — no `cover.jpg` sidecar at all (AUTO_FIXABLE).
+
+**Flow** (same as metadata proposals — no separate command):
+
+```
+bmf report --databazeknih           # detect C11/MISSING_COVER, fetch cover_url
+# → review.yaml entry with action: accept (auto-set when databazeknih matched)
+bmf apply review.yaml --apply        # downloads cover_url → cover.jpg (with .bak)
+```
+
+With `--auto-apply`, covers are downloaded inline during the report run.
+
+**Cost:** zero LLM tokens. Detection is Pillow pixel math (~5 ms/book).
+Download is one HTTP request per replaced cover, rate-limited at 1 s/host.
+
 
 ```
 <library>/
@@ -159,7 +325,9 @@ catalog with real examples. Summary:
 | C8 | translator mislabeled as author | NEEDS_REVIEW |
 | C9 | anonym (mostly fake — real anonym is whitelisted) | NEEDS_REVIEW |
 | C10 | long multi-author list (anthology vs translator team) | NEEDS_REVIEW |
+| C11 | generated cover (Calibre placeholder) detected by pixel analysis | NEEDS_REVIEW |
 | — | MISSING_ISBN / MISSING_YEAR | AUTO_FIXABLE (enrich) |
+| — | MISSING_COVER (no `cover.jpg` sidecar) | AUTO_FIXABLE (download) |
 
 ## YAML review format
 

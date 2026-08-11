@@ -451,7 +451,14 @@ class Enricher:
 		cache_key = self._cache_key(isbn=isbn, title=title, author=author)
 		cached = self._cache_get(cache_key)
 		if cached is not None:
-			return cached or None  # cached "not found" as empty payload
+			# _cache_get returns one of:
+			#   - an EnrichedMeta  -> return it
+			#   - "__NOT_FOUND__"   -> a cached negative: return None (we already
+			#                          looked once and found nothing)
+			#   - None              -> cache miss: fall through and do the lookup
+			if cached == "__NOT_FOUND__":
+				return None
+			return cached
 
 		result: EnrichedMeta | None = None
 		# databazeknih: by title (search). Goes first — best CZ/SK source + genres.

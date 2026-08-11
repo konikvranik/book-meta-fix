@@ -12,13 +12,15 @@ Corruption categories (from empirical study of the library):
 	    with other signals; alone too noisy — 47% of titles have '_')
 	C3  series/library/publisher as author  NEEDS_REVIEW
 	C4  encoding corruption (unrepairable)  NEEDS_REVIEW (LLM)
-	C5  placeholder record                  AUTO_FIXABLE (delete)
+	C5  placeholder record                  NEEDS_REVIEW (metadata corrupted; recover from page text)
 	C6  Word lock-file duplicate            AUTO_FIXABLE (delete)
 	C7  glued authors ("byXandY")           NEEDS_REVIEW
 	C8  translator mislabeled as author     NEEDS_REVIEW
 	C9  anonym (mostly fake — real anonym is whitelisted) NEEDS_REVIEW
 	C10 long comma-separated author list    NEEDS_REVIEW (mostly real multi-author)
+	C11 generated cover (calibre placeholder) NEEDS_REVIEW (download replacement)
 	EXTRA: missing ISBN / year              AUTO_FIXABLE (enrichable)
+	EXTRA: missing cover / generated cover  AUTO_FIXABLE / NEEDS_REVIEW (download)
 """
 from __future__ import annotations
 
@@ -37,7 +39,10 @@ Rule = Callable[[BookMeta], "Diagnosis | None"]
 
 # Czech/Slovak "anonymous" spellings — almost always signal a corrupted record,
 # NOT a genuine anonymous work. Genuine anonym (Bible etc.) is whitelisted below.
-_ANONYM_SPELLINGS = {"anonym", "anonymous", "neznamy", "neznámý", "neznamy", "unknown", ""}
+# Compared case-insensitively (callers .lower() before checking membership).
+_ANONYM_SPELLINGS = {
+	"", "anonym", "anonymní", "anonymni", "anonymous", "neznamy", "neznámý", "unknown",
+}
 
 # Titles that indicate a GENUINE anonymous work (religion/folklore).
 _REAL_ANONYM_RE = re.compile(r"\b(bible|bibl[ei]|kralick|[mn]ový?\s+z[áa]kon|knihy\s+moj|koran|quran|edda)\b", re.IGNORECASE)
@@ -149,14 +154,19 @@ def rule_c6_word_lockfile(meta: BookMeta) -> Diagnosis | None:
 
 
 def rule_c5_placeholder(meta: BookMeta) -> Diagnosis | None:
-	"""C5: literal placeholder record ('author'/'title'/'subject')."""
+	"""C5: literal placeholder record ('author'/'title'/'subject').
+
+	The metadata are corrupted (Calibre overwrote them with a placeholder), but
+	the book itself may still hold the real title/author. Reliable recovery
+	requires extracting metadata from the page text (a planned enhancement);
+	until then this needs a human in the loop.
+	"""
 	if _PLACEHOLDER_RE.match(meta.title) or any(_PLACEHOLDER_RE.match(a) for a in meta.authors):
 		return Diagnosis(
 			category="C5",
 			reason=f"placeholder record: author={meta.authors!r} title={meta.title!r}",
 			confidence=Confidence.HIGH,
-			verdict=Verdict.AUTO_FIXABLE,
-			proposed={"action": "delete", "reason": "empty placeholder, no real data"},
+			verdict=Verdict.NEEDS_REVIEW,
 		)
 	return None
 
@@ -258,6 +268,14 @@ def rule_c2_filename_title(meta: BookMeta) -> Diagnosis | None:
 	Alone, '_' in title is too noisy (47% of library). We require a STRONGER
 	signal: either a file extension in the title, or a Word-temp prefix, or a
 	truncated marker, or a near-exact match with the primary file's stem.
+
+	The filename-stem match compares the title to the primary file's stem
+	(minus extension and ' - Author' suffix) **directly** (case-insensitive,
+	not accent-stripped). Calibre strips diacritics from filenames but not
+	from the title field, so a healthy book whose title is "Čas přílivu" will
+	have a filename "Cas prilivu - Author.epub" — the stem and title do NOT
+	match without accent-stripping, so the rule does not fire. Only when the
+	title field itself IS the filename (no diacritics) does the match succeed.
 	"""
 	reasons: list[str] = []
 	if _EXTENSION_RE.search(meta.title):
@@ -266,7 +284,11 @@ def rule_c2_filename_title(meta: BookMeta) -> Diagnosis | None:
 		reasons.append("MS-Word temp filename prefix")
 	if _TRUNCATED_RE.search(meta.title):
 		reasons.append("truncated slug marker (_n_ / _txt)")
-	# Filename-stem match: title is the primary file's stem (minus ' - Author' suffix)
+	# Filename-stem match: title IS the primary file's stem (minus ' - Author'
+	# suffix). Compare directly (case-insensitive), NOT accent-stripped — a
+	# healthy book's title has diacritics that the filename lacks, so they
+	# won't match. This only fires when the title field is literally the
+	# filename (a genuine filename-as-title corruption).
 	if meta.primary_file:
 		import os
 
@@ -278,7 +300,7 @@ def rule_c2_filename_title(meta: BookMeta) -> Diagnosis | None:
 				break
 		# Strip trailing ' - <something>' (author)
 		stem = re.sub(r"\s*-\s*[^-]+$", "", stem).strip()
-		if stem and _strip_accents(stem).lower() == _strip_accents(meta.title).lower():
+		if stem and stem.lower() == meta.title.lower():
 			reasons.append("title == primary file stem")
 	if reasons:
 		return Diagnosis(
@@ -349,10 +371,30 @@ def rule_c9_anonym(meta: BookMeta) -> Diagnosis | None:
 	whitelisted; everything else with an anonym spelling is flagged because
 	99.7% of such records in this library are corrupted (lost author), not
 	truly anonymous.
+
+	The anonym signal must come from the actual metadata (authors list), not
+	merely from the author_folder. ~15% of the library lives in a 'Neznamy/'
+	folder but already carries a real author in metadata.json (calibre was
+	fixed at some point, the folder was never moved). Flagging those as C9
+	is a false positive — the metadata is already correct.
 	"""
-	# Check both the authors list and the author_folder
-	all_author_strings = [meta.author_folder, *meta.authors]
-	is_anonym = any(a.strip().lower() in _ANONYM_SPELLINGS for a in all_author_strings if a)
+	# A real (non-anonym) author in the metadata means the record is fine,
+	# regardless of what folder it happens to live in.
+	has_real_author = any(
+		a.strip().lower() not in _ANONYM_SPELLINGS
+		for a in meta.authors
+		if a
+	)
+	if has_real_author:
+		return None
+	# No real author in metadata — check whether the folder signals anonym.
+	# (author_folder alone, without an anonym authors[], is still C9 because
+	# the metadata has no author at all and the folder confirms it.)
+	is_anonym = any(
+		a.strip().lower() in _ANONYM_SPELLINGS
+		for a in (meta.author_folder, *meta.authors)
+		if a
+	)
 	if not is_anonym:
 		return None
 	# Whitelist: title looks like a genuine religious/folkloric anonymous work
@@ -396,6 +438,65 @@ def rule_missing_year(meta: BookMeta) -> Diagnosis | None:
 	return None
 
 
+# ---------------------------------------------------------------------------
+# Cover rules (C11 generated, MISSING_COVER absent)
+# ---------------------------------------------------------------------------
+#
+# These are enrichment-tier rules: a generated/missing cover is not metadata
+# corruption, but a fixable quality issue. They run after the structural and
+# ISBN/year enrichment rules. When cover_url is available from an enricher
+# (preferably databazeknih), the ReviewWriter pre-fills action:accept and
+# `bmf apply` downloads the replacement.
+
+
+def rule_generated_cover(meta: BookMeta) -> Diagnosis | None:
+	"""C11: auto-generated (Calibre placeholder) cover detected.
+
+	Fires when cover.jpg exists AND pixel analysis classifies it as generated
+	(1200x1600 default template + low colour count + dominant background).
+	Returns NEEDS_REVIEW so a human sees the proposal before the replacement
+	cover is downloaded — though the ReviewWriter pre-fills action:accept when
+	a cover_url is available.
+	"""
+	from pathlib import Path
+
+	cover_path = Path(meta.path) / "cover.jpg"
+	if not cover_path.is_file():
+		return None
+	from .covers import analyze_cover
+
+	info = analyze_cover(cover_path)
+	if not info.is_generated:
+		return None
+	signals = ", ".join(info.signals) if info.signals else f"{info.width}x{info.height}"
+	return Diagnosis(
+		category="C11",
+		reason=f"generated cover ({signals})",
+		confidence=Confidence.HIGH,
+		verdict=Verdict.NEEDS_REVIEW,
+	)
+
+
+def rule_missing_cover(meta: BookMeta) -> Diagnosis | None:
+	"""MISSING_COVER: no cover.jpg sidecar at all.
+
+	Auto-fixable: if an enricher has a cover_url, `bmf apply` will download it.
+	Fires only when cover.jpg is entirely absent (PDFs/PDBs may have an
+	embedded cover but no sidecar — those are left for a future extractor).
+	"""
+	from pathlib import Path
+
+	cover_path = Path(meta.path) / "cover.jpg"
+	if cover_path.is_file():
+		return None
+	return Diagnosis(
+		category="MISSING_COVER",
+		reason="no cover.jpg sidecar",
+		confidence=Confidence.LOW,
+		verdict=Verdict.AUTO_FIXABLE,
+	)
+
+
 # Priority-ordered list of structural rules (NOT the missing-ISBN/year ones —
 # those are enrichment opportunities applied only to books that pass the
 # structural checks as OK).
@@ -416,9 +517,14 @@ RULES: list[Rule] = [
 
 # Enrichment rules — applied to books that passed all structural rules as OK
 # (these are not corruption, just missing data we can fetch).
+# Cover rules are last: C11/MISSING_COVER are lower priority than metadata
+# enrichment, and their cover_url pre-fill in the ReviewWriter is independent
+# of the metadata proposal.
 ENRICHMENT_RULES: list[Rule] = [
 	rule_missing_isbn,
 	rule_missing_year,
+	rule_generated_cover,
+	rule_missing_cover,
 ]
 
 

@@ -20,41 +20,49 @@ from .readers import read_book_folder
 
 log = logging.getLogger(__name__)
 
-# Top-level directory names to skip entirely.
-# `needfix` is where bmf organize moves broken books (default), so we must
-# not re-scan them as part of the main library.
-_EXCLUDE_DIRS = {"temp_calibre", "needfix"}
+# Top-level directory names to skip entirely (Calibre scratch dir).
+# NOTE: `needfix` is intentionally NOT excluded — bmf organize moves broken
+# books there, but they must stay visible so subsequent report/organize/apply
+# runs can re-diagnose them and move fixed books back out.
+_EXCLUDE_DIRS = {"temp_calibre"}
 
 # A book folder is recognized by having metadata.opf OR metadata.json
 _META_FILES = ("metadata.opf", "metadata.json")
 
 
 def iter_book_folders(library: Path):
-	"""Yield book folder paths under *library*, skipping excluded directories.
+	"""Yield book folder paths under *library*, recursively.
 
-	Yields paths in arbitrary (os.scandir) order. Each yielded path contains
-	at least one of the _META_FILES.
+	Descends into subdirectories at any depth so books relocated by `organize`
+	(e.g. into needfix/) remain discoverable. A folder is yielded when it
+	contains at least one of _META_FILES. Excluded entries (calibre scratch
+	dirs, dotfiles, MS-Word lock files) are pruned throughout the tree.
+
+	Yields paths in deterministic (name-sorted) order.
 	"""
 	library = Path(library)
 	if not library.is_dir():
 		raise FileNotFoundError(f"library not found: {library}")
 
-	for author_dir in _scandir_sorted(library):
-		if not author_dir.is_dir():
+	yield from _walk_for_book_folders(library)
+
+
+def _walk_for_book_folders(folder: Path):
+	"""Recurse into *folder*, yielding directories that hold a metadata file.
+
+	We descend depth-first but yield in name-sorted order for determinism.
+	A folder that is itself a book is not descended into further (a book's
+	subdirectories are not separate books). Excluded entries are pruned.
+	"""
+	for entry in _scandir_sorted(folder):
+		if not entry.is_dir():
 			continue
-		if _is_excluded(author_dir.name):
+		if _is_excluded(entry.name):
 			continue
-		# Second level: <Author>/<Title> (<id>)/
-		try:
-			for book_dir in _scandir_sorted(author_dir):
-				if not book_dir.is_dir():
-					continue
-				if _is_excluded(book_dir.name):
-					continue
-				if any((book_dir / mf).is_file() for mf in _META_FILES):
-					yield book_dir
-		except PermissionError as e:
-			log.warning("permission denied in %s: %s", author_dir, e)
+		if any((entry / mf).is_file() for mf in _META_FILES):
+			yield entry
+			continue  # book folder — don't descend into its contents
+		yield from _walk_for_book_folders(entry)
 
 
 def _scandir_sorted(path: Path):
