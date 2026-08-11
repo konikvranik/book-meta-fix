@@ -268,6 +268,14 @@ def rule_c2_filename_title(meta: BookMeta) -> Diagnosis | None:
 	Alone, '_' in title is too noisy (47% of library). We require a STRONGER
 	signal: either a file extension in the title, or a Word-temp prefix, or a
 	truncated marker, or a near-exact match with the primary file's stem.
+
+	The filename-stem match compares the title to the primary file's stem
+	(minus extension and ' - Author' suffix) **directly** (case-insensitive,
+	not accent-stripped). Calibre strips diacritics from filenames but not
+	from the title field, so a healthy book whose title is "Čas přílivu" will
+	have a filename "Cas prilivu - Author.epub" — the stem and title do NOT
+	match without accent-stripping, so the rule does not fire. Only when the
+	title field itself IS the filename (no diacritics) does the match succeed.
 	"""
 	reasons: list[str] = []
 	if _EXTENSION_RE.search(meta.title):
@@ -276,7 +284,11 @@ def rule_c2_filename_title(meta: BookMeta) -> Diagnosis | None:
 		reasons.append("MS-Word temp filename prefix")
 	if _TRUNCATED_RE.search(meta.title):
 		reasons.append("truncated slug marker (_n_ / _txt)")
-	# Filename-stem match: title is the primary file's stem (minus ' - Author' suffix)
+	# Filename-stem match: title IS the primary file's stem (minus ' - Author'
+	# suffix). Compare directly (case-insensitive), NOT accent-stripped — a
+	# healthy book's title has diacritics that the filename lacks, so they
+	# won't match. This only fires when the title field is literally the
+	# filename (a genuine filename-as-title corruption).
 	if meta.primary_file:
 		import os
 
@@ -288,7 +300,7 @@ def rule_c2_filename_title(meta: BookMeta) -> Diagnosis | None:
 				break
 		# Strip trailing ' - <something>' (author)
 		stem = re.sub(r"\s*-\s*[^-]+$", "", stem).strip()
-		if stem and _strip_accents(stem).lower() == _strip_accents(meta.title).lower():
+		if stem and stem.lower() == meta.title.lower():
 			reasons.append("title == primary file stem")
 	if reasons:
 		return Diagnosis(
