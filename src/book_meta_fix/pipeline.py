@@ -366,29 +366,43 @@ def _process_book(
 			if not _has_usable_text(first_page):
 				stats["llm_skipped_no_text"] += 1
 			else:
+				def _llm_attempt(ev):
+					"""One reconcile_loop attempt. Returns (enriched, llm_src) or (None, None)."""
+					reconciled, src = _llm_reconcile_with_loop(llm_provider, ev, extracted, loop=llm_loop)
+					if reconciled is None or not _reconciled_is_useful(reconciled, meta):
+						return None, None
+					em = _reconciled_to_enriched(reconciled, source=src)
+					# The LLM result passed verify_proposal inside the loop;
+					# confirm_identity is the matching positive gate that sets
+					# identity_confirmed (a verified identity change auto-accepts).
+					em.identity_confirmed = confirm_identity(em, extracted)
+					return em, src
+
+				def _bucket(src):
+					if src in ("llm:flash", "llm:loop"):
+						stats["llm_flash_fixed"] += 1
+					elif src == "llm:high":
+						stats["llm_final_fixed"] += 1
+					elif src == "llm:low":
+						stats["llm_low_confidence"] += 1
+					else:
+						stats["llm_fixed"] += 1
+
 				try:
 					evidence = _build_llm_evidence(meta, diag, extracted)
-					# reconcile_loop tries the free Flash model first (with
-					# verify_proposal feedback between attempts), then the paid
-					# final model. Falls back to plain reconcile() for mock
-					# providers that don't implement the loop (back-compat).
-					reconciled, llm_src = _llm_reconcile_with_loop(llm_provider, evidence, extracted, loop=llm_loop)
-					if reconciled is not None and _reconciled_is_useful(reconciled, meta):
-						enriched = _reconciled_to_enriched(reconciled, source=llm_src)
-						# The LLM result already passed verify_proposal inside the
-						# reconcile loop; confirm_identity is the matching positive
-						# gate that sets identity_confirmed (so a verified identity
-						# change auto-accepts).
-						enriched.identity_confirmed = confirm_identity(enriched, extracted)
-						# Bucket the result by how it was obtained.
-						if llm_src in ("llm:flash", "llm:loop"):
-							stats["llm_flash_fixed"] += 1
-						elif llm_src == "llm:high":
-							stats["llm_final_fixed"] += 1
-						elif llm_src == "llm:low":
-							stats["llm_low_confidence"] += 1
-						else:
-							stats["llm_fixed"] += 1
+					# Attempt 1: first-page text.
+					enriched, llm_src = _llm_attempt(evidence)
+					# Attempt 2 (only if the first page wasn't enough): retry with a
+					# broader text window (title/author aren't always on page 1).
+					if enriched is None and extracted is not None:
+						broader = getattr(extracted, "broader_text", None)
+						first = extracted.first_page_text
+						if broader and _has_usable_text(broader) and (not first or len(broader) > len(first)):
+							enriched, llm_src = _llm_attempt({**evidence, "first_page_text": broader})
+							if enriched is not None:
+								stats["llm_broader_fixed"] = stats.get("llm_broader_fixed", 0) + 1
+					if enriched is not None:
+						_bucket(llm_src)
 					else:
 						stats["llm_no_result"] += 1
 				except Exception as e:  # noqa: BLE001
