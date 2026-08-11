@@ -17,6 +17,7 @@ dependencies = [
 	"rich>=13.0",
 	"PyYAML>=6.0",
 	"rapidfuzz>=3.0",
+	"Pillow>=10.0",
 ]
 
 [project.optional-dependencies]

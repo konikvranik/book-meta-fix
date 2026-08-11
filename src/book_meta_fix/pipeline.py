@@ -114,6 +114,7 @@ def run_pipeline(
 		"llm_fixed": 0, "llm_flash_fixed": 0, "llm_final_fixed": 0, "llm_low_confidence": 0,
 		"llm_skipped_no_text": 0, "llm_no_result": 0, "llm_error": 0,
 		"unfixed": 0, "errors": 0, "content_mismatch": 0,
+		"covers_generated": 0, "covers_missing": 0,
 	}
 
 	# Per-book work closure. The shared enricher/llm are thread-safe:
@@ -213,10 +214,11 @@ def run_pipeline(
 	if interrupted:
 		log.warning("pipeline interrupted: returning %d partial results (of %d books) for review", len(results), total)
 	log.info(
-		"pipeline: %d ok, %d needs_review (content_mismatch=%d, det=%d, online=%d, llm_flash=%d, llm_final=%d, llm_low=%d, llm_other=%d, llm_skipped=%d, llm_no_result=%d, unfixed=%d, errors=%d)%s",
+		"pipeline: %d ok, %d needs_review (content_mismatch=%d, det=%d, online=%d, llm_flash=%d, llm_final=%d, llm_low=%d, llm_other=%d, llm_skipped=%d, llm_no_result=%d, unfixed=%d, covers_gen=%d, covers_missing=%d, errors=%d)%s",
 		stats["ok"], stats["needs_review"], stats["content_mismatch"], stats["det_fixed"], stats["online_fixed"],
 		stats["llm_flash_fixed"], stats["llm_final_fixed"], stats["llm_low_confidence"], stats["llm_fixed"],
-		stats["llm_skipped_no_text"], stats["llm_no_result"], stats["unfixed"], stats["errors"],
+		stats["llm_skipped_no_text"], stats["llm_no_result"], stats["unfixed"],
+		stats["covers_generated"], stats["covers_missing"], stats["errors"],
 		" [INTERRUPTED]" if interrupted else "",
 	)
 	return results
@@ -245,6 +247,11 @@ def _process_book(
 	diag = detect_fn(meta)
 	verification = None
 	enriched = None
+	# Count cover-specific diagnoses for the pipeline summary.
+	if diag.category == "C11":
+		stats["covers_generated"] += 1
+	elif diag.category == "MISSING_COVER":
+		stats["covers_missing"] += 1
 	# Carries an already-extracted ExtractedMeta into the fix path, so a book
 	# that was verified (and reclassified) doesn't get extracted a second time.
 	preextracted: ExtractedMeta | None = None
@@ -282,7 +289,7 @@ def _process_book(
 			stats["ok"] += 1
 			return (meta, diag, None, None)
 
-	is_needs_review = diag.verdict == Verdict.NEEDS_REVIEW or diag.category in ("MISSING_ISBN", "MISSING_YEAR")
+	is_needs_review = diag.verdict == Verdict.NEEDS_REVIEW or diag.category in ("MISSING_ISBN", "MISSING_YEAR", "MISSING_COVER")
 
 	# --- NEEDS_REVIEW books: try cheap fixes first, LLM last ---
 	if is_needs_review:
@@ -488,13 +495,16 @@ def _online_is_useful(online: "EnrichedMeta", meta: BookMeta) -> bool:  # noqa: 
 	"""Does an online result bring something the DB doesn't already have?
 
 	Accepts the online record if ANY of its fields is better than the DB's
-	(title/author/isbn/year/publisher/genres). This is the gate that keeps us
-	from overwriting good metadata with a no-op online hit.
+	(title/author/isbn/year/publisher/genres), OR it has a cover_url (the one
+	field that may be useful even when all text metadata already matches —
+	the book's cover may be a generated placeholder that needs replacement).
+	This is the gate that keeps us from overwriting good metadata with a
+	no-op online hit.
 	"""
 	return any(
 		_is_better(getattr(online, f, None), getattr(meta, f, None))
 		for f in ("title", "isbn", "year", "publisher")
-	) or bool(getattr(online, "genres", None))
+	) or bool(getattr(online, "genres", None)) or bool(getattr(online, "cover_url", None))
 
 
 def _is_better(candidate: object | None, current: object | None) -> bool:
@@ -1034,7 +1044,12 @@ def _snapshot_deletions(folders: list[Path], library: Path) -> Path | None:
 
 
 def _apply_action(meta: BookMeta, item) -> None:  # noqa: ANN001
-	"""Mutate *meta* in place according to the review item's action."""
+	"""Mutate *meta* in place according to the review item's action.
+
+	Cover downloads are handled inline (not deferred to write_book_meta) because
+	they involve a network fetch — the caller (apply_review) wraps this in a
+	try/except and reports download failures via the summary dict.
+	"""
 	if item.action == "accept" and item.proposed:
 		# Apply all proposed fields
 		if "title" in item.proposed:
@@ -1047,6 +1062,23 @@ def _apply_action(meta: BookMeta, item) -> None:  # noqa: ANN001
 			meta.year = item.proposed["year"]
 		if "publisher" in item.proposed:
 			meta.publisher = item.proposed["publisher"]
+		if "language" in item.proposed:
+			meta.language = item.proposed["language"]
+		if "genres" in item.proposed:
+			genres = item.proposed["genres"]
+			meta.genres = genres if isinstance(genres, list) else [genres]
+		# Cover replacement: download cover_url to cover.jpg. This is a network
+		# I/O side effect inside the metadata-mutation function, but it's the
+		# cleanest place — _apply_action is the single point where proposed
+		# values are committed to the book. write_book_meta (called next) will
+		# then emit the OPF <guide> cover reference automatically.
+		if "cover_url" in item.proposed:
+			from .covers import download_cover
+
+			cover_path = Path(meta.path) / "cover.jpg"
+			ok = download_cover(item.proposed["cover_url"], cover_path)
+			if not ok:
+				log.warning("cover download failed for id=%s url=%s", item.id, item.proposed["cover_url"])
 	elif item.action == "swap":
 		# Swap author <-> title
 		old_title = meta.title
