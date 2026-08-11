@@ -14,7 +14,12 @@ accent-stripped), so only genuine filename-as-title cases fire.
 """
 from __future__ import annotations
 
-from book_meta_fix.detectors import detect, rule_c2_filename_title, rule_c9_anonym
+from book_meta_fix.detectors import (
+	detect,
+	rule_c12_bad_author,
+	rule_c2_filename_title,
+	rule_c9_anonym,
+)
 from book_meta_fix.models import BookMeta
 
 
@@ -188,3 +193,66 @@ class TestC2FilenameTitle:
 		d = rule_c2_filename_title(m)
 		assert d is not None
 		assert d.category == "C2"
+
+
+class TestC12BadAuthor:
+	"""rule_c12_bad_author catches author-field slug/artefact pollution that
+	organize() faithfully turned into author-folder names (e.g. 'anthony
+	burgess', '_ antologie', 'jsvoboda'). These were previously invisible to
+	detection and left sitting in the library root."""
+
+	def test_all_lowercase_author_fires_c12(self):
+		"""A real person name always has a capital; all-lowercase is slug pollution."""
+		m = _meta(author_folder="anthony burgess", authors=["anthony burgess"])
+		d = rule_c12_bad_author(m)
+		assert d is not None
+		assert d.category == "C12"
+		assert d.verdict.value == "NEEDS_REVIEW"
+		assert "lowercase" in d.reason
+
+	def test_glued_lowercase_author_fires_c12(self):
+		"""'jsvoboda' — glued, all-lowercase. Filename slug artefact."""
+		m = _meta(author_folder="jsvoboda", authors=["jsvoboda"])
+		d = rule_c12_bad_author(m)
+		assert d is not None
+		assert d.category == "C12"
+
+	def test_underscore_prefix_fires_c12(self):
+		"""Leading underscore is a slug artefact ('_ antologie')."""
+		m = _meta(author_folder="_ antologie", authors=["* antologie"])
+		d = rule_c12_bad_author(m)
+		assert d is not None
+		assert d.category == "C12"
+		assert "prefix" in d.reason
+
+	def test_asterisk_prefix_fires_c12(self):
+		"""Leading asterisk is a slug artefact."""
+		m = _meta(author_folder="* edice", authors=["* edice"])
+		d = rule_c12_bad_author(m)
+		assert d is not None
+		assert d.category == "C12"
+
+	def test_proper_name_not_c12(self):
+		"""A correctly capitalized name must not fire C12."""
+		m = _meta(author_folder="Karel Čapek", authors=["Karel Čapek"])
+		assert rule_c12_bad_author(m) is None
+
+	def test_foreign_capitalized_not_c12(self):
+		"""Foreign names with capitals are fine."""
+		m = _meta(author_folder="Agatha Christie", authors=["Agatha Christie"])
+		assert rule_c12_bad_author(m) is None
+
+	def test_anonym_not_swallowed_by_c12(self):
+		"""Anonym spellings must reach C9 (which knows the Bible/Koran whitelist),
+		not get caught here as 'all-lowercase'."""
+		m = _meta(author_folder="anonym", authors=["anonym"])
+		# C12 skips anonym; full detect() routes it to C9.
+		assert rule_c12_bad_author(m) is None
+		d = detect(m)
+		assert d.category == "C9"
+
+	def test_detect_routes_bad_author_to_c12(self):
+		"""End-to-end: detect() returns C12 for an all-lowercase author."""
+		m = _meta(author_folder="anthony burgess", authors=["anthony burgess"])
+		d = detect(m)
+		assert d.category == "C12"

@@ -98,3 +98,15 @@ class TestIterBookFolders:
 		(json_book / "metadata.json").touch()
 		found = {p.name for p in iter_book_folders(tmp_path)}
 		assert found == {"Opf Book (1)", "Json Book (2)"}
+
+	def test_sees_tilde_dollar_author_folder(self, tmp_path: Path) -> None:
+		"""Regression: a book whose author metadata was polluted to '~$Foo'
+		lives under a '~$Foo/' author folder. The walker must NOT prune such
+		directories, otherwise the C6 detector can never see them and the book
+		is invisible to every bmf command. (Only concrete '~$ lock FILES are
+		pruned, not directories.)"""
+		_make_book(tmp_path / "Author" / "Normal (1)")
+		_make_book(tmp_path / "~$N. Shearer" / "Accident Report (2)")
+		found = {p.name for p in iter_book_folders(tmp_path)}
+		assert "Accident Report (2)" in found
+		assert "Normal (1)" in found

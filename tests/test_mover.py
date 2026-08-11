@@ -145,3 +145,63 @@ class TestOrganize:
 		actions = {r.source: r.destination for r in results}
 		assert actions[str(ok_src)] == str(tmp_path / "Author" / "Fixed (1)")
 		assert actions[str(broken_src)] == str(tmp_path / "needfix" / "Author" / "Broken (2)")
+
+
+class TestPruneEmptyParents:
+	"""Regression: organize() left behind empty author folders after moving
+	a book (e.g. 'adams/', 'Alexander Dumas/' — 61 of them in the real library).
+	move_book() must now remove newly-empty parent dirs up to the library root."""
+
+	def test_empty_author_folder_removed_after_move(self, tmp_path: Path) -> None:
+		"""When a book is the only child of its author folder, the author
+		folder must disappear after the move."""
+		src = tmp_path / "Bad Author" / "Book (1)"
+		src.mkdir(parents=True)
+		(src / "metadata.opf").touch()
+		meta = _book(1, path=str(src), title="Book", authors=["Good Author"])
+
+		organize([(meta, Verdict.OK)], tmp_path, dry_run=False)
+
+		# Book moved to the new author; old author folder gone.
+		assert (tmp_path / "Good Author" / "Book (1)").is_dir()
+		assert not (tmp_path / "Bad Author").exists()
+
+	def test_nonempty_author_folder_kept_after_move(self, tmp_path: Path) -> None:
+		"""If the author folder still holds other books, it must stay."""
+		keep = tmp_path / "Author" / "Stays (2)"
+		keep.mkdir(parents=True)
+		(keep / "metadata.opf").touch()
+		src = tmp_path / "Author" / "Moves (1)"
+		src.mkdir(parents=True)
+		(src / "metadata.opf").touch()
+		meta = _book(1, path=str(src), title="Moves", authors=["New Author"])
+
+		organize([(meta, Verdict.OK)], tmp_path, dry_run=False)
+
+		assert (tmp_path / "New Author" / "Moves (1)").is_dir()
+		# Old author folder still has Stays (2), so it must remain.
+		assert (tmp_path / "Author").is_dir()
+
+	def test_library_root_not_removed(self, tmp_path: Path) -> None:
+		"""The library root itself must never be deleted, even if it becomes empty."""
+		src = tmp_path / "Author" / "Book (1)"
+		src.mkdir(parents=True)
+		(src / "metadata.opf").touch()
+		meta = _book(1, path=str(src), title="Book", authors=["Author"])
+
+		organize([(meta, Verdict.OK)], tmp_path, dry_run=False)
+
+		assert tmp_path.is_dir()  # library root survives
+
+	def test_dry_run_leaves_empty_folders(self, tmp_path: Path) -> None:
+		"""Dry-run must NOT clean up — it doesn't move anything."""
+		src = tmp_path / "Bad Author" / "Book (1)"
+		src.mkdir(parents=True)
+		(src / "metadata.opf").touch()
+		meta = _book(1, path=str(src), title="Book", authors=["Good Author"])
+
+		organize([(meta, Verdict.OK)], tmp_path, dry_run=True)
+
+		# Nothing moved, nothing pruned.
+		assert src.is_dir()
+		assert (tmp_path / "Bad Author").is_dir()

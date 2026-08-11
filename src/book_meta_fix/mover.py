@@ -137,6 +137,7 @@ def move_book(
 	*,
 	dry_run: bool = True,
 	overwrite: bool = False,
+	library: Path | None = None,
 ) -> MoveResult:
 	"""Move a book folder from source to destination.
 
@@ -144,6 +145,9 @@ def move_book(
 	- If destination exists but differs -> append ' (dup N)' suffix.
 	- Within the same filesystem: atomic rename.
 	- Cross-filesystem: copy + delete.
+	- After a real move, empty parent directories under *library* are removed
+	  up to (but not including) the library root, so relocating a book does not
+	  leave behind orphaned author folders.
 	"""
 	source = Path(source)
 	destination = Path(destination)
@@ -185,7 +189,53 @@ def move_book(
 		return MoveResult(str(source), str(final_dest), "error", str(e))
 	except OSError as e:
 		return MoveResult(str(source), str(final_dest), "error", str(e))
+	# Clean up empty parent directories left behind by the move (e.g. an author
+	# folder that becomes empty once its only book moved elsewhere). Walk
+	# upwards from the original source's parent and rmtree nothing — only
+	# remove truly empty dirs, stopping at the library root (or the source's
+	# own grandparent if no library bound was given).
+	_prune_empty_parents(source.parent, library)
 	return MoveResult(str(source), str(final_dest), action)
+
+
+def _prune_empty_parents(start: Path, library: Path | None) -> None:
+	"""Remove empty parent directories from *start* upwards, stopping at *library*.
+
+	Only directories that contain nothing (no files, no subdirs) are removed.
+	Never removes *library* itself. If *library* is None, stops at the parent
+	of *start* (i.e. removes at most one level — the most conservative cleanup
+	that still catches a newly-orphaned author folder).
+	"""
+	try:
+		start = Path(start).resolve()
+	except OSError:
+		return
+	stop: Path | None = None
+	if library is not None:
+		try:
+			stop = Path(library).resolve()
+		except OSError:
+			stop = None
+	cur = start
+	while True:
+		if stop is not None and cur == stop:
+			break
+		try:
+			if cur == cur.parent:  # filesystem root
+				break
+			next(cur.iterdir())  # raises StopIteration if empty
+			return  # not empty — stop
+		except StopIteration:
+			pass
+		except OSError:
+			return
+		try:
+			cur.rmdir()
+		except OSError:
+			return  # not empty or not removable — stop quietly
+		if stop is not None and cur == stop:
+			break
+		cur = cur.parent
 
 
 def compute_needfix_path(meta: BookMeta, library: Path, needfix_dir: str) -> Path:
@@ -236,6 +286,6 @@ def organize(
 			dest = compute_target_path(meta, path_pattern, library)
 		else:
 			dest = compute_needfix_path(meta, library, needfix_dir)
-		result = move_book(Path(meta.path), dest, dry_run=dry_run)
+		result = move_book(Path(meta.path), dest, dry_run=dry_run, library=library)
 		results.append(result)
 	return results
