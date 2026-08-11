@@ -165,17 +165,25 @@ def download_cover(url: str, dest_path: str | Path, *, timeout: float = 15.0) ->
 		log.debug("cover download failed for %s: %s", url, e)
 		return False
 
-	# Validate the bytes are a real image before writing.
+	# Validate the bytes are a real image before writing. Pillow is optional;
+	# if it's unavailable we accept the bytes as-is (the URL came from a trusted
+	# enricher and is overwhelmingly unlikely to be non-image). The import is
+	# hoisted out of the verify try-block so a missing Pillow is not mistaken
+	# for an invalid image — that ordering bug previously turned "no PIL" into
+	# a hard download failure.
 	try:
 		from PIL import Image
-
-		import io
-		Image.open(io.BytesIO(content)).verify()
-	except Exception as e:  # noqa: BLE001
-		log.warning("downloaded cover from %s is not a valid image: %s", url, e)
-		return False
 	except ImportError:
-		pass  # Pillow unavailable — accept bytes as-is
+		Image = None  # type: ignore[assignment]
+
+	if Image is not None:
+		import io
+
+		try:
+			Image.open(io.BytesIO(content)).verify()
+		except Exception as e:  # noqa: BLE001
+			log.warning("downloaded cover from %s is not a valid image: %s", url, e)
+			return False
 
 	# Backup existing cover, then atomic write.
 	if dest_path.is_file():
