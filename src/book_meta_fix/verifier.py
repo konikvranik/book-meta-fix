@@ -11,6 +11,7 @@ Implements the cascading verification from the plan:
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Literal
 
@@ -200,6 +201,71 @@ def _author_in_text(author: str, text: str, window: int = 4000) -> float:
 		fuzz.partial_ratio(author_norm, text_norm),
 		fuzz.token_sort_ratio(author_norm, text_norm[: len(author_norm) * 4 + 40]),
 	) / 100.0
+
+
+# ---------------------------------------------------------------------------
+# Identity confirmation — a POSITIVE gate (does content corroborate identity?)
+# Used by the pipeline to set EnrichedMeta.identity_confirmed for online/LLM
+# matches. Unlike verify_proposal (which accepts when there's no text to
+# disprove), this returns True only when content actively confirms.
+# ---------------------------------------------------------------------------
+
+
+def _isbn_in_content(isbn: str, extracted: ExtractedMeta) -> bool:
+	"""Is *isbn* corroborated by the book's content?
+
+	True when it equals the ISBN scanned from the page text (or embedded), or
+	when it appears verbatim in the first-page text. Both are independent of
+	the (possibly corrupt) library metadata.
+	"""
+	canon = canonicalize(isbn)
+	if not canon:
+		return False
+	content_isbn = getattr(extracted, "isbn_from_text", None) or getattr(extracted, "isbn", None)
+	if content_isbn and canonicalize(content_isbn) == canon:
+		return True
+	text = getattr(extracted, "first_page_text", None) or ""
+	# ISBNs in text may keep hyphens/spaces; compare digits only.
+	if canon and canon in re.sub(r"\D", "", text):
+		return True
+	return False
+
+
+def identity_in_text(title: str, author: str | None, text: str | None, *, fuzzy_strong: float = 0.8) -> bool:
+	"""Do *title* and *author* both appear (fuzzily) in the book's page text?"""
+	if not text or not title:
+		return False
+	if _title_in_text(title, text) < fuzzy_strong:
+		return False
+	if author and _author_in_text(author, text) < fuzzy_strong:
+		return False
+	return True
+
+
+def confirm_identity(proposal, extracted, *, fuzzy_strong: float = 0.8) -> bool:
+	"""Is the identity in *proposal* confirmed by the book's *extracted* content?
+
+	A POSITIVE gate: returns True only when content actually corroborates the
+	identity. Two independent signals (either suffices):
+	  1. ISBN agreement — proposal.isbn canonicalizes equal to an ISBN mined
+	     from the book's content (strongest; works even without page text).
+	  2. title + author both appear in the first-page text.
+
+	Returns False when there is no content to check against (we cannot confirm
+	what we cannot read) and when the content contradicts the proposal.
+	"""
+	# Signal 1: ISBN agreement.
+	proposal_isbn = getattr(proposal, "isbn", None)
+	if proposal_isbn and _isbn_in_content(proposal_isbn, extracted):
+		return True
+	# Signal 2: title + author in page text.
+	text = getattr(extracted, "first_page_text", None)
+	title = getattr(proposal, "title", None)
+	authors = getattr(proposal, "authors", None) or []
+	author = authors[0] if authors else None
+	if text and title and identity_in_text(title, author, text, fuzzy_strong=fuzzy_strong):
+		return True
+	return False
 
 
 def verify_proposal(proposal, extracted, *, fuzzy_strong: float = 0.8) -> tuple[bool, str]:

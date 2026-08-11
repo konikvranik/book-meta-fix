@@ -278,7 +278,11 @@ class ReviewWriter:
 		# threshold, because _min_rank is 0 when --auto-apply is off.
 		if action is None and enriched is not None and proposed:
 			conf = self._confidence(enriched)
-			if self._confidence_rank.get(conf, 0) >= self._confidence_rank["high"]:
+			if getattr(enriched, "identity_confirmed", False) or self._confidence_rank.get(conf, 0) >= self._confidence_rank["high"]:
+				# identity_confirmed: the book's identity was verified against its
+				# own content (ISBN agreement or title+author in the page text),
+				# independent of the online match — so the proposal is safe to
+				# auto-accept even when it changes title/author. We know the book.
 				action = "accept"
 			elif self._confidence_rank.get(conf, 0) >= self._confidence_rank["medium"]:
 				# Medium-confidence (llm:flash/loop, openlibrary, google_books,

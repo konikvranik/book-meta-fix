@@ -149,6 +149,22 @@ class TestMediumConfidencePrefill:
 		assert entry.action is None
 		assert entry.proposed.get("title") == "New Title"
 
+	def test_identity_confirmed_auto_accepts_identity_change(self, tmp_path):
+		"""An identity_confirmed proposal (verified against the book's content)
+		auto-accepts even when it changes title/author — we know the book."""
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		enriched = EnrichedMeta(
+			title="New Title", authors=["New Author"], isbn="9782222222222",
+			source="openlibrary", identity_confirmed=True,
+		)
+		_submit_all_and_finish(w, [_result(1, title="Old Title", enriched=enriched)])
+		parsed = parse_review(out)
+		entry = parsed[0]
+		assert entry.action == "accept"
+		# The identity change is present in proposed (not stripped).
+		assert entry.proposed.get("title") == "New Title"
+
 	def test_flash_changing_author_stays_none(self, tmp_path):
 		"""llm:flash proposing a different author -> action stays None."""
 		out = tmp_path / "review.yaml"
