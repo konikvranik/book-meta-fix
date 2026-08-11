@@ -23,13 +23,15 @@ def _book(title: str = "Broken_epub", isbn: str | None = None, year: int | None 
 	)
 
 
-def _extracted_with_text_title(real_title: str, *, isbn_from_text: str | None = None) -> ExtractedMeta:
+def _extracted_with_text_title(real_title: str, *, author: str = "Gregory Benford", isbn_from_text: str | None = None) -> ExtractedMeta:
 	"""An ExtractedMeta whose embedded title is still broken but whose
-	text-mined title (title_from_text) is the real one."""
+	text-mined title (title_from_text) + author are the real ones — and both
+	appear in the page text so the identity is content-verifiable."""
 	return ExtractedMeta(
 		title="Broken_epub",  # embedded OPF still broken
 		title_from_text=real_title,
-		first_page_text=f"Neznámý {real_title.upper()} some body text",
+		authors_from_text=[author],
+		first_page_text=f"{author.upper()} {real_title.upper()} some body text",
 		isbn_from_text=isbn_from_text,
 		source_format="epub",
 	)
@@ -88,7 +90,7 @@ class TestLlmNotCalledWhenOfflineSucceeds:
 		"""When an online lookup (here: mocked databazeknih hit) returns a
 		better title, the LLM is never called."""
 		meta = _book()
-		extracted = ExtractedMeta(title="Broken_epub", first_page_text="Neznámý JÁDRO GALAXIE")
+		extracted = _extracted_with_text_title("Jádro Galaxie")
 		stats = _stats()
 
 		from book_meta_fix.enrichers import EnrichedMeta
@@ -198,7 +200,7 @@ class TestStatsSourceBreakdown:
 	def test_online_databazeknih_buckets_into_online_databazeknih(self):
 		"""A databazeknih hit increments online_fixed AND online_databazeknih."""
 		meta = _book()
-		extracted = ExtractedMeta(title="Broken_epub", first_page_text="Neznámý JÁDRO GALAXIE")
+		extracted = _extracted_with_text_title("Jádro Galaxie")
 		stats = _stats()
 		from book_meta_fix.enrichers import EnrichedMeta
 		from book_meta_fix import pipeline as pmod
@@ -227,7 +229,7 @@ class TestStatsSourceBreakdown:
 		hypothetical 'openlibrary') still increments online_fixed and creates
 		an online_<source> key rather than raising."""
 		meta = _book()
-		extracted = ExtractedMeta(title="Broken_epub", first_page_text="Neznámý JÁDRO GALAXIE")
+		extracted = _extracted_with_text_title("Jádro Galaxie")
 		stats = _stats()
 		from book_meta_fix.enrichers import EnrichedMeta
 		from book_meta_fix import pipeline as pmod
@@ -273,3 +275,105 @@ class TestStatsSourceBreakdown:
 		):
 			assert key in stats, f"stats dict missing key {key!r}"
 		assert stats["total"] == 0
+
+
+class TestAcquireIdentity:
+	"""_acquire_identity: content-verified identity cascade (no network)."""
+
+	def test_content_isbn_wins(self):
+		from book_meta_fix.pipeline import _acquire_identity
+
+		meta = _book(isbn="9788072072323")
+		ext = ExtractedMeta(title="Broken_epub", isbn_from_text="9788072072323")
+		ident = _acquire_identity(meta, ext)
+		assert ident is not None and ident.has_isbn
+		assert ident.source == "content-isbn"
+
+	def test_metadata_isbn_verified_against_content(self):
+		from book_meta_fix.pipeline import _acquire_identity
+
+		meta = _book(isbn="978-80-720-7232-3")
+		# ISBN appears in the page text but no content_isbn field set.
+		ext = ExtractedMeta(title="Broken_epub", first_page_text="ISBN 9788072072323 here")
+		ident = _acquire_identity(meta, ext)
+		assert ident is not None and ident.has_isbn
+		assert ident.source == "metadata"
+
+	def test_extractor_title_author_for_c2_book(self):
+		"""A C2 book (broken title) whose metadata identity isn't in the text
+		falls to the offline extractor level — title+author mined from the page
+		text and present there."""
+		from book_meta_fix.pipeline import _acquire_identity
+
+		meta = _book()  # title "Broken_epub", author "Neznamy" — not in text
+		ext = _extracted_with_text_title("Jádro Galaxie")
+		ident = _acquire_identity(meta, ext)
+		assert ident is not None and ident.has_title_author
+		assert ident.title == "Jádro Galaxie"
+		assert ident.source == "extractor"
+
+	def test_no_verifiable_identity_returns_none(self):
+		from book_meta_fix.pipeline import _acquire_identity
+
+		meta = _book()
+		# Garbage text, no ISBN, no extracted title/author.
+		ext = ExtractedMeta(title="Broken_epub", first_page_text="random noise " * 20)
+		assert _acquire_identity(meta, ext) is None
+
+	def test_no_extracted_returns_none(self):
+		from book_meta_fix.pipeline import _acquire_identity
+
+		assert _acquire_identity(_book(), None) is None
+
+
+class TestOnlineFill:
+	"""_online_fill: anchored lookup with false-positive filtering."""
+
+	def _identity_title(self):
+		from book_meta_fix.pipeline import IdentityResult
+
+		return IdentityResult(title="Jádro Galaxie", authors=["Gregory Benford"], source="extractor")
+
+	def test_isbn_identity_uses_isbn_lookup(self):
+		from book_meta_fix.enrichers import EnrichedMeta
+		from book_meta_fix.pipeline import IdentityResult, _online_fill
+
+		seen = {}
+
+		class Stub:
+			def lookup(self, *, isbn=None, title=None, author=None):
+				seen["isbn"] = isbn
+				return EnrichedMeta(title="X", source="databazeknih", isbn=isbn)
+
+		ident = IdentityResult(isbn="9788072072323", source="content-isbn")
+		em = _online_fill(ident, Stub(), skip_enrich=False)
+		assert em is not None and seen["isbn"] == "9788072072323"
+
+	def test_title_identity_rejects_author_mismatch(self):
+		"""A title lookup that returns a DIFFERENT author is rejected — false
+		possession prevention (same title, different book)."""
+		from book_meta_fix.enrichers import EnrichedMeta
+		from book_meta_fix.pipeline import _online_fill
+
+		class Stub:
+			def lookup(self, *, isbn=None, title=None, author=None):
+				return EnrichedMeta(title="Jádro Galaxie", authors=["Někdo Úplně Jiný"], source="databazeknih")
+
+		assert _online_fill(self._identity_title(), Stub(), skip_enrich=False) is None
+
+	def test_title_identity_accepts_author_match(self):
+		from book_meta_fix.enrichers import EnrichedMeta
+		from book_meta_fix.pipeline import _online_fill
+
+		class Stub:
+			def lookup(self, *, isbn=None, title=None, author=None):
+				return EnrichedMeta(title="Jádro Galaxie", authors=["Gregory Benford"], source="databazeknih")
+
+		em = _online_fill(self._identity_title(), Stub(), skip_enrich=False)
+		assert em is not None and em.source == "databazeknih"
+
+	def test_skip_enrich_returns_none(self):
+		from book_meta_fix.pipeline import IdentityResult, _online_fill
+
+		ident = IdentityResult(isbn="9788072072323", source="content-isbn")
+		assert _online_fill(ident, None, skip_enrich=True) is None

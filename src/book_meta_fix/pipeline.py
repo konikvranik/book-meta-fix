@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +30,7 @@ from .extractors import ExtractedMeta, extract
 from .library import Cache, scan_library
 from .models import BookMeta, Confidence, Diagnosis, Verdict
 from .review import _COVER_CATEGORIES, build_review, parse_review, prune_review
-from .verifier import verify
+from .verifier import confirm_identity, identity_in_text, verify
 from .writers import write_book_meta
 
 log = logging.getLogger(__name__)
@@ -374,6 +375,11 @@ def _process_book(
 					reconciled, llm_src = _llm_reconcile_with_loop(llm_provider, evidence, extracted, loop=llm_loop)
 					if reconciled is not None and _reconciled_is_useful(reconciled, meta):
 						enriched = _reconciled_to_enriched(reconciled, source=llm_src)
+						# The LLM result already passed verify_proposal inside the
+						# reconcile loop; confirm_identity is the matching positive
+						# gate that sets identity_confirmed (so a verified identity
+						# change auto-accepts).
+						enriched.identity_confirmed = confirm_identity(enriched, extracted)
 						# Bucket the result by how it was obtained.
 						if llm_src in ("llm:flash", "llm:loop"):
 							stats["llm_flash_fixed"] += 1
@@ -461,57 +467,142 @@ def _try_deterministic_fix(
 	enricher: Enricher | None,
 	skip_enrich: bool,
 ) -> "EnrichedMeta | None":  # noqa: F821
-	"""Try cheap fixes before falling back to the LLM. Cheap-first order:
+	"""Resolve a content-verified identity, then fill metadata online.
 
-	  A. Offline metadata mined from the book's page text (text_meta) — no I/O.
-	  B. Online lookup by ISBN (text-scan ISBN > embedded ISBN > DB ISBN).
-	  C. Online lookup by title + author (text-mined > embedded > DB).
-	  D. Embedded-OPF compare (only if cleaner than DB; calibre may have
-	     corrupted it, so this is the weakest signal and runs last).
+	Online sources no longer guess identity. We first acquire an identity from
+	the book itself (ISBN or title+author), confirmed against its content, then
+	anchor the online lookup to that identity. The result is identity_confirmed
+	(safe to auto-accept even if it changes title/author — we know the book).
 
-	Returns an EnrichedMeta if we found something better than the current
-	(broken) metadata, else None (caller falls back to the LLM).
+	Returns None if no identity could be verified against content (→ LLM, or
+	review when there is no content to reason over).
 	"""
+	identity = _acquire_identity(meta, extracted)
+	if identity is None:
+		return None
+
+	# Online fill, anchored to the verified identity (ISBN exact, or title+
+	# author with an author-match filter).
+	online = _online_fill(identity, enricher, skip_enrich)
+	if online is not None:
+		online.identity_confirmed = True
+		return online
+
+	# No online data — fall back to a content-grounded proposal (offline fix
+	# from text_meta + embedded OPF, only fields that improve on the meta).
+	return _content_proposal(meta, extracted)
+
+
+@dataclass
+class IdentityResult:
+	"""A book identity confirmed against the book's own content.
+
+	Either an ISBN (strongest) or a title+authors pair, plus the source level
+	that established it. Used to anchor online metadata lookup so online sources
+	fill data for a KNOWN book rather than guess identity.
+	"""
+
+	isbn: str | None = None
+	title: str | None = None
+	authors: list[str] = field(default_factory=list)
+	year: int | None = None
+	source: str = ""  # 'content-isbn' | 'metadata' | 'extractor'
+
+	@property
+	def has_isbn(self) -> bool:
+		return bool(self.isbn)
+
+	@property
+	def has_title_author(self) -> bool:
+		return bool(self.title) and bool(self.authors)
+
+
+def _acquire_identity(meta: BookMeta, extracted: ExtractedMeta | None) -> IdentityResult | None:
+	"""Acquire a content-verified identity for the book (no network).
+
+	Cascade (first verified wins):
+	  1. content-ISBN — scanned from the book's text/embedded OPF (strongest;
+	     self-grounded, validated by ISBN check digit).
+	  2. metadata ISBN — confirmed present in the content.
+	  3. metadata title+author — confirmed present in the page text.
+	  4. offline extractor (text_meta) title+author — mined from the page text.
+
+	Returns None when no identity can be confirmed against content (→ LLM).
+	"""
+	if extracted is None:
+		return None
+	from .verifier import _isbn_in_content
+
+	content_isbn = extracted.isbn_from_text or extracted.isbn
+	text = extracted.first_page_text
+
+	# 1. Content-ISBN (strongest, content-grounded).
+	if content_isbn:
+		return IdentityResult(isbn=content_isbn, source="content-isbn")
+
+	# 2. Metadata ISBN, verified against content.
+	if meta.isbn and _isbn_in_content(meta.isbn, extracted):
+		return IdentityResult(isbn=meta.isbn, source="metadata")
+
+	# 3. Metadata title+author, verified against content.
+	if meta.title and meta.authors and identity_in_text(meta.title, meta.authors[0], text):
+		return IdentityResult(title=meta.title, authors=list(meta.authors), year=meta.year, source="metadata")
+
+	# 4. Offline extractor (text_meta) — content-grounded.
+	ext_title = extracted.title_from_text
+	ext_authors = extracted.authors_from_text or []
+	if ext_title and ext_authors and identity_in_text(ext_title, ext_authors[0], text):
+		return IdentityResult(title=ext_title, authors=list(ext_authors), year=extracted.year_from_text, source="extractor")
+
+	return None
+
+
+def _online_matches_identity(online: "EnrichedMeta", identity: IdentityResult) -> bool:  # noqa: F821
+	"""For title-based online lookups: does the record's author match the
+	verified identity? (The title was already gated by the source's search.)
+	Different author ⇒ different book ⇒ reject (false-positive prevention)."""
+	from rapidfuzz import fuzz
+
+	if online.authors and identity.authors:
+		return fuzz.token_sort_ratio(online.authors[0].lower(), identity.authors[0].lower()) >= 80
+	return True  # no author to compare — trust the title search
+
+
+def _online_fill(identity: IdentityResult, enricher: Enricher | None, skip_enrich: bool) -> "EnrichedMeta | None":  # noqa: F821
+	"""Fill metadata online, anchored to the verified identity: exact by ISBN,
+	or title+author with an author-match filter. Returns None if nothing found
+	or the result doesn't match the identity."""
+	if enricher is None or skip_enrich:
+		return None
+	if identity.has_isbn:
+		online = enricher.lookup(isbn=identity.isbn)
+	elif identity.has_title_author:
+		online = enricher.lookup(title=identity.title, author=identity.authors[0])
+	else:
+		return None
+	if online is None:
+		return None
+	# ISBN lookups are exact; title lookups need an author-match filter.
+	if identity.has_title_author and not _online_matches_identity(online, identity):
+		log.debug("online result rejected (author mismatch) for identity %r", identity.title)
+		return None
+	return online
+
+
+def _content_proposal(meta: BookMeta, extracted: ExtractedMeta) -> "EnrichedMeta | None":  # noqa: F821
+	"""Build an offline proposal from content-grounded fields (text_meta +
+	embedded OPF), only fields that improve on the current meta. Used when the
+	online lookup found nothing — the identity is still content-confirmed, so
+	the proposal carries identity_confirmed=True."""
 	from .enrichers import EnrichedMeta
 
-	# Best available ISBN independent of the (possibly calibre-corrupted) DB:
-	# prefer the one scanned from the page text, then the embedded-OPF one.
 	content_isbn = extracted.isbn_from_text or extracted.isbn
-
-	# Best available title/author for an online title-search: prefer text-mined
-	# (independent of OPF), then embedded, then DB.
-	best_title = extracted.title_from_text or extracted.title or meta.title
-	best_authors = extracted.authors_from_text or extracted.authors or meta.authors
-	best_author = best_authors[0] if best_authors else None
-
-	# --- Phase B: online lookup by ISBN (cached, ~1s) ---
-	# databazeknih is title-only, so this hits OpenLibrary / Google Books.
-	if content_isbn and enricher is not None and not skip_enrich:
-		online = enricher.lookup(isbn=content_isbn)
-		if online is not None and _online_is_useful(online, meta):
-			return online
-
-	# --- Phase C: online lookup by title + author ---
-	# This is the path that reaches databazeknih.cz (the strongest CZ/SK
-	# source) as well as OpenLibrary's title search. Skipped when we have no
-	# title to search on.
-	if best_title and enricher is not None and not skip_enrich:
-		online = enricher.lookup(title=best_title, author=best_author)
-		if online is not None and _online_is_useful(online, meta):
-			return online
-
-	# --- Phase A: offline metadata mined from the book's page text ---
-	# Build a proposal from the text-mined fields when they are cleaner than
-	# the DB. These come from extractors.ExtractedMeta.*_from_text, populated
-	# by text_meta.extract_metadata_from_text over first_page_text.
 	proposal_title = extracted.title_from_text if _is_better(extracted.title_from_text, meta.title) else None
-	proposal_authors = [a for a in extracted.authors_from_text if _is_better(a, meta.authors[0] if meta.authors else None)] or None
+	proposal_authors = [a for a in (extracted.authors_from_text or []) if _is_better(a, meta.authors[0] if meta.authors else None)] or None
 	proposal_isbn = content_isbn if (content_isbn and content_isbn != meta.isbn and _is_better(content_isbn, meta.isbn)) else None
 	proposal_publisher = extracted.publisher_from_text if _is_better(extracted.publisher_from_text, meta.publisher) else None
 	proposal_year = extracted.year_from_text if _is_better(extracted.year_from_text, meta.year) else None
-
-	# --- Phase D: embedded-OPF compare (weakest; calibre may have corrupted it) ---
-	# Only fill fields that Phase A did not already fill.
+	# Embedded-OPF fallback (weakest; calibre may have corrupted it).
 	if proposal_title is None:
 		proposal_title = extracted.title if _is_better(extracted.title, meta.title) else None
 	if proposal_authors is None:
@@ -527,24 +618,9 @@ def _try_deterministic_fix(
 			publisher=proposal_publisher,
 			year=proposal_year,
 			source="content",
+			identity_confirmed=True,
 		)
 	return None
-
-
-def _online_is_useful(online: "EnrichedMeta", meta: BookMeta) -> bool:  # noqa: F821
-	"""Does an online result bring something the DB doesn't already have?
-
-	Accepts the online record if ANY of its fields is better than the DB's
-	(title/author/isbn/year/publisher/genres), OR it has a cover_url (the one
-	field that may be useful even when all text metadata already matches —
-	the book's cover may be a generated placeholder that needs replacement).
-	This is the gate that keeps us from overwriting good metadata with a
-	no-op online hit.
-	"""
-	return any(
-		_is_better(getattr(online, f, None), getattr(meta, f, None))
-		for f in ("title", "isbn", "year", "publisher")
-	) or bool(getattr(online, "genres", None)) or bool(getattr(online, "cover_url", None))
 
 
 def _is_better(candidate: object | None, current: object | None) -> bool:

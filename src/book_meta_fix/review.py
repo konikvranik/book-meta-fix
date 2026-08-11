@@ -224,7 +224,10 @@ def _build_proposed(
 		# (score >= 70) before returning it, so a title it returns IS the title
 		# of the matched book — even if the DB title (a filename-as-title C2
 		# case) does not look "broken" to _looks_better.
-		trust_blindly = enriched.source.startswith("llm:") or enriched.source == "databazeknih"
+		# identity_confirmed (verified against the book's content) is trusted
+		# like databazeknih/llm:high: we know which book it is, so its title/
+		# author are proposed even if the current metadata doesn't look broken.
+		trust_blindly = enriched.source.startswith("llm:") or enriched.source == "databazeknih" or getattr(enriched, "identity_confirmed", False)
 		if enriched.title and "title" not in proposed and (trust_blindly or _looks_better(enriched.title, meta.title)):
 			proposed["title"] = enriched.title
 			source_parts.append(enriched.source)

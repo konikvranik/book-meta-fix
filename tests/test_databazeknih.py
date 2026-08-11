@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from book_meta_fix import enrichers
-from book_meta_fix.enrichers import Enricher, EnrichedMeta, lookup_databazeknih
+from book_meta_fix.enrichers import Enricher, EnrichedMeta, lookup_databazeknih, lookup_databazeknih_isbn
 
 FIX = Path(__file__).parent / "fixtures" / "databazeknih"
 
@@ -124,6 +124,30 @@ class TestLookupDatabazeknih:
 		assert lookup_databazeknih(title="1984", author="George Orwell") is None
 
 
+class TestDatabazeknihIsbnLookup:
+	def test_isbn_returns_direct_profile(self, monkeypatch):
+		"""ISBN search returns the book's detail page directly → parsed in one
+		HTTP call (no fuzzy title scoring needed)."""
+		def fake_get(url, **kw):
+			# ISBN search lands on the detail page directly.
+			return _load("detail_1984.html")
+
+		monkeypatch.setattr(enrichers, "_http_get_html", fake_get)
+		em = lookup_databazeknih_isbn("9788073099993")
+		assert em is not None
+		assert em.source == "databazeknih"
+		assert em.title == "1984"
+
+	def test_isbn_no_results_returns_none(self, monkeypatch):
+		"""A 'no results' page has no book JSON-LD → None."""
+		monkeypatch.setattr(enrichers, "_http_get_html", lambda url, **kw: "<html>nenalezeno žádný výsledek</html>")
+		assert lookup_databazeknih_isbn("0000000000") is None
+
+	def test_isbn_network_failure_returns_none(self, monkeypatch):
+		monkeypatch.setattr(enrichers, "_http_get_html", lambda url, **kw: None)
+		assert lookup_databazeknih_isbn("9788073099993") is None
+
+
 class TestEnricherLookupOrder:
 	def test_databazeknih_disabled_by_default(self):
 		e = Enricher()
@@ -137,6 +161,10 @@ class TestEnricherLookupOrder:
 		"""When enabled, databazeknih should be consulted before OpenLibrary."""
 		calls: list[str] = []
 
+		def fake_dk_isbn(isbn):
+			calls.append("databazeknih_isbn")
+			return None  # ISBN miss → fall through to title lookup
+
 		def fake_dk(*, title, author=None):
 			calls.append("databazeknih")
 			return EnrichedMeta(title=title, source="databazeknih", genres=["Romány"])
@@ -145,6 +173,7 @@ class TestEnricherLookupOrder:
 			calls.append("openlibrary_isbn")
 			return None
 
+		monkeypatch.setattr(enrichers, "lookup_databazeknih_isbn", fake_dk_isbn)
 		monkeypatch.setattr(enrichers, "lookup_databazeknih", fake_dk)
 		monkeypatch.setattr(enrichers, "lookup_openlibrary_isbn", fake_ol_isbn)
 
@@ -152,7 +181,8 @@ class TestEnricherLookupOrder:
 		em = e.lookup(title="1984", author="George Orwell", isbn="9788073099993")
 		assert em is not None
 		assert em.source == "databazeknih"
-		assert calls == ["databazeknih"]  # OpenLibrary never called (DK hit first)
+		# ISBN lookup tried first (miss), then title lookup hits; OL never called.
+		assert calls == ["databazeknih_isbn", "databazeknih"]
 
 	def test_lookup_skips_databazeknih_when_disabled(self, monkeypatch):
 		calls: list[str] = []

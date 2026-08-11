@@ -3,7 +3,7 @@ book's actual page text (title + author fuzzy match, ISBN exact match)."""
 from __future__ import annotations
 
 from book_meta_fix.extractors import ExtractedMeta
-from book_meta_fix.verifier import _author_in_text, _title_in_text, verify_proposal
+from book_meta_fix.verifier import _author_in_text, _title_in_text, confirm_identity, verify_proposal
 
 
 class _Proposal:
@@ -81,3 +81,41 @@ class TestVerifyProposal:
 		prop = _Proposal("Zastavený příval", ["Nesmysl", "Eduard Štorch"])
 		passed, fb = verify_proposal(prop, ext)
 		assert passed is True
+
+
+class TestConfirmIdentity:
+	"""confirm_identity is a POSITIVE gate (does content corroborate?) — the
+	flip side of verify_proposal. It returns True only when content confirms,
+	including via ISBN agreement even without page text."""
+
+	def test_isbn_agreement_confirms(self):
+		"""ISBN in the proposal equals an ISBN mined from content → confirmed,
+		even with no title/author text matching."""
+		ext = ExtractedMeta(isbn_from_text="9788072072323")
+		prop = _Proposal("Anything", ["Anyone"], isbn="978-80-720-7232-3")
+		assert confirm_identity(prop, ext) is True
+
+	def test_title_and_author_in_text_confirms(self):
+		ext = ExtractedMeta(first_page_text=_TEXT)
+		prop = _Proposal("Zastavený příval", ["Eduard Štorch"])
+		assert confirm_identity(prop, ext) is True
+
+	def test_isbn_mismatch_not_confirmed_but_title_may_save(self):
+		"""A disagreeing ISBN alone doesn't confirm — but title+author in text
+		still can (independent signal)."""
+		ext = ExtractedMeta(first_page_text=_TEXT, isbn_from_text="9788072072323")
+		prop = _Proposal("Zastavený příval", ["Eduard Štorch"], isbn="9788000018300")
+		assert confirm_identity(prop, ext) is True  # title+author win
+
+	def test_no_content_not_confirmed(self):
+		"""Unlike verify_proposal (which accepts on no text), confirm_identity
+		returns False — we cannot confirm what we cannot read."""
+		ext = ExtractedMeta(first_page_text=None)
+		prop = _Proposal("Zastavený příval", ["Eduard Štorch"])
+		assert confirm_identity(prop, ext) is False
+
+	def test_contradicting_content_not_confirmed(self):
+		"""Title/author absent from text and no ISBN → not confirmed."""
+		ext = ExtractedMeta(first_page_text="úplně jiný text o něčem jiném")
+		prop = _Proposal("Zastavený příval", ["Eduard Štorch"])
+		assert confirm_identity(prop, ext) is False

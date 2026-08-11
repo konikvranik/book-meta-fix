@@ -50,6 +50,11 @@ class EnrichedMeta:
 	series_index: str | None = None  # position within series
 	genres: list[str] = field(default_factory=list)  # genre tags (databazeknih / LLM)
 	source: str = ""  # 'openlibrary' | 'google_books' | 'databazeknih' | 'llm:high'
+	# True when the book's identity was confirmed against its own content
+	# (ISBN agreement or title+author in the page text), independent of the
+	# online match. When set, the proposal is high-confidence and safe to
+	# auto-accept even if it changes title/author — we know which book it is.
+	identity_confirmed: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -328,29 +333,13 @@ def _parse_jsonld(html: str) -> dict | None:
 		return None
 
 
-def lookup_databazeknih(*, title: str, author: str | None = None) -> EnrichedMeta | None:
-	"""Scrape databazeknih.cz for a book's metadata + genres.
+def _parse_databazeknih_detail(html: str) -> EnrichedMeta | None:
+	"""Parse a databazeknih book-detail page (JSON-LD + Štítky) into EnrichedMeta.
 
-	Two HTTP calls: (1) search by title to find the detail page, (2) fetch the
-	detail page and parse its JSON-LD (schema.org Book) plus the user 'Štítky'.
-
-	Returns None if the book can't be confidently matched. Genres are the union
-	of JSON-LD `genre` (broad categories) and user tags (richer, e.g.
-	'antiutopie'); broad categories come first.
+	Returns None if the page carries no usable title/isbn (e.g. a 'no results'
+	search page). Shared by the title-search and ISBN-search lookups.
 	"""
-	from urllib.parse import urljoin
-
-	path = _search_databazeknih(title, author)
-	if path is None:
-		return None
-
-	detail_url = urljoin("https://www.databazeknih.cz/", path)
-	html = _http_get_html(detail_url)
-	if html is None:
-		return None
-
 	ld = _parse_jsonld(html) or {}
-
 	em = EnrichedMeta(source="databazeknih")
 
 	# --- JSON-LD metadata (authoritative-ish) ---
@@ -398,6 +387,56 @@ def lookup_databazeknih(*, title: str, author: str | None = None) -> EnrichedMet
 	return em
 
 
+def lookup_databazeknih(*, title: str, author: str | None = None) -> EnrichedMeta | None:
+	"""Scrape databazeknih.cz for a book's metadata + genres (by title search).
+
+	Two HTTP calls: (1) search by title to find the detail page, (2) fetch the
+	detail page and parse its JSON-LD (schema.org Book) plus the user 'Štítky'.
+
+	Returns None if the book can't be confidently matched (fuzzy title < 70).
+	"""
+	from urllib.parse import urljoin
+
+	path = _search_databazeknih(title, author)
+	if path is None:
+		return None
+
+	detail_url = urljoin("https://www.databazeknih.cz/", path)
+	html = _http_get_html(detail_url)
+	if html is None:
+		return None
+	return _parse_databazeknih_detail(html)
+
+
+def lookup_databazeknih_isbn(isbn: str) -> EnrichedMeta | None:
+	"""Look up a book on databazeknih.cz by ISBN (exact match, no fuzzy score).
+
+	ISBN search returns the book's detail page directly for a hit (one HTTP
+	call), or a 'no results' page for a miss. For CZ/SK books this is the most
+	reliable entry point — it resolves the correct record even when the library
+	metadata title is corrupt (filename-as-title). If the search unexpectedly
+	returns a list, the first result is fetched as a fallback.
+	"""
+	from urllib.parse import quote_plus, urljoin
+
+	url = f"https://www.databazeknih.cz/search?q={quote_plus(isbn)}&in=books"
+	html = _http_get_html(url)
+	if html is None:
+		return None
+	# Direct profile hit (the usual case): the page is the book detail.
+	em = _parse_databazeknih_detail(html)
+	if em is not None:
+		return em
+	# Fallback: a search-results list — take the first result's detail page.
+	for m in _RESULT_RE.finditer(html):
+		path = m.group(1)
+		detail_html = _http_get_html(urljoin("https://www.databazeknih.cz/", path))
+		if detail_html is not None:
+			return _parse_databazeknih_detail(detail_html)
+		break
+	return None
+
+
 # ---------------------------------------------------------------------------
 # Top-level lookup with caching
 # ---------------------------------------------------------------------------
@@ -440,13 +479,14 @@ class Enricher:
 		"""Try sources in order. Returns first hit or None.
 
 		Order (gated by *_enabled flags):
-		  1. databazeknih.cz by title (best for CZ/SK genres; opt-in)
-		  2. OpenLibrary by ISBN
-		  3. Google Books by ISBN
-		  4. OpenLibrary by title
+		  1. databazeknih.cz by ISBN (exact; best for CZ/SK + genres)
+		  2. databazeknih.cz by title (fuzzy >= 70)
+		  3. OpenLibrary by ISBN
+		  4. Google Books by ISBN
+		  5. OpenLibrary by title
 
-		databazeknih goes first because it's the strongest source for this
-		library's CZ/SK content and the only one returning genres.
+		databazeknih by ISBN goes first: it's an exact match and the only way to
+		reach the strongest CZ/SK source when the library title is corrupt.
 		"""
 		cache_key = self._cache_key(isbn=isbn, title=title, author=author)
 		cached = self._cache_get(cache_key)
@@ -461,7 +501,12 @@ class Enricher:
 			return cached
 
 		result: EnrichedMeta | None = None
-		# databazeknih: by title (search). Goes first — best CZ/SK source + genres.
+		# databazeknih by ISBN (exact match) — the strongest CZ/SK source, and
+		# the only way to reach it for a book whose title is corrupt but that
+		# has an ISBN. Goes first when an ISBN is available.
+		if result is None and self.databazeknih_enabled and isbn:
+			result = lookup_databazeknih_isbn(isbn)
+		# databazeknih by title (search). Best CZ/SK source + genres.
 		if result is None and self.databazeknih_enabled and title:
 			result = lookup_databazeknih(title=title, author=author)
 		# ISBN-based lookups (authoritative when available).
