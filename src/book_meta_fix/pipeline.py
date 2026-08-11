@@ -622,7 +622,7 @@ def _looks_broken(s: str | object) -> bool:
 		return True
 	if "_" in s:
 		return True
-	if any(ext in s.lower() for ext in (".epub", ".pdb", ".pdf", ".doc", ".mobi")):
+	if any(ext in s.lower() for ext in (".epub", ".pdb", ".pdf", ".doc", ".mobi", ".azw", ".azw3", ".prc")):
 		return True
 	# Mojibake / control chars
 	if any(ord(c) > 0x2000 and c not in "„“”‘’–—…" for c in s):
