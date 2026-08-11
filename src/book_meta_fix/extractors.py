@@ -308,6 +308,108 @@ def _strip_html(raw: bytes) -> str:
 
 
 # ---------------------------------------------------------------------------
+# OCR fallback (tesseract) for image-only books — scanned PDFs and comics.
+# Each helper is a graceful no-op when its binary is missing (shutil.which),
+# matching the pdftotext/catdoc pattern.
+# ---------------------------------------------------------------------------
+
+
+def _ocr_image_bytes(img_bytes: bytes, lang: str = "ces+eng") -> str | None:
+	"""OCR image bytes via tesseract. Returns the recognised text or None.
+
+	Tries *lang* (ces+eng for CZ/SK covers) and falls back to eng if the ces
+	training data isn't installed. None when tesseract is missing or fails.
+	"""
+	tesseract = shutil.which("tesseract")
+	if not tesseract or not img_bytes:
+		return None
+	import tempfile
+
+	with tempfile.TemporaryDirectory(prefix="bmf-ocr-") as tmp:
+		img_path = Path(tmp) / "page.png"
+		try:
+			img_path.write_bytes(img_bytes)
+		except OSError:
+			return None
+		for l in (lang, "eng"):
+			try:
+				proc = subprocess.run(
+					[tesseract, str(img_path), "-", "-l", l],
+					capture_output=True, encoding="utf-8", errors="replace", timeout=30,
+				)
+				if proc.returncode == 0 and proc.stdout and proc.stdout.strip():
+					return proc.stdout.strip()
+			except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+				pass
+	return None
+
+
+def _render_pdf_page_png(path: str | Path, page: int = 1, dpi: int = 150) -> bytes | None:
+	"""Render one PDF page to PNG bytes via pdftoppm (poppler). None on failure."""
+	pdftoppm = shutil.which("pdftoppm")
+	if not pdftoppm:
+		return None
+	import tempfile
+
+	with tempfile.TemporaryDirectory(prefix="bmf-ppm-") as tmp:
+		out_base = str(Path(tmp) / "p")
+		try:
+			subprocess.run(
+				[pdftoppm, "-png", "-r", str(dpi), "-f", str(page), "-l", str(page), str(path), out_base],
+				capture_output=True, timeout=30,
+			)
+		except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+			return None
+		candidates = sorted(Path(tmp).glob("p*.png"))
+		if candidates:
+			try:
+				return candidates[0].read_bytes()
+			except OSError:
+				return None
+	return None
+
+
+def _comic_first_image(path: str | Path) -> bytes | None:
+	"""Return the first page image of a comic archive (.cbz/.cbr/.cb7)."""
+	p = Path(path)
+	IMG = (".jpg", ".jpeg", ".png", ".webp")
+	if p.suffix.lower() == ".cbz":
+		try:
+			with zipfile.ZipFile(p) as zf:
+				names = sorted(n for n in zf.namelist() if n.lower().endswith(IMG))
+				if names:
+					return zf.read(names[0])
+		except Exception:  # noqa: BLE001
+			return None
+		return None
+	# .cbr (RAR) / .cb7 (7z) — extract the first image via 7z, fallback unar.
+	import tempfile
+
+	for tool in ("7z", "unar"):
+		binary = shutil.which(tool)
+		if not binary:
+			continue
+		with tempfile.TemporaryDirectory(prefix="bmf-comic-img-") as tmp:
+			try:
+				if tool == "7z":
+					subprocess.run([binary, "e", "-y", "-bso0", "-bsp0", f"-o{tmp}", str(p)],
+					               capture_output=True, timeout=60)
+				else:
+					subprocess.run([binary, "-f", "-q", "-o", tmp, str(p)],
+					               capture_output=True, timeout=60)
+			except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+				continue
+			candidates = sorted(Path(tmp).iterdir(), key=lambda e: e.name.lower())
+			candidates = [c for c in candidates if c.suffix.lower() in IMG]
+			if candidates:
+				try:
+					return candidates[0].read_bytes()
+				except OSError:
+					continue
+	return None
+
+
+# ---------------------------------------------------------------------------
 # PDF extractor
 # ---------------------------------------------------------------------------
 
@@ -390,6 +492,18 @@ def extract_pdf(path: str | Path) -> ExtractedMeta:
 					result.isbn_from_text = extract_isbn(proc.stdout)
 			except (subprocess.TimeoutExpired, FileNotFoundError) as e:  # noqa: BLE001
 				log.debug("pdftotext (end pages) failed for %s: %s", path, e)
+
+	# 4. No text layer at all (scanned/image-only PDF) — OCR the first page.
+	#    pdftoppm renders it to PNG, tesseract reads it. Graceful no-op when
+	#    either tool is missing.
+	if not result.first_page_text:
+		img = _render_pdf_page_png(path, page=1)
+		if img:
+			ocr = _ocr_image_bytes(img)
+			if ocr:
+				result.first_page_text = ocr[:5000]
+				if not result.isbn_from_text:
+					result.isbn_from_text = extract_isbn(ocr)
 
 	if not result.title and not result.authors and not result.isbn and not result.first_page_text:
 		result.error = result.error or "no metadata extracted"
@@ -658,47 +772,59 @@ def extract_comic(path: str | Path) -> ExtractedMeta:
 	"""Extract metadata from a comic archive's ComicInfo.xml.
 
 	Comics (.cbz/.cbr/.cb7) are image-only — there is no text layer to mine,
-	so first_page_text is always None and identity cannot be text-verified.
-	ComicInfo.xml (when present) is the file's own metadata declaration (like
-	an EPUB's OPF) and provides title/authors/publisher/year/ISBN. Cover-image
-	OCR (vision) is a separate, later path for comics without ComicInfo.xml.
+	so identity cannot be text-verified from content. ComicInfo.xml (when
+	present) is the file's own metadata declaration (like an EPUB's OPF) and
+	provides title/authors/publisher/year/ISBN. When ComicInfo.xml is absent
+	or empty, the cover image is OCR'd via tesseract (pdftoppm/7z + tesseract)
+	to recover at least title/author/ISBN text for the identity pipeline.
 	"""
 	result = ExtractedMeta(source_format=Path(path).suffix.lower().lstrip("."))
 	xml = _read_comicinfo_xml(path)
-	if not xml:
+	if xml:
+		try:
+			root = etree.fromstring(xml)
+
+			def _text(tag: str) -> str | None:
+				el = root.find(tag)
+				return el.text.strip() if el is not None and el.text and el.text.strip() else None
+
+			title = _text("Title")
+			series = _text("Series")
+			number = _text("Number")
+			if not title and series:  # fall back to "Series #Number"
+				title = f"{series} #{number}" if number else series
+			result.title = title
+			creator = _text("Writer") or _text("Penciller")
+			if creator:
+				result.authors = [a.strip() for a in re.split(r"[;,]", creator) if a.strip()]
+			result.publisher = _text("Publisher")
+			year = _text("Year")
+			if year and year.isdigit():
+				result.year_from_text = int(year)
+			result.language = _text("LanguageISO")
+			isbn = _text("ISBN")
+			if isbn:
+				canon = _canonicalize_or_none(isbn)
+				if canon:
+					result.isbn = canon
+			if not (result.title or result.authors or result.isbn):
+				result.error = "ComicInfo.xml has no usable fields"
+		except Exception as e:  # noqa: BLE001
+			result.error = f"ComicInfo.xml parse: {e}"
+	else:
 		result.error = "no ComicInfo.xml"
-		return result
-	try:
-		root = etree.fromstring(xml)
-	except Exception as e:  # noqa: BLE001
-		result.error = f"ComicInfo.xml parse: {e}"
-		return result
 
-	def _text(tag: str) -> str | None:
-		el = root.find(tag)
-		return el.text.strip() if el is not None and el.text and el.text.strip() else None
-
-	title = _text("Title")
-	series = _text("Series")
-	number = _text("Number")
-	if not title and series:  # fall back to "Series #Number"
-		title = f"{series} #{number}" if number else series
-	result.title = title
-	creator = _text("Writer") or _text("Penciller")
-	if creator:
-		result.authors = [a.strip() for a in re.split(r"[;,]", creator) if a.strip()]
-	result.publisher = _text("Publisher")
-	year = _text("Year")
-	if year and year.isdigit():
-		result.year_from_text = int(year)
-	result.language = _text("LanguageISO")
-	isbn = _text("ISBN")
-	if isbn:
-		canon = _canonicalize_or_none(isbn)
-		if canon:
-			result.isbn = canon
-	if not (result.title or result.authors or result.isbn):
-		result.error = "ComicInfo.xml has no usable fields"
+	# No usable metadata (no ComicInfo, empty, or unparseable) — OCR the cover
+	# image so the identity pipeline has SOME text to work with. Graceful no-op
+	# when tesseract is missing (the comic just stays image-only → review).
+	if result.error and not result.first_page_text:
+		img = _comic_first_image(path)
+		if img:
+			ocr = _ocr_image_bytes(img)
+			if ocr:
+				result.first_page_text = ocr[:5000]
+				result.isbn_from_text = extract_isbn(ocr)
+				result.error = None  # we got cover text, however partial
 	return result
 
 

@@ -272,3 +272,66 @@ class TestComicExtractor:
 			zf.writestr("ComicInfo.xml", "<ComicInfo><Series>Prey</Series><Number>4</Number></ComicInfo>")
 		result = extract_comic(cbz)
 		assert result.title == "Prey #4"
+
+
+class TestOcrFallback:
+	"""Image-only books (scanned PDFs, comics without ComicInfo.xml) get OCR'd
+	via tesseract when it's installed. These tests mock the binaries so they run
+	without tesseract/pdftoppm actually present."""
+
+	def test_pdf_ocr_when_no_text_layer(self, tmp_path):
+		from book_meta_fix.extractors import extract_pdf
+
+		f = tmp_path / "scan.pdf"
+		f.write_bytes(b"%PDF-1.4 fake scanned")
+		# No pdfinfo/pdftotext (shutil.which → None) so first_page_text stays
+		# None and the OCR fallback path is taken.
+		with patch("book_meta_fix.extractors.shutil.which", return_value=None), \
+			 patch("book_meta_fix.extractors._render_pdf_page_png", return_value=b"PNGBYTES"), \
+			 patch("book_meta_fix.extractors._ocr_image_bytes", return_value="Babička\nBožena Němcová\nISBN 978-80-720-7232-3"):
+			result = extract_pdf(f)
+		assert result.first_page_text is not None
+		assert "Babička" in result.first_page_text
+		# ISBN recovered from the OCR'd cover/copyright text.
+		assert result.isbn_from_text == "9788072072323"
+
+	def test_pdf_skips_ocr_when_text_present(self, tmp_path):
+		"""When pdftotext yields text, the OCR path is not taken."""
+		from book_meta_fix.extractors import extract_pdf
+
+		f = tmp_path / "book.pdf"
+		f.write_bytes(b"%PDF fake")
+
+		def fake_which(tool):
+			return "/usr/bin/pdftotext" if tool == "pdftotext" else None
+
+		with patch("book_meta_fix.extractors.shutil.which", side_effect=fake_which), \
+			 patch("book_meta_fix.extractors.subprocess.run") as mock_run, \
+			 patch("book_meta_fix.extractors._render_pdf_page_png") as mock_render:
+			# The pdftotext call returns real text.
+			mock_run.return_value = type("R", (), {"returncode": 0, "stdout": "Kniha s textovou vrstvou " * 30})()
+			result = extract_pdf(f)
+		assert result.first_page_text is not None  # came from pdftotext
+		mock_render.assert_not_called()  # OCR never triggered
+
+	def test_comic_ocr_cover_when_no_comicinfo(self, tmp_path):
+		from book_meta_fix.extractors import extract_comic
+
+		cbz = tmp_path / "comic.cbz"
+		with zipfile.ZipFile(cbz, "w") as zf:
+			zf.writestr("page01.jpg", b"img")  # no ComicInfo.xml
+		with patch("book_meta_fix.extractors._comic_first_image", return_value=b"COVERIMG"), \
+			 patch("book_meta_fix.extractors._ocr_image_bytes", return_value="Batman\nBob Kane\nISBN 978-80-720-7232-3"):
+			result = extract_comic(cbz)
+		# Cover was OCR'd → first_page_text + ISBN recovered, error cleared.
+		assert result.first_page_text is not None
+		assert "Batman" in result.first_page_text
+		assert result.isbn_from_text == "9788072072323"
+		assert result.error is None
+
+	def test_ocr_noop_without_tesseract(self, tmp_path):
+		"""When tesseract isn't installed, OCR silently returns None (no crash)."""
+		from book_meta_fix.extractors import _ocr_image_bytes
+
+		with patch("book_meta_fix.extractors.shutil.which", return_value=None):
+			assert _ocr_image_bytes(b"some png bytes") is None
