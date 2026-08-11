@@ -222,3 +222,53 @@ class TestIsbnScanEndPages:
 		with zipfile.ZipFile(epub) as zf:
 			scan_text = _epub_isbn_scan_text(zf, "content.opf")
 		assert extract_isbn(scan_text) is not None
+
+
+class TestComicExtractor:
+	"""Comics are books too. .cbz/.cbr/.cb7 are image archives; when they carry
+	a ComicInfo.xml it is the file's own metadata declaration (like EPUB OPF)."""
+
+	def test_cbz_parses_comicinfo_xml(self, tmp_path):
+		from book_meta_fix.extractors import extract_comic
+
+		comicinfo = (
+			"<ComicInfo>"
+			"<Title>The Return</Title>"
+			"<Series>Neverwhere</Series><Number>6</Number>"
+			"<Writer>Laini Taylor</Writer>"
+			"<Publisher>Archa</Publisher><Year>2018</Year>"
+			"<ISBN>978-80-720-7232-3</ISBN><LanguageISO>cs</LanguageISO>"
+			"</ComicInfo>"
+		)
+		cbz = tmp_path / "comic.cbz"
+		with zipfile.ZipFile(cbz, "w") as zf:
+			zf.writestr("ComicInfo.xml", comicinfo)
+			zf.writestr("page01.jpg", b"img")
+		result = extract_comic(cbz)
+		assert result.error is None
+		assert result.source_format == "cbz"
+		assert result.title == "The Return"
+		assert result.authors == ["Laini Taylor"]
+		assert result.publisher == "Archa"
+		assert result.year_from_text == 2018
+		assert result.isbn == "9788072072323"
+		assert result.language == "cs"
+
+	def test_cbz_without_comicinfo_returns_error(self, tmp_path):
+		from book_meta_fix.extractors import extract_comic
+
+		cbz = tmp_path / "comic.cbz"
+		with zipfile.ZipFile(cbz, "w") as zf:
+			zf.writestr("page01.jpg", b"img")
+		result = extract_comic(cbz)
+		assert result.error == "no ComicInfo.xml"
+		assert result.first_page_text is None  # image-only — no text layer
+
+	def test_title_falls_back_to_series_number(self, tmp_path):
+		from book_meta_fix.extractors import extract_comic
+
+		cbz = tmp_path / "comic.cbz"
+		with zipfile.ZipFile(cbz, "w") as zf:
+			zf.writestr("ComicInfo.xml", "<ComicInfo><Series>Prey</Series><Number>4</Number></ComicInfo>")
+		result = extract_comic(cbz)
+		assert result.title == "Prey #4"

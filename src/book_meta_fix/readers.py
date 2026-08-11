@@ -137,7 +137,7 @@ def _parse_path(folder: Path) -> BookMeta:
 def _collect_formats(folder: Path, meta: BookMeta) -> None:
 	"""List book file extensions present and pick a primary file for extraction."""
 	# Known ebook extensions, ordered by extraction preference (richest metadata first)
-	pref = [".epub", ".pdf", ".mobi", ".azw", ".azw3", ".prc", ".pdb", ".doc", ".rtf", ".txt", ".lit", ".djvu"]
+	pref = [".epub", ".pdf", ".mobi", ".azw", ".azw3", ".prc", ".pdb", ".doc", ".rtf", ".txt", ".lit", ".djvu", ".cbz", ".cbr", ".cb7"]
 	seen: list[str] = []
 	for entry in folder.iterdir():
 		if not entry.is_file():
