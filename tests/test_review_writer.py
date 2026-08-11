@@ -101,7 +101,8 @@ class TestMediumConfidencePrefill:
 		assert parsed[0].action == "accept"
 
 	def test_flash_changing_title_stays_none(self, tmp_path):
-		"""llm:flash proposing a different title -> action stays None for review."""
+		"""llm:flash proposing ONLY a different title (no additive data) -> action
+		stays None for review — nothing safe to auto-apply."""
 		out = tmp_path / "review.yaml"
 		w = ReviewWriter(out)
 		enriched = EnrichedMeta(
@@ -110,6 +111,43 @@ class TestMediumConfidencePrefill:
 		_submit_all_and_finish(w, [_result(1, title="Old Title", enriched=enriched)])
 		parsed = parse_review(out)
 		assert parsed[0].action is None
+
+	def test_flash_changing_title_with_additive_stays_none(self, tmp_path):
+		"""llm:flash proposing a title change AND an isbn: the match is on an
+		unconfirmed identity (query built on the old title), so we cannot trust
+		the additive isbn either — it may belong to the wrong book. Whole
+		proposal stays action=None for review."""
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		enriched = EnrichedMeta(
+			title="New Title", authors=["A"], isbn="9782222222222", source="llm:flash",
+		)
+		_submit_all_and_finish(w, [_result(1, title="Old Title", enriched=enriched)])
+		parsed = parse_review(out)
+		entry = parsed[0]
+		assert entry.action is None
+		# Nothing stripped — the full proposal (title + isbn) is preserved for
+		# the human to review together.
+		assert entry.proposed.get("title") == "New Title"
+		assert entry.proposed.get("isbn") == "9782222222222"
+
+	def test_openlibrary_changing_title_with_year_stays_none(self, tmp_path):
+		"""openlibrary (medium) proposing a title fix for a broken current title
+		+ adding year: the match is on the (broken) current title, so identity is
+		unconfirmed → defer everything (additive year not trustworthy either)."""
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		enriched = EnrichedMeta(
+			title="New Title", authors=["A"], year=2005, source="openlibrary",
+		)
+		# Broken current title (underscore) so _looks_better lets the enriched
+		# title into the proposal — otherwise openlibrary (not trust-blindly)
+		# wouldn't propose a title change at all.
+		_submit_all_and_finish(w, [_result(1, title="Old_Title", enriched=enriched)])
+		parsed = parse_review(out)
+		entry = parsed[0]
+		assert entry.action is None
+		assert entry.proposed.get("title") == "New Title"
 
 	def test_flash_changing_author_stays_none(self, tmp_path):
 		"""llm:flash proposing a different author -> action stays None."""

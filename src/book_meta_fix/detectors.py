@@ -1,9 +1,11 @@
 """Detector rules C1–C10 — classify each book's metadata corruption.
 
 Each rule is a function (meta: BookMeta) -> Diagnosis | None.
-`detect()` applies rules in priority order and returns the first match; if no
+`detect()` applies rules in priority order and returns the first match as the
+primary diagnosis, with every other match attached to ``.additional``; if no
 rule fires, the book is OK (and will be passed to the verifier for content
-validation).
+validation). `detect_all()` returns the full list of matches so one book can
+carry several problems at once.
 
 Corruption categories (from empirical study of the library):
 
@@ -620,26 +622,58 @@ ENRICHMENT_RULES: list[Rule] = [
 ]
 
 
-def detect(meta: BookMeta) -> Diagnosis:
-	"""Apply rules in priority order; return the first matching Diagnosis.
+def detect_all(meta: BookMeta) -> list[Diagnosis]:
+	"""Apply ALL rules and return every match, in priority order (structural
+	rules first, then enrichment rules).
 
-	If no structural rule fires, the book is OK. Then enrichment rules are
-	checked — if any fire, the book is OK-with-enrichment (still auto-fixable,
-	but for a different reason: missing data, not corruption).
+	Unlike detect(), this surfaces every problem on the book — e.g. a book with
+	a filename-as-title (C2) AND a generated cover (C11) returns [C2, C11], so
+	both can be reported and fixed in a single pass. If nothing matches, returns
+	a single OK diagnosis.
 	"""
+	matches: list[Diagnosis] = []
 	for rule in RULES:
 		d = rule(meta)
 		if d is not None:
-			return d
-	# No corruption found — check for enrichment opportunities
+			matches.append(d)
 	for rule in ENRICHMENT_RULES:
 		d = rule(meta)
 		if d is not None:
-			return d
-	# Truly clean
-	return Diagnosis(
-		category="OK",
-		reason="no structural or enrichment rule triggered",
-		confidence=Confidence.HIGH,
-		verdict=Verdict.OK,
-	)
+			matches.append(d)
+	if not matches:
+		return [
+			Diagnosis(
+				category="OK",
+				reason="no structural or enrichment rule triggered",
+				confidence=Confidence.HIGH,
+				verdict=Verdict.OK,
+			)
+		]
+	return matches
+
+
+def all_diagnoses(diag: Diagnosis | None) -> list[Diagnosis]:
+	"""The primary diagnosis plus its additional diagnoses, as a flat list.
+
+	Use this anywhere that needs to answer "does this book have ANY problem of
+	kind X?" rather than reading the single primary category. Returns an empty
+	list when *diag* is None (callers like _build_proposed accept diag=None).
+	"""
+	if diag is None:
+		return []
+	return [diag, *diag.additional]
+
+
+def detect(meta: BookMeta) -> Diagnosis:
+	"""Apply rules in priority order; return the first matching Diagnosis as
+	the primary, with every other match attached as ``.additional``.
+
+	The primary (first match) preserves the historical category/verdict that
+	drives the pipeline's branching and organize routing. The remaining matches
+	are carried in ``Diagnosis.additional`` so one book can report several
+	problems at once (e.g. C2 + C11). See detect_all / all_diagnoses.
+	"""
+	matches = detect_all(meta)
+	primary = matches[0]
+	primary.additional = matches[1:]
+	return primary

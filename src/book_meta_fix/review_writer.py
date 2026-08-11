@@ -37,8 +37,9 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from .detectors import all_diagnoses
 from .models import Verdict
-from .review import _build_current, _build_proposed, _header, _relative_path, _render_entry
+from .review import _COVER_CATEGORIES, _build_current, _build_proposed, _header, _relative_path, _render_entry
 
 log = logging.getLogger(__name__)
 
@@ -174,7 +175,7 @@ class ReviewWriter:
 		if self._min_rank > 0 and enriched is not None:
 			conf = self._confidence(enriched)
 			if self._confidence_rank.get(conf, 0) >= self._min_rank:
-				if self._apply_to_metadata(meta, enriched):
+				if self._apply_to_metadata(meta, enriched, diag):
 					self._apply_summary["applied"] += 1
 					self._processed.add(bid)
 					return
@@ -226,11 +227,12 @@ class ReviewWriter:
 			return "medium"
 		return "low"
 
-	def _apply_to_metadata(self, meta: Any, enriched: Any) -> bool:
+	def _apply_to_metadata(self, meta: Any, enriched: Any, diag: Any = None) -> bool:
 		"""Apply *enriched* to metadata files. Returns True on success.
 
-		Also downloads a replacement cover when the enricher has a cover_url
-		(the cover_url is not metadata — it's a one-time download to cover.jpg).
+		Also downloads a replacement cover when the enricher has a cover_url AND
+		the diagnosis is about the cover (C11 placeholder / MISSING_COVER). The
+		cover_url is not metadata — it's a one-time download to cover.jpg.
 		"""
 		try:
 			from .pipeline import _apply_enriched_to_meta
@@ -239,7 +241,9 @@ class ReviewWriter:
 			updated = _apply_enriched_to_meta(meta, enriched)
 			# Cover download: network side effect. Done before write_book_meta
 			# so the OPF <guide> cover reference is emitted for the new file.
-			if getattr(enriched, "cover_url", None):
+			# Gated on the cover categories across ALL diagnoses (a C2 book with
+			# a generated cover in diag.additional still gets it replaced here).
+			if getattr(enriched, "cover_url", None) and any(d.category in _COVER_CATEGORIES for d in all_diagnoses(diag)):
 				from pathlib import Path
 
 				from .covers import download_cover
@@ -254,7 +258,7 @@ class ReviewWriter:
 
 	def _build_entry(self, meta: Any, diag: Any, extracted: Any, enriched: Any, prior_entry: dict | None) -> dict:
 		"""Build a review entry dict, carrying over prior user edits."""
-		proposed = _build_proposed(meta, extracted, enriched)
+		proposed = _build_proposed(meta, extracted, enriched, diag)
 		# AUTO_FIXABLE detectors may carry an explicit action/proposal on
 		# diag.proposed (e.g. C6 Word lock-file -> {"action": "delete"}).
 		# Pre-fill it so the user only has to confirm. Merge any extra keys
@@ -278,13 +282,15 @@ class ReviewWriter:
 				action = "accept"
 			elif self._confidence_rank.get(conf, 0) >= self._confidence_rank["medium"]:
 				# Medium-confidence (llm:flash/loop, openlibrary, google_books,
-				# content): pre-fill accept ONLY when the proposal does not change
-				# title or author. When the LLM agrees with the existing title/
-				# author (both already passed verify_proposal against the book's
-				# text), the only risk is in the *added* metadata (isbn/year/
-				# genres/series) — which a human can bulk-verify far more easily
-				# than a title/author swap. Proposals that change title or author
-				# stay action=None so they get individual review.
+				# content): pre-fill accept ONLY when the proposal confirms the
+				# book's identity (leaves title/author unchanged). When the match
+				# AGREES with the existing title/author, the enrichment is about
+				# the right book, so its additive fields (isbn/year/genres) are
+				# safe to bulk-apply. When the proposal CHANGES title/author the
+				# match is on an unconfirmed identity — and because the query was
+				# built on those (possibly wrong) title/author values, we cannot
+				# trust the additive fields either: they may belong to the wrong
+				# book. So the whole proposal stays action=None for review.
 				if self._proposal_preserves_identity(proposed, meta):
 					action = "accept"
 		# Cover replacement: when the diagnosis is C11 (generated cover) or
@@ -292,7 +298,7 @@ class ReviewWriter:
 		# accept so the user can bulk-approve. The enricher already fuzzy-
 		# matched the book (databazeknih score >= 70), so the cover belongs to
 		# the right book. No title/author change risk — just a cover download.
-		if action is None and diag.category in ("C11", "MISSING_COVER") and proposed and proposed.get("cover_url"):
+		if action is None and diag.category in _COVER_CATEGORIES and proposed and proposed.get("cover_url"):
 			action = "accept"
 		entry: dict[str, Any] = {
 			"id": meta.calibre_id,
@@ -306,6 +312,14 @@ class ReviewWriter:
 			"proposed": proposed,
 			"action": action,
 		}
+		# Expose the full diagnosis list when the book has additional problems,
+		# so apply and the reviewer see every issue (primary is already in
+		# `diagnosis` above). Single-issue books keep the legacy shape.
+		if diag.additional:
+			entry["diagnoses"] = [
+				{"category": d.category, "reason": d.reason, "confidence": d.confidence.value}
+				for d in all_diagnoses(diag)
+			]
 		if prior_entry is not None:
 			if prior_entry.get("edited"):
 				entry["edited"] = prior_entry["edited"]

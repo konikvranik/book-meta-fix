@@ -16,7 +16,9 @@ from __future__ import annotations
 
 from book_meta_fix.detectors import (
 	_is_anonym_spelling,
+	all_diagnoses,
 	detect,
+	detect_all,
 	rule_c12_bad_author,
 	rule_c2_filename_title,
 	rule_c9_anonym,
@@ -325,3 +327,54 @@ class TestAnonymSpellings:
 		d = detect(m)
 		assert d.category == "C9"
 		assert d.verdict.value == "OK"
+
+
+class TestDetectAll:
+	"""detect_all surfaces every matching rule, not just the first. detect()
+	returns the first match as primary with the rest in .additional."""
+
+	def test_multiple_enrichment_diagnoses(self):
+		"""A clean book missing ISBN/year/cover matches several enrichment rules
+		at once — detect_all returns all of them."""
+		# Default _meta: clean title/author, no isbn/year, no cover.jpg on disk.
+		m = _meta()
+		diags = detect_all(m)
+		cats = [d.category for d in diags]
+		# All three enrichment problems are present.
+		assert "MISSING_ISBN" in cats
+		assert "MISSING_YEAR" in cats
+		assert "MISSING_COVER" in cats
+
+	def test_detect_carries_additional(self):
+		"""detect() primary is the first match; the rest land in .additional."""
+		m = _meta()
+		diags = detect_all(m)
+		d = detect(m)
+		assert d.category == diags[0].category
+		assert {a.category for a in d.additional} == {x.category for x in diags[1:]}
+
+	def test_all_diagnoses_flattens(self):
+		m = _meta()
+		d = detect(m)
+		assert [x.category for x in all_diagnoses(d)] == [d.category, *(a.category for a in d.additional)]
+
+	def test_all_diagnoses_none_safe(self):
+		"""Callers (e.g. _build_proposed) may pass diag=None — must not raise."""
+		assert all_diagnoses(None) == []
+
+	def test_clean_book_has_no_enrichment_or_cover_diagnoses(self, tmp_path):
+		"""A book with isbn, year and a real (non-placeholder) cover triggers no
+		enrichment or cover rule."""
+		from PIL import Image
+
+		# A colour-rich gradient (not a solid fill) so analyze_cover does NOT
+		# classify it as a generated placeholder.
+		img = Image.new("RGB", (300, 450))
+		px = img.load()
+		for y in range(450):
+			for x in range(300):
+				px[x, y] = ((x + y) % 256, (x * 2) % 256, (y * 2) % 256)
+		img.save(tmp_path / "cover.jpg")
+		m = _meta(path=str(tmp_path), isbn="9788020403114", year=2001)
+		cats = {d.category for d in detect_all(m)}
+		assert cats.isdisjoint({"MISSING_ISBN", "MISSING_YEAR", "MISSING_COVER", "C11"})

@@ -7,8 +7,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from book_meta_fix.enrichers import EnrichedMeta
 from book_meta_fix.models import BookMeta, Confidence, Diagnosis, Verdict
-from book_meta_fix.review import build_review, parse_review
+from book_meta_fix.review import _build_proposed, build_review, parse_review
 
 
 def _meta(calibre_id: int, title: str = "T", author: str = "A") -> BookMeta:
@@ -122,3 +123,88 @@ class TestParseLegacySingleList:
 		path.write_text(hybrid, encoding="utf-8")
 		parsed = parse_review(path)
 		assert len(parsed) == 2
+
+
+def _enriched_with_cover() -> EnrichedMeta:
+	"""An enriched hit that carries a cover_url plus a year, so proposed is
+	guaranteed non-empty even when cover_url is gated out."""
+	return EnrichedMeta(
+		title="Some Title",
+		authors=["Some Author"],
+		year=2001,
+		cover_url="https://example.com/cover.jpg",
+		source="databazeknih",
+	)
+
+
+class TestCoverUrlProposalGate:
+	"""cover_url must only land in `proposed` for C11 / MISSING_COVER books.
+
+	Every enriched book carries a cover_url, but downloading is reserved for the
+	cover-problem categories — otherwise apply would fetch covers for every
+	metadata fix and the Covers report would never match apply's behaviour.
+	"""
+
+	def test_cover_url_proposed_for_c11(self):
+		meta = _meta(1)
+		diag = _diag(category="C11")
+		proposed = _build_proposed(meta, None, _enriched_with_cover(), diag)
+		assert proposed is not None
+		assert proposed.get("cover_url") == "https://example.com/cover.jpg"
+
+	def test_cover_url_proposed_for_missing_cover(self):
+		meta = _meta(1)
+		diag = _diag(category="MISSING_COVER")
+		proposed = _build_proposed(meta, None, _enriched_with_cover(), diag)
+		assert proposed is not None
+		assert proposed.get("cover_url") == "https://example.com/cover.jpg"
+
+	def test_cover_url_not_proposed_for_non_cover_category(self):
+		"""A C2 (metadata) book keeps its enriched year but NOT the cover_url."""
+		meta = _meta(1)
+		diag = _diag(category="C2")
+		proposed = _build_proposed(meta, None, _enriched_with_cover(), diag)
+		assert proposed is not None
+		assert "cover_url" not in proposed
+		# Other enriched fields are still proposed.
+		assert proposed.get("year") == 2001
+
+	def test_cover_url_not_proposed_without_diag(self):
+		"""No diagnosis available → be conservative, don't propose a cover."""
+		meta = _meta(1)
+		proposed = _build_proposed(meta, None, _enriched_with_cover(), None)
+		assert proposed is not None
+		assert "cover_url" not in proposed
+
+	def test_cover_url_proposed_when_c11_is_additional(self):
+		"""A book whose primary issue is NOT a cover but that also has a
+		generated cover (C11 in diag.additional) still gets cover_url proposed —
+		so apply can fix both the title and the cover in one pass."""
+		meta = _meta(1)
+		diag = _diag(category="C2")  # primary is a title issue
+		diag.additional = [_diag(category="C11")]
+		proposed = _build_proposed(meta, None, _enriched_with_cover(), diag)
+		assert proposed is not None
+		assert proposed.get("cover_url") == "https://example.com/cover.jpg"
+
+	def test_entry_exposes_diagnoses_list(self):
+		"""When a book carries additional diagnoses, the review entry exposes
+		the full list (primary first) so apply sees every problem."""
+		from book_meta_fix.review import _entry_dict
+		from pathlib import Path
+
+		meta = _meta(1)
+		diag = _diag(category="C2")
+		diag.additional = [_diag(category="C11")]
+		entry = _entry_dict(meta, diag, None, None, None, library_root=None)
+		assert entry["diagnosis"]["category"] == "C2"  # primary stays
+		cats = [d["category"] for d in entry["diagnoses"]]
+		assert cats == ["C2", "C11"]
+
+	def test_entry_no_diagnoses_key_for_single_issue(self):
+		"""A single-issue book keeps the legacy shape (no `diagnoses` key)."""
+		from book_meta_fix.review import _entry_dict
+
+		meta = _meta(1)
+		entry = _entry_dict(meta, _diag(), None, None, None, library_root=None)
+		assert "diagnoses" not in entry
