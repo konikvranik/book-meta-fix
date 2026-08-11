@@ -227,12 +227,25 @@ class ReviewWriter:
 		return "low"
 
 	def _apply_to_metadata(self, meta: Any, enriched: Any) -> bool:
-		"""Apply *enriched* to metadata files. Returns True on success."""
+		"""Apply *enriched* to metadata files. Returns True on success.
+
+		Also downloads a replacement cover when the enricher has a cover_url
+		(the cover_url is not metadata — it's a one-time download to cover.jpg).
+		"""
 		try:
 			from .pipeline import _apply_enriched_to_meta
 			from .writers import write_book_meta
 
 			updated = _apply_enriched_to_meta(meta, enriched)
+			# Cover download: network side effect. Done before write_book_meta
+			# so the OPF <guide> cover reference is emitted for the new file.
+			if getattr(enriched, "cover_url", None):
+				from pathlib import Path
+
+				from .covers import download_cover
+
+				cover_path = Path(updated.path) / "cover.jpg"
+				download_cover(enriched.cover_url, cover_path)
 			write_book_meta(updated, dry_run=False, backup=True)
 			return True
 		except Exception:  # noqa: BLE001
@@ -274,6 +287,13 @@ class ReviewWriter:
 				# stay action=None so they get individual review.
 				if self._proposal_preserves_identity(proposed, meta):
 					action = "accept"
+		# Cover replacement: when the diagnosis is C11 (generated cover) or
+		# MISSING_COVER and we have a cover_url from an enricher, pre-fill
+		# accept so the user can bulk-approve. The enricher already fuzzy-
+		# matched the book (databazeknih score >= 70), so the cover belongs to
+		# the right book. No title/author change risk — just a cover download.
+		if action is None and diag.category in ("C11", "MISSING_COVER") and proposed and proposed.get("cover_url"):
+			action = "accept"
 		entry: dict[str, Any] = {
 			"id": meta.calibre_id,
 			"path": _relative_path(meta, self.library_root),

@@ -164,6 +164,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich:
 	console.print(f"[bold]Running pipeline[/bold] on {cfg.library} ({workers} workers)")
 	if cfg.databazeknih_enabled:
 		console.print("  [cyan]databazeknih.cz[/cyan] lookup enabled (genres + metadata)")
+		console.print("  [cyan]cover replacement[/cyan] enabled (C11 generated / MISSING_COVER → databazeknih cover_url)")
 	if verify_ok:
 		strict = not no_strict_verify
 		console.print(f"  [cyan]--verify-ok[/cyan] audit: OK books checked against content (strict={strict})")

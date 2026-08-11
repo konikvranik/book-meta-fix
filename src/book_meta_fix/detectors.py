@@ -18,7 +18,9 @@ Corruption categories (from empirical study of the library):
 	C8  translator mislabeled as author     NEEDS_REVIEW
 	C9  anonym (mostly fake — real anonym is whitelisted) NEEDS_REVIEW
 	C10 long comma-separated author list    NEEDS_REVIEW (mostly real multi-author)
+	C11 generated cover (calibre placeholder) NEEDS_REVIEW (download replacement)
 	EXTRA: missing ISBN / year              AUTO_FIXABLE (enrichable)
+	EXTRA: missing cover / generated cover  AUTO_FIXABLE / NEEDS_REVIEW (download)
 """
 from __future__ import annotations
 
@@ -424,6 +426,65 @@ def rule_missing_year(meta: BookMeta) -> Diagnosis | None:
 	return None
 
 
+# ---------------------------------------------------------------------------
+# Cover rules (C11 generated, MISSING_COVER absent)
+# ---------------------------------------------------------------------------
+#
+# These are enrichment-tier rules: a generated/missing cover is not metadata
+# corruption, but a fixable quality issue. They run after the structural and
+# ISBN/year enrichment rules. When cover_url is available from an enricher
+# (preferably databazeknih), the ReviewWriter pre-fills action:accept and
+# `bmf apply` downloads the replacement.
+
+
+def rule_generated_cover(meta: BookMeta) -> Diagnosis | None:
+	"""C11: auto-generated (Calibre placeholder) cover detected.
+
+	Fires when cover.jpg exists AND pixel analysis classifies it as generated
+	(1200x1600 default template + low colour count + dominant background).
+	Returns NEEDS_REVIEW so a human sees the proposal before the replacement
+	cover is downloaded — though the ReviewWriter pre-fills action:accept when
+	a cover_url is available.
+	"""
+	from pathlib import Path
+
+	cover_path = Path(meta.path) / "cover.jpg"
+	if not cover_path.is_file():
+		return None
+	from .covers import analyze_cover
+
+	info = analyze_cover(cover_path)
+	if not info.is_generated:
+		return None
+	signals = ", ".join(info.signals) if info.signals else f"{info.width}x{info.height}"
+	return Diagnosis(
+		category="C11",
+		reason=f"generated cover ({signals})",
+		confidence=Confidence.HIGH,
+		verdict=Verdict.NEEDS_REVIEW,
+	)
+
+
+def rule_missing_cover(meta: BookMeta) -> Diagnosis | None:
+	"""MISSING_COVER: no cover.jpg sidecar at all.
+
+	Auto-fixable: if an enricher has a cover_url, `bmf apply` will download it.
+	Fires only when cover.jpg is entirely absent (PDFs/PDBs may have an
+	embedded cover but no sidecar — those are left for a future extractor).
+	"""
+	from pathlib import Path
+
+	cover_path = Path(meta.path) / "cover.jpg"
+	if cover_path.is_file():
+		return None
+	return Diagnosis(
+		category="MISSING_COVER",
+		reason="no cover.jpg sidecar",
+		confidence=Confidence.LOW,
+		verdict=Verdict.AUTO_FIXABLE,
+	)
+
+
 # Priority-ordered list of structural rules (NOT the missing-ISBN/year ones —
 # those are enrichment opportunities applied only to books that pass the
 # structural checks as OK).
@@ -444,9 +505,14 @@ RULES: list[Rule] = [
 
 # Enrichment rules — applied to books that passed all structural rules as OK
 # (these are not corruption, just missing data we can fetch).
+# Cover rules are last: C11/MISSING_COVER are lower priority than metadata
+# enrichment, and their cover_url pre-fill in the ReviewWriter is independent
+# of the metadata proposal.
 ENRICHMENT_RULES: list[Rule] = [
 	rule_missing_isbn,
 	rule_missing_year,
+	rule_generated_cover,
+	rule_missing_cover,
 ]
 
 

@@ -234,7 +234,39 @@ bmf report --llm --no-llm-loop --llm-model glm-4.5-flash
 bmf report --llm --llm-burst 1 --llm-min-interval 2.0
 ```
 
-## Library layout expected
+## Cover replacement
+
+Calibre's default "Generate cover" produces a placeholder image (solid
+background + rendered title/author text) at exactly 1200×1600. The pipeline
+detects these by pixel analysis — **no LLM involved** — and proposes a
+replacement from databazeknih.cz when one is available.
+
+**Detection** (`covers.py` + `rule_generated_cover`): three signals, each adds
+confidence; a cover is classified as generated at confidence ≥ 0.5:
+
+| Signal | Weight | What it means |
+|--------|--------|---------------|
+| Dimensions == 1200×1600 | +0.5 | Calibre default template signature |
+| Few unique colours (< ~50 at 64-colour quantization) | +0.3 | Solid background + text |
+| Dominant colour covers > 60% of pixels | +0.2 | Flat background |
+
+**Categories:**
+- `C11` — generated cover detected (NEEDS_REVIEW). Replacement proposed when a `cover_url` is available.
+- `MISSING_COVER` — no `cover.jpg` sidecar at all (AUTO_FIXABLE).
+
+**Flow** (same as metadata proposals — no separate command):
+
+```
+bmf report --databazeknih           # detect C11/MISSING_COVER, fetch cover_url
+# → review.yaml entry with action: accept (auto-set when databazeknih matched)
+bmf apply review.yaml --apply        # downloads cover_url → cover.jpg (with .bak)
+```
+
+With `--auto-apply`, covers are downloaded inline during the report run.
+
+**Cost:** zero LLM tokens. Detection is Pillow pixel math (~5 ms/book).
+Download is one HTTP request per replaced cover, rate-limited at 1 s/host.
+
 
 ```
 <library>/
@@ -293,7 +325,9 @@ catalog with real examples. Summary:
 | C8 | translator mislabeled as author | NEEDS_REVIEW |
 | C9 | anonym (mostly fake — real anonym is whitelisted) | NEEDS_REVIEW |
 | C10 | long multi-author list (anthology vs translator team) | NEEDS_REVIEW |
+| C11 | generated cover (Calibre placeholder) detected by pixel analysis | NEEDS_REVIEW |
 | — | MISSING_ISBN / MISSING_YEAR | AUTO_FIXABLE (enrich) |
+| — | MISSING_COVER (no `cover.jpg` sidecar) | AUTO_FIXABLE (download) |
 
 ## YAML review format
 
