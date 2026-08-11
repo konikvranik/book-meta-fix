@@ -134,6 +134,39 @@ class TestDownloadCover:
 		assert ok is False
 		assert not dest.exists()
 
+	def test_missing_pillow_accepts_bytes_as_is(self, tmp_path: Path) -> None:
+		"""When Pillow is unavailable, a successful download is accepted as-is.
+
+		Regression: the import and verify used to share one try/except, and the
+		broad `except Exception` came before `except ImportError` — so a missing
+		PIL was misreported as "not a valid image" and every download failed.
+		"""
+		# Genuine JPEG bytes (the kind a real server returns); we don't need to
+		# construct them via Pillow here, only to show they're written through.
+		buf = io.BytesIO()
+		Image.new("RGB", (40, 60), color=(0, 0, 0)).save(buf, format="JPEG")
+		jpeg_bytes = buf.getvalue()
+
+		dest = tmp_path / "cover.jpg"
+		mock_response = type("R", (), {"status_code": 200, "content": jpeg_bytes})
+
+		import builtins
+
+		real_import = builtins.__import__
+
+		def _block_pil(name, *args, **kwargs):
+			if name == "PIL":
+				raise ModuleNotFoundError("No module named 'PIL'")
+			return real_import(name, *args, **kwargs)
+
+		with patch("requests.get", return_value=mock_response), \
+				patch("builtins.__import__", side_effect=_block_pil):
+			ok = download_cover("https://example.com/cover.jpg", dest)
+
+		assert ok is True
+		assert dest.is_file()
+		assert dest.read_bytes() == jpeg_bytes
+
 
 # ---------------------------------------------------------------------------
 # Detector rules
