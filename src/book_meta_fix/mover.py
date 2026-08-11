@@ -193,12 +193,21 @@ def compute_needfix_path(meta: BookMeta, library: Path, needfix_dir: str) -> Pat
 
 	Preserves the relative subpath under the library root:
 		<lib>/<author>/<title> (<id>)/  ->  <lib>/<needfix>/<author>/<title> (<id>)/
+
+	If the book is already under needfix/ (re-diagnosed in a later run), the
+	existing prefix is stripped first to avoid a double needfix/needfix/ path.
 	"""
 	try:
 		rel = Path(meta.path).relative_to(library)
 	except ValueError:
 		# meta.path is not under library (shouldn't happen, but be safe)
 		rel = Path(meta.author_folder) / meta.title_folder
+	else:
+		# Strip an existing needfix/ prefix so re-running on books already in
+		# needfix/ yields the same path rather than needfix/needfix/...
+		parts = rel.parts
+		if len(parts) > 1 and parts[0] == needfix_dir:
+			rel = Path(*parts[1:])
 	return library / needfix_dir / rel
 
 
@@ -213,8 +222,13 @@ def organize(
 ) -> list[MoveResult]:
 	"""Move OK books to pattern path and broken books to needfix/.
 
-	*books_with_verdicts* is a list of (meta, verdict) tuples (verdict is the
-	Diagnosis.verdict value). Returns a list of MoveResults.
+	Placement is driven by the current verdict, not by the book's location:
+	  - OK/VERIFIED  -> <lib>/<pattern>/ (moved OUT of needfix/ if it was there)
+	  - other         -> <lib>/<needfix_dir>/<rel path>
+
+	A book already at its destination yields a MoveResult with action
+	'already_correct' (see move_book). This is what lets a book fixed by
+	`apply` move back out of needfix/ on the next organize run.
 	"""
 	results: list[MoveResult] = []
 	for meta, verdict in books_with_verdicts:
@@ -222,13 +236,6 @@ def organize(
 			dest = compute_target_path(meta, path_pattern, library)
 		else:
 			dest = compute_needfix_path(meta, library, needfix_dir)
-		# Don't move if the source is already inside needfix/ (idempotency)
-		try:
-			rel = Path(meta.path).relative_to(library)
-			if str(rel).startswith(needfix_dir + "/") or str(rel) == needfix_dir:
-				continue
-		except ValueError:
-			pass
 		result = move_book(Path(meta.path), dest, dry_run=dry_run)
 		results.append(result)
 	return results
