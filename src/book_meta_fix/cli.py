@@ -206,9 +206,19 @@ def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich:
 		else:
 			cats = tuple(c.strip() for c in llm_categories.split(",") if c.strip())
 			rpm = round(60.0 / cfg.llm_min_interval) if cfg.llm_min_interval > 0 else float("inf")
-			is_glm5 = cfg.zai_model.lower().startswith("glm-5")
-			reason = f"reasoning_effort={cfg.zai_reasoning_effort}" if is_glm5 else f"thinking={cfg.zai_thinking}"
-			console.print(f"  LLM: [cyan]{llm_provider.name}[/cyan] model={cfg.zai_model} ({reason}) for categories {cats} (≤{rpm} RPM, min {cfg.llm_min_interval}s between calls)")
+			if cfg.llm_loop:
+				# Loop mode (default): free Flash first, paid final as fallback.
+				console.print(
+					f"  LLM: [cyan]{llm_provider.name}[/cyan] "
+					f"primary={cfg.zai_flash_model} → fallback={cfg.zai_final_model} "
+					f"(reasoning_effort={cfg.zai_reasoning_effort}) "
+					f"for categories {cats} (≤{rpm} RPM, min {cfg.llm_min_interval}s between calls)"
+				)
+			else:
+				# Single-call mode (--no-llm-loop): one model, no fallback.
+				is_glm5 = cfg.zai_model.lower().startswith("glm-5")
+				reason = f"reasoning_effort={cfg.zai_reasoning_effort}" if is_glm5 else f"thinking={cfg.zai_thinking}"
+				console.print(f"  LLM: [cyan]{llm_provider.name}[/cyan] model={cfg.zai_model} ({reason}) for categories {cats} (≤{rpm} RPM, min {cfg.llm_min_interval}s between calls)")
 
 	# Streaming review writer: appends each processed book to review.yaml as it
 	# completes (Unix-pipe style). The original is moved to .bak on
