@@ -74,6 +74,44 @@ class TestSearchDatabazeknih:
 		path = _search_databazeknih("1984", None)
 		assert path == "/prehled-knihy/1984-283"
 
+	def _editions_html(self) -> str:
+		"""Two same-titled editions of one work, different years (2003, 2010)."""
+		return (
+			"<html><body>"
+			"<p class='new'>"
+			"<a class='new' type='book' href='/prehled-knihy/1984-v1-1'>1984</a>"
+			"<br /><span class='pozn'>2003, George Orwell (p)</span></p>"
+			"<p class='new'>"
+			"<a class='new' type='book' href='/prehled-knihy/1984-v2-2'>1984</a>"
+			"<br /><span class='pozn'>2010, George Orwell (p)</span></p>"
+			"</body></html>"
+		)
+
+	def test_year_prefers_matching_edition(self, monkeypatch):
+		"""With a target year, the edition published that year (±1) is chosen."""
+		from book_meta_fix.enrichers import _search_databazeknih
+
+		monkeypatch.setattr(enrichers, "_http_get_html", lambda url, **kw: self._editions_html())
+		assert _search_databazeknih("1984", "George Orwell", year=2010) == "/prehled-knihy/1984-v2-2"
+		assert _search_databazeknih("1984", "George Orwell", year=2003) == "/prehled-knihy/1984-v1-1"
+
+	def test_year_no_match_falls_back_to_best_fuzzy(self, monkeypatch):
+		"""No edition matches the target year → fall back to best fuzzy (same
+		work, other edition) rather than rejecting — maximise autodetection."""
+		from book_meta_fix.enrichers import _search_databazeknih
+
+		monkeypatch.setattr(enrichers, "_http_get_html", lambda url, **kw: self._editions_html())
+		path = _search_databazeknih("1984", "George Orwell", year=1990)
+		# Both editions match the title equally; either is acceptable (no reject).
+		assert path in ("/prehled-knihy/1984-v1-1", "/prehled-knihy/1984-v2-2")
+
+	def test_no_year_picks_best_fuzzy(self, monkeypatch):
+		from book_meta_fix.enrichers import _search_databazeknih
+
+		monkeypatch.setattr(enrichers, "_http_get_html", lambda url, **kw: self._editions_html())
+		path = _search_databazeknih("1984", "George Orwell")
+		assert path in ("/prehled-knihy/1984-v1-1", "/prehled-knihy/1984-v2-2")
+
 
 class TestLookupDatabazeknih:
 	def test_full_lookup_returns_enriched_meta(self, monkeypatch):
@@ -165,7 +203,7 @@ class TestEnricherLookupOrder:
 			calls.append("databazeknih_isbn")
 			return None  # ISBN miss → fall through to title lookup
 
-		def fake_dk(*, title, author=None):
+		def fake_dk(*, title, author=None, year=None):
 			calls.append("databazeknih")
 			return EnrichedMeta(title=title, source="databazeknih", genres=["Romány"])
 
@@ -187,7 +225,7 @@ class TestEnricherLookupOrder:
 	def test_lookup_skips_databazeknih_when_disabled(self, monkeypatch):
 		calls: list[str] = []
 
-		def fake_dk(*, title, author=None):
+		def fake_dk(*, title, author=None, year=None):
 			calls.append("databazeknih")
 			return EnrichedMeta(title=title, source="databazeknih")
 
@@ -202,7 +240,7 @@ class TestEnricherLookupOrder:
 		"""Genres must survive a cache round-trip (cache payload includes them)."""
 		call_count = [0]
 
-		def fake_dk(*, title, author=None):
+		def fake_dk(*, title, author=None, year=None):
 			call_count[0] += 1
 			return EnrichedMeta(title=title, source="databazeknih", genres=["Sci-fi", "antiutopie"])
 
