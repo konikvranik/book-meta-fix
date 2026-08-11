@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -140,6 +141,13 @@ these fields (omit any you cannot determine):
   - "publisher": publisher name (optional)
   - "year": publication year as integer (optional)
   - "language": ISO 639-2 code like "ces", "slk", "eng" (optional)
+
+IMPORTANT JSON rules (GLM models frequently get these wrong):
+  - Use JSON null, NOT Python None.
+  - Use JSON true/false, NOT Python True/False.
+  - No trailing commas before } or ].
+  - Omit a field entirely rather than emitting an empty string "".
+  - Keep the JSON short. Do not include any key you are not confident about.
   - "genres": array of 1-3 literary genre tags in Czech (e.g. ["sci-fi"],
     ["fantasy","série"], ["detektivka"], ["naučná literatura"],
     ["populárně-naučná"], ["román"], ["povídky"], ["poezie"],
@@ -472,8 +480,94 @@ def get_provider(config: Any) -> LLMProvider | None:  # noqa: ANN001
 	return None
 
 
+def _sanitize_json(content: str) -> str:
+	"""Fix common LLM JSON mistakes before parsing.
+
+	GLM models (trained on Python) frequently emit Python literals where JSON
+	is expected: ``None`` instead of ``null``, ``True``/``False`` instead of
+	``true``/``false``, and trailing commas before ``}``/``]``. These are
+	syntactically tiny errors but they turn an otherwise-perfect response into
+	a parse failure that costs 3 retry API calls.
+
+	We split on double-quotes and only rewrite barewords in even-indexed
+	segments (outside strings), so ``"None Yet"`` as a title value is left
+	alone while ``"publisher": None`` is fixed to ``"publisher": null``.
+	"""
+	# Split on double-quote: even indices are outside strings, odd are inside.
+	# (This correctly handles the common case; escaped quotes \" inside values
+	# are extremely rare in book metadata and the worst case is a missed fix.)
+	parts = content.split('"')
+	for i in range(0, len(parts), 2):  # outside-string segments only
+		p = parts[i]
+		p = re.sub(r"\bNone\b", "null", p)
+		p = re.sub(r"\bTrue\b", "true", p)
+		p = re.sub(r"\bFalse\b", "false", p)
+		# Trailing comma before a closing brace/bracket: {"a": 1,} -> {"a": 1}
+		p = re.sub(r",\s*([}\]])", r"\1", p)
+		parts[i] = p
+	return '"'.join(parts)
+
+
+def _repair_truncated_json(content: str) -> str | None:
+	"""Best-effort repair of a JSON object truncated mid-value.
+
+	When the LLM hits the token limit mid-response the output is a valid JSON
+	prefix that just ends abruptly: ``{"title": "X", "genres": ["sc``. We close
+	any open arrays and objects and return something ``json.loads`` can parse.
+	Returns None if no sensible repair is possible.
+	"""
+	# Only attempt repair on content that starts like a JSON object.
+	stripped = content.strip()
+	if not stripped.startswith("{"):
+		return None
+	# Track depth of objects/arrays and whether we're inside a string.
+	depth: list[str] = []
+	in_string = False
+	esc = False
+	for ch in content:
+		if esc:
+			esc = False
+			continue
+		if ch == "\\":
+			esc = True
+			continue
+		if ch == '"':
+			in_string = not in_string
+			continue
+		if in_string:
+			continue
+		if ch in "{[":
+			depth.append(ch)
+		elif ch == "}":
+			if depth and depth[-1] == "{":
+				depth.pop()
+		elif ch == "]":
+			if depth and depth[-1] == "[":
+				depth.pop()
+	# Strip trailing punctuation (comma/colon) that would make the closed JSON
+	# invalid. Only strip if we're not inside a string.
+	result = content
+	if not in_string:
+		result = result.rstrip()
+		while result and result[-1] in ",:":
+			result = result[:-1].rstrip()
+	# Close an unterminated string, then close open containers innermost-first.
+	suffix = ""
+	if in_string:
+		suffix += '"'
+	for opener in reversed(depth):
+		suffix += "]" if opener == "[" else "}"
+	return result + suffix
+
+
 def _parse_llm_json(content: str) -> ReconciledMeta | None:
-	"""Parse the LLM's JSON response into a ReconciledMeta."""
+	"""Parse the LLM's JSON response into a ReconciledMeta.
+
+	Tolerant of two common LLM failure modes (each previously caused a
+	3-retry waste of API calls + an eventual give-up):
+	  1. Python literals (None/True/False) instead of JSON (null/true/false).
+	  2. Truncation at the token limit — closes open braces/arrays.
+	"""
 	# Strip markdown fences if present (```json ... ```)
 	content = content.strip()
 	if content.startswith("```"):
@@ -481,11 +575,33 @@ def _parse_llm_json(content: str) -> ReconciledMeta | None:
 		# Remove first line (```json) and last line (```)
 		lines = [ln for ln in lines if not ln.strip().startswith("```")]
 		content = "\n".join(lines)
-	try:
-		data = json.loads(content)
-	except json.JSONDecodeError as e:
-		log.warning("LLM returned invalid JSON: %s; content: %s", e, content[:200])
-		return None
+	# Fix Python literals and trailing commas (cheap, always safe to apply).
+	sanitized = _sanitize_json(content)
+	# Try parsing directly, then the sanitized version, then a truncation repair.
+	for attempt_content, label in (
+		(content, "raw"),
+		(sanitized, "sanitized"),
+	):
+		try:
+			data = json.loads(attempt_content)
+			if label == "sanitized":
+				log.debug("JSON parsed after sanitization (Python literals fixed)")
+			break
+		except json.JSONDecodeError:
+			continue
+	else:
+		# Last resort: try repairing truncated JSON (sanitized version).
+		repaired = _repair_truncated_json(sanitized)
+		if repaired is not None:
+			try:
+				data = json.loads(repaired)
+				log.warning("LLM JSON was truncated; repaired to parseable object (dropping incomplete trailing field)")
+			except json.JSONDecodeError as e:
+				log.warning("LLM returned invalid JSON: %s; content: %s", e, content[:500])
+				return None
+		else:
+			log.warning("LLM returned invalid JSON; content: %s", content[:500])
+			return None
 	# Normalize field names
 	def _str(k):
 		v = data.get(k)
