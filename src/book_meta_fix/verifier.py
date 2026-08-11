@@ -258,13 +258,15 @@ def confirm_identity(proposal, extracted, *, fuzzy_strong: float = 0.8) -> bool:
 	proposal_isbn = getattr(proposal, "isbn", None)
 	if proposal_isbn and _isbn_in_content(proposal_isbn, extracted):
 		return True
-	# Signal 2: title + author in page text.
-	text = getattr(extracted, "first_page_text", None)
+	# Signal 2: title + author in page text — check the first-page window, then
+	# the broader window (the LLM retry path may have matched against the latter).
 	title = getattr(proposal, "title", None)
 	authors = getattr(proposal, "authors", None) or []
 	author = authors[0] if authors else None
-	if text and title and identity_in_text(title, author, text, fuzzy_strong=fuzzy_strong):
-		return True
+	if title:
+		for text in (getattr(extracted, "first_page_text", None), getattr(extracted, "broader_text", None)):
+			if text and identity_in_text(title, author, text, fuzzy_strong=fuzzy_strong):
+				return True
 	return False
 
 

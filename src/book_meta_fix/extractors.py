@@ -67,6 +67,10 @@ class ExtractedMeta:
 	isbn_from_text: str | None = None
 	# First-page text sample (for fuzzy title/author matching in verifier)
 	first_page_text: str | None = None
+	# A larger text window (first ~15 pages / ~30k chars) used only when the
+	# first-page LLM attempt fails — gives the model more context (title/author
+	# not always on page 1). None for formats that can't cheaply provide more.
+	broader_text: str | None = None
 	# Metadata mined from first_page_text by text_meta (independent of the
 	# embedded OPF block, which calibre may have overwritten).
 	title_from_text: str | None = None
@@ -167,6 +171,14 @@ def extract_epub(path: str | Path) -> ExtractedMeta:
 				# Scan first + last spine items for ISBN (copyright/colophon page
 				# is often at the end of the spine, not in the first 3000 chars).
 				result.isbn_from_text = extract_isbn(_epub_isbn_scan_text(zf, opf_path))
+				# Broader window (first ~15 spine items) for the LLM retry path.
+				try:
+					b_hrefs = _epub_spine_hrefs(zf, opf_path)[:15]
+					broader = _epub_text_from_hrefs(zf, b_hrefs)
+					if broader and len(broader) > len(result.first_page_text):
+						result.broader_text = broader[:30000]
+				except Exception:  # noqa: BLE001
+					pass
 				# Mine title/authors/publisher/year from the page text. These are
 				# independent of the OPF block above and feed the pipeline's
 				# deterministic fix stage.
@@ -336,17 +348,20 @@ def extract_pdf(path: str | Path) -> ExtractedMeta:
 		except (subprocess.TimeoutExpired, FileNotFoundError) as e:
 			log.debug("pdfinfo failed for %s: %s", path, e)
 
-	# 2. pdftotext for first 3 pages (ISBN on copyright page + title verification)
+	# 2. pdftotext for the first ~15 pages (one call serves two windows).
 	pdftotext = shutil.which("pdftotext")
 	if pdftotext:
 		try:
 			proc = subprocess.run(
-				[pdftotext, "-f", "1", "-l", "3", path, "-"],
+				[pdftotext, "-f", "1", "-l", "15", path, "-"],
 				capture_output=True, encoding="utf-8", errors="replace", timeout=15,
 			)
 			if proc.returncode == 0 and proc.stdout:
-				text = proc.stdout[:5000]
+				full = proc.stdout
+				text = full[:5000]
 				result.first_page_text = text
+				if len(full) > 5000:
+					result.broader_text = full[:30000]
 				# Always scan the text for an ISBN (independent of pdfinfo's
 				# embedded value) and mine the other text-based fields.
 				result.isbn_from_text = extract_isbn(text)
@@ -446,6 +461,9 @@ def extract_via_ebook_meta(path: str | Path) -> ExtractedMeta:
 	page_text = _ebook_convert_to_text(path)
 	if page_text:
 		result.first_page_text = page_text[:8000]
+		# Broader window for the LLM retry path — free (text already rendered).
+		if len(page_text) > 8000:
+			result.broader_text = page_text[:30000]
 		# Scan the FULL rendered text for ISBN (not just the first 3000 chars):
 		# the copyright/colophon page with the ISBN is often well past the first
 		# chunk, and extract_isbn is a cheap regex even over the whole book.
@@ -535,7 +553,7 @@ def extract_txt(path: str | Path) -> ExtractedMeta:
 	result = ExtractedMeta(source_format="txt")
 	try:
 		# Try utf-8, then cp1250/iso-8859-2 for CZ content
-		raw = Path(path).read_bytes()[:8000]
+		raw = Path(path).read_bytes()[:15000]
 		text = None
 		for enc in ("utf-8", "cp1250", "iso-8859-2"):
 			try:
@@ -546,6 +564,8 @@ def extract_txt(path: str | Path) -> ExtractedMeta:
 		if text is None:
 			text = raw.decode("utf-8", errors="replace")
 		result.first_page_text = text[:5000]
+		if len(text) > 5000:
+			result.broader_text = text[:15000]
 		result.isbn_from_text = extract_isbn(text[:5000])
 		# If no ISBN in the head, scan the tail too (colophon at the end).
 		if not result.isbn_from_text:

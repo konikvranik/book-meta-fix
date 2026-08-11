@@ -377,3 +377,79 @@ class TestOnlineFill:
 
 		ident = IdentityResult(isbn="9788072072323", source="content-isbn")
 		assert _online_fill(ident, None, skip_enrich=True) is None
+
+
+class TestLlmBroaderRetry:
+	"""When the first-page LLM attempt fails, the pipeline retries with the
+	broader text window (title/author aren't always on page 1)."""
+
+	def test_retries_with_broader_when_first_page_fails(self):
+		from book_meta_fix.llm import ReconciledMeta
+
+		meta = _book()  # C2 broken title
+		# first_page: usable text but no identity; broader: has the real title.
+		extracted = ExtractedMeta(
+			title="Broken_epub",
+			first_page_text="Obsah kapitoly text text text " * 8,
+			broader_text="Gregory Benford JÁDRO GALAXIE úvodní kapitola " * 30,
+		)
+		stats = _stats()
+		calls: list[int] = []
+
+		class RetryProvider:
+			name = "retry"
+
+			def reconcile(self, evidence):  # noqa: ANN001
+				t = evidence.get("first_page_text") or ""
+				calls.append(len(t))
+				if "JÁDRO GALAXIE" in t.upper():
+					return ReconciledMeta(title="Jádro Galaxie", authors=["Gregory Benford"], confidence="high")
+				return None
+
+		from book_meta_fix import pipeline as pmod
+
+		def fake_detect(m):
+			return Diagnosis(category="C2", reason="x", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
+
+		with patch.object(pmod, "detect_fn", fake_detect), \
+			 patch.object(pmod, "_safe_extract", lambda m: extracted):
+			result = _process_book(
+				meta, enricher=None, skip_enrich=True, skip_verify=True,
+				llm_provider=RetryProvider(), llm_categories=("ALL",), stats=stats,
+			)
+		_meta, diag, _ver, enriched = result
+		# The LLM was called twice: first-page (shorter), then broader (longer).
+		assert len(calls) == 2
+		assert calls[0] < calls[1]
+		# The broader attempt succeeded and is the adopted proposal.
+		assert enriched is not None
+		assert enriched.title == "Jádro Galaxie"
+		assert stats.get("llm_broader_fixed", 0) == 1
+
+	def test_no_retry_without_broader_text(self):
+		"""If no broader window is available, the first-page failure is final."""
+		meta = _book()
+		extracted = ExtractedMeta(title="Broken_epub", first_page_text="Obsah kapitoly " * 12)
+		stats = _stats()
+		calls = []
+
+		class OnceProvider:
+			name = "once"
+
+			def reconcile(self, evidence):  # noqa: ANN001
+				calls.append(1)
+				return None
+
+		from book_meta_fix import pipeline as pmod
+
+		def fake_detect(m):
+			return Diagnosis(category="C2", reason="x", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
+
+		with patch.object(pmod, "detect_fn", fake_detect), \
+			 patch.object(pmod, "_safe_extract", lambda m: extracted):
+			_process_book(
+				meta, enricher=None, skip_enrich=True, skip_verify=True,
+				llm_provider=OnceProvider(), llm_categories=("ALL",), stats=stats,
+			)
+		assert len(calls) == 1  # no broader → no retry
+		assert stats["llm_no_result"] == 1
