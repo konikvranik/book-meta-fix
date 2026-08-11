@@ -8,10 +8,12 @@ corruption that text_meta can only fix once the page text is available.
 from __future__ import annotations
 
 import shutil
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
-from book_meta_fix.extractors import _catdoc_to_text, _ebook_convert_to_text
+from book_meta_fix.extractors import _catdoc_to_text, _ebook_convert_to_text, _epub_isbn_scan_text, extract, extract_txt
+from book_meta_fix.isbn import extract_isbn
 
 
 class TestCatdocHelper:
@@ -158,3 +160,65 @@ class TestEbookConvertToTextDocFallback:
 			 patch("book_meta_fix.extractors.shutil.which", return_value=None):
 			_ebook_convert_to_text(f)
 		mock_catdoc.assert_not_called()
+
+
+def _build_epub(path: Path, item_htmls: list[str]) -> None:
+	"""Write a minimal valid EPUB whose spine items are *item_htmls* in order."""
+	container = (
+		'<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+		'<rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/>'
+		'</rootfiles></container>'
+	)
+	manifest = "".join(
+		f'<item id="c{i}" href="c{i}.xhtml" media-type="application/xhtml+xml"/>'
+		for i in range(len(item_htmls))
+	)
+	spine = "".join(f'<itemref idref="c{i}"/>' for i in range(len(item_htmls)))
+	opf = (
+		'<package xmlns="http://www.idpf.org/2007/opf">'
+		'<metadata><dc:title xmlns:dc="http://purl.org/dc/elements/1.1/">x</dc:title></metadata>'
+		f'<manifest>{manifest}</manifest><spine>{spine}</spine></package>'
+	)
+	with zipfile.ZipFile(path, "w") as zf:
+		zf.writestr("META-INF/container.xml", container)
+		zf.writestr("content.opf", opf)
+		for i, html in enumerate(item_htmls):
+			zf.writestr(f"c{i}.xhtml", html)
+
+
+class TestIsbnScanEndPages:
+	"""ISBN often lives on the copyright/colophon page (middle/end of the book),
+	not in the first 3000 chars. The ISBN scan now covers first + last chunks."""
+
+	def test_txt_isbn_in_tail(self, tmp_path):
+		"""An ISBN only present in the LAST 5000 bytes of a TXT is found."""
+		f = tmp_path / "book.txt"
+		head = "Babička. Božena Němcová.\n" + ("obsah kapitoly " * 800)  # >8000 bytes
+		tail = "\n\nVydavatel: Albatros. ISBN 978-80-720-7232-3.\n"
+		f.write_text(head + tail, encoding="utf-8")
+		result = extract_txt(f)
+		assert result.isbn_from_text is not None
+		assert "9788072072323" in result.isbn_from_text
+
+	def test_epub_isbn_in_last_spine_item(self, tmp_path):
+		"""An ISBN only in the LAST spine item (beyond the first 8) is found via
+		the first-5 + last-5 ISBN scan, not just first_page_text."""
+		# 12 spine items; the ISBN is in item 11 (last), which is NOT in the
+		# first 8 (first_page_text) but IS in the last 5.
+		items = [f"<p>kapitola {i} text text text</p>" for i in range(11)]
+		items.append("<p>Colophon. Vydavatel Albatros. ISBN 978-80-720-7232-3.</p>")
+		epub = tmp_path / "book.epub"
+		_build_epub(epub, items)
+		with zipfile.ZipFile(epub) as zf:
+			scan_text = _epub_isbn_scan_text(zf, "content.opf")
+		assert extract_isbn(scan_text) is not None
+		assert "9788072072323" in (extract_isbn(scan_text) or "")
+
+	def test_epub_isbn_scan_includes_end_when_short(self, tmp_path):
+		"""For a short spine (≤10 items), all items are scanned."""
+		items = ["<p>titul</p>", "<p>ISBN 978-80-720-7232-3</p>"]
+		epub = tmp_path / "book.epub"
+		_build_epub(epub, items)
+		with zipfile.ZipFile(epub) as zf:
+			scan_text = _epub_isbn_scan_text(zf, "content.opf")
+		assert extract_isbn(scan_text) is not None

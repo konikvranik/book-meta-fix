@@ -164,7 +164,9 @@ def extract_epub(path: str | Path) -> ExtractedMeta:
 			#    back — the text-scan is independent and can flag the mismatch.
 			result.first_page_text = _epub_first_page_text(zf, opf_path)
 			if result.first_page_text:
-				result.isbn_from_text = extract_isbn(result.first_page_text[:3000])
+				# Scan first + last spine items for ISBN (copyright/colophon page
+				# is often at the end of the spine, not in the first 3000 chars).
+				result.isbn_from_text = extract_isbn(_epub_isbn_scan_text(zf, opf_path))
 				# Mine title/authors/publisher/year from the page text. These are
 				# independent of the OPF block above and feed the pipeline's
 				# deterministic fix stage.
@@ -186,49 +188,66 @@ def extract_epub(path: str | Path) -> ExtractedMeta:
 	return result
 
 
-def _epub_first_page_text(zf: zipfile.ZipFile, opf_path: str) -> str | None:
-	"""Extract text from the first few reading-order chapters of an EPUB.
+def _epub_spine_hrefs(zf: zipfile.ZipFile, opf_path: str) -> list[str]:
+	"""Ordered list of EPUB spine item hrefs (manifest-resolved, zip-internal)."""
+	opf_dir = opf_path.rsplit("/", 1)[0] + "/" if "/" in opf_path else ""
+	opf = etree.fromstring(zf.read(opf_path))
+	manifest: dict[str, str] = {}
+	for item in opf.iter("{http://www.idpf.org/2007/opf}item"):
+		item_id = item.get("id")
+		href = item.get("href")
+		if item_id and href:
+			manifest[item_id] = href
+	hrefs: list[str] = []
+	for itemref in opf.iter("{http://www.idpf.org/2007/opf}itemref"):
+		idref = itemref.get("idref")
+		if not idref or idref not in manifest:
+			continue
+		href = manifest[idref]
+		hrefs.append(opf_dir + href if not href.startswith("/") else href[1:])
+	return hrefs
 
-	We follow the OPF spine and concatenate the text of the first ~8 items
-	(cover, title page, copyright page, dedication, first chapter...).
-	Returns up to ~8000 chars. This is necessary because many EPUBs have the
-	cover as an image-only HTML page (CSS only), so the *real* title appears
-	only on the 2nd or 3rd spine item.
+
+def _epub_text_from_hrefs(zf: zipfile.ZipFile, hrefs: list[str]) -> str | None:
+	"""Concatenate the stripped text of the given spine hrefs (>5 chars each)."""
+	chunks: list[str] = []
+	for full in hrefs:
+		try:
+			raw = zf.read(full)
+		except KeyError:
+			continue
+		text = _strip_html(raw)
+		if text and len(text.strip()) > 5:
+			chunks.append(text)
+	return " | ".join(chunks) if chunks else None
+
+
+def _epub_first_page_text(zf: zipfile.ZipFile, opf_path: str) -> str | None:
+	"""Text of the first ~8 reading-order spine items (≤8000 chars).
+
+	Many EPUBs have an image-only cover page, so the real title/author appear
+	only on the 2nd/3rd spine item — hence several items, not just the first.
 	"""
 	try:
-		opf_dir = opf_path.rsplit("/", 1)[0] + "/" if "/" in opf_path else ""
-		opf = etree.fromstring(zf.read(opf_path))
-		manifest: dict[str, str] = {}
-		for item in opf.iter("{http://www.idpf.org/2007/opf}item"):
-			item_id = item.get("id")
-			href = item.get("href")
-			if item_id and href:
-				manifest[item_id] = href
-		# Spine order: collect text from up to 8 items
-		chunks: list[str] = []
-		seen = 0
-		for itemref in opf.iter("{http://www.idpf.org/2007/opf}itemref"):
-			if seen >= 8:
-				break
-			idref = itemref.get("idref")
-			if not idref or idref not in manifest:
-				continue
-			href = manifest[idref]
-			full = opf_dir + href if not href.startswith("/") else href[1:]
-			try:
-				raw = zf.read(full)
-			except KeyError:
-				continue
-			text = _strip_html(raw)
-			if text and len(text.strip()) > 5:
-				chunks.append(text)
-				seen += 1
-		if not chunks:
-			return None
-		combined = " | ".join(chunks)
-		return combined[:8000]
+		hrefs = _epub_spine_hrefs(zf, opf_path)
+		text = _epub_text_from_hrefs(zf, hrefs[:8])
+		return text[:8000] if text else None
 	except Exception:  # noqa: BLE001
 		return None
+
+
+def _epub_isbn_scan_text(zf: zipfile.ZipFile, opf_path: str) -> str:
+	"""Text of the first 5 + last 5 spine items, for ISBN scanning.
+
+	The ISBN (and publisher/year) often lives on the copyright/colophon page,
+	which can be at the very END of the spine — not reached by first_page_text.
+	"""
+	try:
+		hrefs = _epub_spine_hrefs(zf, opf_path)
+		picked = hrefs if len(hrefs) <= 10 else hrefs[:5] + hrefs[-5:]
+		return _epub_text_from_hrefs(zf, picked) or ""
+	except Exception:  # noqa: BLE001
+		return ""
 
 
 def _strip_html(raw: bytes) -> str:
@@ -285,6 +304,7 @@ def extract_pdf(path: str | Path) -> ExtractedMeta:
 	"""Extract metadata from PDF via pdfinfo + ISBN from first pages via pdftotext."""
 	result = ExtractedMeta(source_format="pdf")
 	path = str(path)
+	pages: int | None = None
 
 	# 1. pdfinfo for embedded metadata (Title/Author/Subject)
 	pdfinfo = shutil.which("pdfinfo")
@@ -311,6 +331,8 @@ def extract_pdf(path: str | Path) -> ExtractedMeta:
 						canon = _canonicalize_or_none(val)
 						if canon:
 							result.isbn = canon
+					elif k == "pages" and val.isdigit():
+						pages = int(val)
 		except (subprocess.TimeoutExpired, FileNotFoundError) as e:
 			log.debug("pdfinfo failed for %s: %s", path, e)
 
@@ -339,6 +361,20 @@ def extract_pdf(path: str | Path) -> ExtractedMeta:
 					result.isbn_from_text = tm.isbn
 		except (subprocess.TimeoutExpired, FileNotFoundError) as e:
 			log.debug("pdftotext failed for %s: %s", path, e)
+
+		# 3. If no ISBN yet, scan the LAST few pages — the colophon/back cover
+		# often carries the ISBN even when the front matter doesn't.
+		if not result.isbn_from_text and pages and pages > 3:
+			last_start = max(1, pages - 4)
+			try:
+				proc = subprocess.run(
+					[pdftotext, "-f", str(last_start), "-l", str(pages), path, "-"],
+					capture_output=True, encoding="utf-8", errors="replace", timeout=15,
+				)
+				if proc.returncode == 0 and proc.stdout:
+					result.isbn_from_text = extract_isbn(proc.stdout)
+			except (subprocess.TimeoutExpired, FileNotFoundError) as e:  # noqa: BLE001
+				log.debug("pdftotext (end pages) failed for %s: %s", path, e)
 
 	if not result.title and not result.authors and not result.isbn and not result.first_page_text:
 		result.error = result.error or "no metadata extracted"
@@ -410,7 +446,10 @@ def extract_via_ebook_meta(path: str | Path) -> ExtractedMeta:
 	page_text = _ebook_convert_to_text(path)
 	if page_text:
 		result.first_page_text = page_text[:8000]
-		result.isbn_from_text = extract_isbn(result.first_page_text[:3000])
+		# Scan the FULL rendered text for ISBN (not just the first 3000 chars):
+		# the copyright/colophon page with the ISBN is often well past the first
+		# chunk, and extract_isbn is a cheap regex even over the whole book.
+		result.isbn_from_text = extract_isbn(page_text)
 		from .text_meta import extract_metadata_from_text
 
 		tm = extract_metadata_from_text(result.first_page_text)
@@ -508,6 +547,24 @@ def extract_txt(path: str | Path) -> ExtractedMeta:
 			text = raw.decode("utf-8", errors="replace")
 		result.first_page_text = text[:5000]
 		result.isbn_from_text = extract_isbn(text[:5000])
+		# If no ISBN in the head, scan the tail too (colophon at the end).
+		if not result.isbn_from_text:
+			try:
+				size = Path(path).stat().st_size
+				if size > 8000:
+					tail = Path(path).read_bytes()[size - 5000:]
+					tail_text = None
+					for enc in ("utf-8", "cp1250", "iso-8859-2"):
+						try:
+							tail_text = tail.decode(enc)
+							break
+						except UnicodeDecodeError:
+							continue
+					if tail_text is None:
+						tail_text = tail.decode("utf-8", errors="replace")
+					result.isbn_from_text = extract_isbn(tail_text)
+			except OSError:
+				pass
 	except OSError as e:
 		result.error = f"txt read error: {e}"
 	return result
