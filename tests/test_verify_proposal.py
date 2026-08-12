@@ -3,7 +3,7 @@ book's actual page text (title + author fuzzy match, ISBN exact match)."""
 from __future__ import annotations
 
 from book_meta_fix.extractors import ExtractedMeta
-from book_meta_fix.verifier import _author_in_text, _title_in_text, confirm_identity, verify_proposal
+from book_meta_fix.verifier import _author_in_text, confirm_identity, verify_proposal
 
 
 class _Proposal:

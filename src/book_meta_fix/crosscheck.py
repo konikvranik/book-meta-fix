@@ -37,9 +37,10 @@ from __future__ import annotations
 
 import logging
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .extractors import ExtractedMeta, extract
 from .isbn import canonicalize
@@ -318,7 +319,7 @@ def quarantine(
 	*,
 	needfix_dir: str = "needfix",
 	dry_run: bool = True,
-	cache: "Cache | None" = None,
+	cache: Cache | None = None,
 	progress_callback: Any = None,
 ) -> list[MoveResult]:
 	"""Move every rogue file from the given results into its own isolated folder.

@@ -170,7 +170,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--llm-rate-limit-max", "llm_rate_limit_max", type=float, default=None, help="Cap (seconds) on the escalating 429 cooldown (default 60). Prevents a sustained outage from parking workers indefinitely.")
 def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, skip_verify: bool, verify_ok: bool, no_strict_verify: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int, llm_min_interval: float | None, llm_model: str | None, llm_reasoning_effort: str | None, llm_thinking: str | None, no_llm_loop: bool, llm_flash_model: str | None, llm_final_model: str | None, llm_burst: float | None, llm_rate_limit_base: float | None, llm_rate_limit_max: float | None) -> None:
 	"""Run full pipeline and generate a review.yaml for NEEDS_REVIEW books."""
-	from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn
+	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 
 	from .enrichers import Enricher
 	from .llm import get_provider
@@ -525,7 +525,8 @@ def apply(review_file: Path, library: Path | None, do_apply: bool) -> None:
 def organize(library: Path | None, no_cache: bool, limit: int | None, pattern: str | None, needfix_dir: str | None, do_apply: bool, skip_verify: bool) -> None:
 	"""Move OK books to a clean path pattern and broken books to needfix/."""
 	from .detectors import detect as detect_fn
-	from .mover import DEFAULT_NEEDFIX_DIR, DEFAULT_PATH_PATTERN, organize as organize_fn
+	from .mover import DEFAULT_NEEDFIX_DIR, DEFAULT_PATH_PATTERN
+	from .mover import organize as organize_fn
 	from .verifier import verify
 
 	cfg = Config.from_env()
@@ -601,7 +602,6 @@ def organize(library: Path | None, no_cache: bool, limit: int | None, pattern: s
 def _print_organize_summary(results, verdicts) -> None:  # noqa: ANN001
 	from collections import Counter
 
-	from .models import Verdict
 
 	# Verdict distribution
 	vc: Counter[str] = Counter()
@@ -774,7 +774,8 @@ def crosscheck(library: Path | None, no_cache: bool, limit: int | None, needfix_
 	"""
 	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 
-	from .crosscheck import CROSSCHECK_SUBDIR, crosscheck_book, quarantine as quarantine_fn
+	from .crosscheck import CROSSCHECK_SUBDIR, crosscheck_book
+	from .crosscheck import quarantine as quarantine_fn
 	from .mover import DEFAULT_NEEDFIX_DIR
 
 	cfg = Config.from_env()
@@ -1072,7 +1073,7 @@ def install_completion(shell: str, output: Path | None) -> None:
 		elif shell == "zsh":
 			console.print(f"[dim]Run: source {output} (or add to your ~/.zshrc)[/dim]")
 		elif shell == "fish":
-			console.print(f"[dim]Fish loads it automatically from ~/.config/fish/completions/[/dim]")
+			console.print("[dim]Fish loads it automatically from ~/.config/fish/completions/[/dim]")
 	else:
 		# Print raw script to stdout (not via rich) so 'eval "$(bmf ...)"' works.
 		click.echo(script)

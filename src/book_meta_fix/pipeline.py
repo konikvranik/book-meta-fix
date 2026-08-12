@@ -24,7 +24,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .detectors import all_diagnoses, detect as detect_fn
+from .detectors import all_diagnoses
+from .detectors import detect as detect_fn
 from .enrichers import Enricher
 from .extractors import ExtractedMeta, extract
 from .library import Cache, scan_library
@@ -54,7 +55,7 @@ def run_pipeline(
 	strict_verify: bool = True,
 	llm_loop: bool = True,
 	stats: dict | None = None,
-) -> list[tuple[BookMeta, "Diagnosis", "Verification | None", "EnrichedMeta | None"]]:  # noqa: F821
+) -> list[tuple[BookMeta, Diagnosis, Verification | None, EnrichedMeta | None]]:  # noqa: F821
 	"""Run the full pipeline over the whole library.
 
 	Returns a list of (meta, diagnosis, verification, enriched) tuples.
@@ -259,7 +260,7 @@ def _process_book(
 	verify_ok: bool = False,
 	strict_verify: bool = True,
 	llm_loop: bool = True,
-) -> tuple[BookMeta, "Diagnosis", "Verification | None", "EnrichedMeta | None"]:  # noqa: F821
+) -> tuple[BookMeta, Diagnosis, Verification | None, EnrichedMeta | None]:  # noqa: F821
 	"""Process one book end-to-end. Thread-safe (no shared mutable state except *stats*).
 
 	*verify_ok*: when True, OK books (detectors found nothing wrong) are still
@@ -505,11 +506,11 @@ def _has_usable_text(text: str | None) -> bool:
 
 def _try_deterministic_fix(
 	meta: BookMeta,
-	diag: "Diagnosis",  # noqa: F821
+	diag: Diagnosis,  # noqa: F821
 	extracted: ExtractedMeta,
 	enricher: Enricher | None,
 	skip_enrich: bool,
-) -> "EnrichedMeta | None":  # noqa: F821
+) -> EnrichedMeta | None:  # noqa: F821
 	"""Resolve a content-verified identity, then fill metadata online.
 
 	Online sources no longer guess identity. We first acquire an identity from
@@ -600,7 +601,7 @@ def _acquire_identity(meta: BookMeta, extracted: ExtractedMeta | None) -> Identi
 	return None
 
 
-def _online_matches_identity(online: "EnrichedMeta", identity: IdentityResult) -> bool:  # noqa: F821
+def _online_matches_identity(online: EnrichedMeta, identity: IdentityResult) -> bool:  # noqa: F821
 	"""For title-based online lookups: does the record's author match the
 	verified identity? (The title was already gated by the source's search.)
 	Different author ⇒ different book ⇒ reject (false-positive prevention)."""
@@ -611,7 +612,7 @@ def _online_matches_identity(online: "EnrichedMeta", identity: IdentityResult) -
 	return True  # no author to compare — trust the title search
 
 
-def _online_fill(identity: IdentityResult, enricher: Enricher | None, skip_enrich: bool) -> "EnrichedMeta | None":  # noqa: F821
+def _online_fill(identity: IdentityResult, enricher: Enricher | None, skip_enrich: bool) -> EnrichedMeta | None:  # noqa: F821
 	"""Fill metadata online, anchored to the verified identity: exact by ISBN,
 	or title+author with an author-match filter. Returns None if nothing found
 	or the result doesn't match the identity."""
@@ -634,7 +635,7 @@ def _online_fill(identity: IdentityResult, enricher: Enricher | None, skip_enric
 	return online
 
 
-def _content_proposal(meta: BookMeta, extracted: ExtractedMeta) -> "EnrichedMeta | None":  # noqa: F821
+def _content_proposal(meta: BookMeta, extracted: ExtractedMeta) -> EnrichedMeta | None:  # noqa: F821
 	"""Build an offline proposal from content-grounded fields (text_meta +
 	embedded OPF), only fields that improve on the current meta. Used when the
 	online lookup found nothing — the identity is still content-confirmed, so
@@ -774,7 +775,7 @@ def _strip_diacritics(s: str) -> str:
 	return s.translate(repl)
 
 
-def _build_llm_evidence(meta: BookMeta, diag: "Diagnosis", extracted: ExtractedMeta | None) -> dict:  # noqa: F821
+def _build_llm_evidence(meta: BookMeta, diag: Diagnosis, extracted: ExtractedMeta | None) -> dict:  # noqa: F821
 	"""Assemble the evidence dict passed to the LLM provider."""
 	first_page = extracted.first_page_text if extracted is not None else None
 	return {
@@ -814,7 +815,7 @@ def _reconciled_is_useful(r, meta: BookMeta) -> bool:  # noqa: ANN001
 	return False
 
 
-def _reconciled_to_enriched(r, *, source: str | None = None) -> "EnrichedMeta":  # noqa: F821
+def _reconciled_to_enriched(r, *, source: str | None = None) -> EnrichedMeta:  # noqa: F821
 	"""Convert a ReconciledMeta into the EnrichedMeta shape used by review.py.
 
 	*source* overrides the default ``llm:<confidence>`` tag — used when the
@@ -1007,7 +1008,6 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cach
 	only remaining work; pending (action: null), rejected, and errored entries
 	are kept. Dry-run never prunes.
 	"""
-	from .models import Diagnosis  # local to avoid cycle
 
 	items = parse_review(review_path)
 	summary = {"applied": 0, "rejected": 0, "deleted": 0, "pruned": 0, "remaining": None, "snapshot": None, "errors": [], "dry_run": dry_run}

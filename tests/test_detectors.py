@@ -19,9 +19,9 @@ from book_meta_fix.detectors import (
 	all_diagnoses,
 	detect,
 	detect_all,
-	rule_c12_bad_author,
 	rule_c2_filename_title,
 	rule_c9_anonym,
+	rule_c12_bad_author,
 )
 from book_meta_fix.models import BookMeta
 

@@ -17,7 +17,7 @@ Parser: parse_review() reads a (possibly human-edited) YAML back into a list
 from __future__ import annotations
 
 import logging
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Any, Literal

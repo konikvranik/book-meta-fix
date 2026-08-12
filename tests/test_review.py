@@ -5,8 +5,6 @@ single-list), and the format's backward compatibility.
 """
 from __future__ import annotations
 
-from pathlib import Path
-
 from book_meta_fix.enrichers import EnrichedMeta
 from book_meta_fix.models import BookMeta, Confidence, Diagnosis, Verdict
 from book_meta_fix.review import _build_proposed, build_review, parse_review
@@ -191,7 +189,6 @@ class TestCoverUrlProposalGate:
 		"""When a book carries additional diagnoses, the review entry exposes
 		the full list (primary first) so apply sees every problem."""
 		from book_meta_fix.review import _entry_dict
-		from pathlib import Path
 
 		meta = _meta(1)
 		diag = _diag(category="C2")
