@@ -23,7 +23,7 @@ Audiobookshelf and Kavita pick up the fixes on rescan.
 - [x] Scan (`bmf scan`)
 - [x] Detect (`bmf report`) — C1–C10 rules
 - [x] Verify (content vs metadata cascade)
-- [x] Enrich (databazeknih.cz scraping for CZ/SK genres + metadata; OpenLibrary + Google Books fallback)
+- [x] Enrich (databazeknih.cz scraping for CZ/SK genres + metadata; legie.info for sci-fi/fantasy short stories & series; OpenLibrary + Google Books fallback)
 - [x] Analyze + YAML review (`bmf analyze`, `bmf apply`)
 - [x] Organize (`bmf organize`) — split OK vs needfix
 - [x] EPUB generation (`bmf epubgen`)
@@ -105,7 +105,7 @@ can recover the pre-run state.
 | `bmf crosscheck --apply` | Actually move the mismatched format files |
 
 Common options: `--library PATH`, `--limit N`, `--no-cache`, `-o FILE`,
-`--skip-enrich`, `--skip-verify`, `--databazeknih`.
+`--skip-enrich`, `--skip-verify`, `--databazeknih`, `--legie`.
 
 ## Enrichment sources
 
@@ -116,10 +116,11 @@ for `analyze`). Enable them with the flags below; results are cached in
 | Flag | Source | Strengths | Notes |
 |---|---|---|---|
 | `--databazeknih` | databazeknih.cz | **Best for CZ/SK**. Returns genres (broad categories + user tags), ISBN, publisher, language, description, cover. | Scraping (no API key). 2 requests/book. Fuzzy title match gates the result so the wrong book's genres aren't attached. |
+| `--legie` | legie.info | **Best for CZ/SK sci-fi/fantasy**. Indexes short stories ("povídky") and the series/universe a work belongs to, which databazeknih's book search misses. Strong for identity (title + author + original title). | Scraping (no API key). No ISBN/Year/Publisher (identity only). Tried after databazeknih. |
 | *(always on when enrichment enabled)* | OpenLibrary | ISBN + title search, international editions | Weak CZ coverage (~10%) |
 | *(always on when enrichment enabled)* | Google Books | ISBN lookup | Often rate-limited without an API key |
 
-Lookup order when enrichment is on: **databazeknih (if enabled) → OpenLibrary by ISBN → Google Books by ISBN → OpenLibrary by title**. First hit wins.
+Lookup order when enrichment is on: **databazeknih (if enabled) → legie.info (if enabled) → OpenLibrary by ISBN → Google Books by ISBN → OpenLibrary by title**. First hit wins.
 
 ```bash
 # Enrich with CZ/SK genres only (no international fallbacks needed for a CZ library)
