@@ -5,7 +5,11 @@ _is_better -> _looks_broken and raised TypeError.
 """
 from __future__ import annotations
 
-from book_meta_fix.pipeline import _is_better, _llm_wants, _looks_broken
+from unittest.mock import patch
+
+from book_meta_fix.extractors import ExtractedMeta
+from book_meta_fix.models import BookMeta, Confidence, Diagnosis, Verdict
+from book_meta_fix.pipeline import _is_better, _llm_wants, _looks_broken, _process_book
 
 
 class TestLooksBroken:
@@ -121,3 +125,125 @@ class TestLlmWants:
 		# still gets sent under ALL — only C9 is special-cased.
 		assert _llm_wants("ERROR", ("ALL",)) is True
 		assert _llm_wants("CUSTOM_X", ("ALL",)) is True
+
+
+# ---------------------------------------------------------------------------
+# accept_missing_if_identified: MISSING_* books whose author+title were
+# confirmed against the book's content are stamped with an identity_confirmed
+# EnrichedMeta so review_writer pre-fills action: accept (and `bmf apply`
+# prunes them). Covers the gap where no enricher/text_meta recovered the field.
+# ---------------------------------------------------------------------------
+
+
+def _missing_isbn_book(title="Bílá nemoc", author="Karel Čapek", calibre_id=10) -> BookMeta:
+	return BookMeta(
+		calibre_id=calibre_id, title=title, authors=[author],
+		path=f"/lib/{title} ({calibre_id})",
+		primary_file=f"/lib/{title} ({calibre_id})/book.epub",
+	)
+
+
+def _empty_stats() -> dict:
+	return {
+		"ok": 0, "needs_review": 0, "det_fixed": 0, "online_fixed": 0,
+		"llm_fixed": 0, "llm_skipped_no_text": 0, "llm_no_result": 0, "llm_error": 0,
+		"unfixed": 0, "errors": 0, "content_mismatch": 0,
+		"covers_generated": 0, "covers_missing": 0, "accepted_missing": 0,
+	}
+
+
+def _run_accept(meta, *, first_page_text, additional=None, accept=True):
+	"""Run _process_book with detect_fn -> MISSING_ISBN (AUTO_FIXABLE) and
+	_safe_extract mocked to return an ExtractedMeta with *first_page_text*.
+	No enricher, no LLM. Returns (result_tuple, stats)."""
+	from book_meta_fix import pipeline as pmod
+
+	def fake_detect(_m):
+		d = Diagnosis(category="MISSING_ISBN", reason="no isbn", confidence=Confidence.LOW, verdict=Verdict.AUTO_FIXABLE)
+		if additional:
+			d.additional = list(additional)
+		return d
+
+	def fake_extract(_m):
+		if first_page_text is None:
+			return None
+		return ExtractedMeta(first_page_text=first_page_text)
+
+	patches = [patch.object(pmod, "detect_fn", fake_detect), patch.object(pmod, "_safe_extract", fake_extract)]
+	for p in patches:
+		p.start()
+	try:
+		stats = _empty_stats()
+		result = _process_book(
+			meta, enricher=None, skip_enrich=True, skip_verify=False,
+			llm_provider=None, llm_categories=("ALL",), stats=stats,
+			accept_missing_if_identified=accept,
+		)
+	finally:
+		for p in patches:
+			p.stop()
+	return result, stats
+
+
+class TestAcceptMissingIdentified:
+	def test_identity_confirmed_no_proposal_stamps_accept(self):
+		# Title + author appear in the first-page text -> _acquire_identity
+		# confirms -> a minimal identity_confirmed EnrichedMeta is stamped.
+		meta = _missing_isbn_book()
+		text = "Bílá nemoc\nKarel Čapek\nRomán o lidské slušnosti."
+		result, stats = _run_accept(meta, first_page_text=text)
+		_enriched = result[3]
+		assert _enriched is not None
+		assert _enriched.identity_confirmed is True
+		# No fields carried — proposed stays empty (accept-as-is, no fake change).
+		assert _enriched.title is None and not _enriched.authors
+		assert stats["accepted_missing"] == 1
+
+	def test_identity_not_confirmed_stays_unfixed(self):
+		# First-page text does NOT contain the title/author -> identity cannot be
+		# confirmed -> no stamp, falls through to unfixed (stays for review).
+		meta = _missing_isbn_book()
+		text = "Lorem ipsum dolor sit amet, consectetur adipiscing elit."
+		result, stats = _run_accept(meta, first_page_text=text)
+		assert result[3] is None
+		assert stats["accepted_missing"] == 0
+		assert stats["unfixed"] == 1
+
+	def test_no_content_stays_unfixed(self):
+		# No extractable text at all -> _acquire_identity returns None -> unfixed.
+		meta = _missing_isbn_book()
+		result, stats = _run_accept(meta, first_page_text=None)
+		assert result[3] is None
+		assert stats["accepted_missing"] == 0
+
+	def test_additional_needs_review_blocks_accept(self):
+		# A co-occurring NEEDS_REVIEW diagnosis (e.g. generated cover C11) keeps
+		# the book in review even though identity is confirmed.
+		meta = _missing_isbn_book()
+		text = "Bíla nemoc\nKarel Čapek"
+		extra = [Diagnosis(category="C11", reason="generated cover", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)]
+		result, stats = _run_accept(meta, first_page_text=text, additional=extra)
+		assert result[3] is None
+		assert stats["accepted_missing"] == 0
+
+	def test_disabled_flag_no_stamp(self):
+		# --no-accept-missing: never stamp, even when identity is confirmed.
+		meta = _missing_isbn_book()
+		text = "Bílá nemoc\nKarel Čapek"
+		result, stats = _run_accept(meta, first_page_text=text, accept=False)
+		assert result[3] is None
+		assert stats["accepted_missing"] == 0
+		assert stats["unfixed"] == 1
+
+	def test_apply_action_accept_empty_proposal_is_noop(self):
+		# `bmf apply` on an accept-as-is entry (empty proposed) must NOT touch
+		# metadata — _apply_action gates the whole accept block on item.proposed.
+		from types import SimpleNamespace
+
+		from book_meta_fix.pipeline import _apply_action
+
+		meta = _missing_isbn_book()
+		before = (meta.title, list(meta.authors), meta.isbn, meta.year, meta.publisher)
+		item = SimpleNamespace(action="accept", proposed=None, diagnoses=None, diagnosis=None, id=10, path=meta.path)
+		_apply_action(meta, item)
+		assert (meta.title, list(meta.authors), meta.isbn, meta.year, meta.publisher) == before

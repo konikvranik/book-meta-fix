@@ -117,31 +117,31 @@ def _render_opf(meta: BookMeta) -> str:
 	now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
 
 	nsmap = {None: NS_OPF, "dc": NS_DC, "opf": NS_OPF}
-	root = etree.Element("{%s}package" % NS_OPF, nsmap=nsmap, attrib={"unique-identifier": "uuid_id", "version": "2.0"})
-	md = etree.SubElement(root, "{%s}metadata" % NS_OPF)
+	root = etree.Element(f"{{{NS_OPF}}}package", nsmap=nsmap, attrib={"unique-identifier": "uuid_id", "version": "2.0"})
+	md = etree.SubElement(root, f"{{{NS_OPF}}}metadata")
 
 	# Identifiers
 	if meta.calibre_id is not None:
 		etree.SubElement(
-			md, "{%s}identifier" % NS_DC,
-			attrib={"{%s}scheme" % NS_OPF: "calibre", "id": "calibre_id"},
+			md, f"{{{NS_DC}}}identifier",
+			attrib={f"{{{NS_OPF}}}scheme": "calibre", "id": "calibre_id"},
 		).text = str(meta.calibre_id)
 	etree.SubElement(
-		md, "{%s}identifier" % NS_DC,
-		attrib={"{%s}scheme" % NS_OPF: "uuid", "id": "uuid_id"},
+		md, f"{{{NS_DC}}}identifier",
+		attrib={f"{{{NS_OPF}}}scheme": "uuid", "id": "uuid_id"},
 	).text = uuid
 	if meta.isbn:
 		etree.SubElement(
-			md, "{%s}identifier" % NS_DC,
-			attrib={"{%s}scheme" % NS_OPF: "ISBN"},
+			md, f"{{{NS_DC}}}identifier",
+			attrib={f"{{{NS_OPF}}}scheme": "ISBN"},
 		).text = meta.isbn
 
 	# Title
 	if meta.title:
-		etree.SubElement(md, "{%s}title" % NS_DC).text = _sanitize_xml_text(meta.title)
+		etree.SubElement(md, f"{{{NS_DC}}}title").text = _sanitize_xml_text(meta.title)
 		# title_sort (sort under first letter, ignore leading "the/a")
 		etree.SubElement(
-			md, "{%s}meta" % NS_OPF,
+			md, f"{{{NS_OPF}}}meta",
 			attrib={"name": "calibre:title_sort", "content": _sanitize_xml_text(meta.title) or ""},
 		)
 
@@ -149,38 +149,38 @@ def _render_opf(meta: BookMeta) -> str:
 	for author in meta.authors:
 		file_as = _sanitize_xml_text(_file_as(author)) or ""
 		etree.SubElement(
-			md, "{%s}creator" % NS_DC,
-			attrib={"{%s}file-as" % NS_OPF: file_as, "{%s}role" % NS_OPF: "aut"},
+			md, f"{{{NS_DC}}}creator",
+			attrib={f"{{{NS_OPF}}}file-as": file_as, f"{{{NS_OPF}}}role": "aut"},
 		).text = _sanitize_xml_text(author) or ""
 
 	# Publisher / date / language
 	if meta.publisher:
-		etree.SubElement(md, "{%s}publisher" % NS_DC).text = _sanitize_xml_text(meta.publisher)
+		etree.SubElement(md, f"{{{NS_DC}}}publisher").text = _sanitize_xml_text(meta.publisher)
 	if meta.year:
-		etree.SubElement(md, "{%s}date" % NS_DC).text = f"{meta.year}-01-01T00:00:00+00:00"
+		etree.SubElement(md, f"{{{NS_DC}}}date").text = f"{meta.year}-01-01T00:00:00+00:00"
 	if meta.language:
-		etree.SubElement(md, "{%s}language" % NS_DC).text = _sanitize_xml_text(meta.language)
+		etree.SubElement(md, f"{{{NS_DC}}}language").text = _sanitize_xml_text(meta.language)
 	if meta.description:
-		etree.SubElement(md, "{%s}description" % NS_DC).text = _sanitize_xml_text(meta.description)
+		etree.SubElement(md, f"{{{NS_DC}}}description").text = _sanitize_xml_text(meta.description)
 
 	# Contributor (us)
 	etree.SubElement(
-		md, "{%s}contributor" % NS_DC,
-		attrib={"{%s}file-as" % NS_OPF: "book-meta-fix", "{%s}role" % NS_OPF: "bkp"},
+		md, f"{{{NS_DC}}}contributor",
+		attrib={f"{{{NS_OPF}}}file-as": "book-meta-fix", f"{{{NS_OPF}}}role": "bkp"},
 	).text = "book-meta-fix"
 
 	# Timestamp
 	etree.SubElement(
-		md, "{%s}meta" % NS_OPF,
+		md, f"{{{NS_OPF}}}meta",
 		attrib={"name": "calibre:timestamp", "content": now},
 	)
 
 	# Cover reference (if cover.jpg exists)
 	cover_path = Path(meta.path) / "cover.jpg"
 	if cover_path.is_file():
-		guide = etree.SubElement(root, "{%s}guide" % NS_OPF)
+		guide = etree.SubElement(root, f"{{{NS_OPF}}}guide")
 		etree.SubElement(
-			guide, "{%s}reference" % NS_OPF,
+			guide, f"{{{NS_OPF}}}reference",
 			attrib={"type": "cover", "title": "Obálka", "href": "cover.jpg"},
 		)
 

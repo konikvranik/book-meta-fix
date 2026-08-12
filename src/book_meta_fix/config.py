@@ -208,7 +208,7 @@ def _apply_env_file(path: Path, *, override: bool) -> None:
 		text = path.read_text(encoding="utf-8")
 	except OSError:
 		return
-	for lineno, raw in enumerate(text.splitlines(), start=1):
+	for raw in text.splitlines():
 		line = raw.strip()
 		if not line or line.startswith("#"):
 			continue
