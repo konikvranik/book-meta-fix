@@ -26,7 +26,7 @@ from typing import Any
 
 from .detectors import all_diagnoses
 from .detectors import detect as detect_fn
-from .enrichers import Enricher
+from .enrichers import EnrichedMeta, Enricher
 from .extractors import ExtractedMeta, extract
 from .library import Cache, scan_library
 from .models import BookMeta, Confidence, Diagnosis, Verdict
@@ -54,6 +54,7 @@ def run_pipeline(
 	verify_ok: bool = False,
 	strict_verify: bool = True,
 	llm_loop: bool = True,
+	accept_missing_if_identified: bool = True,
 	stats: dict | None = None,
 ) -> list[tuple[BookMeta, Diagnosis, Verification | None, EnrichedMeta | None]]:  # noqa: F821
 	"""Run the full pipeline over the whole library.
@@ -150,6 +151,7 @@ def run_pipeline(
 			meta, enricher=enricher, skip_enrich=skip_enrich, skip_verify=skip_verify,
 			llm_provider=llm_provider, llm_categories=llm_categories, stats=stats_ref,
 			verify_ok=verify_ok, strict_verify=strict_verify, llm_loop=llm_loop,
+			accept_missing_if_identified=accept_missing_if_identified,
 		)
 
 	def _process_safe(meta: BookMeta):
@@ -260,6 +262,7 @@ def _process_book(
 	verify_ok: bool = False,
 	strict_verify: bool = True,
 	llm_loop: bool = True,
+	accept_missing_if_identified: bool = True,
 ) -> tuple[BookMeta, Diagnosis, Verification | None, EnrichedMeta | None]:  # noqa: F821
 	"""Process one book end-to-end. Thread-safe (no shared mutable state except *stats*).
 
@@ -410,6 +413,23 @@ def _process_book(
 					log.debug("LLM reconcile failed for %s: %s", meta.path, e)
 					stats["llm_error"] += 1
 
+		# Identity-confirmed MISSING_* book, nothing recoverable: stamp a minimal
+		# EnrichedMeta(identity_confirmed=True) so review_writer pre-fills
+		# action: accept (its identity_confirmed-no-proposal branch) and
+		# `bmf apply` prunes it. No fields are set on the EnrichedMeta on purpose
+		# — proposed must stay empty so the entry reads "accept as-is" (no fake
+		# change) and _apply_action is a clean no-op. Fires ONLY when enriched is
+		# None: if any enricher/text_meta found something, enriched is already set
+		# and those fields are proposed + applied normally.
+		if (
+			accept_missing_if_identified
+			and enriched is None
+			and diag.category in ("MISSING_ISBN", "MISSING_YEAR", "MISSING_COVER")
+			and not any(d.verdict == Verdict.NEEDS_REVIEW for d in diag.additional)
+			and _acquire_identity(meta, extracted) is not None
+		):
+			enriched = EnrichedMeta(identity_confirmed=True, source="content")
+			stats["accepted_missing"] = stats.get("accepted_missing", 0) + 1
 		if enriched is None:
 			stats["unfixed"] += 1
 
@@ -652,7 +672,7 @@ def _content_proposal(meta: BookMeta, extracted: ExtractedMeta) -> EnrichedMeta 
 	if proposal_title is None:
 		proposal_title = extracted.title if _is_better(extracted.title, meta.title) else None
 	if proposal_authors is None:
-		embedded_authors = extracted.authors if any(_is_better(a, m) for a, m in zip(extracted.authors, meta.authors)) else None
+		embedded_authors = extracted.authors if any(_is_better(a, m) for a, m in zip(extracted.authors, meta.authors, strict=False)) else None
 		if embedded_authors:
 			proposal_authors = [a for a in embedded_authors if a and a != "Neznamy" and "_" not in a] or None
 

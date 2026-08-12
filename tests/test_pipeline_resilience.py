@@ -133,7 +133,7 @@ class TestPipelineResilience:
 			 patch.object(pmod, "detect_fn", fake_detect), \
 			 patch.object(pmod, "_safe_extract", fake_extract), \
 			 caplog.at_level(logging.INFO, logger="book_meta_fix.pipeline"):
-			results = run_pipeline(tmp_path, cache=None, workers=1)
+			run_pipeline(tmp_path, cache=None, workers=1)
 
 		# The summary log line mentions errors=1.
 		summary_lines = [r.getMessage() for r in caplog.records if "pipeline:" in r.getMessage() and "errors=" in r.getMessage()]

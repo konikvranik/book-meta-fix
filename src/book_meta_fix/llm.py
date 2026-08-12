@@ -574,11 +574,9 @@ class MockProvider(LLMProvider):
 		cat = evidence.get("category", "?")
 		if cat in self.responses:
 			return self.responses[cat]
-		# Default mock: try to extract title from first-page text
-		first_page = evidence.get("first_page_text") or ""
 		current = evidence.get("current") or {}
-		# Heuristic: look for " - " or known patterns; very crude
-		# This is intentionally dumb — tests should pass explicit responses.
+		# Intentionally dumb echo of current metadata — tests should pass
+		# explicit responses via the constructor.
 		return ReconciledMeta(
 			title=current.get("title"),
 			authors=current.get("authors") or [],

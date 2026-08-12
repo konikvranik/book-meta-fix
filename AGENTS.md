@@ -79,6 +79,22 @@ src/book_meta_fix/
   confirm a record. Don't "fix" the verifier to trust embedded OPF.
 - **Source of truth = `metadata.json`**, not `.opf`. Writers update *both*.
   Readers prefer `metadata.json`, fall back to `.opf`.
+- **Identity-confirmed MISSING_* books are auto-accepted** (`pipeline.py`
+  `_process_book`, gated by `accept_missing_if_identified`, default on). When
+  a `MISSING_ISBN`/`MISSING_YEAR`/`MISSING_COVER` book has its author+title
+  confirmed against the book's content (`_acquire_identity`) and no enricher
+  recovered the field, the pipeline stamps a minimal
+  `EnrichedMeta(identity_confirmed=True, source="content")`. `review_writer`
+  then pre-fills `action: accept` (its identity_confirmed-no-proposal branch),
+  and `bmf apply` prunes the entry — a safe no-op (`_apply_action` skips when
+  `proposed` is empty). The verdict stays `AUTO_FIXABLE` (in the review
+  inclusion set); the book reappears as auto-accept on the next `analyze`
+  because the detector re-fires (the field is genuinely still missing) — that
+  is intended: zero manual work, bulk-pruned by `apply`. A co-occurring
+  `NEEDS_REVIEW` diagnosis (e.g. C11 generated cover) blocks the auto-accept
+  and keeps the book in review. If any enricher/text_meta DID return data,
+  `enriched` is already set and those fields are proposed + applied normally —
+  this path fires only when nothing was recovered.
 - **LLM rate limiting is two-layered** (`llm.py`): a `LeakyBucket` smoother
   (constant aggregate RPM) **and** a global 429 cooldown / circuit breaker.
   Z.AI's free tier has a cascade bug — when one model 429s, all models get

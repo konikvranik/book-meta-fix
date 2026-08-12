@@ -105,7 +105,16 @@ can recover the pre-run state.
 | `bmf crosscheck --apply` | Actually move the mismatched format files |
 
 Common options: `--library PATH`, `--limit N`, `--no-cache`, `-o FILE`,
-`--skip-enrich`, `--skip-verify`, `--databazeknih`, `--legie`.
+`--skip-enrich`, `--skip-verify`, `--databazeknih`, `--legie`,
+`--accept-missing/--no-accept-missing` (default on).
+
+`--accept-missing` (default): a `MISSING_ISBN`/`MISSING_YEAR`/`MISSING_COVER`
+book whose author+title were confirmed against the book's content is
+pre-filled `action: accept` in `review.yaml` (the missing field is cosmetic,
+not an identity problem). `bmf apply` then prunes it in bulk — it's a safe
+no-op when nothing was recovered. Use `--no-accept-missing` to keep these for
+manual review. Books with a co-occurring `NEEDS_REVIEW` diagnosis (e.g. a
+generated cover) are still sent to review.
 
 ## Enrichment sources
 

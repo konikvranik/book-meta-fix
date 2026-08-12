@@ -169,6 +169,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--skip-verify", is_flag=True, help="Skip content verification")
 @click.option("--verify-ok", "verify_ok", is_flag=True, help="Audit: also verify books the detectors marked OK against their content. Reads every OK book's file (slower). A MISMATCH reclassifies it to NEEDS_REVIEW and seeks a fix (enrichment + LLM). Use periodically to catch corruption the structural detectors miss.")
 @click.option("--no-strict-verify", "no_strict_verify", is_flag=True, help="With --verify-ok: only reclassify a clear MISMATCH (fuzzy title < 0.5). By default (without this flag) UNCERTAIN (0.5–0.8) is also reclassified.")
+@click.option("--accept-missing/--no-accept-missing", "accept_missing", default=True, help="Auto-accept MISSING_ISBN/YEAR/COVER books whose author+title were confirmed against the book's content (pre-filled action: accept in review.yaml; pruned by `bmf apply`, safe no-op). Default on. Use --no-accept-missing to keep them for manual review.")
 @click.option("--output", "-o", type=click.Path(path_type=Path), default=None, help="Output review file (default: review.yaml)")
 @click.option("--llm", "use_llm", is_flag=True, help="Enable LLM reconciliation (needs ZAI_API_KEY or BMF_LLM_MOCK=1)")
 @click.option("--llm-categories", default="ALL", help="Comma-separated categories to send to LLM, or 'ALL' (default). ALL = every category except C9 (legitimate anonyms like the Bible, where an LLM-invented author would be wrong). Each book is one LLM request that returns all fields at once, so the cost is per-book, not per-category.")
@@ -183,7 +184,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--llm-burst", "llm_burst", type=float, default=None, help="Leaky-bucket burst capacity: how many LLM calls may start inside one interval (default 1 = pure even drip, no bunching — one call every --llm-min-interval seconds). This is a count-per-time limiter, not a concurrency cap. Raise only with confirmed rate headroom; a burst >1 fires multiple calls in the same second and trips Z.AI's dynamic RPM limit (429).")
 @click.option("--llm-rate-limit-base", "llm_rate_limit_base", type=float, default=None, help="Base seconds of the global cooldown applied when a 429 is seen (default 5). When ANY worker hits a 429, ALL workers pause this long; the cooldown escalates 5/10/20/... with consecutive 429s, honours the server Retry-After when longer, and is capped by --llm-rate-limit-max. Higher = safer but slower; lower = more 429 risk.")
 @click.option("--llm-rate-limit-max", "llm_rate_limit_max", type=float, default=None, help="Cap (seconds) on the escalating 429 cooldown (default 60). Prevents a sustained outage from parking workers indefinitely.")
-def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, use_legie: bool, skip_verify: bool, verify_ok: bool, no_strict_verify: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int, llm_min_interval: float | None, llm_model: str | None, llm_reasoning_effort: str | None, llm_thinking: str | None, no_llm_loop: bool, llm_flash_model: str | None, llm_final_model: str | None, llm_burst: float | None, llm_rate_limit_base: float | None, llm_rate_limit_max: float | None) -> None:
+def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, use_legie: bool, skip_verify: bool, verify_ok: bool, no_strict_verify: bool, accept_missing: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int, llm_min_interval: float | None, llm_model: str | None, llm_reasoning_effort: str | None, llm_thinking: str | None, no_llm_loop: bool, llm_flash_model: str | None, llm_final_model: str | None, llm_burst: float | None, llm_rate_limit_base: float | None, llm_rate_limit_max: float | None) -> None:
 	"""Run full pipeline and generate a review.yaml for NEEDS_REVIEW books."""
 	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 
@@ -317,6 +318,7 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 			verify_ok=verify_ok,
 			strict_verify=not no_strict_verify,
 			llm_loop=cfg.llm_loop,
+			accept_missing_if_identified=accept_missing,
 			stats=pipe_stats,
 		)
 	except KeyboardInterrupt:
@@ -445,6 +447,7 @@ def _print_fix_source_summary(stats: dict) -> None:
 	t.add_section()
 	t.add_row("Proposed (any source)", str(proposed_total), style="bold")
 	t.add_row("Unfixed (no proposal found)", str(unfixed), style="yellow")
+	t.add_row("Accepted (identity OK, field missing)", str(stats.get("accepted_missing", 0)), style="green")
 	console.print(t)
 
 	# LLM cost detail: how many books the LLM was asked about vs. how many it

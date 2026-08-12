@@ -280,7 +280,7 @@ class TestCarryOverUnprocessed:
 		# New run processes ONLY book 2 (e.g. --limit). Books 1 and 3 are not
 		# submitted — they must be carried over from .bak.
 		w = ReviewWriter(out)
-		summary = _submit_all_and_finish(w, [_result(2, title="B-new")])
+		_submit_all_and_finish(w, [_result(2, title="B-new")])
 		parsed = parse_review(out)
 		by_id = {p.id: p for p in parsed}
 		# All three present: 1 carried (action preserved), 2 refreshed, 3 carried.
@@ -401,8 +401,51 @@ class TestLegacyPriorLoading:
 		assert set(w._prior) == {1, 2}
 		assert w._prior[1]["action"] == "accept"
 		# Submit only book 2; book 1 carried over with its action.
-		summary = _submit_all_and_finish(w, [_result(2, title="B-new")])
+		_submit_all_and_finish(w, [_result(2, title="B-new")])
 		parsed = parse_review(out)
 		by_id = {p.id: p for p in parsed}
 		assert by_id[1].action == "accept"  # carried
 		assert by_id[2].current["title"] == "B-new"  # refreshed
+
+
+class TestIdentityConfirmedAccept:
+	"""MISSING_* books whose identity was confirmed against the book's content
+	get action: accept pre-filled so `bmf apply` prunes them. Covers both the
+	no-proposal accept-as-is case (new branch) and the with-other-metadata case
+	(existing path — nothing is thrown away)."""
+
+	def test_identity_confirmed_no_proposal_prefills_accept(self, tmp_path):
+		"""A minimal identity_confirmed EnrichedMeta with no fields -> empty
+		proposed, but action: accept is still pre-filled (accept-as-is)."""
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		em = EnrichedMeta(identity_confirmed=True, source="content")
+		_submit_all_and_finish(w, [_result(1, verdict=Verdict.AUTO_FIXABLE, category="MISSING_ISBN", enriched=em)])
+		parsed = parse_review(out)
+		assert len(parsed) == 1
+		assert parsed[0].action == "accept"
+		# No fake proposed fields — it's an accept-as-is, not a change.
+		assert not parsed[0].proposed
+
+	def test_identity_confirmed_with_other_metadata_is_proposed(self, tmp_path):
+		"""When an enricher DID return data (publisher here) alongside an
+		identity confirmation, that metadata is proposed and action: accept is
+		pre-filled (existing path) — it is applied, not discarded."""
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		em = EnrichedMeta(identity_confirmed=True, source="databazeknih", publisher="Argo")
+		_submit_all_and_finish(w, [_result(1, verdict=Verdict.AUTO_FIXABLE, category="MISSING_ISBN", enriched=em)])
+		parsed = parse_review(out)
+		assert len(parsed) == 1
+		assert parsed[0].action == "accept"
+		assert parsed[0].proposed and parsed[0].proposed.get("publisher") == "Argo"
+
+	def test_identity_confirmed_missing_year_also_accepted(self, tmp_path):
+		"""The accept-as-is path applies to any MISSING_* category, not just
+		MISSING_ISBN. MISSING_YEAR + identity_confirmed -> accept."""
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		em = EnrichedMeta(identity_confirmed=True, source="content")
+		_submit_all_and_finish(w, [_result(1, verdict=Verdict.AUTO_FIXABLE, category="MISSING_YEAR", enriched=em)])
+		parsed = parse_review(out)
+		assert len(parsed) == 1 and parsed[0].action == "accept"
