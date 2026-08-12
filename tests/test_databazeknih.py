@@ -286,3 +286,83 @@ class TestEnricherLookupOrder:
 		assert em2 != "__NOT_FOUND__"
 		# The source was not re-queried (cached negative short-circuits).
 		assert call_count[0] == 1
+
+	def test_negative_expires_after_ttl(self, tmp_path, monkeypatch):
+		"""A cached __NOT_FOUND__ older than negative_ttl_sec is re-queried, so a
+		transient miss (or a pre-fix identity) gets a second chance instead of
+		being pinned forever."""
+		class _Clock:
+			def __init__(self) -> None:
+				self.t = 1_000_000.0
+
+			def time(self) -> float:
+				return self.t
+
+		clock = _Clock()
+		monkeypatch.setattr(enrichers, "time", clock)
+
+		call_count = [0]
+
+		def fake_ol_isbn(isbn):
+			call_count[0] += 1
+			return None
+
+		monkeypatch.setattr(enrichers, "lookup_openlibrary_isbn", fake_ol_isbn)
+		monkeypatch.setattr(enrichers, "lookup_google_books_isbn", lambda isbn: None)
+
+		cache = tmp_path / "cache.db"
+		kwargs = dict(openlibrary_enabled=True, google_books_enabled=True, databazeknih_enabled=False, negative_ttl_sec=100)
+
+		# First lookup at t: miss, caches __NOT_FOUND__ (cached_at = t).
+		e1 = Enricher(cache_db=cache, **kwargs)
+		assert e1.lookup(isbn="9788073099992") is None
+		assert call_count[0] == 1
+		e1.close()
+
+		# Within TTL: served from cache, no re-query.
+		clock.t += 50
+		e2 = Enricher(cache_db=cache, **kwargs)
+		assert e2.lookup(isbn="9788073099992") is None
+		assert call_count[0] == 1
+		e2.close()
+
+		# Past TTL: treated as a miss -> re-query -> re-cached.
+		clock.t += 200
+		e3 = Enricher(cache_db=cache, **kwargs)
+		assert e3.lookup(isbn="9788073099992") is None
+		assert call_count[0] == 2
+		e3.close()
+
+	def test_negative_never_expires_when_ttl_zero(self, tmp_path, monkeypatch):
+		"""negative_ttl_sec <= 0 keeps the old forever-unchanging behaviour."""
+		class _Clock:
+			def __init__(self) -> None:
+				self.t = 1_000_000.0
+
+			def time(self) -> float:
+				return self.t
+
+		clock = _Clock()
+		monkeypatch.setattr(enrichers, "time", clock)
+
+		call_count = [0]
+
+		def fake_ol_isbn(isbn):
+			call_count[0] += 1
+			return None
+
+		monkeypatch.setattr(enrichers, "lookup_openlibrary_isbn", fake_ol_isbn)
+		monkeypatch.setattr(enrichers, "lookup_google_books_isbn", lambda isbn: None)
+
+		cache = tmp_path / "cache.db"
+		kwargs = dict(openlibrary_enabled=True, google_books_enabled=True, databazeknih_enabled=False, negative_ttl_sec=0)
+
+		e1 = Enricher(cache_db=cache, **kwargs)
+		assert e1.lookup(isbn="9788073099992") is None
+		e1.close()
+
+		clock.t += 10_000_000  # far in the future
+		e2 = Enricher(cache_db=cache, **kwargs)
+		assert e2.lookup(isbn="9788073099992") is None  # still cached
+		assert call_count[0] == 1  # never re-queried
+		e2.close()

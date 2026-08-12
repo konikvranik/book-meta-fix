@@ -213,38 +213,3 @@ def _backup(path: Path) -> None:
 	if path.is_file():
 		bak = path.with_suffix(path.suffix + ".bak")
 		shutil.copy2(path, bak)
-
-
-# ---------------------------------------------------------------------------
-# Library-wide snapshot (tar.gz of all metadata.json/opf before bulk apply)
-# ---------------------------------------------------------------------------
-
-
-def snapshot_metadata(library: Path, output: Path | None = None) -> Path:
-	"""Create a tar.gz snapshot of all metadata.json/opf files in the library.
-
-	This is the safety net for --auto-apply: if something goes wrong, you can
-	restore the entire library's metadata from this single tarball. Only
-	metadata files are included (not the ebooks themselves — those don't change).
-
-	Returns the path to the created .tar.gz file.
-	"""
-	import tarfile
-	from datetime import datetime
-
-	library = Path(library)
-	if output is None:
-		stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-		output = Path(f"metadata_snapshot_{stamp}.tar.gz")
-	output = Path(output)
-
-	count = 0
-	with tarfile.open(output, "w:gz") as tar:
-		# Walk the library and add only metadata.json / metadata.opf / .bak
-		for path in library.rglob("metadata.*"):
-			if path.name in ("metadata.json", "metadata.opf") or path.name.endswith(".bak"):
-				arcname = path.relative_to(library.parent) if library.parent in path.parents else path
-				tar.add(path, arcname=str(arcname))
-				count += 1
-	log.info("snapshot: %d metadata files -> %s", count, output)
-	return output

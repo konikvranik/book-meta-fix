@@ -27,25 +27,41 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+# json-repair salvages LLM JSON that the cheap built-in sanitizer cannot
+# recover: unescaped double-quotes inside string values (the model writes
+# `"PROLOG"` with straight quotes inside a JSON string), raw control chars
+# (newlines) inside strings, and truncation. Optional dependency — if absent we
+# fall back to the built-in sanitizer + truncation repair.
+try:
+	import json_repair  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - exercised only without the extra
+	json_repair = None  # type: ignore[assignment]
+
 log = logging.getLogger(__name__)
 
 
 class LeakyBucket:
-	"""Thread-safe leaky-bucket rate limiter (token bucket).
+	"""Thread-safe leaky-bucket rate limiter (token bucket) — a *count per time*
+	limiter, not a concurrency limiter.
 
-	Better than a simple "min interval since last request" lock for concurrent
-	workers: it allows a short burst up to *capacity* requests, then refills at
-	one token every *interval* seconds, so the aggregate request rate is
-	bounded and roughly constant regardless of when worker threads arrive.
-	With the old lock-during-sleep throttle, N threads hitting the LLM phase
-	at once piled up on the lock and emitted requests back-to-back once each
-	woke; the bucket smooths that into a steady drip.
+	It bounds the request START rate regardless of how many calls are in
+	flight or when worker threads arrive. With the old lock-during-sleep
+	throttle, N threads hitting the LLM phase at once piled up on the lock and
+	emitted requests back-to-back once each woke; the bucket smooths that into
+	a steady drip.
 
-	*capacity* (default 5) is the burst size; *interval* (seconds) is the
-	steady-state period between requests (so steady RPM ~= 60/interval).
+	*capacity* is the burst size (max tokens that can bank up); *interval*
+	(seconds) is the steady-state period between requests, so steady RPM ~=
+	60/interval. With the default **capacity=1** the bucket is a pure even
+	drip — exactly one call starts every *interval* seconds, no bunching,
+	no initial burst. That is the count-per-time semantics we want for Z.AI's
+	sliding-window request limit: e.g. interval=2.0 = exactly 30 evenly-spaced
+	requests per minute. Raise *capacity* only if you have rate headroom and
+	accept the burst risk (a burst of N calls inside one second is exactly
+	what trips the dynamic RPM limit).
 	"""
 
-	def __init__(self, *, capacity: float = 5.0, interval: float = 2.0) -> None:
+	def __init__(self, *, capacity: float = 1.0, interval: float = 2.0) -> None:
 		self.capacity = max(0.0, capacity)
 		self.interval = max(0.0, interval)
 		self._tokens = self.capacity
@@ -228,7 +244,7 @@ class ZaiProvider(LLMProvider):
 	# which is the safest match for the documented dynamic RPM cap.
 	DEFAULT_MIN_INTERVAL = 2.0
 
-	def __init__(self, api_key: str, base_url: str = "https://api.z.ai/api/paas/v4/", model: str = "glm-5.2", *, min_interval: float | None = None, reasoning_effort: str | None = None, thinking: str | None = None, burst: float = 5.0, flash_model: str | None = None, final_model: str | None = None) -> None:
+	def __init__(self, api_key: str, base_url: str = "https://api.z.ai/api/paas/v4/", model: str = "glm-5.2", *, min_interval: float | None = None, reasoning_effort: str | None = None, thinking: str | None = None, burst: float = 1.0, rate_limit_base: float = 5.0, rate_limit_max: float = 60.0, flash_model: str | None = None, final_model: str | None = None) -> None:
 		self.api_key = api_key
 		self.base_url = base_url
 		self.model = model
@@ -245,11 +261,29 @@ class ZaiProvider(LLMProvider):
 			self._extra_body["reasoning_effort"] = reasoning_effort
 		elif not is_glm5 and thinking:
 			self._extra_body["thinking"] = {"type": thinking}
-		# Leaky-bucket rate limiter shared across ALL model calls (Flash + final
-		# + retries). Smooths bursty worker threads into a constant aggregate
-		# RPM so Z.AI's dynamic rate limit (429 code 1302) is not tripped.
+		# Leaky-bucket rate limiter (count-per-time) shared across ALL model
+		# calls (Flash + final + retries). With the default burst=1 it is a
+		# pure even drip — one call starts every interval seconds, no bunching
+		# — which is what Z.AI's sliding-window request limit wants. Raise
+		# burst only with rate headroom; a burst of N inside one second is what
+		# trips the dynamic RPM limit (429 code 1302).
 		interval = self.DEFAULT_MIN_INTERVAL if min_interval is None else min_interval
 		self._bucket = LeakyBucket(capacity=burst, interval=max(0.0, interval))
+		# Global rate-limit cooldown (circuit breaker) shared across ALL worker
+		# threads. The leaky bucket caps the steady-state call rate per worker,
+		# but Z.AI's free tier has a cascade-cooldown bug: when ONE model gets a
+		# 429, the others (including the paid fallback) get throttled too for
+		# several seconds. Without coordination, every worker keeps firing and
+		# every call 429s. So when ANY call observes a 429, we set a global
+		# "cooldown until" timestamp that _all_ threads wait on before their
+		# next acquire — one 429 pauses the whole fleet instead of hammering.
+		# The cooldown escalates with consecutive 429s (and honours Retry-After
+		# when Z.AI sends it), capped at rate_limit_max.
+		self._rate_limit_base = max(0.0, rate_limit_base)
+		self._rate_limit_max = max(self._rate_limit_base, rate_limit_max)
+		self._cooldown_until = 0.0  # monotonic timestamp; callers block until past it
+		self._consecutive_429 = 0
+		self._cooldown_lock = threading.Lock()
 		# Models used by reconcile_loop. flash_model is the free first-attempt
 		# model (default glm-4.7-flash — best CZ/SK quality among free models
 		# per scripts/llm_experiment.py); final_model is the paid high-quality
@@ -263,6 +297,97 @@ class ZaiProvider(LLMProvider):
 			effort = self._extra_body.get("reasoning_effort", "low")
 			return {"reasoning_effort": effort}
 		return {"thinking": {"type": "disabled"}}
+
+	# ------------------------------------------------------------------
+	# Global rate-limit cooldown (shared across all worker threads)
+	# ------------------------------------------------------------------
+
+	def _wait_cooldown(self) -> None:
+		"""Block until any active global rate-limit cooldown has elapsed.
+
+		Called at the top of every _call attempt, before the bucket acquire, so
+		that a 429 observed by one thread pauses the whole fleet. Re-checks the
+		deadline periodically (a 429 on another thread can extend it while we
+		wait) rather than sleeping the full gap in one go.
+		"""
+		while True:
+			with self._cooldown_lock:
+				now = time.monotonic()
+				if now >= self._cooldown_until:
+					return
+				# Sleep at most ~1s, then re-check: another thread may push the
+				# deadline out with another 429 while we nap.
+				wait = min(1.0, self._cooldown_until - now)
+			time.sleep(wait)
+
+	def _on_rate_limited(self, retry_after: float | None) -> float:
+		"""Record an observed 429 and return the cooldown applied (seconds).
+
+		Escalates with consecutive 429s (base * 2**(n-1): 5, 10, 20, ...) and
+		honours the server's Retry-After when it is longer. Capped at
+		``rate_limit_max`` so a sustained outage doesn't park workers forever.
+		"""
+		with self._cooldown_lock:
+			self._consecutive_429 += 1
+			escalated = self._rate_limit_base * (2 ** (self._consecutive_429 - 1))
+			if retry_after and retry_after > escalated:
+				cooldown = retry_after
+			else:
+				cooldown = escalated
+			cooldown = min(cooldown, self._rate_limit_max)
+			self._cooldown_until = time.monotonic() + cooldown
+			return cooldown
+
+	def _on_success(self) -> None:
+		"""A call completed (parseable response): reset the escalation counter.
+
+		We deliberately do NOT clear an active cooldown — letting it expire on
+		 its own keeps behaviour predictable and avoids a thundering herd of
+		waiting threads all unblocking the instant one call sneaks through.
+		"""
+		with self._cooldown_lock:
+			self._consecutive_429 = 0
+
+	@staticmethod
+	def _is_rate_limit(exc: BaseException) -> bool:
+		"""True if *exc* is a rate-limit (429) response from the provider.
+
+		Checks the openai exception type when available, then falls back to a
+		message substring match (the observed Z.AI error string is
+		``Error code: 429 - {'error': {'code': '1302', 'message': 'Rate limit
+		reached for requests'}}``).
+		"""
+		try:
+			from openai import RateLimitError
+			if isinstance(exc, RateLimitError):
+				return True
+		except ImportError:
+			pass
+		msg = str(exc).lower()
+		return "429" in msg or "rate limit" in msg or "rate_limit" in msg
+
+	@staticmethod
+	def _extract_retry_after(exc: BaseException) -> float | None:
+		"""Best-effort parse of a Retry-After hint from a 429 response.
+
+		The openai client attaches the underlying httpx Response as
+		``exc.response``; Z.AI may send ``Retry-After`` (seconds) or
+		``retry-after-ms`` (milliseconds). Returns None if unavailable.
+		"""
+		resp = getattr(exc, "response", None)
+		headers = getattr(resp, "headers", None)
+		if not headers:
+			return None
+		try:
+			for key in ("retry-after-ms", "Retry-After", "retry-after"):
+				if key in headers:
+					value = headers[key]
+					secs = float(value) / 1000.0 if key.endswith("-ms") else float(value)
+					if secs > 0:
+						return secs
+		except (TypeError, ValueError):
+			return None
+		return None
 
 	def _get_client(self):
 		"""Lazy-init the OpenAI client (avoids import error if openai not installed)."""
@@ -280,11 +405,21 @@ class ZaiProvider(LLMProvider):
 		On a transient failure (429 / empty / json-parse) retries with
 		exponential backoff. On a hard failure (length / exhausted) returns
 		(None, reason) so the caller can fall through to the next model.
+
+		Rate limiting is layered:
+		  1. ``_wait_cooldown`` blocks the thread if a 429 elsewhere parked the
+		     fleet (cascade-cooldown coordination).
+		  2. the leaky-bucket caps the steady-state call rate.
+		On a 429 we record a global cooldown (escalating, honouring Retry-After)
+		and retry — so the next attempt of every thread waits it out.
 		"""
 		prompt = build_user_prompt(evidence)
 		last_error: str | None = None
 		extra = self._extra_body_for(model)
 		for attempt in range(max_retries):
+			# Wait out any global rate-limit cooldown before acquiring a token.
+			# This is the cascade-cooldown fix: a 429 on one thread parks all.
+			self._wait_cooldown()
 			# Acquire a rate-limit token BEFORE the HTTP call. The bucket
 			# smooths concurrent workers; retries also acquire, so a flapping
 			# endpoint cannot exceed the configured rate while backing off.
@@ -302,10 +437,15 @@ class ZaiProvider(LLMProvider):
 					extra_body=extra or None,
 				)
 			except Exception as e:  # noqa: BLE001
+				if self._is_rate_limit(e):
+					# 429: set a global cooldown so all workers pause, then retry
+					# (the next loop's _wait_cooldown blocks until it elapses).
+					cooldown = self._on_rate_limited(self._extract_retry_after(e))
+					log.info("Z.AI rate-limited (429); global cooldown %.1fs across all workers (model=%s)", cooldown, model)
+					last_error = "rate limited"
+					continue
 				last_error = str(e)
-				# Exponential backoff for transient (mostly 429) failures.
-				# Z.AI's free-tier cascade-cooldown bug can take several
-				# seconds to clear; 1s/2s/4s gives it room.
+				# Exponential backoff for other transient failures.
 				time.sleep(1.0 * (2 ** attempt))
 				continue
 
@@ -322,6 +462,8 @@ class ZaiProvider(LLMProvider):
 				continue
 			result = _parse_llm_json(content)
 			if result is not None:
+				# Successful parse: the endpoint is healthy — reset escalation.
+				self._on_success()
 				reasoning = getattr(choice.message, "reasoning_content", None)
 				if reasoning and not result.reasoning:
 					result.reasoning = reasoning[-300:]
@@ -471,7 +613,9 @@ def get_provider(config: Any) -> LLMProvider | None:  # noqa: ANN001
 			min_interval=min_interval,
 			reasoning_effort=getattr(config, "zai_reasoning_effort", None),
 			thinking=getattr(config, "zai_thinking", None),
-			burst=getattr(config, "llm_burst", 5.0),
+			burst=getattr(config, "llm_burst", 1.0),
+			rate_limit_base=getattr(config, "llm_rate_limit_base", 5.0),
+			rate_limit_max=getattr(config, "llm_rate_limit_max", 60.0),
 			flash_model=getattr(config, "zai_flash_model", None),
 			final_model=getattr(config, "zai_final_model", None),
 		)
@@ -596,12 +740,30 @@ def _parse_llm_json(content: str) -> ReconciledMeta | None:
 			try:
 				data = json.loads(repaired)
 				log.warning("LLM JSON was truncated; repaired to parseable object (dropping incomplete trailing field)")
-			except json.JSONDecodeError as e:
-				log.warning("LLM returned invalid JSON: %s; content: %s", e, content[:500])
-				return None
+			except json.JSONDecodeError:
+				# Truncation repair didn't yield valid JSON either. Fall through
+				# to the json-repair salvage below (handles the same content).
+				data = None
 		else:
-			log.warning("LLM returned invalid JSON; content: %s", content[:500])
-			return None
+			data = None
+		if data is None:
+			# Final salvage: json-repair recovers the two failure modes the
+			# cheap sanitizer cannot — unescaped quotes inside string values
+			# ("reasoning": "...contains "PROLOG"...") and raw control chars
+			# (newlines) inside strings. These are the most common GLM mistakes
+			# and previously cost 3 wasted retry API calls each. Only used when
+			# json-repair is installed (optional [llm] extra).
+			if json_repair is not None:
+				try:
+					salvaged = json_repair.loads(content)
+				except Exception:  # noqa: BLE001 - third-party, never fatal
+					salvaged = None
+				if isinstance(salvaged, dict):
+					log.warning("LLM JSON salvaged via json-repair (unescaped quotes/control chars fixed)")
+					data = salvaged
+			if data is None:
+				log.warning("LLM returned invalid JSON; content: %s", content[:500])
+				return None
 	# Normalize field names
 	def _str(k):
 		v = data.get(k)

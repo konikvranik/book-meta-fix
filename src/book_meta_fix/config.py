@@ -39,6 +39,13 @@ class Config:
 	api_rate_sec: float = DEFAULT_API_RATE_SEC
 	api_timeout: float = DEFAULT_API_TIMEOUT
 
+	# Enricher cache: how long a cached negative lookup ("__NOT_FOUND__") is
+	# trusted before it is re-queried. A book that failed an online lookup once
+	# (transient API error, or before its identity was fixed) gets retried after
+	# this many seconds. <= 0 disables expiry (negatives kept forever, the old
+	# behaviour). Default 7 days. Override via BMF_ENRICH_NEGATIVE_TTL.
+	enrich_negative_ttl_sec: float = 7 * 24 * 3600
+
 	# LLM (Z.AI)
 	# Coding plan users must use /api/coding/paas/v4/ (draws from subscription
 	# quota). PaaS / pay-as-you-go users use /api/paas/v4/ (per-token billing).
@@ -69,10 +76,13 @@ class Config:
 	# zai_model when the loop is disabled.
 	zai_flash_model: str = "glm-4.7-flash"
 	zai_final_model: str = "glm-5.2"
-	# Leaky-bucket burst capacity: how many LLM calls may fire in a short burst
-	# before the smoother engages. Default 5; lower (e.g. 1) for stricter rate
-	# matching Z.AI's free-tier RPM. Override via BMF_LLM_BURST.
-	llm_burst: float = 5.0
+	# Leaky-bucket burst capacity: how many LLM calls may start inside one
+	# interval. Default 1 = pure even drip (one call every interval seconds,
+	# no bunching) — this is the count-per-time semantics Z.AI's sliding-window
+	# request limit wants. A burst > 1 lets N calls fire in the same second,
+	# which is exactly what trips the dynamic RPM limit (429 code 1302); raise
+	# only with confirmed rate headroom. Override via BMF_LLM_BURST.
+	llm_burst: float = 1.0
 	# Minimum seconds between LLM requests (RPM throttle). Z.AI's coding plan
 	# applies a dynamic requests-per-minute limit; 429 'Rate limit reached for
 	# requests' (code 1302) trips when too many calls land inside a rolling
@@ -80,6 +90,15 @@ class Config:
 	# response speed. Lower (e.g. 1.0) on a higher tier; raise (e.g. 4.0) if you
 	# still hit 429.
 	llm_min_interval: float = 2.0
+	# Global 429 cooldown knobs. When ANY worker sees a 429, ALL workers pause
+	# until this many seconds have passed (Z.AI's free tier cascade-throttles
+	# every model when one 429s, so per-worker throttling alone can't stop it).
+	# The cooldown escalates with consecutive 429s (base * 2**(n-1): 5, 10,
+	# 20, ...), honours the server's Retry-After when longer, and is capped at
+	# rate_limit_max. Override via BMF_LLM_RATE_LIMIT_BASE / _MAX. Lower base =
+	# more aggressive (less waiting, more 429 risk); higher = safer but slower.
+	llm_rate_limit_base: float = 5.0
+	llm_rate_limit_max: float = 60.0
 
 	# Verification thresholds
 	verify_fuzzy_strong: float = 0.8  # >= -> VERIFIED
@@ -106,6 +125,12 @@ class Config:
 			cfg.openlibrary_enabled = v.strip().lower() in ("1", "true", "yes", "on")
 		if (v := os.environ.get("BMF_GOOGLE_BOOKS")) is not None:
 			cfg.google_books_enabled = v.strip().lower() in ("1", "true", "yes", "on")
+		# Enricher negative-cache TTL (seconds)
+		if (v := os.environ.get("BMF_ENRICH_NEGATIVE_TTL")) is not None:
+			try:
+				cfg.enrich_negative_ttl_sec = float(v)
+			except ValueError:
+				pass
 		# LLM
 		if v := os.environ.get("ZAI_API_KEY"):
 			cfg.zai_api_key = v
@@ -131,6 +156,16 @@ class Config:
 		if (v := os.environ.get("BMF_LLM_MIN_INTERVAL")) is not None:
 			try:
 				cfg.llm_min_interval = max(0.0, float(v))
+			except ValueError:
+				pass
+		if (v := os.environ.get("BMF_LLM_RATE_LIMIT_BASE")) is not None:
+			try:
+				cfg.llm_rate_limit_base = max(0.0, float(v))
+			except ValueError:
+				pass
+		if (v := os.environ.get("BMF_LLM_RATE_LIMIT_MAX")) is not None:
+			try:
+				cfg.llm_rate_limit_max = max(0.0, float(v))
 			except ValueError:
 				pass
 		return cfg

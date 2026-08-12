@@ -2,14 +2,15 @@
 
 Covers: append-on-complete, .bak move on construct, prior user-action merge,
 carry-over of unprocessed prior entries, .bak deletion on success, .bak kept
-on simulated crash, inline auto-apply, and legacy-format prior loading.
+on simulated crash, and legacy-format prior loading.
 """
 from __future__ import annotations
 
 import threading
 import time
-from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from book_meta_fix.enrichers import EnrichedMeta
 from book_meta_fix.models import BookMeta, Confidence, Diagnosis, Verdict
@@ -313,50 +314,26 @@ class TestStreamingConcurrency:
 		assert {p.id for p in parsed} == set(range(20))
 
 
-class TestAutoApply:
-	def test_high_confidence_applied_not_appended(self, tmp_path):
-		"""With apply_threshold='high', an llm:high proposal is written to
-		metadata and NOT appended to review.yaml."""
+class TestReviewOnlyNoMetadataWrites:
+	"""auto-apply was removed: ReviewWriter must never write metadata files,
+	and ``apply_threshold`` is no longer a constructor parameter."""
+
+	def test_apply_threshold_param_removed(self, tmp_path):
 		out = tmp_path / "review.yaml"
-		w = ReviewWriter(out, apply_threshold="high")
+		with pytest.raises(TypeError):
+			ReviewWriter(out, apply_threshold="high")  # type: ignore[misc]
+
+	def test_never_writes_metadata(self, tmp_path):
+		"""Even a high-confidence proposal must land in review.yaml, not on disk."""
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
 		enriched = EnrichedMeta(title="Fixed", source="llm:high")
-		applied_ids: list[int] = []
-
-		# Patch the metadata writer so we don't touch real files; record calls.
-		def fake_apply(meta, enriched):
-			applied_ids.append(meta.calibre_id)
-			return True
-
-		with patch("book_meta_fix.pipeline._apply_enriched_to_meta", lambda m, e: m), \
-			 patch("book_meta_fix.writers.write_book_meta", lambda *a, **kw: None):
+		with patch("book_meta_fix.writers.write_book_meta") as fake_write:
 			summary = _submit_all_and_finish(w, [_result(1, enriched=enriched)])
-		assert summary["applied"] == 1
-		assert summary["written"] == 0
-		parsed = parse_review(out)
-		assert parsed == []
-
-	def test_low_confidence_goes_to_review(self, tmp_path):
-		"""With apply_threshold='high', an llm:low proposal is NOT auto-applied —
-		it goes to review.yaml for the human."""
-		out = tmp_path / "review.yaml"
-		w = ReviewWriter(out, apply_threshold="high")
-		enriched = EnrichedMeta(title="Guess", source="llm:low")
-		summary = _submit_all_and_finish(w, [_result(1, enriched=enriched)])
-		assert summary["applied"] == 0
-		assert summary["skipped_low_conf"] == 1
+		assert fake_write.call_count == 0
 		assert summary["written"] == 1
 		parsed = parse_review(out)
 		assert len(parsed) == 1 and parsed[0].id == 1
-
-	def test_no_proposal_goes_to_review(self, tmp_path):
-		out = tmp_path / "review.yaml"
-		w = ReviewWriter(out, apply_threshold="high")
-		summary = _submit_all_and_finish(w, [_result(1, enriched=None)])
-		assert summary["applied"] == 0
-		assert summary["skipped_no_proposal"] == 1
-		assert summary["written"] == 1
-		parsed = parse_review(out)
-		assert len(parsed) == 1
 
 
 class TestAutoFixable:
