@@ -476,6 +476,126 @@ def lookup_databazeknih_isbn(isbn: str) -> EnrichedMeta | None:
 
 
 # ---------------------------------------------------------------------------
+# legie.info (scraping — CZ/SK fantasy/sci-fi database)
+# ---------------------------------------------------------------------------
+#
+# Complementary to databazeknih: legie.info is the strongest CZ/SK source for
+# speculative fiction (sci-fi / fantasy / horror) — short stories ("povídky"),
+# series and the "world" (universe) a work belongs to. databazeknih's book
+# search does NOT index short stories at all (verified: a story like Asimov's
+# "Ženská intuice" exists on databazeknih under /povidky/ but is unreachable
+# via the /search?in=books endpoint), so for a sci-fi-heavy library legie.info
+# is often the only source that can confirm a work's identity. It does NOT
+# carry CZ-edition ISBN/Year/Publisher (only the original publication date), so
+# it is consulted AFTER databazeknih (which is richer when it hits).
+
+# Detail-page title. Povídky use id="nazev_povidky", books id="nazev_knihy".
+_LEGIE_TITLE_RE = _re.compile(
+	r'<h2[^>]*id="nazev_(?:povidky|knihy)"[^>]*>([^<]+)</h2>', _re.IGNORECASE
+)
+# Author: <h3><a href="autor/292-isaac-asimov">Isaac Asimov</a></h3> (relative href)
+_LEGIE_AUTHOR_RE = _re.compile(
+	r'<h3>\s*<a[^>]*href="autor/[^"]+"[^>]*>([^<]+)</a>\s*</h3>', _re.IGNORECASE
+)
+# Universe/world a povídka belongs to: "Povídka patří do světa: <a href="svet/42-nadace">"
+_LEGIE_SVET_RE = _re.compile(
+	r'pat[řr][íi]\s+do\s+sv[ěe]ta:\s*<a[^>]*href="svet/[^"]+"[^>]*>([^<]+)</a>',
+	_re.IGNORECASE,
+)
+# Original (foreign) title + first-published date, inside <p id="jine_nazvy">.
+_LEGIE_ORIG_RE = _re.compile(
+	r"origin[áa]ln[íi]\s+n[áa]zev:\s*([^<\r\n]+)", _re.IGNORECASE
+)
+# A result row on a search-list page uses a RELATIVE href (no leading slash):
+#   <a href="kniha/3377-vladimir-...-neodvratna-zkaza">Neodvratná zkáza</a>
+_LEGIE_RESULT_RE = _re.compile(
+	r'<a[^>]*href="((?:povidka|kniha)/[^"]+)"[^>]*>([^<]{1,120})</a>', _re.IGNORECASE
+)
+
+
+def _collapse_ws(s: str) -> str:
+	"""Collapse internal whitespace and strip — HTML titles often wrap/spread."""
+	return _re.sub(r"\s+", " ", s).strip()
+
+
+def _parse_legie_detail(html: str) -> EnrichedMeta | None:
+	"""Parse a legie.info work-detail page into EnrichedMeta.
+
+	Returns None when the page has no parseable title (e.g. a bare search form
+	or a 'no results' page). ISBN/Year/Publisher are not available on legie.info.
+	"""
+	m = _LEGIE_TITLE_RE.search(html)
+	if m is None:
+		return None
+	em = EnrichedMeta(source="legie")
+	em.title = _collapse_ws(m.group(1))
+	# Authors: there may be several <h3> author lines (co-authors); de-dup in order.
+	authors = [_collapse_ws(a) for a in _LEGIE_AUTHOR_RE.findall(html) if _collapse_ws(a)]
+	em.authors = list(dict.fromkeys(authors))
+	svet = _LEGIE_SVET_RE.search(html)
+	if svet:
+		em.series = _collapse_ws(svet.group(1))
+	orig = _LEGIE_ORIG_RE.search(html)
+	if orig:
+		# Stash the original title in description — useful for LLM/cross-check;
+		# there is no dedicated field on EnrichedMeta.
+		em.description = f"originál: {_collapse_ws(orig.group(1))}"
+	if not em.title:
+		return None
+	return em
+
+
+def _legie_pick_from_list(html: str, title: str, *, floor: int = 70) -> str | None:
+	"""From a search-results page, return the best-matching relative href
+	('kniha/<slug>-<id>' / 'povidka/...') by fuzzy title, or None when nothing
+	reaches *floor*. The visible anchor text is the work's title."""
+	from rapidfuzz import fuzz
+
+	best: str | None = None
+	best_score = 0
+	for href, rtitle in _LEGIE_RESULT_RE.findall(html):
+		score = fuzz.token_sort_ratio(title.lower(), _collapse_ws(rtitle).lower())
+		if score >= floor and score > best_score:
+			best, best_score = href, score
+	return best
+
+
+def lookup_legie(*, title: str, author: str | None = None) -> EnrichedMeta | None:
+	"""Scrape legie.info for a work's identity (title + author + universe).
+
+	Two HTTP paths, mirroring lookup_databazeknih_isbn:
+	  1. A strong/unique match returns the work's detail page directly from the
+	     search endpoint → parse in one call.
+	  2. Otherwise the search returns a results list → pick the best fuzzy title
+	     match (>= 70) and fetch its detail page.
+
+	*author* is accepted for API symmetry but not added to the query: legie.info
+	searches a single text field and the title is the reliable key (adding an
+	author surname hurt recall during calibration, same as on databazeknih).
+
+	Returns None if no work can be confidently matched.
+	"""
+	from urllib.parse import quote_plus, urljoin
+
+	url = f"https://www.legie.info/index.php?search_text={quote_plus(title)}"
+	html = _http_get_html(url)
+	if html is None:
+		return None
+	# Direct hit: the search page IS the work's detail page.
+	em = _parse_legie_detail(html)
+	if em is not None:
+		return em
+	# Results list: fetch the best match's detail page.
+	href = _legie_pick_from_list(html, title)
+	if href is None:
+		return None
+	detail = _http_get_html(urljoin("https://www.legie.info/", href))
+	if detail is None:
+		return None
+	return _parse_legie_detail(detail)
+
+
+# ---------------------------------------------------------------------------
 # Top-level lookup with caching
 # ---------------------------------------------------------------------------
 
@@ -489,12 +609,14 @@ class Enricher:
 		rate_sec: float = 1.0,
 		*,
 		databazeknih_enabled: bool = False,
+		legie_enabled: bool = False,
 		openlibrary_enabled: bool = True,
 		google_books_enabled: bool = True,
 		negative_ttl_sec: float = 7 * 24 * 3600,
 	) -> None:
 		self.rate_sec = rate_sec
 		self.databazeknih_enabled = databazeknih_enabled
+		self.legie_enabled = legie_enabled
 		self.openlibrary_enabled = openlibrary_enabled
 		self.google_books_enabled = google_books_enabled
 		# A cached negative ("__NOT_FOUND__") older than this is treated as a
@@ -553,6 +675,11 @@ class Enricher:
 		# databazeknih by title (search). Best CZ/SK source + genres.
 		if result is None and self.databazeknih_enabled and title:
 			result = lookup_databazeknih(title=title, author=author, year=year)
+		# legie.info by title — catches CZ/SK sci-fi/fantasy short stories and
+		# series that databazeknih's book search does not index. No ISBN/Year here,
+		# so it only helps identity (title/author), not CZ-edition metadata.
+		if result is None and self.legie_enabled and title:
+			result = lookup_legie(title=title, author=author)
 		# ISBN-based lookups (authoritative when available).
 		if result is None and isbn:
 			if self.openlibrary_enabled:

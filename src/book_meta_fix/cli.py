@@ -165,6 +165,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--limit", type=int, default=None, help="Process only the first N books (for testing)")
 @click.option("--skip-enrich", is_flag=True, default=True, help="Skip online enrichment (offline mode)")
 @click.option("--databazeknih", "use_databazeknih", is_flag=True, help="Enable databazeknih.cz lookup (CZ/SK genres + metadata). Implies --no-skip-enrich.")
+@click.option("--legie", "use_legie", is_flag=True, help="Enable legie.info lookup (CZ/SK sci-fi/fantasy — short stories & series databazeknih misses). Implies --no-skip-enrich.")
 @click.option("--skip-verify", is_flag=True, help="Skip content verification")
 @click.option("--verify-ok", "verify_ok", is_flag=True, help="Audit: also verify books the detectors marked OK against their content. Reads every OK book's file (slower). A MISMATCH reclassifies it to NEEDS_REVIEW and seeks a fix (enrichment + LLM). Use periodically to catch corruption the structural detectors miss.")
 @click.option("--no-strict-verify", "no_strict_verify", is_flag=True, help="With --verify-ok: only reclassify a clear MISMATCH (fuzzy title < 0.5). By default (without this flag) UNCERTAIN (0.5–0.8) is also reclassified.")
@@ -182,7 +183,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--llm-burst", "llm_burst", type=float, default=None, help="Leaky-bucket burst capacity: how many LLM calls may start inside one interval (default 1 = pure even drip, no bunching — one call every --llm-min-interval seconds). This is a count-per-time limiter, not a concurrency cap. Raise only with confirmed rate headroom; a burst >1 fires multiple calls in the same second and trips Z.AI's dynamic RPM limit (429).")
 @click.option("--llm-rate-limit-base", "llm_rate_limit_base", type=float, default=None, help="Base seconds of the global cooldown applied when a 429 is seen (default 5). When ANY worker hits a 429, ALL workers pause this long; the cooldown escalates 5/10/20/... with consecutive 429s, honours the server Retry-After when longer, and is capped by --llm-rate-limit-max. Higher = safer but slower; lower = more 429 risk.")
 @click.option("--llm-rate-limit-max", "llm_rate_limit_max", type=float, default=None, help="Cap (seconds) on the escalating 429 cooldown (default 60). Prevents a sustained outage from parking workers indefinitely.")
-def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, skip_verify: bool, verify_ok: bool, no_strict_verify: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int, llm_min_interval: float | None, llm_model: str | None, llm_reasoning_effort: str | None, llm_thinking: str | None, no_llm_loop: bool, llm_flash_model: str | None, llm_final_model: str | None, llm_burst: float | None, llm_rate_limit_base: float | None, llm_rate_limit_max: float | None) -> None:
+def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, use_legie: bool, skip_verify: bool, verify_ok: bool, no_strict_verify: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int, llm_min_interval: float | None, llm_model: str | None, llm_reasoning_effort: str | None, llm_thinking: str | None, no_llm_loop: bool, llm_flash_model: str | None, llm_final_model: str | None, llm_burst: float | None, llm_rate_limit_base: float | None, llm_rate_limit_max: float | None) -> None:
 	"""Run full pipeline and generate a review.yaml for NEEDS_REVIEW books."""
 	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 
@@ -199,11 +200,17 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 	if use_databazeknih:
 		skip_enrich = False
 		cfg.databazeknih_enabled = True
+	# --legie opts the CZ/SK sci-fi/fantasy scraper in (also needs enrichment).
+	if use_legie:
+		skip_enrich = False
+		cfg.legie_enabled = True
 
 	console.print(f"[bold]Running pipeline[/bold] on [cyan]{cfg.library}[/cyan] ({workers} workers)", highlight=False)
 	if cfg.databazeknih_enabled:
 		console.print("  [cyan]databazeknih.cz[/cyan] lookup enabled (genres + metadata)")
 		console.print("  [cyan]cover replacement[/cyan] enabled (C11 generated / MISSING_COVER → databazeknih cover_url)")
+	if cfg.legie_enabled:
+		console.print("  [cyan]legie.info[/cyan] lookup enabled (sci-fi/fantasy — short stories & series)")
 	if verify_ok:
 		strict = not no_strict_verify
 		console.print(f"  [cyan]--verify-ok[/cyan] audit: OK books checked against content (strict={strict})")
@@ -217,6 +224,7 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 		enricher = Enricher(
 			cache_db=cfg.cache_db,
 			databazeknih_enabled=cfg.databazeknih_enabled,
+			legie_enabled=cfg.legie_enabled,
 			openlibrary_enabled=cfg.openlibrary_enabled,
 			google_books_enabled=cfg.google_books_enabled,
 			negative_ttl_sec=cfg.enrich_negative_ttl_sec,
@@ -408,6 +416,7 @@ def _print_fix_source_summary(stats: dict) -> None:
 		("  └ embedded OPF", stats.get("offline_embedded", 0), True),
 		("Online fixes", online_total, False),
 		("  └ databazeknih.cz", stats.get("online_databazeknih", 0), True),
+		("  └ legie.info", stats.get("online_legie", 0), True),
 		("  └ openlibrary.org", stats.get("online_openlibrary", 0), True),
 		("  └ Google Books", stats.get("online_google_books", 0), True),
 		("LLM fixes", llm_total, False),

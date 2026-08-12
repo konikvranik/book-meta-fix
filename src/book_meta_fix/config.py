@@ -34,6 +34,7 @@ class Config:
 	google_books_enabled: bool = True
 	openlibrary_enabled: bool = True
 	databazeknih_enabled: bool = False  # scraping, opt-in
+	legie_enabled: bool = False  # legie.info scraping (CZ/SK sci-fi/fantasy), opt-in
 
 	# API rate limit / timeout
 	api_rate_sec: float = DEFAULT_API_RATE_SEC
@@ -121,6 +122,8 @@ class Config:
 		# Enrichers (opt-in/out)
 		if (v := os.environ.get("BMF_DATABAZEKNIH")) is not None:
 			cfg.databazeknih_enabled = v.strip().lower() in ("1", "true", "yes", "on")
+		if (v := os.environ.get("BMF_LEGIE")) is not None:
+			cfg.legie_enabled = v.strip().lower() in ("1", "true", "yes", "on")
 		if (v := os.environ.get("BMF_OPENLIBRARY")) is not None:
 			cfg.openlibrary_enabled = v.strip().lower() in ("1", "true", "yes", "on")
 		if (v := os.environ.get("BMF_GOOGLE_BOOKS")) is not None:

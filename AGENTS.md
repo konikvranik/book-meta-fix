@@ -57,7 +57,7 @@ src/book_meta_fix/
   encoding.py      mojibake detection + repair
   isbn.py          ISBN extract/canonicalize/validate
   verifier.py      compare DB meta vs BOOK CONTENT (do NOT trust embedded)
-  enrichers.py     databazeknih.cz / OpenLibrary / Google Books → EnrichedMeta
+  enrichers.py     databazeknih.cz / legie.info / OpenLibrary / Google Books → EnrichedMeta
   pipeline.py      orchestration: ThreadPoolExecutor, per-book state machine
   llm.py           Z.AI provider: LeakyBucket + global 429 cooldown + reconcile_loop + tolerant JSON
   review_writer.py streaming review.yaml writer (queue + writer thread)
