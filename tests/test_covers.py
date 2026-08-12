@@ -69,6 +69,40 @@ class TestAnalyzeCover:
 		info = analyze_cover(cover)
 		assert info.is_generated is False
 
+	def test_solid_non_calibre_size_detected_as_generated(self, tmp_path: Path) -> None:
+		"""A generated cover at a non-default size is caught by colour analysis.
+
+		Regression for the main detection gap: only exactly-1200x1600 used to be
+		detected, so Calibre placeholders generated at other sizes (1240x1755,
+		876x1240, ...) were missed entirely even though they're solid bg + text.
+		"""
+		cover = tmp_path / "cover.jpg"
+		_solid_cover(cover, size=(876, 1240))  # a real Calibre variant size, not 1200x1600
+		info = analyze_cover(cover)
+		assert info.is_generated is True
+		assert (info.width, info.height) != (1200, 1600)  # caught despite non-default size
+		assert any("few_colours" in s for s in info.signals)
+
+	def test_colourful_non_calibre_size_not_detected(self, tmp_path: Path) -> None:
+		"""A colour-rich cover at a non-calibre size is not flagged (no false positive)."""
+		cover = tmp_path / "cover.jpg"
+		_gradient_cover(cover, size=(876, 1240))
+		info = analyze_cover(cover)
+		assert info.is_generated is False
+
+	def test_calibre_size_photo_not_detected(self, tmp_path: Path) -> None:
+		"""A photo-like cover at exactly 1200x1600 is NOT flagged just for the size.
+
+		Regression: the size signal used to fire on every 1200x1600 cover, which
+		false-positived ~1/3 of them (photos that merely share the default size).
+		The size signal is now gated on the few-colours check.
+		"""
+		cover = tmp_path / "cover.jpg"
+		_gradient_cover(cover, size=(1200, 1600))  # correct size, but colour-rich
+		info = analyze_cover(cover)
+		assert info.width == 1200 and info.height == 1600
+		assert info.is_generated is False
+
 	def test_nonexistent_file_returns_not_generated(self) -> None:
 		info = analyze_cover("/nonexistent/cover.jpg")
 		assert info.is_generated is False
