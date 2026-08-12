@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from book_meta_fix import enrichers
-from book_meta_fix.enrichers import Enricher, EnrichedMeta, lookup_databazeknih, lookup_databazeknih_isbn
+from book_meta_fix.enrichers import EnrichedMeta, Enricher, lookup_databazeknih, lookup_databazeknih_isbn
 
 FIX = Path(__file__).parent / "fixtures" / "databazeknih"
 

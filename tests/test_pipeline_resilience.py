@@ -6,7 +6,6 @@ whole pipeline — throwing away LLM tokens already spent on other books.
 """
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import patch
 
 from book_meta_fix.models import BookMeta, Verdict
@@ -116,8 +115,9 @@ class TestPipelineResilience:
 		"""The final log line reports the error count (smoke check that the
 		stats dict's 'errors' key is populated and logged)."""
 		books = [_make_book(1, "Boom")]
-		from book_meta_fix import pipeline as pmod
 		import logging
+
+		from book_meta_fix import pipeline as pmod
 
 		def fake_scan(library, cache=None):
 			return books

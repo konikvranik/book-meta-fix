@@ -38,7 +38,7 @@ class TestDeleteAction:
 		_seed_library(library, [1])
 		review = tmp_path / "review.yaml"
 		_write_review(review, [{
-			"id": 1, "path": f"author_1/book_1",
+			"id": 1, "path": "author_1/book_1",
 			"current": {"title": "~$doc"}, "proposed": {"reason": "word lock"},
 			"action": "delete",
 		}])

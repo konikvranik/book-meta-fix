@@ -93,8 +93,8 @@ class TestLlmNotCalledWhenOfflineSucceeds:
 		extracted = _extracted_with_text_title("Jádro Galaxie")
 		stats = _stats()
 
-		from book_meta_fix.enrichers import EnrichedMeta
 		from book_meta_fix import pipeline as pmod
+		from book_meta_fix.enrichers import EnrichedMeta
 
 		class StubEnricher:
 			def lookup(self, *, isbn=None, title=None, author=None, year=None):
@@ -202,8 +202,8 @@ class TestStatsSourceBreakdown:
 		meta = _book()
 		extracted = _extracted_with_text_title("Jádro Galaxie")
 		stats = _stats()
-		from book_meta_fix.enrichers import EnrichedMeta
 		from book_meta_fix import pipeline as pmod
+		from book_meta_fix.enrichers import EnrichedMeta
 
 		class StubEnricher:
 			def lookup(self, *, isbn=None, title=None, author=None, year=None):
@@ -231,8 +231,8 @@ class TestStatsSourceBreakdown:
 		meta = _book()
 		extracted = _extracted_with_text_title("Jádro Galaxie")
 		stats = _stats()
-		from book_meta_fix.enrichers import EnrichedMeta
 		from book_meta_fix import pipeline as pmod
+		from book_meta_fix.enrichers import EnrichedMeta
 
 		class StubEnricher:
 			def lookup(self, *, isbn=None, title=None, author=None, year=None):

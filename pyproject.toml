@@ -45,7 +45,13 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B"]
-ignore = ["E501"]  # line length handled by formatter
+# E501: line length handled by formatter
+# W191/E101: project uses tabs for indentation (see .editorconfig); these
+# pycodestyle rules flag every tab-indented line, so they are baseline noise.
+ignore = ["E501", "W191", "E101"]
+
+[tool.ruff.format]
+indent-style = "tab"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

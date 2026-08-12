@@ -10,12 +10,10 @@ import io
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 from PIL import Image
 
 from book_meta_fix.covers import analyze_cover, download_cover
 from book_meta_fix.models import BookMeta, Confidence, Verdict
-
 
 # ---------------------------------------------------------------------------
 # Helpers: create synthetic cover images on disk

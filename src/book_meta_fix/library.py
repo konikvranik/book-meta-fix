@@ -11,7 +11,6 @@ Results are cached in a SQLite database so repeated runs skip unchanged folders.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import sqlite3

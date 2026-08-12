@@ -105,7 +105,7 @@ class Config:
 	verify_fuzzy_weak: float = 0.5  # >= -> NEEDS_REVIEW (uncertain)
 
 	@classmethod
-	def from_env(cls) -> "Config":
+	def from_env(cls) -> Config:
 		# Load .env first (walking up from CWD), so its values populate
 		# os.environ as defaults. Real env vars still win because load_dotenv
 		# is called with override=False.

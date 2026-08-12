@@ -30,7 +30,7 @@ import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .detectors import _is_anonym_spelling
 from .isbn import canonicalize
@@ -487,7 +487,7 @@ def merge_folders(
 	loser_meta: BookMeta,
 	*,
 	dry_run: bool = True,
-	cache: "Cache | None" = None,
+	cache: Cache | None = None,
 	library: Path | None = None,
 ) -> MoveResult:
 	"""Merge *loser_meta*'s folder into *winner_folder* (a single book result).
@@ -563,7 +563,7 @@ def _place_clusters(
 	anchor: BookMeta | None,
 	library: Path,
 	dry_run: bool,
-	cache: "Cache | None",
+	cache: Cache | None,
 ) -> list[MoveResult]:
 	"""Place same-book clusters at/around *dest*.
 
@@ -616,7 +616,7 @@ def _resolve_at_dest(
 	library: Path,
 	*,
 	dry_run: bool,
-	cache: "Cache | None",
+	cache: Cache | None,
 ) -> list[MoveResult]:
 	"""Resolve where each *claimant* (batch books wanting *dest*) actually lands.
 
@@ -667,7 +667,7 @@ def organize(
 	needfix_dir: str = DEFAULT_NEEDFIX_DIR,
 	dry_run: bool = True,
 	ok_verdicts: tuple[Verdict, ...] = (Verdict.OK, Verdict.VERIFIED),
-	cache: "Cache | None" = None,
+	cache: Cache | None = None,
 	progress_callback: Any = None,
 ) -> list[MoveResult]:
 	"""Move OK books to pattern path and broken books to needfix/.

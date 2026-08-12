@@ -7,12 +7,11 @@ corruption that text_meta can only fix once the page text is available.
 """
 from __future__ import annotations
 
-import shutil
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
-from book_meta_fix.extractors import _catdoc_to_text, _ebook_convert_to_text, _epub_isbn_scan_text, extract, extract_txt
+from book_meta_fix.extractors import _catdoc_to_text, _ebook_convert_to_text, _epub_isbn_scan_text, extract_txt
 from book_meta_fix.isbn import extract_isbn
 
 

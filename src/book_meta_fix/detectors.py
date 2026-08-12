@@ -29,7 +29,7 @@ Corruption categories (from empirical study of the library):
 from __future__ import annotations
 
 import re
-from typing import Callable
+from collections.abc import Callable
 
 from .models import BookMeta, Confidence, Diagnosis, Verdict
 
