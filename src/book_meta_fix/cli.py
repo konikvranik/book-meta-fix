@@ -61,8 +61,6 @@ def scan(library: Path | None, no_cache: bool, limit: int | None) -> None:
 	"""Scan the library and print summary statistics."""
 	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 
-	from .library import iter_book_folders
-
 	cfg = Config.from_env()
 	if library is not None:
 		cfg.library = library
@@ -73,17 +71,19 @@ def scan(library: Path | None, no_cache: bool, limit: int | None) -> None:
 	if not no_cache:
 		cache = Cache(cfg.cache_db)
 
-	# Cheap pre-count of book folders so the bar has a total for ETA. This is a
-	# dir-only walk (no metadata parsing); the cost is small next to parsing.
-	total = sum(1 for _ in iter_book_folders(cfg.library))
+	# scan_library walks the tree once to learn the folder count, then reports
+	# (done, total) per folder — so the bar starts indeterminate and gains a
+	# total + ETA on the first callback (no separate pre-count walk needed).
 	with Progress(
 		SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-		BarColumn(), TextColumn("{task.completed}/{task.total}"),
+		BarColumn(complete_style="cyan", finished_style="cyan", pulse_style="cyan"), TextColumn("{task.completed}/{task.total}"),
 		TimeRemainingColumn(), console=console, transient=True,
 	) as progress:
-		task_id = progress.add_task("Scanning", total=total)
+		task_id = progress.add_task("Scanning", total=None)
 
-		def _cb(done: int) -> None:
+		def _cb(done: int, total: int) -> None:
+			if progress.tasks[0].total is None and total:
+				progress.update(task_id, total=total)
 			progress.update(task_id, completed=done)
 
 		books = scan_library(cfg.library, cache=cache, use_cache=not no_cache, progress_callback=_cb)
@@ -121,7 +121,21 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 	if not no_cache:
 		cache = Cache(cfg.cache_db)
 
-	books = scan_library(cfg.library, cache=cache, use_cache=not no_cache)
+	# Reading metadata for the whole library is I/O-heavy (especially on NFS);
+	# wrap it so there's no silent gap before the detect pass.
+	with Progress(
+		SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+		BarColumn(complete_style="magenta", finished_style="magenta", pulse_style="magenta"), TextColumn("{task.completed}/{task.total}"),
+		TimeRemainingColumn(), console=console, transient=True,
+	) as progress:
+		task_id = progress.add_task("Reading library", total=None)
+
+		def _scan_cb(done: int, total: int) -> None:
+			if progress.tasks[0].total is None and total:
+				progress.update(task_id, total=total)
+			progress.update(task_id, completed=done)
+
+		books = scan_library(cfg.library, cache=cache, use_cache=not no_cache, progress_callback=_scan_cb)
 	if limit is not None:
 		books = books[:limit]
 	if not books:
@@ -132,7 +146,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 	results = []
 	with Progress(
 		SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-		BarColumn(), TextColumn("{task.completed}/{task.total}"),
+		BarColumn(complete_style="magenta", finished_style="magenta", pulse_style="magenta"), TextColumn("{task.completed}/{task.total}"),
 		TimeRemainingColumn(), console=console, transient=True,
 	) as progress:
 		task_id = progress.add_task("Detecting", total=len(books))
@@ -263,7 +277,7 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 	progress = Progress(
 		SpinnerColumn(),
 		TextColumn("[progress.description]{task.description}"),
-		BarColumn(),
+		BarColumn(complete_style="blue", finished_style="blue", pulse_style="blue"),
 		TextColumn("{task.completed}/{task.total}"),
 		TimeRemainingColumn(),
 		console=console,
@@ -476,7 +490,7 @@ def apply(review_file: Path, library: Path | None, do_apply: bool) -> None:
 	cache: Cache | None = Cache(cfg.cache_db) if cfg.cache_db.is_file() else None
 	progress = Progress(
 		SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-		BarColumn(), TextColumn("{task.completed}/{task.total}"),
+		BarColumn(complete_style="green", finished_style="green", pulse_style="green"), TextColumn("{task.completed}/{task.total}"),
 		TimeRemainingColumn(), console=console, transient=True,
 	)
 	task_id = progress.add_task("Applying", total=None)
@@ -544,19 +558,33 @@ def organize(library: Path | None, no_cache: bool, limit: int | None, pattern: s
 	if not no_cache:
 		cache = Cache(cfg.cache_db)
 	try:
-		books = scan_library(cfg.library, cache=cache, use_cache=not no_cache)
+		from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
+
+		# Reading metadata for the whole library is the slow, silent gap before
+		# classify — wrap it in a bar so it isn't a dead spot.
+		with Progress(
+			SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+			BarColumn(complete_style="yellow", finished_style="yellow", pulse_style="yellow"), TextColumn("{task.completed}/{task.total}"),
+			TimeRemainingColumn(), console=console, transient=True,
+		) as progress:
+			task_id = progress.add_task("Reading library", total=None)
+
+			def _scan_cb(done: int, total: int) -> None:
+				if progress.tasks[0].total is None and total:
+					progress.update(task_id, total=total)
+				progress.update(task_id, completed=done)
+
+			books = scan_library(cfg.library, cache=cache, use_cache=not no_cache, progress_callback=_scan_cb)
 		if limit is not None:
 			books = books[:limit]
 
 		# Classify each book: detector rules + content verify for OK books (a
 		# MISMATCH demotes to NEEDS_REVIEW). verify() reads the book file, so on
 		# NFS this phase can take a while — wrap it in a progress bar.
-		from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
-
 		verdicts = []
 		with Progress(
 			SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-			BarColumn(), TextColumn("{task.completed}/{task.total}"),
+			BarColumn(complete_style="yellow", finished_style="yellow", pulse_style="yellow"), TextColumn("{task.completed}/{task.total}"),
 			TimeRemainingColumn(), console=console, transient=True,
 		) as progress:
 			task_id = progress.add_task("Classifying", total=len(books))
@@ -580,7 +608,7 @@ def organize(library: Path | None, no_cache: bool, limit: int | None, pattern: s
 		# down so organize can invalidate the folders it moves.
 		with Progress(
 			SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-			BarColumn(), TextColumn("{task.completed}/{task.total}"),
+			BarColumn(complete_style="yellow", finished_style="yellow", pulse_style="yellow"), TextColumn("{task.completed}/{task.total}"),
 			TimeRemainingColumn(), console=console, transient=True,
 		) as progress:
 			move_task = progress.add_task("Moving books", total=len(verdicts))
@@ -670,7 +698,23 @@ def epubgen(library: Path | None, no_cache: bool, limit: int | None, do_apply: b
 	cache: Cache | None = None
 	if not no_cache:
 		cache = Cache(cfg.cache_db)
-	books = scan_library(cfg.library, cache=cache, use_cache=not no_cache)
+	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
+
+	# Reading metadata for the whole library is the slow, silent gap before
+	# EPUB generation — wrap it in a bar so it isn't a dead spot.
+	with Progress(
+		SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+		BarColumn(complete_style="bright_cyan", finished_style="bright_cyan", pulse_style="bright_cyan"), TextColumn("{task.completed}/{task.total}"),
+		TimeRemainingColumn(), console=console, transient=True,
+	) as progress:
+		task_id = progress.add_task("Reading library", total=None)
+
+		def _scan_cb(done: int, total: int) -> None:
+			if progress.tasks[0].total is None and total:
+				progress.update(task_id, total=total)
+			progress.update(task_id, completed=done)
+
+		books = scan_library(cfg.library, cache=cache, use_cache=not no_cache, progress_callback=_scan_cb)
 	if cache is not None:
 		cache.close()
 	if limit is not None:
@@ -679,11 +723,10 @@ def epubgen(library: Path | None, no_cache: bool, limit: int | None, do_apply: b
 	results = []
 	skipped_not_ok = 0
 	skipped_has_epub = 0
-	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 
 	with Progress(
 		SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-		BarColumn(), TextColumn("{task.completed}/{task.total}"),
+		BarColumn(complete_style="bright_cyan", finished_style="bright_cyan", pulse_style="bright_cyan"), TextColumn("{task.completed}/{task.total}"),
 		TimeRemainingColumn(), console=console, transient=True,
 	) as progress:
 		task_id = progress.add_task("Generating EPUBs", total=len(books))
@@ -790,14 +833,28 @@ def crosscheck(library: Path | None, no_cache: bool, limit: int | None, needfix_
 	if not no_cache:
 		cache = Cache(cfg.cache_db)
 	try:
-		books = scan_library(cfg.library, cache=cache, use_cache=not no_cache)
+		# Reading metadata for the whole library is the slow, silent gap before
+		# cross-check — wrap it in a bar so it isn't a dead spot.
+		with Progress(
+			SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+			BarColumn(complete_style="bright_magenta", finished_style="bright_magenta", pulse_style="bright_magenta"), TextColumn("{task.completed}/{task.total}"),
+			TimeRemainingColumn(), console=console, transient=True,
+		) as progress:
+			task_id = progress.add_task("Reading library", total=None)
+
+			def _scan_cb(done: int, total: int) -> None:
+				if progress.tasks[0].total is None and total:
+					progress.update(task_id, total=total)
+				progress.update(task_id, completed=done)
+
+			books = scan_library(cfg.library, cache=cache, use_cache=not no_cache, progress_callback=_scan_cb)
 		if limit is not None:
 			books = books[:limit]
 
 		results: list = []
 		with Progress(
 			SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-			BarColumn(), TextColumn("{task.completed}/{task.total}"),
+			BarColumn(complete_style="bright_magenta", finished_style="bright_magenta", pulse_style="bright_magenta"), TextColumn("{task.completed}/{task.total}"),
 			TimeRemainingColumn(), console=console, transient=True,
 		) as progress:
 			task_id = progress.add_task("Cross-checking formats", total=len(books))
@@ -815,7 +872,7 @@ def crosscheck(library: Path | None, no_cache: bool, limit: int | None, needfix_
 			rogue_count = sum(len(r.rogues) for r in to_quarantine)
 			with Progress(
 				SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-				BarColumn(), TextColumn("{task.completed}/{task.total}"),
+				BarColumn(complete_style="bright_magenta", finished_style="bright_magenta", pulse_style="bright_magenta"), TextColumn("{task.completed}/{task.total}"),
 				TimeRemainingColumn(), console=console, transient=True,
 			) as progress:
 				qtask = progress.add_task("Quarantining rogues", total=rogue_count)
