@@ -107,7 +107,11 @@ class Cache:
 	"""Simple SQLite cache of parsed BookMeta, keyed by folder path + mtime.
 
 	On load, folders whose (path, mtime, size) match the cache are reused
-	without re-parsing. Use bump_schema() if the BookMeta shape changes.
+	without re-parsing. Mutating commands (apply, organize) must call
+	invalidate()/invalidate_many() for the folders they change, so the next
+	run re-parses them instead of trusting a possibly-stale mtime (e.g. on
+	NFS, where the client attribute cache can serve an old mtime for seconds
+	after a write).
 	"""
 
 	SCHEMA_VERSION = 1
@@ -160,6 +164,24 @@ class Cache:
 			(str(meta.path), mtime, size, payload, time.time()),
 		)
 
+	def invalidate(self, path: str | Path) -> None:
+		"""Drop the cached entry for *path* so the next scan re-parses it.
+
+		Safe to call with a path that has no cached entry (no-op). The key is
+		normalised to ``str(Path(path))`` to match get()/put().
+		"""
+		self.conn.execute("DELETE FROM books WHERE path = ?", (str(Path(path)),))
+
+	def invalidate_many(self, paths) -> None:
+		"""Drop cached entries for several paths at once."""
+		keys = [(str(Path(p)),) for p in paths]
+		if keys:
+			self.conn.executemany("DELETE FROM books WHERE path = ?", keys)
+
+	def clear(self) -> None:
+		"""Drop every cached entry (the table stays)."""
+		self.conn.execute("DELETE FROM books")
+
 	def commit(self) -> None:
 		self.conn.commit()
 
@@ -210,15 +232,26 @@ def _bookmeta_from_payload(payload: str) -> BookMeta:
 # ---------------------------------------------------------------------------
 
 
-def scan_library(library: Path, cache: Cache | None = None, use_cache: bool = True) -> list[BookMeta]:
+def scan_library(
+	library: Path,
+	cache: Cache | None = None,
+	use_cache: bool = True,
+	progress_callback=None,
+) -> list[BookMeta]:
 	"""Scan the whole library and return a list of BookMeta.
 
 	If *cache* is given and *use_cache* is True, unchanged folders are loaded
 	from the cache instead of re-parsing.
+
+	*progress_callback*, if given, is called as ``callback(done)`` after each
+	book folder is processed (cache hit or fresh parse), with the running count
+	(1-based). The caller knows the total (e.g. from a pre-count) and can drive
+	a progress bar with ETA.
 	"""
 	library = Path(library)
 	results: list[BookMeta] = []
 	n_cached = n_fresh = 0
+	done = 0  # folders processed (cache hit + fresh parse + errors)
 
 	for folder in iter_book_folders(library):
 		if use_cache and cache is not None:
@@ -226,16 +259,25 @@ def scan_library(library: Path, cache: Cache | None = None, use_cache: bool = Tr
 			if cached is not None:
 				results.append(cached)
 				n_cached += 1
+				done += 1
+				if progress_callback is not None:
+					progress_callback(done)
 				continue
 		try:
 			meta = read_book_folder(folder)
 		except Exception as e:  # noqa: BLE001
 			log.error("failed to read %s: %s", folder, e)
+			done += 1
+			if progress_callback is not None:
+				progress_callback(done)
 			continue
 		results.append(meta)
 		if cache is not None:
 			cache.put(meta)
 		n_fresh += 1
+		done += 1
+		if progress_callback is not None:
+			progress_callback(done)
 
 	if cache is not None:
 		cache.commit()

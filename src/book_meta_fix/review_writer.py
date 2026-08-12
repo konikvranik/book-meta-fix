@@ -20,13 +20,6 @@ Lifecycle
 3. ``finish()``: signal the writer to drain, then append any prior entries the
    new run did NOT process (so a ``--limit`` run doesn't drop user decisions
    for untouched books). On success, delete ``.bak``. Returns a summary.
-
-Auto-apply
----------
-When an ``apply_threshold`` is configured, the writer applies high-confidence
-proposals directly to metadata files (via writers.write_book_meta) and does
-NOT append those books to review.yaml — exactly the split that auto_apply_results
-implements, but interleaved with streaming instead of as a post-pass.
 """
 from __future__ import annotations
 
@@ -59,23 +52,16 @@ class ReviewWriter:
 		self,
 		output: Path,
 		library_root: Path | None = None,
-		*,
-		apply_threshold: str | None = None,
 	) -> None:
 		"""Set up the streaming writer.
 
 		*output*: review.yaml path. Moved to ``output + ".bak"`` on construction
 		(the original no longer exists at this path after construction).
 		*library_root*: used to render relative paths in entries.
-		*apply_threshold*: if given ('high'|'medium'|'low'), proposals at or
-		above this confidence are applied to metadata files directly (and
-		omitted from review.yaml). If None, every NEEDS_REVIEW book is appended.
 		"""
 		self.output = output
 		self.library_root = library_root
-		self.apply_threshold = apply_threshold
 		self._confidence_rank = {"high": 3, "medium": 2, "low": 1}
-		self._min_rank = self._confidence_rank.get(apply_threshold or "", 0)
 
 		# 1. Move output -> output.bak (overwrite a stale .bak if present).
 		bak = output.with_suffix(output.suffix + ".bak")
@@ -98,12 +84,9 @@ class ReviewWriter:
 		# 3. Start a fresh output with the header.
 		self._processed: set[Any] = set()
 		self._written = 0
-		self._apply_summary = {
-			"applied": 0,
-			"skipped_low_conf": 0,
-			"skipped_no_proposal": 0,
-			"skipped_user_decided": 0,
-		}
+		# Books skipped because the user already decided on them in a prior
+		# review.yaml (their `action` is preserved as-is on rerun).
+		self._skipped_user_decided = 0
 		output.write_text(_header(0), encoding="utf-8")
 
 		# 4. Writer thread + queue. The file is opened in append-binary mode and
@@ -146,7 +129,7 @@ class ReviewWriter:
 				self._queue.task_done()
 
 	def _handle(self, result: tuple) -> None:
-		"""Apply/auto-apply/append one book result."""
+		"""Append one book result to review.yaml (prior user decisions preserved)."""
 		meta, diag, verification = result[0], result[1], result[2]
 		enriched = result[3] if len(result) > 3 else None
 		extracted = verification.extracted if verification else None
@@ -162,28 +145,14 @@ class ReviewWriter:
 		prior_entry = self._prior.get(bid)
 
 		# Respect a prior user decision: if they already set action, keep the
-		# prior entry verbatim (refresh current) and don't re-apply/append-new.
+		# prior entry verbatim (refresh current) and append it unchanged.
 		if prior_entry is not None and prior_entry.get("action") is not None:
-			self._apply_summary["skipped_user_decided"] += 1
+			self._skipped_user_decided += 1
 			entry = dict(prior_entry)
 			entry["current"] = _build_current(meta)
 			self._append_entry(entry)
 			self._processed.add(bid)
 			return
-
-		# Auto-apply path: high-confidence proposal -> write metadata, skip review.
-		if self._min_rank > 0 and enriched is not None:
-			conf = self._confidence(enriched)
-			if self._confidence_rank.get(conf, 0) >= self._min_rank:
-				if self._apply_to_metadata(meta, enriched, diag):
-					self._apply_summary["applied"] += 1
-					self._processed.add(bid)
-					return
-				# write failed -> fall through to review so the human can fix
-			elif enriched is not None:
-				self._apply_summary["skipped_low_conf"] += 1
-		elif self._min_rank > 0 and enriched is None:
-			self._apply_summary["skipped_no_proposal"] += 1
 
 		# Build the review entry, carrying prior user edits if any.
 		entry = self._build_entry(meta, diag, extracted, enriched, prior_entry)
@@ -194,22 +163,22 @@ class ReviewWriter:
 		"""Confidence label from an EnrichedMeta.source ('llm:high'|'embedded'|...).
 
 		Returns one of the three rank labels used by _confidence_rank:
-		'high' | 'medium' | 'low'.
+		'high' | 'medium' | 'low'. The label drives the action: accept pre-fill
+		in review.yaml (see _build_entry): high pre-fills unconditionally,
+		medium only when the proposal preserves the book's identity.
 
-		High-confidence sources (only these pre-fill action: accept without
-		--auto-apply, and only these are auto-applied with --auto-apply high):
+		High-confidence sources (pre-fill action: accept):
 		  - 'embedded'    — OPF metadata, deterministic
 		  - 'databazeknih' — authoritative CZ/SK source, fuzzy-match-gated
 		  - 'llm:high'    — paid reasoning model, verify_proposal-validated
 
-		Medium-confidence (pre-filled when the proposal preserves title/author;
-		auto-applied with --auto-apply-threshold medium):
+		Medium-confidence (pre-fill accept only when title/author are unchanged):
 		  - 'openlibrary' / 'google_books' — international, weaker CZ coverage
 		  - 'llm:flash' / 'llm:loop' / 'llm:medium' — Flash model that passed
 		    verify_proposal (title+author fuzzy-match the book's page text)
-		  - 'content'     — text_meta heuristic; useful but not auto-apply-safe
+		  - 'content'     — text_meta heuristic; identity must be preserved
 
-		Low (never pre-filled, never auto-applied at high threshold):
+		Low (never pre-filled):
 		  - 'llm:low'     — proposal that failed verify_proposal
 		  - unknown sources
 		"""
@@ -227,35 +196,6 @@ class ReviewWriter:
 			return "medium"
 		return "low"
 
-	def _apply_to_metadata(self, meta: Any, enriched: Any, diag: Any = None) -> bool:
-		"""Apply *enriched* to metadata files. Returns True on success.
-
-		Also downloads a replacement cover when the enricher has a cover_url AND
-		the diagnosis is about the cover (C11 placeholder / MISSING_COVER). The
-		cover_url is not metadata — it's a one-time download to cover.jpg.
-		"""
-		try:
-			from .pipeline import _apply_enriched_to_meta
-			from .writers import write_book_meta
-
-			updated = _apply_enriched_to_meta(meta, enriched)
-			# Cover download: network side effect. Done before write_book_meta
-			# so the OPF <guide> cover reference is emitted for the new file.
-			# Gated on the cover categories across ALL diagnoses (a C2 book with
-			# a generated cover in diag.additional still gets it replaced here).
-			if getattr(enriched, "cover_url", None) and any(d.category in _COVER_CATEGORIES for d in all_diagnoses(diag)):
-				from pathlib import Path
-
-				from .covers import download_cover
-
-				cover_path = Path(updated.path) / "cover.jpg"
-				download_cover(enriched.cover_url, cover_path)
-			write_book_meta(updated, dry_run=False, backup=True)
-			return True
-		except Exception:  # noqa: BLE001
-			log.exception("auto-apply write failed for %s; falling back to review", getattr(meta, "path", "?"))
-			return False
-
 	def _build_entry(self, meta: Any, diag: Any, extracted: Any, enriched: Any, prior_entry: dict | None) -> dict:
 		"""Build a review entry dict, carrying over prior user edits."""
 		proposed = _build_proposed(meta, extracted, enriched, diag)
@@ -271,11 +211,8 @@ class ReviewWriter:
 				proposed = {**(proposed or {}), **extra}
 		# High-confidence enriched proposal (offline extraction, databazeknih,
 		# LLM high) -> pre-fill action: accept so the user can approve it in
-		# bulk via `bmf apply`. This only fires when --auto-apply is OFF (with
-		# --auto-apply on, high-confidence books are written directly and never
-		# reach review.yaml). Without a proposal there is nothing to accept.
-		# Threshold is fixed at 'high' (rank 3) regardless of the auto-apply
-		# threshold, because _min_rank is 0 when --auto-apply is off.
+		# bulk via `bmf apply`. Without a proposal there is nothing to accept.
+		# Threshold is fixed at 'high' (rank 3).
 		if action is None and enriched is not None and proposed:
 			conf = self._confidence(enriched)
 			if getattr(enriched, "identity_confirmed", False) or self._confidence_rank.get(conf, 0) >= self._confidence_rank["high"]:
@@ -373,8 +310,8 @@ class ReviewWriter:
 		After finish() the writer thread has stopped and the file is closed.
 		On success (no exception), the ``.bak`` is deleted unless *keep_backup*.
 
-		Returns a summary dict: {written, applied, skipped_*, remaining_count,
-		backup_path}.
+		Returns a summary dict: {written, skipped_user_decided,
+		remaining_count, backup_path}.
 		"""
 		# Tell the writer to drain and exit.
 		self._queue.put(_SENTINEL)
@@ -412,13 +349,9 @@ class ReviewWriter:
 
 		return {
 			"written": self._written,
-			"applied": self._apply_summary["applied"],
-			"skipped_low_conf": self._apply_summary["skipped_low_conf"],
-			"skipped_no_proposal": self._apply_summary["skipped_no_proposal"],
-			"skipped_user_decided": self._apply_summary["skipped_user_decided"],
-			"remaining_count": self._written - self._apply_summary["applied"],
+			"skipped_user_decided": self._skipped_user_decided,
+			"remaining_count": self._written,
 			"backup_path": backup_path,
-			"threshold": self.apply_threshold,
 		}
 
 	def _rewrite_header_count(self, count: int) -> None:

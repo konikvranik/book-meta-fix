@@ -24,7 +24,9 @@ dependencies = [
 # PDF metadata (pdfinfo/pdftotext are primary; pypdf is optional)
 pdf = ["pypdf>=4.0"]
 # LLM reconciliation via Z.AI (OpenAI-compatible client)
-llm = ["openai>=1.10"]
+# json-repair salvages invalid LLM JSON (unescaped quotes, control chars,
+# truncation) that the built-in sanitizer cannot recover.
+llm = ["openai>=1.10", "json-repair>=0.30"]
 dev = [
 	"pytest>=7.0",
 	"pytest-cov>=4.0",

@@ -491,11 +491,15 @@ class Enricher:
 		databazeknih_enabled: bool = False,
 		openlibrary_enabled: bool = True,
 		google_books_enabled: bool = True,
+		negative_ttl_sec: float = 7 * 24 * 3600,
 	) -> None:
 		self.rate_sec = rate_sec
 		self.databazeknih_enabled = databazeknih_enabled
 		self.openlibrary_enabled = openlibrary_enabled
 		self.google_books_enabled = google_books_enabled
+		# A cached negative ("__NOT_FOUND__") older than this is treated as a
+		# miss and re-queried. <= 0 keeps negatives forever (old behaviour).
+		self._negative_ttl = negative_ttl_sec
 		self._cache_conn: sqlite3.Connection | None = None
 		self._cache_lock = __import__("threading").Lock()
 		if cache_db is not None:
@@ -573,15 +577,22 @@ class Enricher:
 		return json.dumps({"isbn": isbn_c, "title": (title or "").lower()[:80], "author": (author or "").lower()[:50], "year": year}, sort_keys=True)
 
 	def _cache_get(self, key: str) -> EnrichedMeta | None | str:
-		"""Returns: EnrichedMeta on hit, None on miss, '__NOT_FOUND__' on cached negative."""
+		"""Returns: EnrichedMeta on hit, None on miss, '__NOT_FOUND__' on cached negative.
+
+		A cached negative older than the configured TTL is treated as a miss so
+		transient online failures (and pre-fix identities) get retried instead
+		of being pinned forever.
+		"""
 		if self._cache_conn is None:
 			return None
 		with self._cache_lock:
-			row = self._cache_conn.execute("SELECT payload FROM enrich_cache WHERE key = ?", (key,)).fetchone()
+			row = self._cache_conn.execute("SELECT payload, cached_at FROM enrich_cache WHERE key = ?", (key,)).fetchone()
 		if row is None:
 			return None  # miss
-		payload = row[0]
+		payload, cached_at = row
 		if payload == "__NOT_FOUND__":
+			if self._negative_ttl > 0 and (time.time() - cached_at) > self._negative_ttl:
+				return None  # expired negative -> re-query and re-cache
 			return "__NOT_FOUND__"
 		try:
 			d = json.loads(payload)

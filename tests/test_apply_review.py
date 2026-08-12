@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from book_meta_fix.covers import CoverInfo
+from book_meta_fix.library import Cache
 from book_meta_fix.pipeline import apply_review
 from book_meta_fix.review import parse_review
 
@@ -301,3 +302,106 @@ class TestPruning:
 		summary = apply_review(review, library, dry_run=True)
 		assert summary["pruned"] == 0
 		assert review.read_text(encoding="utf-8") == before
+
+
+class TestCacheInvalidation:
+	"""apply_review must drop the cached BookMeta for folders it writes/deletes,
+	so the next scan re-parses instead of serving the pre-apply entry."""
+
+	def _seed_and_prime(self, library: Path, bid: int, cache: Cache) -> Path:
+		from book_meta_fix.readers import read_book_folder
+
+		folder = library / f"a{bid}" / f"b{bid}"
+		folder.mkdir(parents=True)
+		(folder / "metadata.json").write_text("{}\n", encoding="utf-8")
+		(folder / f"b{bid}.epub").write_text("x", encoding="utf-8")
+		cache.put(read_book_folder(folder))
+		cache.commit()
+		return folder
+
+	def _has_row(self, cache: Cache, path: Path) -> bool:
+		return cache.conn.execute("SELECT 1 FROM books WHERE path = ?", (str(path),)).fetchone() is not None
+
+	def test_accept_invalidates_folder(self, tmp_path):
+		library = tmp_path / "lib"
+		cache = Cache(tmp_path / "cache.db")
+		folder = self._seed_and_prime(library, 1, cache)
+		assert self._has_row(cache, folder)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [{
+			"id": 1, "path": "a1/b1",
+			"current": {"title": "Old"}, "proposed": {"title": "New"}, "action": "accept",
+		}])
+		apply_review(review, library, dry_run=False, cache=cache)
+		assert not self._has_row(cache, folder)
+		cache.close()
+
+	def test_delete_invalidates_folder(self, tmp_path):
+		import os
+
+		library = tmp_path / "lib"
+		cache = Cache(tmp_path / "cache.db")
+		folder = self._seed_and_prime(library, 1, cache)
+		assert self._has_row(cache, folder)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [{
+			"id": 1, "path": "a1/b1",
+			"current": {"title": "~$x"}, "proposed": {}, "action": "delete",
+		}])
+		# Snapshot is written to CWD; run from tmp_path so it doesn't land in the repo.
+		cwd = os.getcwd()
+		os.chdir(tmp_path)
+		try:
+			apply_review(review, library, dry_run=False, cache=cache)
+		finally:
+			os.chdir(cwd)
+		assert not folder.exists()
+		assert not self._has_row(cache, folder)
+		cache.close()
+
+	def test_dry_run_does_not_invalidate(self, tmp_path):
+		"""Dry-run writes nothing — the cache entry must survive untouched."""
+		library = tmp_path / "lib"
+		cache = Cache(tmp_path / "cache.db")
+		folder = self._seed_and_prime(library, 1, cache)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [{
+			"id": 1, "path": "a1/b1",
+			"current": {"title": "Old"}, "proposed": {"title": "New"}, "action": "accept",
+		}])
+		apply_review(review, library, dry_run=True, cache=cache)
+		assert self._has_row(cache, folder)
+		cache.close()
+
+
+class TestApplyProgressCallback:
+	"""apply_review(progress_callback=cb) reports per-item progress as
+	(done, total); the bar's total equals the number of review entries."""
+
+	def test_callback_reports_done_and_total(self, tmp_path):
+		library = tmp_path / "lib"
+		_seed_library(library, [1, 2, 3])
+		review = tmp_path / "review.yaml"
+		_write_review(review, [
+			{"id": bid, "path": f"author_{bid}/book_{bid}", "action": "accept",
+			 "proposed": {"title": f"Book {bid}", "authors": [f"Author {bid}"]}}
+			for bid in (1, 2, 3)
+		])
+		seen: list[tuple[int, int]] = []
+		summary = apply_review(review, library, dry_run=False, progress_callback=lambda d, t: seen.append((d, t)))
+		assert summary["applied"] == 3
+		# Every reported total is the entry count.
+		assert all(t == 3 for _, t in seen)
+		# done is non-decreasing and ends at total.
+		dones = [d for d, _ in seen]
+		assert dones == sorted(dones)
+		assert dones[-1] == 3
+
+	def test_no_callback_is_default(self, tmp_path):
+		library = tmp_path / "lib"
+		_seed_library(library, [1])
+		review = tmp_path / "review.yaml"
+		_write_review(review, [{"id": 1, "path": "author_1/book_1", "action": "reject"}])
+		# Must not raise when progress_callback is omitted.
+		summary = apply_review(review, library, dry_run=True)
+		assert summary["rejected"] == 1

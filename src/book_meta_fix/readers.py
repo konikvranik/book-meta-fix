@@ -33,6 +33,14 @@ _TITLE_ID_RE = re.compile(r"^(?P<title>.*)\s+\((?P<id>\d+)\)\s*$")
 # Calibre NULL date marker
 _NULL_DATE = "0101-01-01"
 
+# Known ebook extensions, ordered by extraction preference (richest metadata
+# first). Hoisted to module level so other modules (e.g. mover.merge_folders)
+# can reuse the same set instead of re-hardcoding it.
+EBOOK_EXTS = (
+	".epub", ".pdf", ".mobi", ".azw", ".azw3", ".prc", ".pdb",
+	".doc", ".rtf", ".txt", ".lit", ".djvu", ".cbz", ".cbr", ".cb7",
+)
+
 
 def read_book_folder(folder: Path) -> BookMeta:
 	"""Read a single book folder, building a normalized BookMeta.
@@ -136,8 +144,7 @@ def _parse_path(folder: Path) -> BookMeta:
 
 def _collect_formats(folder: Path, meta: BookMeta) -> None:
 	"""List book file extensions present and pick a primary file for extraction."""
-	# Known ebook extensions, ordered by extraction preference (richest metadata first)
-	pref = [".epub", ".pdf", ".mobi", ".azw", ".azw3", ".prc", ".pdb", ".doc", ".rtf", ".txt", ".lit", ".djvu", ".cbz", ".cbr", ".cb7"]
+	pref = list(EBOOK_EXTS)
 	seen: list[str] = []
 	for entry in folder.iterdir():
 		if not entry.is_file():
