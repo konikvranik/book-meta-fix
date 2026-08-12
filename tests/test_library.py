@@ -196,10 +196,12 @@ class TestScanProgressCallback:
 
 		for i in range(3):
 			self._valid_book(tmp_path / "Author" / f"Title {i} ({i})")
-		seen: list[int] = []
-		books = scan_library(tmp_path, use_cache=False, progress_callback=lambda done: seen.append(done))
+		seen: list[tuple[int, int]] = []
+		books = scan_library(tmp_path, use_cache=False, progress_callback=lambda done, total: seen.append((done, total)))
 		assert len(books) == 3
-		assert seen == [1, 2, 3]  # strictly increasing, final == folder count
+		# strictly increasing done; total reported from the first call and constant
+		assert [d for d, _ in seen] == [1, 2, 3]
+		assert all(t == 3 for _, t in seen)
 
 	def test_callback_fires_per_folder_with_cache(self, tmp_path: Path) -> None:
 		from book_meta_fix.library import scan_library
@@ -209,10 +211,10 @@ class TestScanProgressCallback:
 		cache = Cache(tmp_path / "cache.db")
 		seen: list[int] = []
 		# First run: fresh parses.
-		scan_library(tmp_path, cache=cache, progress_callback=lambda d: seen.append(d))
+		scan_library(tmp_path, cache=cache, progress_callback=lambda d, total: seen.append(d))
 		# Second run: all cached, but callback still fires per folder.
 		seen.clear()
-		scan_library(tmp_path, cache=cache, progress_callback=lambda d: seen.append(d))
+		scan_library(tmp_path, cache=cache, progress_callback=lambda d, total: seen.append(d))
 		assert seen == [1, 2]
 		cache.close()
 

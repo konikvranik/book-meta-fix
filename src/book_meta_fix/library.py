@@ -242,17 +242,26 @@ def scan_library(
 	If *cache* is given and *use_cache* is True, unchanged folders are loaded
 	from the cache instead of re-parsing.
 
-	*progress_callback*, if given, is called as ``callback(done)`` after each
-	book folder is processed (cache hit or fresh parse), with the running count
-	(1-based). The caller knows the total (e.g. from a pre-count) and can drive
-	a progress bar with ETA.
+	*progress_callback*, if given, is called as ``callback(done, total)`` after
+	each book folder is processed (cache hit or fresh parse), with the running
+	1-based count and the total folder count. The folder list is materialized
+	upfront (one dir walk) precisely so *total* is known and reported from the
+	very first call — letting a progress bar show an ETA immediately instead of
+	pulsing blindly. This matches the ``(done, total)`` contract every other
+	long-running callback in the codebase already uses.
 	"""
 	library = Path(library)
+	# Materialize the folder list once so we know the total up front (lets the
+	# caller render a determinate bar with ETA from the first callback). The walk
+	# itself is cheap relative to parsing: readdir + a metadata-file existence
+	# check per folder — no per-file stat or metadata parse happens here yet.
+	folders = list(iter_book_folders(library))
+	total = len(folders)
 	results: list[BookMeta] = []
 	n_cached = n_fresh = 0
 	done = 0  # folders processed (cache hit + fresh parse + errors)
 
-	for folder in iter_book_folders(library):
+	for folder in folders:
 		if use_cache and cache is not None:
 			cached = cache.get(folder)
 			if cached is not None:
@@ -260,7 +269,7 @@ def scan_library(
 				n_cached += 1
 				done += 1
 				if progress_callback is not None:
-					progress_callback(done)
+					progress_callback(done, total)
 				continue
 		try:
 			meta = read_book_folder(folder)
@@ -268,7 +277,7 @@ def scan_library(
 			log.error("failed to read %s: %s", folder, e)
 			done += 1
 			if progress_callback is not None:
-				progress_callback(done)
+				progress_callback(done, total)
 			continue
 		results.append(meta)
 		if cache is not None:
@@ -276,7 +285,7 @@ def scan_library(
 		n_fresh += 1
 		done += 1
 		if progress_callback is not None:
-			progress_callback(done)
+			progress_callback(done, total)
 
 	if cache is not None:
 		cache.commit()
