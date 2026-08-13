@@ -184,9 +184,22 @@ def recover_cover_from_book(book_path: str | Path, dest_path: str | Path) -> boo
 	placeholder back out — and a generated extract can never become ``cover.jpg``
 	(the book would just re-fire C11 on the next scan).
 	"""
-	tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False, prefix="bmf-cover-")
-	tmp.close()
-	tmp_path = Path(tmp.name)
+	dest_path = Path(dest_path)
+	# Extract into a temp file in the DESTINATION's own directory, not the
+	# system /tmp, so the final move stays on one filesystem. os.replace uses
+	# rename(2), which fails with EXDEV ("Invalid cross-device link", Errno 18)
+	# across mounts — e.g. /tmp on the local disk vs the library on an NFS
+	# share. download_cover sidesteps the same trap by writing its .tmp beside
+	# the cover. If the dest dir is unusable we fall back to /tmp and rely on
+	# shutil.move's cross-device copy+unlink path below.
+	try:
+		fd, name = tempfile.mkstemp(suffix=".jpg", prefix="bmf-cover-", dir=str(dest_path.parent))
+		os.close(fd)
+		tmp_path = Path(name)
+	except OSError:
+		tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False, prefix="bmf-cover-")
+		tmp.close()
+		tmp_path = Path(tmp.name)
 	try:
 		if extract_cover_from_book(book_path, dest=tmp_path) is None:
 			return False  # calibre absent, or the file has no embedded cover
@@ -194,11 +207,12 @@ def recover_cover_from_book(book_path: str | Path, dest_path: str | Path) -> boo
 		if analyze_cover(tmp_path).is_generated:
 			log.info("extracted cover for %s looks generated; discarding", book_path)
 			return False
-		dest_path = Path(dest_path)
 		if dest_path.is_file():  # backup existing, mirroring download_cover
 			bak = dest_path.with_suffix(dest_path.suffix + ".bak")
 			shutil.copy2(dest_path, bak)
-		os.replace(tmp_path, dest_path)
+		# Atomic rename within one filesystem; on the /tmp fallback (or an odd
+		# overlay mount) shutil.move transparently falls back to copy + unlink.
+		shutil.move(str(tmp_path), str(dest_path))
 		log.info("cover extracted from book: %s -> %s", Path(book_path).name, dest_path.name)
 		return True
 	finally:
