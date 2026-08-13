@@ -87,6 +87,12 @@ class ReviewWriter:
 		# Books skipped because the user already decided on them in a prior
 		# review.yaml (their `action` is preserved as-is on rerun).
 		self._skipped_user_decided = 0
+		# Action breakdown of the entries THIS run freshly decided (not the
+		# user-already-decoded or carried-over ones). Drives the summary the
+		# user actually cares about: auto-fix (accept) vs manual review (null).
+		self._action_accept = 0
+		self._action_null = 0
+		self._action_other = 0
 		output.write_text(_header(0), encoding="utf-8")
 
 		# 4. Writer thread + queue. The file is opened in append-binary mode and
@@ -156,6 +162,16 @@ class ReviewWriter:
 
 		# Build the review entry, carrying prior user edits if any.
 		entry = self._build_entry(meta, diag, extracted, enriched, prior_entry)
+		# Tally the action this run decided (the prior-user-decided path above
+		# and the finish()-carryover loop are counted separately). This drives
+		# the summary's "auto-fix (accept) vs manual review (null)" breakdown.
+		a = entry.get("action")
+		if a == "accept":
+			self._action_accept += 1
+		elif a is None:
+			self._action_null += 1
+		else:
+			self._action_other += 1
 		self._append_entry(entry)
 		self._processed.add(bid)
 
@@ -359,6 +375,11 @@ class ReviewWriter:
 			"skipped_user_decided": self._skipped_user_decided,
 			"remaining_count": self._written,
 			"backup_path": backup_path,
+			# Action breakdown of this run's freshly-decided entries. These are
+			# what the workflow cares about: accept → `bmf apply`, null → human.
+			"action_accept": self._action_accept,
+			"action_null": self._action_null,
+			"action_other": self._action_other,
 		}
 
 	def _rewrite_header_count(self, count: int) -> None:
