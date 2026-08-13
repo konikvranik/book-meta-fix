@@ -275,6 +275,28 @@ class TestRecoverCoverFromBook:
 		assert bak.is_file()
 		assert bak.read_bytes() == old
 
+	def test_cross_device_move_still_succeeds(self, tmp_path: Path) -> None:
+		"""Regression: moving the extracted cover across mounts must not crash.
+
+		os.replace / os.rename fail with EXDEV (Errno 18, "Invalid cross-device
+		link") when source and dest are on different filesystems — seen in
+		production with the system /tmp on the local disk and the library on an
+		NFS share. The temp is now created beside the dest, and the move falls
+		back to a copy+unlink when a same-filesystem rename is impossible.
+		"""
+		import errno
+
+		dest = tmp_path / "cover.jpg"
+
+		def _cross_device(src, dst):
+			raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+		with patch("book_meta_fix.covers.extract_cover_from_book", side_effect=_extractor_writing(_gradient_cover)), \
+				patch("os.rename", side_effect=_cross_device):
+			ok = recover_cover_from_book(tmp_path / "book.epub", dest)
+		assert ok is True
+		assert dest.is_file()
+
 
 # ---------------------------------------------------------------------------
 # Detector rules
