@@ -37,7 +37,8 @@ Action = Literal["accept", "reject", "swap", "edit", "delete"]
 class ReviewItem:
 	"""One book entry in the review file."""
 
-	id: int | None
+	id: int | None  # calibre_id (informational, parsed from folder name)
+	uuid: str | None  # bmf identity — the carry-over/prune key
 	path: str  # relative to library root, for human readability
 	diagnosis: dict[str, Any]
 	current: dict[str, Any]
@@ -108,6 +109,7 @@ def _entry_dict(meta: BookMeta, diag: Diagnosis, extracted: Any, enriched: Any, 
 			proposed = {**(proposed or {}), **extra}
 	entry: dict[str, Any] = {
 		"id": meta.calibre_id,
+		"uuid": meta.uuid,
 		"path": _relative_path(meta, library_root),
 		"diagnosis": {
 			"category": diag.category,
@@ -327,6 +329,7 @@ def parse_review(path: str | Path) -> list[ReviewItem]:
 	return [
 		ReviewItem(
 			id=entry.get("id"),
+			uuid=entry.get("uuid"),
 			path=entry.get("path", ""),
 			diagnosis=entry.get("diagnosis") or {},
 			# diagnoses falls back to the single primary diagnosis for older
@@ -342,18 +345,19 @@ def parse_review(path: str | Path) -> list[ReviewItem]:
 	]
 
 
-def prune_review(path: str | Path, drop_ids: set) -> int:
-	"""Rewrite review.yaml in place, dropping entries whose ``id`` is in
-	*drop_ids*. Returns the number of entries kept.
+def prune_review(path: str | Path, drop_uuids: set) -> int:
+	"""Rewrite review.yaml in place, dropping entries whose ``uuid`` is in
+	*drop_uuids*. Returns the number of entries kept.
 
 	Used by apply_review to remove successfully-applied entries so the file
 	reflects only remaining work (and subsequent apply runs don't re-process
-	already-committed books). Entries with id ``None`` are always kept — they
-	cannot be matched safely. Re-rendered via the standard renderer, so inline
-	comments are not preserved (the file is otherwise machine-generated).
+	already-committed books). Entries without a ``uuid`` (e.g. leftover legacy
+	entries from before uuid keying) are always kept — they cannot be matched
+	safely. Re-rendered via the standard renderer, so inline comments are not
+	preserved (the file is otherwise machine-generated).
 	"""
 	entries = _load_raw_entries(path)
-	kept = [e for e in entries if e.get("id") is None or e.get("id") not in drop_ids]
+	kept = [e for e in entries if e.get("uuid") is None or e.get("uuid") not in drop_uuids]
 	header = _header(len(kept))
 	body = "\n".join(_render_entry(e) for e in kept)
 	if body:

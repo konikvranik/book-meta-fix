@@ -147,15 +147,19 @@ class ReviewWriter:
 		if not include:
 			return
 
-		bid = meta.calibre_id
+		bid = meta.uuid
 		prior_entry = self._prior.get(bid)
 
 		# Respect a prior user decision: if they already set action, keep the
-		# prior entry verbatim (refresh current) and append it unchanged.
+		# prior entry verbatim (refresh current AND path) and append it.
+		# Path is refreshed because organize may have relocated the folder since
+		# the prior run (uuid matched it, but apply still needs the live path to
+		# find the book on disk).
 		if prior_entry is not None and prior_entry.get("action") is not None:
 			self._skipped_user_decided += 1
 			entry = dict(prior_entry)
 			entry["current"] = _build_current(meta)
+			entry["path"] = _relative_path(meta, self.library_root)
 			self._append_entry(entry)
 			self._processed.add(bid)
 			return
@@ -266,6 +270,7 @@ class ReviewWriter:
 			action = "accept"
 		entry: dict[str, Any] = {
 			"id": meta.calibre_id,
+			"uuid": meta.uuid,
 			"path": _relative_path(meta, self.library_root),
 			"diagnosis": {
 				"category": diag.category,
@@ -398,7 +403,14 @@ class ReviewWriter:
 
 	@staticmethod
 	def _load_prior(bak: Path) -> dict[Any, dict]:
-		"""Load a backup review.yaml into {id: entry_dict}, best-effort."""
+		"""Load a backup review.yaml into {uuid: entry_dict}, best-effort.
+
+		Keyed by the book uuid (the stable identity that survives organize
+		moves), NOT calibre_id — so a book whose folder was relocated between
+		runs still keeps its prior user decision. Entries without a uuid (legacy
+		review.yaml from before uuid keying) cannot be matched and are skipped;
+		they are re-decided fresh once (clean break).
+		"""
 		import yaml
 
 		try:
@@ -417,6 +429,6 @@ class ReviewWriter:
 			else:
 				continue
 			for entry in items:
-				if isinstance(entry, dict) and entry.get("id") is not None:
-					prior[entry["id"]] = entry
+				if isinstance(entry, dict) and entry.get("uuid") is not None:
+					prior[entry["uuid"]] = entry
 		return prior

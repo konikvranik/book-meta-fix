@@ -125,8 +125,29 @@ src/book_meta_fix/
   unescaped quotes / control chars / truncation. The `json_repair` import is
   graceful (None if absent) — keep it optional.
 - **`review.yaml` streams** (`review_writer.py`): one YAML document per book,
-  appended as each finishes. `.bak` carry-over preserves prior user decisions.
-  `bmf apply` reads both the multi-doc and legacy single-list forms.
+  appended as each finishes. `.bak` carry-over preserves prior user decisions,
+  matched by the book's **uuid** (NOT calibre_id) so a decision survives an
+  `organize` folder move. `bmf apply` reads both the multi-doc and legacy
+  single-list forms.
+- **The book `uuid` is the unified identity** (`models.BookMeta.uuid`): it lives
+  in `metadata.json` (source of truth), mirrored to `metadata.opf`, and is the
+  single key for **carry-over** (`.bak` match), **pruning** (`apply` drops
+  applied entries by uuid), and the **cache PK** (`library.Cache`, looked up by
+  path but keyed by uuid so a row follows a moved book). `calibre_id` is now
+  informational only (parsed from the folder name). The uuid is **lazy-minted**
+  the first time a book is needed — `scan_library` calls `writers.ensure_uuid`
+  on a cache miss, `apply` mints before writing — via a *minimal, key-preserving
+  inject* (loads the manifest, sets only `uuid`). `write_book_meta` is itself a
+  **surgical merge** onto the existing `metadata.json`: it overlays only the
+  fields bmf manages and preserves ABS-owned fields it does not model
+  (narrators, chapters, asin, explicit, abridged, publishedDate, ...); never
+  rebuild the manifest from a fixed dict (that nulled those fields on every
+  apply). `metadata.opf` is regenerated wholesale (a derived mirror). Side
+  effect: the first scan
+  after this change writes a uuid into every uuid-less book's `metadata.json`
+  (identity augmentation, not a content mutation; deliberately not dry-run
+  gated). A genuinely legacy `review.yaml` whose entries predate uuids cannot be
+  matched and is re-decided fresh (clean break).
 - **Every command runs an internal scan** via the SQLite cache — `bmf scan` is
   only for summary stats, not a prerequisite.
 - **Every mutating command is dry-run by default** (`--apply` to write).

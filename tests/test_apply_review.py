@@ -248,8 +248,8 @@ class TestPruning:
 		self._seed_book(library, 2)
 		review = tmp_path / "review.yaml"
 		_write_review(review, [
-			{"id": 1, "path": "a1/b1", "current": {"title": "A"}, "proposed": {}, "action": "accept"},
-			{"id": 2, "path": "a2/b2", "current": {"title": "B"}, "proposed": {}, "action": "accept"},
+			{"id": 1, "uuid": "u1", "path": "a1/b1", "current": {"title": "A"}, "proposed": {}, "action": "accept"},
+			{"id": 2, "uuid": "u2", "path": "a2/b2", "current": {"title": "B"}, "proposed": {}, "action": "accept"},
 		])
 		summary = apply_review(review, library, dry_run=False)
 		assert summary["applied"] == 2
@@ -264,9 +264,9 @@ class TestPruning:
 		self._seed_book(library, 3)
 		review = tmp_path / "review.yaml"
 		_write_review(review, [
-			{"id": 1, "path": "a1/b1", "current": {"title": "A"}, "proposed": {}, "action": "accept"},
-			{"id": 2, "path": "a2/b2", "current": {"title": "B"}, "proposed": {}, "action": None},
-			{"id": 3, "path": "a3/b3", "current": {"title": "C"}, "proposed": {}, "action": "reject"},
+			{"id": 1, "uuid": "u1", "path": "a1/b1", "current": {"title": "A"}, "proposed": {}, "action": "accept"},
+			{"id": 2, "uuid": "u2", "path": "a2/b2", "current": {"title": "B"}, "proposed": {}, "action": None},
+			{"id": 3, "uuid": "u3", "path": "a3/b3", "current": {"title": "C"}, "proposed": {}, "action": "reject"},
 		])
 		summary = apply_review(review, library, dry_run=False)
 		assert summary["applied"] == 1
@@ -282,8 +282,8 @@ class TestPruning:
 		self._seed_book(library, 1)
 		review = tmp_path / "review.yaml"
 		_write_review(review, [
-			{"id": 1, "path": "a1/b1", "current": {"title": "A"}, "proposed": {}, "action": "accept"},
-			{"id": 9, "path": "nope/missing", "current": {"title": "X"}, "proposed": {}, "action": "accept"},
+			{"id": 1, "uuid": "u1", "path": "a1/b1", "current": {"title": "A"}, "proposed": {}, "action": "accept"},
+			{"id": 9, "uuid": "u9", "path": "nope/missing", "current": {"title": "X"}, "proposed": {}, "action": "accept"},
 		])
 		summary = apply_review(review, library, dry_run=False)
 		assert summary["applied"] == 1
@@ -303,6 +303,22 @@ class TestPruning:
 		assert summary["pruned"] == 0
 		assert review.read_text(encoding="utf-8") == before
 
+	def test_null_calibre_id_with_uuid_is_pruned(self, tmp_path):
+		"""Regression for the original bug: a book with calibre_id=None (~16 real
+		books in the library) was never pruned because pruning keyed on id and
+		guarded `if item.id is not None`. Now that pruning keys on uuid, a null-id
+		book that carries a uuid IS pruned like any other."""
+		library = tmp_path / "lib"
+		self._seed_book(library, 1)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [
+			{"id": None, "uuid": "u-noid", "path": "a1/b1", "current": {"title": "A"}, "proposed": {}, "action": "accept"},
+		])
+		summary = apply_review(review, library, dry_run=False)
+		assert summary["applied"] == 1
+		assert summary["pruned"] == 1
+		assert parse_review(review) == []
+
 
 class TestCacheInvalidation:
 	"""apply_review must drop the cached BookMeta for folders it writes/deletes,
@@ -315,7 +331,9 @@ class TestCacheInvalidation:
 		folder.mkdir(parents=True)
 		(folder / "metadata.json").write_text("{}\n", encoding="utf-8")
 		(folder / f"b{bid}.epub").write_text("x", encoding="utf-8")
-		cache.put(read_book_folder(folder))
+		meta = read_book_folder(folder)
+		meta.uuid = f"u{bid}"  # uuid is the cache PK
+		cache.put(meta)
 		cache.commit()
 		return folder
 

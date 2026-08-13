@@ -15,6 +15,7 @@ import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from lxml import etree
@@ -30,6 +31,15 @@ NS_DC = "http://purl.org/dc/elements/1.1/"
 def write_book_meta(meta: BookMeta, *, dry_run: bool = True, backup: bool = True) -> dict:
 	"""Write both metadata.json and metadata.opf for *meta*.
 
+	metadata.json is a SURGICAL MERGE: bmf overlays only the fields it manages
+	(title, authors, isbn, year, genres, tags, series, publisher, language,
+	description, subtitle, uuid) onto the existing manifest, so ABS-owned fields
+	bmf does not model (narrators, chapters, asin, explicit, abridged,
+	publishedDate, ...) survive a metadata edit instead of being nulled —
+	adding an ISBN must not wipe the narrators. metadata.opf is regenerated
+	wholesale (a derived mirror for Calibre/Kavita; it cannot represent those
+	ABS fields anyway).
+
 	Returns a dict describing what was written (or would be, if dry_run).
 	"""
 	folder = Path(meta.path)
@@ -41,7 +51,9 @@ def write_book_meta(meta: BookMeta, *, dry_run: bool = True, backup: bool = True
 	json_path = folder / "metadata.json"
 	opf_path = folder / "metadata.opf"
 
-	json_payload = _render_json(meta)
+	# Overlay bmf-managed fields onto the existing manifest (preserves the rest).
+	manifest = {**_load_manifest(json_path), **_json_overlay(meta)}
+	json_payload = json.dumps(manifest, ensure_ascii=False, indent=2)
 	opf_payload = _render_opf(meta)
 
 	if dry_run:
@@ -57,6 +69,88 @@ def write_book_meta(meta: BookMeta, *, dry_run: bool = True, backup: bool = True
 	_atomic_write(opf_path, opf_payload)
 	result["written"] = [str(json_path), str(opf_path)]
 	return result
+
+
+def ensure_uuid(meta: BookMeta, *, dry_run: bool = False) -> str | None:
+	"""Ensure *meta* carries a stable uuid, persisting it to disk if missing.
+
+	The uuid is bmf's per-book identity, shared by the review system (carry-
+	over / prune) and the cache (PK). It is minted **lazily** — the first time
+	a book is needed (a cache miss during scan, or an apply) — and written into
+	both ``metadata.json`` (source of truth) and ``metadata.opf``.
+
+	Like ``write_book_meta`` (but narrower) this is a key-preserving injection:
+	it loads the existing manifest, sets ONLY the ``uuid`` key, and writes it
+	back, so ABS-owned fields bmf does not model (narrators, chapters, asin,
+	explicit, abridged, ...) survive. ``write_book_meta`` itself now merges its
+	field overlay onto the existing manifest too, so applies no longer clobber
+	those fields either; this helper exists only because minting a uuid should
+	not require rendering the whole manifest.
+
+	Returns ``meta.uuid``. In dry_run nothing is written (the uuid is still
+	minted onto *meta* so an in-memory caller can proceed). Returns ``None``
+	if the folder does not exist.
+	"""
+	folder = Path(meta.path)
+	if not folder.is_dir():
+		return None
+	if meta.uuid:
+		return meta.uuid
+
+	uuid = str(uuid4())
+	json_path = folder / "metadata.json"
+	opf_path = folder / "metadata.opf"
+
+	if not dry_run:
+		# metadata.json: load, set uuid, write back preserving every other key.
+		if json_path.is_file():
+			_backup(json_path)
+			data = json.loads(json_path.read_text(encoding="utf-8"))
+		else:
+			data = {}
+		if not isinstance(data, dict):  # corrupt/unexpected — don't clobber
+			data = {}
+		data["uuid"] = uuid
+		_atomic_write(json_path, json.dumps(data, ensure_ascii=False, indent=2))
+
+		# metadata.opf: inject/refresh the uuid identifier. Best-effort — the
+		# json above is authoritative, so an opf failure is only a warning.
+		if opf_path.is_file():
+			try:
+				_inject_opf_uuid(opf_path, uuid)
+			except Exception:  # noqa: BLE001
+				log.warning("could not inject uuid into %s; json remains authoritative", opf_path, exc_info=True)
+
+	meta.uuid = uuid
+	return uuid
+
+
+def _inject_opf_uuid(opf_path: Path, uuid: str) -> None:
+	"""Set ``<dc:identifier opf:scheme="uuid">`` in an existing OPF to *uuid*.
+
+	Updates the text if a uuid identifier already exists, otherwise appends a
+	new one to ``<metadata>``. Backed up and rewritten in place. lxml round-
+	trips/reformats the file, which is fine — the opf is machine-generated and
+	kept only for Calibre/Kavita compatibility.
+	"""
+	_backup(opf_path)
+	tree = etree.parse(str(opf_path))
+	md = tree.find(f"{{{NS_OPF}}}metadata")
+	if md is None:
+		return
+	uuid_el = None
+	for ident in md.findall(f"{{{NS_DC}}}identifier"):
+		if ident.get(f"{{{NS_OPF}}}scheme") == "uuid":
+			uuid_el = ident
+			break
+	if uuid_el is None:
+		uuid_el = etree.SubElement(
+			md, f"{{{NS_DC}}}identifier",
+			attrib={f"{{{NS_OPF}}}scheme": "uuid", "id": "uuid_id"},
+		)
+	uuid_el.text = uuid
+	xml = etree.tostring(tree, xml_declaration=True, encoding="utf-8", pretty_print=True)
+	_atomic_write(opf_path, xml.decode("utf-8"))
 
 
 # ---------------------------------------------------------------------------
@@ -81,28 +175,57 @@ def _sanitize_xml_text(s: str | None) -> str | None:
 	return re.sub(r"[^\x09\x0a\x0d\x20-\ud7ff\ue000-\ufffd]", "", s)
 
 
-def _render_json(meta: BookMeta) -> str:
-	"""Render BookMeta back to the Audiobookshelf metadata.json schema."""
-	data = {
+def _load_manifest(json_path: Path) -> dict[str, Any]:
+	"""Read the existing metadata.json as a dict, or {} if missing/corrupt.
+
+	write_book_meta merges its field overlay onto this so a metadata edit
+	preserves ABS-owned keys bmf does not model (narrators, chapters, asin, ...).
+	"""
+	if not json_path.is_file():
+		return {}
+	try:
+		data = json.loads(json_path.read_text(encoding="utf-8"))
+	except (json.JSONDecodeError, OSError):
+		return {}
+	return data if isinstance(data, dict) else {}
+
+
+def _json_overlay(meta: BookMeta) -> dict[str, Any]:
+	"""The bmf-managed subset of the Audiobookshelf manifest, as a dict.
+
+	Only fields bmf models and may edit. Deliberately does NOT include
+	narrators/chapters/asin/explicit/abridged/publishedDate: those are ABS-owned
+	and must be preserved by merging onto the existing manifest (see
+	write_book_meta / _load_manifest) — emitting them here would overwrite real
+	values with defaults.
+	"""
+	return {
 		"tags": meta.tags,
-		"chapters": [],
+		# uuid is the stable per-book identity; persisted to the source of truth
+		# so it survives folder renames/moves (organize). Read back by
+		# _fill_from_json, so it round-trips instead of being regenerated.
+		"uuid": meta.uuid,
 		"title": _sanitize_xml_text(meta.title),
 		"subtitle": _sanitize_xml_text(meta.subtitle),
 		"authors": [_sanitize_xml_text(a) for a in meta.authors] if meta.authors else [],
-		"narrators": [],
 		"series": meta.series if isinstance(meta.series, list) else [],
 		"genres": meta.genres,
 		"publishedYear": str(meta.year) if meta.year else None,
-		"publishedDate": None,
 		"publisher": _sanitize_xml_text(meta.publisher),
 		"description": _sanitize_xml_text(meta.description),
 		"isbn": meta.isbn,
-		"asin": None,
 		"language": meta.language,
-		"explicit": False,
-		"abridged": False,
 	}
-	return json.dumps(data, ensure_ascii=False, indent=2)
+
+
+def _render_json(meta: BookMeta) -> str:
+	"""Render the bmf-managed manifest fields as JSON (no existing-file merge).
+
+	Lossy by design (drops ABS-owned fields bmf does not model) — use only for
+	previews/tests. The real write path is write_book_meta, which merges
+	_json_overlay onto the existing manifest.
+	"""
+	return json.dumps(_json_overlay(meta), ensure_ascii=False, indent=2)
 
 
 # ---------------------------------------------------------------------------

@@ -167,6 +167,11 @@ def _fill_from_json(path: Path, meta: BookMeta) -> None:
 	"""Populate BookMeta from a metadata.json (Audiobookshelf manifest)."""
 	data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
 
+	# bmf uuid: the stable per-book identity (source of truth lives in the
+	# manifest). Minted lazily by writers.ensure_uuid the first time a book is
+	# needed by the cache or apply; once present it round-trips forever.
+	meta.uuid = data.get("uuid")
+
 	authors = data.get("authors") or []
 	# ABS often stores translators alongside real authors; we keep them all here
 	# and let detectors/verifier separate translators later.
@@ -260,6 +265,15 @@ def _fill_from_opf(path: Path, meta: BookMeta) -> None:
 					meta.calibre_id = int(ident.text)
 				except ValueError:
 					pass
+				break
+
+	# bmf uuid from <dc:identifier opf:scheme="uuid"> — fallback only, used
+	# when the manifest had none (e.g. a book never written by bmf). The json
+	# value above is authoritative; we never overwrite a populated meta.uuid.
+	if meta.uuid is None:
+		for ident in md.findall("dc:identifier", NS):
+			if ident.get(f"{{{NS['opf']}}}scheme") == "uuid" and ident.text:
+				meta.uuid = ident.text.strip()
 				break
 
 	# Series: <meta name="calibre:series" content="..."/> + calibre:series_index

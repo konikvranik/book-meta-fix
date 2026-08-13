@@ -264,9 +264,10 @@ class TestAnonymCanonicalFolder:
 
 
 class TestCacheInvalidation:
-	"""organize invalidates the cache for folders it actually moves (both the
-	source it moved from and the destination it moved to), so a later scan
-	re-parses them. Dry runs and no-op moves leave the cache untouched."""
+	"""organize REPOINTS the cache row for a pure move (the metadata is
+	unchanged, only the location moved), so the row follows the book source->
+	destination and a later scan reuses it. Merges still drop both ends (their
+	metadata changed). Dry runs and no-op moves leave the cache untouched."""
 
 	def _has_row(self, cache: Cache, path: str | Path) -> bool:
 		return cache.conn.execute("SELECT 1 FROM books WHERE path = ?", (str(Path(path)),)).fetchone() is not None
@@ -277,19 +278,21 @@ class TestCacheInvalidation:
 		path.mkdir(parents=True, exist_ok=True)
 		# metadata.json (not an empty .opf) so read_book_folder parses cleanly.
 		(path / "metadata.json").write_text("{}\n", encoding="utf-8")
-		cache.put(read_book_folder(path))
+		meta = read_book_folder(path)
+		meta.uuid = f"u-{path.name}"  # uuid is the cache PK
+		cache.put(meta)
 		cache.commit()
 
 	def _seed_stale_row(self, cache: Cache, path: Path) -> None:
 		"""Insert a cache row for *path* without a real folder (simulates a stale
 		entry left by a previous occupant of that path, e.g. a needfix round-trip)."""
 		cache.conn.execute(
-			"INSERT INTO books(path, mtime, size, payload, scanned_at) VALUES (?,?,?,?,?)",
-			(str(path), 0.0, 0, "{}", 0.0),
+			"INSERT INTO books(uuid, path, mtime, size, payload, scanned_at) VALUES (?,?,?,?,?,?)",
+			(f"stale-{path.name}", str(path), 0.0, 0, "{}", 0.0),
 		)
 		cache.commit()
 
-	def test_move_invalidates_source_and_destination(self, tmp_path: Path) -> None:
+	def test_move_repoints_source_to_destination(self, tmp_path: Path) -> None:
 		cache = Cache(tmp_path / "cache.db")
 		src = tmp_path / "Author" / "Title (1)"
 		self._prime(cache, src)
@@ -303,8 +306,8 @@ class TestCacheInvalidation:
 		results = organize([(meta, Verdict.NEEDS_REVIEW)], tmp_path, dry_run=False, cache=cache)
 
 		assert results[0].action == "moved"
-		assert not self._has_row(cache, src)  # moved-from entry dropped
-		assert not self._has_row(cache, dest)  # stale moved-to entry cleared
+		assert not self._has_row(cache, src)  # moved-from path no longer has a row
+		assert self._has_row(cache, dest)     # ...the row followed the book to dest
 		cache.close()
 
 	def test_dry_run_does_not_invalidate(self, tmp_path: Path) -> None:
@@ -364,7 +367,8 @@ def _make_book(
 
 	folder = lib / author / f"{title} ({cid})"
 	folder.mkdir(parents=True)
-	md: dict = {"title": title, "authors": [author]}
+	# uuid is the cache PK; give each test book a stable unique one (cid-derived).
+	md: dict = {"title": title, "authors": [author], "uuid": f"u{cid}"}
 	if isbn:
 		md["isbn"] = isbn
 	if year is not None:

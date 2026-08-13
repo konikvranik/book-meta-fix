@@ -117,7 +117,10 @@ def _prime_cache(cache: Cache, folder: Path) -> None:
 	"""Create a real book folder and put its BookMeta into the cache."""
 	folder.mkdir(parents=True, exist_ok=True)
 	(folder / "metadata.json").write_text("{}\n", encoding="utf-8")
-	cache.put(read_book_folder(folder))
+	meta = read_book_folder(folder)
+	# uuid is the cache PK — give each test book a unique one (path-derived).
+	meta.uuid = f"u-{folder.name}"
+	cache.put(meta)
 	cache.commit()
 
 

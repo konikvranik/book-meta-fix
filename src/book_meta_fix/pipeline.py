@@ -22,6 +22,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from .classify import is_acceptable_missing
 from .detectors import all_diagnoses
@@ -911,9 +912,9 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cach
 
 	items = parse_review(review_path)
 	summary = {"applied": 0, "rejected": 0, "deleted": 0, "pruned": 0, "remaining": None, "snapshot": None, "errors": [], "dry_run": dry_run}
-	succeeded_ids: set = set()  # ids of entries committed this run → pruned
-	# delete collects (folder, id) so removal success can be tracked per entry.
-	deletions: list[tuple[Path, int | None]] = []
+	succeeded_uuids: set = set()  # uuids of entries committed this run → pruned
+	# delete collects (folder, uuid) so removal success can be tracked per entry.
+	deletions: list[tuple[Path, str | None]] = []
 	total = len(items)
 
 	for i, item in enumerate(items):
@@ -943,7 +944,7 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cach
 		# delete: just collect — actual removal happens after a single tar.gz
 		# snapshot is taken, so the whole batch can be rolled back together.
 		if item.action == "delete":
-			deletions.append((folder, item.id))
+			deletions.append((folder, item.uuid))
 			continue
 
 		# Build the desired metadata
@@ -951,6 +952,11 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cach
 
 		meta = read_book_folder(folder)
 		_apply_action(meta, item)
+		# Lazy mint: a book read straight from disk may still lack a uuid (e.g.
+		# a first apply before any scan minted one). write_book_meta persists it;
+		# here we only set it in-memory so we never stamp uuid: null onto disk.
+		if meta.uuid is None:
+			meta.uuid = str(uuid4())
 
 		try:
 			result = write_book_meta(meta, dry_run=dry_run)
@@ -959,8 +965,8 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cach
 			else:
 				summary["applied"] += 1
 				if not dry_run:
-					if item.id is not None:
-						succeeded_ids.add(item.id)
+					if item.uuid is not None:
+						succeeded_uuids.add(item.uuid)
 					# The folder's metadata just changed on disk; drop its cached
 					# BookMeta so the next scan re-parses it. Especially matters
 					# on NFS, where the attribute cache can mask the new mtime.
@@ -986,7 +992,7 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cach
 
 						shutil.rmtree(folder)
 						if did is not None:
-							succeeded_ids.add(did)
+							succeeded_uuids.add(did)
 						# Folder is gone — drop its cache entry too.
 						if cache is not None:
 							cache.invalidate(folder)
@@ -995,9 +1001,9 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cach
 
 	# Pruning: drop successfully-applied entries from review.yaml. Only in WRITE
 	# mode — dry-run must leave the file untouched.
-	if not dry_run and succeeded_ids:
-		summary["remaining"] = prune_review(review_path, succeeded_ids)
-		summary["pruned"] = len(succeeded_ids)
+	if not dry_run and succeeded_uuids:
+		summary["remaining"] = prune_review(review_path, succeeded_uuids)
+		summary["pruned"] = len(succeeded_uuids)
 
 	# Commit any cache invalidations from this run (writes + deletes).
 	if cache is not None and not dry_run:
