@@ -149,8 +149,8 @@ class TestPipelineLoopIntegration:
 			return Diagnosis(category="C2", reason="x", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
 
 		with patch.object(pmod, "detect_fn", fake_detect), \
-			 patch.object(pmod, "_safe_extract", lambda m: extracted), \
-			 patch.object(pmod, "_has_usable_text", lambda t: True), \
+			 patch.object(pmod, "safe_extract", lambda m: extracted), \
+			 patch.object(pmod, "has_usable_text", lambda t: True), \
 			 patch.object(pmod, "_try_deterministic_fix", lambda *a, **kw: None):
 			_process_book(
 				meta, enricher=None, skip_enrich=True, skip_verify=True,
@@ -192,8 +192,8 @@ class TestPipelineLoopIntegration:
 			return Diagnosis(category="C2", reason="x", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
 
 		with patch.object(pmod, "detect_fn", fake_detect), \
-			 patch.object(pmod, "_safe_extract", lambda m: extracted), \
-			 patch.object(pmod, "_has_usable_text", lambda t: True), \
+			 patch.object(pmod, "safe_extract", lambda m: extracted), \
+			 patch.object(pmod, "has_usable_text", lambda t: True), \
 			 patch.object(pmod, "_try_deterministic_fix", lambda *a, **kw: None):
 			_process_book(
 				meta, enricher=None, skip_enrich=True, skip_verify=True,

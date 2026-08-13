@@ -32,7 +32,7 @@ class TestPipelineResilience:
 		# Patch scan_library to return our fake books, and detect_fn to mark
 		# them all NEEDS_REVIEW so _process_book walks the extract path.
 		# Then make book id=2 blow up inside _try_deterministic_fix by patching
-		# _safe_extract to raise for it.
+		# safe_extract to raise for it.
 		from book_meta_fix import pipeline as pmod
 
 		def fake_scan(library, cache=None):
@@ -53,7 +53,7 @@ class TestPipelineResilience:
 
 		with patch.object(pmod, "scan_library", fake_scan), \
 			 patch.object(pmod, "detect_fn", fake_detect), \
-			 patch.object(pmod, "_safe_extract", fake_extract):
+			 patch.object(pmod, "safe_extract", fake_extract):
 			# workers=1 for deterministic, debuggable ordering
 			results = run_pipeline(
 				tmp_path, cache=None, enricher=None,
@@ -95,7 +95,7 @@ class TestPipelineResilience:
 
 		with patch.object(pmod, "scan_library", fake_scan), \
 			 patch.object(pmod, "detect_fn", fake_detect), \
-			 patch.object(pmod, "_safe_extract", fake_extract):
+			 patch.object(pmod, "safe_extract", fake_extract):
 			results = run_pipeline(
 				tmp_path, cache=None, enricher=None,
 				skip_enrich=True, skip_verify=True,
@@ -131,7 +131,7 @@ class TestPipelineResilience:
 
 		with patch.object(pmod, "scan_library", fake_scan), \
 			 patch.object(pmod, "detect_fn", fake_detect), \
-			 patch.object(pmod, "_safe_extract", fake_extract), \
+			 patch.object(pmod, "safe_extract", fake_extract), \
 			 caplog.at_level(logging.INFO, logger="book_meta_fix.pipeline"):
 			run_pipeline(tmp_path, cache=None, workers=1)
 
@@ -168,7 +168,7 @@ class TestInterruptHandling:
 
 		with patch.object(pmod, "scan_library", fake_scan), \
 			 patch.object(pmod, "detect_fn", fake_detect), \
-			 patch.object(pmod, "_safe_extract", fake_extract):
+			 patch.object(pmod, "safe_extract", fake_extract):
 			# workers=1 forces the serial path.
 			results = run_pipeline(tmp_path, cache=None, workers=1)
 
@@ -260,7 +260,7 @@ class TestInterruptHandling:
 
 		with patch.object(pmod, "scan_library", fake_scan), \
 			 patch.object(pmod, "detect_fn", fake_detect), \
-			 patch.object(pmod, "_safe_extract", fake_extract):
+			 patch.object(pmod, "safe_extract", fake_extract):
 			results = run_pipeline(tmp_path, cache=None, workers=1)
 
 		assert results == []

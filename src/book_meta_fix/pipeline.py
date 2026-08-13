@@ -20,18 +20,25 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .classify import is_acceptable_missing
 from .detectors import all_diagnoses
 from .detectors import detect as detect_fn
 from .enrichers import EnrichedMeta, Enricher
-from .extractors import ExtractedMeta, extract
+from .extractors import ExtractedMeta
 from .library import Cache, scan_library
 from .models import BookMeta, Confidence, Diagnosis, Verdict
 from .review import _COVER_CATEGORIES, build_review, parse_review, prune_review
-from .verifier import confirm_identity, identity_in_text, verify
+from .verifier import (
+	IdentityResult,
+	acquire_identity,
+	confirm_identity,
+	has_usable_text,
+	safe_extract,
+	verify,
+)
 from .writers import write_book_meta
 
 log = logging.getLogger(__name__)
@@ -332,7 +339,7 @@ def _process_book(
 		# Extract content once (reused by both deterministic fixes and LLM).
 		# Prefer content already extracted during verify() to avoid a second
 		# read of the book file.
-		extracted = preextracted if preextracted is not None else _safe_extract(meta)
+		extracted = preextracted if preextracted is not None else safe_extract(meta)
 
 		# Step 2a-2c: deterministic fixes from extracted content + online lookup
 		if extracted is not None:
@@ -367,7 +374,7 @@ def _process_book(
 			# This is the #1 cost saver — books with empty/CSS-only content
 			# would waste an API call for nothing.
 			first_page = extracted.first_page_text if extracted is not None else None
-			if not _has_usable_text(first_page):
+			if not has_usable_text(first_page):
 				stats["llm_skipped_no_text"] += 1
 			else:
 				def _llm_attempt(ev):
@@ -401,7 +408,7 @@ def _process_book(
 					if enriched is None and extracted is not None:
 						broader = getattr(extracted, "broader_text", None)
 						first = extracted.first_page_text
-						if broader and _has_usable_text(broader) and (not first or len(broader) > len(first)):
+						if broader and has_usable_text(broader) and (not first or len(broader) > len(first)):
 							enriched, llm_src = _llm_attempt({**evidence, "first_page_text": broader})
 							if enriched is not None:
 								stats["llm_broader_fixed"] = stats.get("llm_broader_fixed", 0) + 1
@@ -424,9 +431,8 @@ def _process_book(
 		if (
 			accept_missing_if_identified
 			and enriched is None
-			and diag.category in ("MISSING_ISBN", "MISSING_YEAR", "MISSING_COVER")
-			and not any(d.verdict == Verdict.NEEDS_REVIEW for d in diag.additional)
-			and _acquire_identity(meta, extracted) is not None
+			and is_acceptable_missing(diag)
+			and acquire_identity(meta, extracted) is not None
 		):
 			enriched = EnrichedMeta(identity_confirmed=True, source="content")
 			stats["accepted_missing"] = stats.get("accepted_missing", 0) + 1
@@ -434,52 +440,6 @@ def _process_book(
 			stats["unfixed"] += 1
 
 	return (meta, diag, verification, enriched)
-
-
-def _safe_extract(meta: BookMeta) -> ExtractedMeta | None:
-	"""Extract content from the book, falling back to sibling formats.
-
-	The primary file (highest-preference format) is tried first. If it yields no
-	usable page text — a corrupt epub (bad zip), an image-only PDF, a .doc whose
-	catdoc output is empty — the book's other formats are tried until one yields
-	usable text. This recovers content when the primary format is broken but a
-	sibling (often the calibre source format) is fine.
-
-	Multi-format extraction is slower, so siblings are only tried when the
-	primary failed — never all formats up front.
-	"""
-	if not meta.primary_file:
-		return None
-
-	def _try(path: str) -> ExtractedMeta | None:
-		try:
-			return extract(path)
-		except Exception as e:  # noqa: BLE001
-			log.debug("extract failed for %s: %s", path, e)
-			return None
-
-	primary = _try(meta.primary_file)
-	if primary is not None and _has_usable_text(primary.first_page_text):
-		return primary
-
-	# Fallback: try sibling formats for usable page text.
-	primary_suffix = Path(meta.primary_file).suffix.lower()
-	folder = Path(meta.path)
-	if folder.is_dir() and meta.formats:
-		for entry in sorted(folder.iterdir(), key=lambda e: e.name):
-			if not entry.is_file():
-				continue
-			suf = entry.suffix.lower()
-			if suf == primary_suffix or suf not in meta.formats:
-				continue
-			other = _try(str(entry))
-			if other is not None and _has_usable_text(other.first_page_text):
-				log.info("extraction fallback %s -> %s for %s", primary_suffix, suf, meta.path)
-				return other
-
-	# No sibling yielded usable text either; return whatever the primary gave
-	# (it may still carry embedded metadata even without page text).
-	return primary
 
 
 # Categories that 'ALL' deliberately excludes from the LLM. Currently EMPTY.
@@ -508,30 +468,6 @@ def _llm_wants(category: str, llm_categories: tuple[str, ...]) -> bool:
 	return category in llm_categories
 
 
-def _has_usable_text(text: str | None) -> bool:
-	"""Does *text* contain enough readable content for the LLM to work with?
-
-	Rejects:
-	  - None / empty
-	  - Pure CSS (e.g. 'Cover @page {padding: 0pt; ...}')
-	  - Pure HTML tags / boilerplate with no prose
-	  - Very short snippets (< 80 chars of actual prose)
-
-	The check is heuristic and fast — it strips obvious non-prose and measures
-	the remaining length. This is the #1 LLM cost saver.
-	"""
-	if not text or len(text) < 80:
-		return False
-	# Strip CSS blocks (common in EPUB cover pages)
-	import re
-
-	clean = re.sub(r"@page\s*\{[^}]*\}", " ", text)
-	clean = re.sub(r"[{};]", " ", clean)
-	# Count word-like tokens (sequences of 3+ letters)
-	words = re.findall(r"[A-Za-zÁ-ž]{3,}", clean)
-	return len(words) >= 8
-
-
 def _try_deterministic_fix(
 	meta: BookMeta,
 	diag: Diagnosis,  # noqa: F821
@@ -549,7 +485,7 @@ def _try_deterministic_fix(
 	Returns None if no identity could be verified against content (→ LLM, or
 	review when there is no content to reason over).
 	"""
-	identity = _acquire_identity(meta, extracted)
+	identity = acquire_identity(meta, extracted)
 	if identity is None:
 		return None
 
@@ -563,70 +499,6 @@ def _try_deterministic_fix(
 	# No online data — fall back to a content-grounded proposal (offline fix
 	# from text_meta + embedded OPF, only fields that improve on the meta).
 	return _content_proposal(meta, extracted)
-
-
-@dataclass
-class IdentityResult:
-	"""A book identity confirmed against the book's own content.
-
-	Either an ISBN (strongest) or a title+authors pair, plus the source level
-	that established it. Used to anchor online metadata lookup so online sources
-	fill data for a KNOWN book rather than guess identity.
-	"""
-
-	isbn: str | None = None
-	title: str | None = None
-	authors: list[str] = field(default_factory=list)
-	year: int | None = None
-	source: str = ""  # 'content-isbn' | 'metadata' | 'extractor'
-
-	@property
-	def has_isbn(self) -> bool:
-		return bool(self.isbn)
-
-	@property
-	def has_title_author(self) -> bool:
-		return bool(self.title) and bool(self.authors)
-
-
-def _acquire_identity(meta: BookMeta, extracted: ExtractedMeta | None) -> IdentityResult | None:
-	"""Acquire a content-verified identity for the book (no network).
-
-	Cascade (first verified wins):
-	  1. content-ISBN — scanned from the book's text/embedded OPF (strongest;
-	     self-grounded, validated by ISBN check digit).
-	  2. metadata ISBN — confirmed present in the content.
-	  3. metadata title+author — confirmed present in the page text.
-	  4. offline extractor (text_meta) title+author — mined from the page text.
-
-	Returns None when no identity can be confirmed against content (→ LLM).
-	"""
-	if extracted is None:
-		return None
-	from .verifier import _isbn_in_content
-
-	content_isbn = extracted.isbn_from_text or extracted.isbn
-	text = extracted.first_page_text
-
-	# 1. Content-ISBN (strongest, content-grounded).
-	if content_isbn:
-		return IdentityResult(isbn=content_isbn, source="content-isbn")
-
-	# 2. Metadata ISBN, verified against content.
-	if meta.isbn and _isbn_in_content(meta.isbn, extracted):
-		return IdentityResult(isbn=meta.isbn, source="metadata")
-
-	# 3. Metadata title+author, verified against content.
-	if meta.title and meta.authors and identity_in_text(meta.title, meta.authors[0], text):
-		return IdentityResult(title=meta.title, authors=list(meta.authors), year=meta.year, source="metadata")
-
-	# 4. Offline extractor (text_meta) — content-grounded.
-	ext_title = extracted.title_from_text
-	ext_authors = extracted.authors_from_text or []
-	if ext_title and ext_authors and identity_in_text(ext_title, ext_authors[0], text):
-		return IdentityResult(title=ext_title, authors=list(ext_authors), year=extracted.year_from_text, source="extractor")
-
-	return None
 
 
 def _online_matches_identity(online: EnrichedMeta, identity: IdentityResult) -> bool:  # noqa: F821

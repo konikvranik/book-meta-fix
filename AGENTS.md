@@ -56,7 +56,8 @@ src/book_meta_fix/
   text_meta.py     offline page-text mining (1st stage of fix cascade)
   encoding.py      mojibake detection + repair
   isbn.py          ISBN extract/canonicalize/validate
-  verifier.py      compare DB meta vs BOOK CONTENT (do NOT trust embedded)
+  verifier.py      compare DB meta vs BOOK CONTENT (do NOT trust embedded) + identity primitives
+  classify.py      SINGLE source of truth for OK/needfix disposition (detect + identity gate + opt-in OK-audit)
   enrichers.py     databazeknih.cz / legie.info / OpenLibrary / Google Books → EnrichedMeta
   pipeline.py      orchestration: ThreadPoolExecutor, per-book state machine
   llm.py           Z.AI provider: LeakyBucket + global 429 cooldown + reconcile_loop + tolerant JSON
@@ -79,10 +80,21 @@ src/book_meta_fix/
   confirm a record. Don't "fix" the verifier to trust embedded OPF.
 - **Source of truth = `metadata.json`**, not `.opf`. Writers update *both*.
   Readers prefer `metadata.json`, fall back to `.opf`.
+- **Classification is unified in `classify.py`.** The rule "an identified
+  MISSING_* book (author+title confirmed against the content, no co-occurring
+  `NEEDS_REVIEW`) is acceptable, not broken" lives EXACTLY ONCE in
+  `classify.is_acceptable_missing` + `classify.classify`. `report`, `organize`,
+  `epubgen`, and the pipeline's accept-missing gate all call it, so the OK /
+  needfix disposition cannot drift between commands. `organize` routes an
+  identified MISSING_* book to the OK path (it is NOT broken); `report` does
+  not count it as broken. The identity primitives (`acquire_identity`,
+  `IdentityResult`, `safe_extract`, `has_usable_text`) live in `verifier.py`.
+  Per the agreed identification policy, author+title confirmed against the
+  content is sufficient; the year is never required for identity.
 - **Identity-confirmed MISSING_* books are auto-accepted** (`pipeline.py`
   `_process_book`, gated by `accept_missing_if_identified`, default on). When
   a `MISSING_ISBN`/`MISSING_YEAR`/`MISSING_COVER` book has its author+title
-  confirmed against the book's content (`_acquire_identity`) and no enricher
+  confirmed against the book's content (`acquire_identity`) and no enricher
   recovered the field, the pipeline stamps a minimal
   `EnrichedMeta(identity_confirmed=True, source="content")`. `review_writer`
   then pre-fills `action: accept` (its identity_confirmed-no-proposal branch),
@@ -95,6 +107,13 @@ src/book_meta_fix/
   and keeps the book in review. If any enricher/text_meta DID return data,
   `enriched` is already set and those fields are proposed + applied normally —
   this path fires only when nothing was recovered.
+- **`organize` does NOT content-verify OK books by default.** Consistent with
+  `report`/`analyze`, OK books are routed on the detector verdict alone; the
+  MISMATCH audit is opt-in via `--verify-ok` (and strict on UNCERTAIN unless
+  `--no-strict-verify`). All three commands share `--accept-missing` (default
+  on) and `--verify-ok` (default off). `--no-accept-missing` disables the
+  identity gate → pure detector verdict, no content reads (the historic fast
+  `report`).
 - **LLM rate limiting is two-layered** (`llm.py`): a `LeakyBucket` smoother
   (constant aggregate RPM) **and** a global 429 cooldown / circuit breaker.
   Z.AI's free tier has a cascade bug — when one model 429s, all models get

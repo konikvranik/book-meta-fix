@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal
 
 from rapidfuzz import fuzz
@@ -409,3 +410,151 @@ def _normalize(s: str) -> str:
 		"acdeeinorstuuyzoauACDEEINORSTUUYZOAU",
 	)
 	return re.sub(r"\s+", " ", s.translate(repl).lower().strip())
+
+
+# --- Content extraction helpers ----------------------------------------------
+# These are content primitives shared by the pipeline and the unified
+# classifier (classify.py): robust extraction with sibling-format fallback,
+# and a heuristic for whether extracted text is usable downstream.
+
+
+def has_usable_text(text: str | None) -> bool:
+	"""Does *text* contain enough readable content to reason over?
+
+	Rejects:
+	  - None / empty
+	  - Pure CSS (e.g. 'Cover @page {padding: 0pt; ...}')
+	  - Pure HTML tags / boilerplate with no prose
+	  - Very short snippets (< 80 chars of actual prose)
+
+	The check is heuristic and fast — it strips obvious non-prose and measures
+	the remaining length. It is the #1 cost saver for the LLM path and the gate
+	for extraction fallback.
+	"""
+	if not text or len(text) < 80:
+		return False
+	# Strip CSS blocks (common in EPUB cover pages)
+	clean = re.sub(r"@page\s*\{[^}]*\}", " ", text)
+	clean = re.sub(r"[{};]", " ", clean)
+	# Count word-like tokens (sequences of 3+ letters)
+	words = re.findall(r"[A-Za-zÁ-ž]{3,}", clean)
+	return len(words) >= 8
+
+
+def safe_extract(meta: BookMeta) -> ExtractedMeta | None:
+	"""Extract content from the book, falling back to sibling formats.
+
+	The primary file (highest-preference format) is tried first. If it yields no
+	usable page text — a corrupt epub (bad zip), an image-only PDF, a .doc whose
+	catdoc output is empty — the book's other formats are tried until one yields
+	usable text. This recovers content when the primary format is broken but a
+	sibling (often the calibre source format) is fine.
+
+	Multi-format extraction is slower, so siblings are only tried when the
+	primary failed — never all formats up front.
+	"""
+	if not meta.primary_file:
+		return None
+
+	def _try(path: str) -> ExtractedMeta | None:
+		try:
+			return extract(path)
+		except Exception as e:  # noqa: BLE001
+			log.debug("extract failed for %s: %s", path, e)
+			return None
+
+	primary = _try(meta.primary_file)
+	if primary is not None and has_usable_text(primary.first_page_text):
+		return primary
+
+	# Fallback: try sibling formats for usable page text.
+	primary_suffix = Path(meta.primary_file).suffix.lower()
+	folder = Path(meta.path)
+	if folder.is_dir() and meta.formats:
+		for entry in sorted(folder.iterdir(), key=lambda e: e.name):
+			if not entry.is_file():
+				continue
+			suf = entry.suffix.lower()
+			if suf == primary_suffix or suf not in meta.formats:
+				continue
+			other = _try(str(entry))
+			if other is not None and has_usable_text(other.first_page_text):
+				log.info("extraction fallback %s -> %s for %s", primary_suffix, suf, meta.path)
+				return other
+
+	# No sibling yielded usable text either; return whatever the primary gave
+	# (it may still carry embedded metadata even without page text).
+	return primary
+
+
+# --- Identity acquisition ----------------------------------------------------
+# A content-verified identity (ISBN or title+author) anchors both online lookup
+# and the "identified MISSING_* book is acceptable" classification rule.
+
+
+@dataclass
+class IdentityResult:
+	"""A book identity confirmed against the book's own content.
+
+	Either an ISBN (strongest) or a title+authors pair, plus the source level
+	that established it. Used to anchor online metadata lookup so online sources
+	fill data for a KNOWN book rather than guess identity.
+	"""
+
+	isbn: str | None = None
+	title: str | None = None
+	authors: list[str] = field(default_factory=list)
+	year: int | None = None
+	source: str = ""  # 'content-isbn' | 'metadata' | 'extractor'
+
+	@property
+	def has_isbn(self) -> bool:
+		return bool(self.isbn)
+
+	@property
+	def has_title_author(self) -> bool:
+		return bool(self.title) and bool(self.authors)
+
+
+def acquire_identity(meta: BookMeta, extracted: ExtractedMeta | None) -> IdentityResult | None:
+	"""Acquire a content-verified identity for the book (no network).
+
+	Cascade (first verified wins):
+	  1. content-ISBN — scanned from the book's text/embedded OPF (strongest;
+	     self-grounded, validated by ISBN check digit).
+	  2. metadata ISBN — confirmed present in the content.
+	  3. metadata title+author — confirmed present in the page text.
+	  4. offline extractor (text_meta) title+author — mined from the page text.
+
+	Returns None when no identity can be confirmed against content (→ LLM).
+
+	Note: per the agreed identification policy, an author+title confirmed
+	against the content is sufficient (year is carried as data, never required);
+	step 3 is the rule the unified classifier reuses to treat an identified
+	MISSING_* book as acceptable.
+	"""
+	if extracted is None:
+		return None
+
+	content_isbn = extracted.isbn_from_text or extracted.isbn
+	text = extracted.first_page_text
+
+	# 1. Content-ISBN (strongest, content-grounded).
+	if content_isbn:
+		return IdentityResult(isbn=content_isbn, source="content-isbn")
+
+	# 2. Metadata ISBN, verified against content.
+	if meta.isbn and _isbn_in_content(meta.isbn, extracted):
+		return IdentityResult(isbn=meta.isbn, source="metadata")
+
+	# 3. Metadata title+author, verified against content.
+	if meta.title and meta.authors and identity_in_text(meta.title, meta.authors[0], text):
+		return IdentityResult(title=meta.title, authors=list(meta.authors), year=meta.year, source="metadata")
+
+	# 4. Offline extractor (text_meta) — content-grounded.
+	ext_title = extracted.title_from_text
+	ext_authors = extracted.authors_from_text or []
+	if ext_title and ext_authors and identity_in_text(ext_title, ext_authors[0], text):
+		return IdentityResult(title=ext_title, authors=list(ext_authors), year=extracted.year_from_text, source="extractor")
+
+	return None
