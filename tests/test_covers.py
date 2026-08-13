@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from book_meta_fix.covers import analyze_cover, download_cover
+from book_meta_fix.covers import analyze_cover, download_cover, recover_cover_from_book
 from book_meta_fix.models import BookMeta, Confidence, Verdict
 
 # ---------------------------------------------------------------------------
@@ -39,6 +39,22 @@ def _gradient_cover(path: Path, size: tuple[int, int] = (458, 500)) -> None:
 			b = (y * 2 + random.randint(0, 50)) % 256
 			px[x, y] = (r, g, b)
 	img.save(path)
+
+
+def _extractor_writing(image_fn):
+	"""A fake extract_cover_from_book that writes image_fn(dest) and returns dest.
+
+	Used to drive recover_cover_from_book without calibre: the real primitive
+	shells out to ebook-meta, but recover_cover_from_book only needs *some*
+	recognisable image at the temp path to validate.
+	"""
+
+	def _fake(book_path, dest=None):
+		dest = Path(dest)
+		image_fn(dest)
+		return dest
+
+	return _fake
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +214,66 @@ class TestDownloadCover:
 		assert ok is True
 		assert dest.is_file()
 		assert dest.read_bytes() == jpeg_bytes
+
+
+# ---------------------------------------------------------------------------
+# recover_cover_from_book
+# ---------------------------------------------------------------------------
+
+
+class TestRecoverCoverFromBook:
+	"""Extracting a cover from the book file as the last-resort fallback.
+
+	The mandatory generated-placeholder gate is the load-bearing piece: a C11
+	book whose embedded cover is Calibre's own placeholder must not have that
+	placeholder written back as cover.jpg.
+	"""
+
+	def test_valid_extract_is_written(self, tmp_path: Path) -> None:
+		dest = tmp_path / "cover.jpg"
+		with patch("book_meta_fix.covers.extract_cover_from_book", side_effect=_extractor_writing(_gradient_cover)):
+			ok = recover_cover_from_book(tmp_path / "book.epub", dest)
+		assert ok is True
+		assert dest.is_file()
+
+	def test_generated_extract_is_rejected(self, tmp_path: Path) -> None:
+		"""A solid-color (generated) extract never becomes cover.jpg."""
+		dest = tmp_path / "cover.jpg"
+		with patch("book_meta_fix.covers.extract_cover_from_book", side_effect=_extractor_writing(_solid_cover)):
+			ok = recover_cover_from_book(tmp_path / "book.epub", dest)
+		assert ok is False
+		assert not dest.exists()
+
+	def test_generated_extract_does_not_overwrite_existing(self, tmp_path: Path) -> None:
+		"""A real cover already at dest survives a generated extraction attempt —
+		regression guard against replacing artwork with a placeholder."""
+		dest = tmp_path / "cover.jpg"
+		_gradient_cover(dest)
+		original = dest.read_bytes()
+		with patch("book_meta_fix.covers.extract_cover_from_book", side_effect=_extractor_writing(_solid_cover)):
+			ok = recover_cover_from_book(tmp_path / "book.epub", dest)
+		assert ok is False
+		assert dest.read_bytes() == original  # untouched
+
+	def test_extraction_failure_returns_false(self, tmp_path: Path) -> None:
+		"""calibre absent / no embedded cover (extract returns None) -> False."""
+		dest = tmp_path / "cover.jpg"
+		with patch("book_meta_fix.covers.extract_cover_from_book", return_value=None):
+			ok = recover_cover_from_book(tmp_path / "book.epub", dest)
+		assert ok is False
+		assert not dest.exists()
+
+	def test_existing_dest_backed_up_on_success(self, tmp_path: Path) -> None:
+		"""A successful overwrite mirrors download_cover: prior cover -> .bak."""
+		dest = tmp_path / "cover.jpg"
+		_solid_cover(dest)  # existing cover (will be replaced by the gradient)
+		old = dest.read_bytes()
+		with patch("book_meta_fix.covers.extract_cover_from_book", side_effect=_extractor_writing(_gradient_cover)):
+			ok = recover_cover_from_book(tmp_path / "book.epub", dest)
+		assert ok is True
+		bak = dest.with_suffix(".jpg.bak")
+		assert bak.is_file()
+		assert bak.read_bytes() == old
 
 
 # ---------------------------------------------------------------------------

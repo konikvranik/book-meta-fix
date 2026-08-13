@@ -480,3 +480,27 @@ class TestIdentityConfirmedAccept:
 		_submit_all_and_finish(w, [_result(1, verdict=Verdict.AUTO_FIXABLE, category="MISSING_YEAR", enriched=em)])
 		parsed = parse_review(out)
 		assert len(parsed) == 1 and parsed[0].action == "accept"
+
+
+class TestCoverOnlyAccept:
+	"""A cover-diagnosis entry (C11 / MISSING_COVER) with no other proposed
+	change pre-fills action: accept so the cover is recovered in bulk —
+	downloaded if a cover_url exists, otherwise extracted from the book file by
+	_apply_action. The book's own cover carries no identity risk, so this
+	pre-fills even without an identity confirmation."""
+
+	def test_missing_cover_empty_proposal_prefills_accept(self, tmp_path):
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		_submit_all_and_finish(w, [_result(1, verdict=Verdict.AUTO_FIXABLE, category="MISSING_COVER")])
+		parsed = parse_review(out)
+		assert len(parsed) == 1
+		assert parsed[0].action == "accept"
+
+	def test_c11_empty_proposal_prefills_accept(self, tmp_path):
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		_submit_all_and_finish(w, [_result(1, verdict=Verdict.NEEDS_REVIEW, category="C11")])
+		parsed = parse_review(out)
+		assert len(parsed) == 1
+		assert parsed[0].action == "accept"

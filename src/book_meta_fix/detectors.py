@@ -573,9 +573,10 @@ def rule_generated_cover(meta: BookMeta) -> Diagnosis | None:
 def rule_missing_cover(meta: BookMeta) -> Diagnosis | None:
 	"""MISSING_COVER: no cover.jpg sidecar at all.
 
-	Auto-fixable: if an enricher has a cover_url, `bmf apply` will download it.
-	Fires only when cover.jpg is entirely absent (PDFs/PDBs may have an
-	embedded cover but no sidecar — those are left for a future extractor).
+	Auto-fixable: if an enricher has a cover_url, `bmf apply` will download it;
+	if not, the book's own embedded cover is extracted as a fallback
+	(covers.recover_cover_from_book). Fires only when cover.jpg is entirely
+	absent.
 	"""
 	from pathlib import Path
 

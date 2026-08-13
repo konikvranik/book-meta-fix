@@ -67,7 +67,7 @@ src/book_meta_fix/
   mover.py         bmf organize
   epubgen.py       bmf epubgen
   crosscheck.py    bmf crosscheck
-  covers.py        generated-cover detection (pixel math) + replacement
+  covers.py        generated-cover detection (pixel math) + replacement & in-book extraction fallback
   cli.py           click commands: scan, report, analyze, apply, organize, epubgen, crosscheck
 ```
 
@@ -98,11 +98,17 @@ src/book_meta_fix/
   recovered the field, the pipeline stamps a minimal
   `EnrichedMeta(identity_confirmed=True, source="content")`. `review_writer`
   then pre-fills `action: accept` (its identity_confirmed-no-proposal branch),
-  and `bmf apply` prunes the entry — a safe no-op (`_apply_action` skips when
-  `proposed` is empty). The verdict stays `AUTO_FIXABLE` (in the review
-  inclusion set); the book reappears as auto-accept on the next `analyze`
-  because the detector re-fires (the field is genuinely still missing) — that
-  is intended: zero manual work, bulk-pruned by `apply`. A co-occurring
+  and `bmf apply` prunes the entry — a safe no-op for MISSING_ISBN/MISSING_YEAR
+  (`_apply_action` skips when `proposed` is empty). For MISSING_COVER,
+  `_apply_action` additionally attempts cover recovery (enricher `cover_url`,
+  then extracting the cover from the book file via
+  `covers.recover_cover_from_book`, which rejects generated placeholders) even
+  with empty `proposed`. The verdict stays `AUTO_FIXABLE` (in the review
+  inclusion set); a MISSING_ISBN/YEAR book reappears as auto-accept on the next
+  `analyze` because the detector re-fires (the field is genuinely still
+  missing) — that is intended: zero manual work, bulk-pruned by `apply`. A
+  MISSING_COVER book whose cover was recovered does NOT re-fire (cover.jpg is
+  now present); one whose cover could not be recovered still re-fires. A co-occurring
   `NEEDS_REVIEW` diagnosis (e.g. C11 generated cover) blocks the auto-accept
   and keeps the book in review. If any enricher/text_meta DID return data,
   `enriched` is already set and those fields are proposed + applied normally —
