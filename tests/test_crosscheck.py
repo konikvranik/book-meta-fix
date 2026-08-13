@@ -418,7 +418,7 @@ class TestCacheInvalidation:
 		cache = Cache(tmp_path / "cache.db")
 		folder, _ = _make_book(tmp_path, title="Babička")
 		# metadata.json so read_book_folder parses cleanly and is cacheable.
-		(folder / "metadata.json").write_text('{"title": "Babička", "authors": ["Author"]}\n', encoding="utf-8")
+		(folder / "metadata.json").write_text('{"title": "Babička", "authors": ["Author"], "uuid": "u-babicka"}\n', encoding="utf-8")
 		_write_epub(folder / "good.epub", body_html="<h1>Babička</h1>")
 		_write_epub(folder / "rogue.epub", body_html="<h1>Saturnin</h1>")
 		cache.put(read_book_folder(folder))
@@ -437,7 +437,7 @@ class TestCacheInvalidation:
 
 		cache = Cache(tmp_path / "cache.db")
 		folder, _ = _make_book(tmp_path, title="Babička")
-		(folder / "metadata.json").write_text('{"title": "Babička", "authors": ["Author"]}\n', encoding="utf-8")
+		(folder / "metadata.json").write_text('{"title": "Babička", "authors": ["Author"], "uuid": "u-babicka"}\n', encoding="utf-8")
 		_write_epub(folder / "good.epub", body_html="<h1>Babička</h1>")
 		_write_epub(folder / "rogue.epub", body_html="<h1>Saturnin</h1>")
 		cache.put(read_book_folder(folder))

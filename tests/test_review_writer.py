@@ -19,7 +19,7 @@ from book_meta_fix.review_writer import ReviewWriter
 
 
 def _meta(calibre_id: int, title: str = "T", author: str = "A") -> BookMeta:
-	return BookMeta(calibre_id=calibre_id, title=title, authors=[author], path=f"/lib/A/{title} ({calibre_id})", primary_file=None)
+	return BookMeta(calibre_id=calibre_id, uuid=f"u{calibre_id}", title=title, authors=[author], path=f"/lib/A/{title} ({calibre_id})", primary_file=None)
 
 
 def _result(calibre_id: int, *, title: str = "T", enriched: EnrichedMeta | None = None, verdict: Verdict = Verdict.NEEDS_REVIEW, category: str = "C2"):
@@ -269,13 +269,33 @@ class TestPriorUserActionMerge:
 		assert summary["skipped_user_decided"] == 1
 
 
+class TestCarryOverPathRefresh:
+	def test_prior_decision_refreshes_path_after_move(self, tmp_path):
+		"""A prior user decision is matched by uuid (so it survives an organize
+		move), and on re-analyze the entry's path is refreshed to the book's
+		current on-disk location — otherwise apply could not find the book."""
+		out = tmp_path / "review.yaml"
+		# Prior run: book u1 reviewed at its OLD path, user set action.
+		seed = "---\nid: 1\nuuid: u1\npath: old/A (1)\ncurrent: {title: T}\naction: accept\n"
+		out.write_text(seed, encoding="utf-8")
+		w = ReviewWriter(out)
+		# Same book (uuid u1) now lives at a new path (organize relocated it).
+		meta = BookMeta(calibre_id=1, uuid="u1", title="T", authors=["A"], path="/lib/needfix/A (1)", primary_file=None)
+		diag = Diagnosis(category="C2", reason="r", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
+		_submit_all_and_finish(w, [(meta, diag, None, None)])
+		parsed = parse_review(out)
+		by_uuid = {p.uuid: p for p in parsed}
+		assert by_uuid["u1"].action == "accept"   # prior decision preserved
+		assert "needfix" in by_uuid["u1"].path    # path refreshed to current location
+
+
 class TestCarryOverUnprocessed:
 	def test_unprocessed_prior_entries_carried_over(self, tmp_path):
 		"""A run with --limit processes only some books; the rest must be carried
 		over from .bak so user decisions aren't dropped."""
 		out = tmp_path / "review.yaml"
 		# Seed a review.yaml with 3 books, one of which the user acted on.
-		seed = "---\nid: 1\ncurrent: {title: A}\naction: accept\n---\nid: 2\ncurrent: {title: B}\naction: null\n---\nid: 3\ncurrent: {title: C}\naction: null\n"
+		seed = "---\nid: 1\nuuid: u1\ncurrent: {title: A}\naction: accept\n---\nid: 2\nuuid: u2\ncurrent: {title: B}\naction: null\n---\nid: 3\nuuid: u3\ncurrent: {title: C}\naction: null\n"
 		out.write_text(seed, encoding="utf-8")
 		# New run processes ONLY book 2 (e.g. --limit). Books 1 and 3 are not
 		# submitted — they must be carried over from .bak.
@@ -376,7 +396,7 @@ class TestAutoFixable:
 		"""If the user already set action on a C6 book in a prior run, that
 		decision wins over the pre-filled delete."""
 		out = tmp_path / "review.yaml"
-		seed = "---\nid: 1\ncurrent: {title: A}\naction: reject\n"
+		seed = "---\nid: 1\nuuid: u1\ncurrent: {title: A}\naction: reject\n"
 		out.write_text(seed, encoding="utf-8")
 		w = ReviewWriter(out)
 		meta = _meta(1, title="~$doc")
@@ -392,20 +412,31 @@ class TestAutoFixable:
 
 
 class TestLegacyPriorLoading:
-	def test_loads_legacy_single_list_bak(self, tmp_path):
-		"""A .bak in the OLD single-list format must load as a prior map."""
+	def test_loads_single_list_bak_keyed_by_uuid(self, tmp_path):
+		"""A .bak in the single-list format (vs the multi-doc stream) still loads
+		as a prior map, now keyed by uuid (the carry-over identity)."""
 		out = tmp_path / "review.yaml"
-		legacy = "# header\n- id: 1\n  current: {title: A}\n  action: accept\n- id: 2\n  current: {title: B}\n  action: null\n"
+		legacy = "# header\n- id: 1\n  uuid: u1\n  current: {title: A}\n  action: accept\n- id: 2\n  uuid: u2\n  current: {title: B}\n  action: null\n"
 		out.write_text(legacy, encoding="utf-8")
 		w = ReviewWriter(out)
-		assert set(w._prior) == {1, 2}
-		assert w._prior[1]["action"] == "accept"
+		assert set(w._prior) == {"u1", "u2"}
+		assert w._prior["u1"]["action"] == "accept"
 		# Submit only book 2; book 1 carried over with its action.
 		_submit_all_and_finish(w, [_result(2, title="B-new")])
 		parsed = parse_review(out)
 		by_id = {p.id: p for p in parsed}
 		assert by_id[1].action == "accept"  # carried
 		assert by_id[2].current["title"] == "B-new"  # refreshed
+
+	def test_truly_uuidless_legacy_entries_skipped(self, tmp_path):
+		"""Clean break: a genuine legacy .bak whose entries predate uuid keying
+		(carry no uuid) cannot be matched, so they are dropped from the prior map
+		and re-decided fresh rather than guessed wrong."""
+		out = tmp_path / "review.yaml"
+		legacy = "# header\n- id: 1\n  current: {title: A}\n  action: accept\n"
+		out.write_text(legacy, encoding="utf-8")
+		w = ReviewWriter(out)
+		assert w._prior == {}  # uuid-less entry not carryable
 
 
 class TestIdentityConfirmedAccept:

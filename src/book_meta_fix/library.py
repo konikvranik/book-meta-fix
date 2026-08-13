@@ -19,6 +19,7 @@ from pathlib import Path
 
 from .models import BookMeta
 from .readers import read_book_folder
+from .writers import ensure_uuid
 
 log = logging.getLogger(__name__)
 
@@ -103,17 +104,19 @@ def _is_excluded(name: str, *, is_file: bool = False) -> bool:
 
 
 class Cache:
-	"""Simple SQLite cache of parsed BookMeta, keyed by folder path + mtime.
+	"""SQLite cache of parsed BookMeta.
 
-	On load, folders whose (path, mtime, size) match the cache are reused
-	without re-parsing. Mutating commands (apply, organize) must call
-	invalidate()/invalidate_many() for the folders they change, so the next
-	run re-parses them instead of trusting a possibly-stale mtime (e.g. on
-	NFS, where the client attribute cache can serve an old mtime for seconds
-	after a write).
+	The primary key is the book's ``uuid`` (the stable identity that survives
+	folder renames/moves), but the LOOKUP is by ``path`` — the only key
+	available cheaply from the directory walk, before any metadata is parsed.
+	On load, a folder whose (path, mtime, size) still matches the cache is
+	reused without re-parsing. Mutating commands must call invalidate() /
+	invalidate_many() for folders they change (apply), or repoint() for a
+	move/rename (organize), so the cache never serves a stale entry —
+	important on NFS, where the client attribute cache can mask a new mtime.
 	"""
 
-	SCHEMA_VERSION = 1
+	SCHEMA_VERSION = 2
 
 	def __init__(self, db_path: Path):
 		self.db_path = Path(db_path)
@@ -123,21 +126,45 @@ class Cache:
 
 	def _init_schema(self) -> None:
 		self.conn.executescript(
-			f"""
+			"""
 			CREATE TABLE IF NOT EXISTS schema_meta (
 				key TEXT PRIMARY KEY,
 				value TEXT NOT NULL
 			);
-			CREATE TABLE IF NOT EXISTS books (
-				path TEXT PRIMARY KEY,
-				mtime REAL NOT NULL,
-				size INTEGER NOT NULL,
-				payload TEXT NOT NULL,
-				scanned_at REAL NOT NULL
-			);
-			INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('version', '{self.SCHEMA_VERSION}');
 			"""
 		)
+		# Migrate on version mismatch (including a fresh db): the books table
+		# shape changed (path-PK -> uuid-PK + path index). The cache is
+		# disposable, so we drop+recreate — the next scan rebuilds it and, via
+		# ensure_uuid, backfills the uuid for every book.
+		row = self.conn.execute("SELECT value FROM schema_meta WHERE key = 'version'").fetchone()
+		current = int(row[0]) if row and str(row[0]).isdigit() else 0
+		if current != self.SCHEMA_VERSION:
+			self.conn.executescript(
+				"""
+				DROP TABLE IF EXISTS books;
+				CREATE TABLE books (
+					uuid TEXT PRIMARY KEY,
+					path TEXT NOT NULL,
+					mtime REAL NOT NULL,
+					size INTEGER NOT NULL,
+					payload TEXT NOT NULL,
+					scanned_at REAL NOT NULL
+				);
+				CREATE UNIQUE INDEX IF NOT EXISTS idx_books_path ON books(path);
+				"""
+			)
+			self.conn.execute(
+				"INSERT INTO schema_meta(key, value) VALUES ('version', ?) "
+				"ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+				(str(self.SCHEMA_VERSION),),
+			)
+		# Commit any pending write (the version UPDATE above starts a transaction
+		# that executescript would otherwise leave open). bmf_cache.db is shared
+		# with the Enricher (a second connection in the same process); an
+		# uncommitted transaction here would lock out its CREATE TABLE and raise
+		# "database is locked" at Enricher.__init__.
+		self.conn.commit()
 
 	def get(self, folder: Path) -> BookMeta | None:
 		"""Return cached BookMeta if folder mtime/size unchanged, else None."""
@@ -156,11 +183,16 @@ class Cache:
 		return None
 
 	def put(self, meta: BookMeta) -> None:
+		if meta.uuid is None:
+			# No uuid -> no stable PK. Should not happen: scan calls ensure_uuid
+			# before put. Guard so a None never lands in the unique index.
+			log.warning("cache.put without uuid for %s; skipping", meta.path)
+			return
 		mtime, size = _stat_folder(Path(meta.path))
 		payload = _bookmeta_to_payload(meta)
 		self.conn.execute(
-			"INSERT OR REPLACE INTO books(path, mtime, size, payload, scanned_at) VALUES (?,?,?,?,?)",
-			(str(meta.path), mtime, size, payload, time.time()),
+			"INSERT OR REPLACE INTO books(uuid, path, mtime, size, payload, scanned_at) VALUES (?,?,?,?,?,?)",
+			(meta.uuid, str(meta.path), mtime, size, payload, time.time()),
 		)
 
 	def invalidate(self, path: str | Path) -> None:
@@ -176,6 +208,32 @@ class Cache:
 		keys = [(str(Path(p)),) for p in paths]
 		if keys:
 			self.conn.executemany("DELETE FROM books WHERE path = ?", keys)
+
+	def repoint(self, src_path: str | Path, dst_path: str | Path) -> bool:
+		"""Re-attach a cached entry from *src_path* to *dst_path* (folder moved).
+
+		Used by organize so a book's cache row FOLLOWS it across a move/rename
+		instead of being dropped — the metadata did not change, only the
+		location, so re-parsing would be wasted work. Updates both the ``path``
+		column and the ``path`` baked into the payload. Any stale row already at
+		the destination is removed first so the UNIQUE(path) index holds.
+		Returns True if a row was repointed, False if none matched *src_path*.
+		"""
+		src = str(Path(src_path))
+		dst = str(Path(dst_path))
+		row = self.conn.execute("SELECT payload FROM books WHERE path = ?", (src,)).fetchone()
+		if row is None:
+			return False
+		payload = row[0]
+		try:
+			meta = _bookmeta_from_payload(payload)
+			meta.path = dst
+			new_payload = _bookmeta_to_payload(meta)
+		except Exception:  # noqa: BLE001
+			new_payload = payload  # keep old payload; path column is what matters
+		self.conn.execute("DELETE FROM books WHERE path = ?", (dst,))
+		self.conn.execute("UPDATE books SET path = ?, payload = ? WHERE path = ?", (dst, new_payload, src))
+		return True
 
 	def clear(self) -> None:
 		"""Drop every cached entry (the table stays)."""
@@ -279,6 +337,14 @@ def scan_library(
 			if progress_callback is not None:
 				progress_callback(done, total)
 			continue
+		# Lazily mint + persist a uuid the first time a book is parsed (it is
+		# needed as the cache PK and the review identity). Non-fatal: a write
+		# error must never abort the scan — the book is still usable in-memory.
+		if meta.uuid is None:
+			try:
+				ensure_uuid(meta)
+			except Exception as e:  # noqa: BLE001
+				log.warning("could not ensure uuid for %s: %s", folder, e)
 		results.append(meta)
 		if cache is not None:
 			cache.put(meta)

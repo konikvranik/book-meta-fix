@@ -680,11 +680,11 @@ def organize(
 	'already_correct' (see move_book). This is what lets a book fixed by
 	`apply` move back out of needfix/ on the next organize run.
 
-	*cache*: when given (and not a dry run), the source and destination paths
-	of each actual move are invalidated so the next scan re-parses them rather
-	than trusting a possibly-stale cached entry (the moved files keep their
-	mtime across a rename/copy, and on NFS the attribute cache can mask the
-	change for a while).
+	*cache*: when given (and not a dry run), a pure move/rename REPOINTS the
+	cached row source->dest (the metadata is unchanged, only the location
+	moved), so the next scan reuses it; a merge still invalidates both ends
+	(its destination metadata changed). Without this, moved files keep their
+	mtime across a rename and on NFS the attribute cache can mask the change.
 
 	*progress_callback*: if given, called as ``callback(done, total)`` after
 	each book is processed, so the CLI can drive a progress bar with ETA.
@@ -704,15 +704,37 @@ def organize(
 	cache_dirty = False
 
 	def _record(result: MoveResult) -> None:
-		"""Append a result and invalidate cache for real moves/merges (both ends)."""
+		"""Append a result and update the cache for real moves/merges.
+
+		For a pure move/rename the cached BookMeta is still valid — only the
+		folder location changed — so the row is REPOINTED source->dest instead
+		of dropped, sparing the next scan a re-parse. For a merge the
+		destination's metadata actually changed (fields merged) and the source
+		folder is gone, so both ends are invalidated as before.
+		"""
 		nonlocal cache_dirty
 		results.append(result)
-		if cache is not None and not dry_run and result.action in ("moved", "collision_renamed", "merged"):
+		if cache is None or dry_run or result.action not in ("moved", "collision_renamed", "merged"):
+			return
+		cache_dirty = True
+		if result.action == "merged":
+			# Destination metadata changed; source folder removed entirely.
 			if result.source:
 				cache.invalidate(result.source)
 			if result.destination:
 				cache.invalidate(result.destination)
-			cache_dirty = True
+			return
+		# moved / collision_renamed: metadata unchanged -> row follows the book.
+		if result.source and result.destination:
+			if not cache.repoint(result.source, result.destination):
+				# No cached row at source (book was never cached): just clear any
+				# stale row at the destination so it re-parses cleanly.
+				cache.invalidate(result.destination)
+		else:
+			if result.source:
+				cache.invalidate(result.source)
+			if result.destination:
+				cache.invalidate(result.destination)
 
 	# Split OK vs broken. Broken books keep the simple move-to-needfix behaviour
 	# (needfix paths are unique by relpath+id, so collisions there are left on
