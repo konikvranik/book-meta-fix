@@ -482,18 +482,26 @@ def _safe_extract(meta: BookMeta) -> ExtractedMeta | None:
 	return primary
 
 
-# Categories that 'ALL' deliberately excludes: a known-good state where sending
-# the book to the LLM would risk inventing a wrong author rather than fixing one.
-_LLM_ALL_EXCLUDE = frozenset({"C9"})
+# Categories that 'ALL' deliberately excludes from the LLM. Currently EMPTY.
+#
+# C9 (anonym) used to live here on the theory that the LLM would invent a wrong
+# author for a genuine anonymous work. That reasoning does not hold: genuine
+# anonymous works (Bible, Koran, Edda, …) are whitelisted to verdict=OK inside
+# rule_c9_anonym, so they never reach this NEEDS_REVIEW/LLM path. Every C9 that
+# DOES reach here is a corrupted record (lost author) that genuinely benefits
+# from LLM recovery — and the result still passes verify_proposal / confirm_identity,
+# so an invented author cannot auto-apply unless the book's own content confirms it.
+# Keeping the set (and this hook) so a future category can be opted out cleanly.
+_LLM_ALL_EXCLUDE: frozenset[str] = frozenset()
 
 
 def _llm_wants(category: str, llm_categories: tuple[str, ...]) -> bool:
 	"""Should a book in *category* be sent to the LLM?
 
 	- Explicit category list (e.g. ('C1','C2')): category must be in the tuple.
-	- 'ALL': every category EXCEPT those in _LLM_ALL_EXCLUDE (currently C9 —
-	  legitimate anonyms like the Bible/Koran; an LLM there would fabricate an
-	  author). 'ALL' may be combined with explicit inclusions/exclusions.
+	- 'ALL': every category EXCEPT those in _LLM_ALL_EXCLUDE (currently empty —
+	  see the note on C9 above). 'ALL' may be combined with explicit
+	  inclusions/exclusions.
 	"""
 	if "ALL" in llm_categories:
 		return category not in _LLM_ALL_EXCLUDE

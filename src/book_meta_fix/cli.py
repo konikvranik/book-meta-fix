@@ -340,19 +340,10 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 			summary = review_writer.finish(keep_backup=interrupted)
 		except Exception as e:  # noqa: BLE001
 			console.print(f"[red]review writer finalize failed: {e}[/red]")
-			summary = {"written": 0, "skipped_user_decided": 0, "remaining_count": 0, "backup_path": None}
+			summary = {"written": 0, "skipped_user_decided": 0, "remaining_count": 0, "backup_path": None, "action_accept": 0, "action_null": 0, "action_other": 0}
 
-	# Print pipeline summary (from the results list — still populated for stats)
-	_print_pipeline_summary(results, pipe_stats)
-
-	# Streaming review summary
-	console.print()
-	t = Table(title="Review results", show_header=True, header_style="bold cyan")
-	t.add_column("Metric", style="bold")
-	t.add_column("Count", justify="right")
-	t.add_row("Skipped (user already decided)", str(summary["skipped_user_decided"]))
-	t.add_row("Written to review", str(summary["written"]))
-	console.print(t)
+	# Print pipeline summary (action breakdown leads; results list still drives stats).
+	_print_pipeline_summary(results, pipe_stats, review_summary=summary)
 	if summary.get("backup_path"):
 		console.print(f"[yellow]Backup kept at {summary['backup_path']} (run did not finish cleanly)[/yellow]", highlight=False)
 	console.print()
@@ -360,11 +351,21 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 	console.print(f"Edit the file, set `action` for each entry, then run: [bold]bmf apply {out}[/bold]", highlight=False)
 
 
-def _print_pipeline_summary(results, stats: dict | None = None) -> None:  # noqa: ANN001
-	"""Print a summary table of the pipeline's verdicts and fix sources.
+def _print_pipeline_summary(results, stats: dict | None = None, review_summary: dict | None = None) -> None:  # noqa: ANN001
+	"""Print a summary of what the pipeline produced.
+
+	Leads with the **actionable** breakdown the workflow cares about —
+	OK (done) vs auto-fix (pre-filled ``accept`` → ``bmf apply``) vs manual
+	review (``action: null``) — rather than the detector's pre-fix verdicts.
+	The verdict (OK / AUTO_FIXABLE / NEEDS_REVIEW) is decided BEFORE the
+	pipeline tries to fix anything, so it does not predict what will actually
+	be applied: a structurally-broken book can still be auto-accepted once a
+	confident, content-verified fix is found, and a merely-incomplete book can
+	stall at ``null`` when no source has the missing data. The ``action``
+	field is the post-fix truth, so that is what we surface.
 
 	*stats* (from run_pipeline) drives the fix-source breakdown table; when
-	None (e.g. when run_pipeline wasn't used), only the verdict/verification
+	None (e.g. when run_pipeline wasn't used), only the action/verification
 	tables are printed.
 	"""
 	from collections import Counter
@@ -379,13 +380,30 @@ def _print_pipeline_summary(results, stats: dict | None = None) -> None:  # noqa
 			verify_counter["(skipped)"] += 1
 
 	total = len(results)
+	ok = verdict_counter.get("OK", 0) + verdict_counter.get("VERIFIED", 0)
+	# Books the detector flagged but the pipeline is confident about: written
+	# to review with action: accept (apply will fix them). And the opposite —
+	# written with action: null (a human must decide).
+	acc = (review_summary or {}).get("action_accept", 0)
+	nul = (review_summary or {}).get("action_null", 0)
+	oth = (review_summary or {}).get("action_other", 0)
+	skipped = (review_summary or {}).get("skipped_user_decided", 0)
+	written = (review_summary or {}).get("written", 0)
+
 	console.print()
 	t = Table(title="Pipeline summary", show_header=True, header_style="bold cyan")
-	t.add_column("Verdict", style="bold")
+	t.add_column("Bucket", style="bold")
 	t.add_column("Count", justify="right")
-	t.add_column("%", justify="right")
-	for v, n in verdict_counter.most_common():
-		t.add_row(v, str(n), f"{n / total * 100:.1f}%")
+	t.add_row("OK (already correct — nothing to do)", str(ok), style="green")
+	t.add_row("Auto-fix (action: accept → `bmf apply`)", str(acc), style="bold green")
+	t.add_row("Manual review (action: null)", str(nul), style="yellow")
+	if oth:
+		t.add_row("Other action (swap/edit/delete)", str(oth))
+	if skipped:
+		t.add_row("Skipped (already decided earlier)", str(skipped), style="dim")
+	t.add_section()
+	t.add_row("Written to review.yaml", str(written))
+	t.add_row("Total books", str(total), style="bold")
 	console.print(t)
 
 	t = Table(title="Verification results", show_header=True, header_style="bold cyan")
