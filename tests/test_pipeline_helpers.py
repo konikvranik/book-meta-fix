@@ -154,7 +154,7 @@ def _empty_stats() -> dict:
 
 def _run_accept(meta, *, first_page_text, additional=None, accept=True):
 	"""Run _process_book with detect_fn -> MISSING_ISBN (AUTO_FIXABLE) and
-	_safe_extract mocked to return an ExtractedMeta with *first_page_text*.
+	safe_extract mocked to return an ExtractedMeta with *first_page_text*.
 	No enricher, no LLM. Returns (result_tuple, stats)."""
 	from book_meta_fix import pipeline as pmod
 
@@ -169,7 +169,7 @@ def _run_accept(meta, *, first_page_text, additional=None, accept=True):
 			return None
 		return ExtractedMeta(first_page_text=first_page_text)
 
-	patches = [patch.object(pmod, "detect_fn", fake_detect), patch.object(pmod, "_safe_extract", fake_extract)]
+	patches = [patch.object(pmod, "detect_fn", fake_detect), patch.object(pmod, "safe_extract", fake_extract)]
 	for p in patches:
 		p.start()
 	try:
@@ -187,7 +187,7 @@ def _run_accept(meta, *, first_page_text, additional=None, accept=True):
 
 class TestAcceptMissingIdentified:
 	def test_identity_confirmed_no_proposal_stamps_accept(self):
-		# Title + author appear in the first-page text -> _acquire_identity
+		# Title + author appear in the first-page text -> acquire_identity
 		# confirms -> a minimal identity_confirmed EnrichedMeta is stamped.
 		meta = _missing_isbn_book()
 		text = "Bílá nemoc\nKarel Čapek\nRomán o lidské slušnosti."
@@ -210,7 +210,7 @@ class TestAcceptMissingIdentified:
 		assert stats["unfixed"] == 1
 
 	def test_no_content_stays_unfixed(self):
-		# No extractable text at all -> _acquire_identity returns None -> unfixed.
+		# No extractable text at all -> acquire_identity returns None -> unfixed.
 		meta = _missing_isbn_book()
 		result, stats = _run_accept(meta, first_page_text=None)
 		assert result[3] is None

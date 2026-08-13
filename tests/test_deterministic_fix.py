@@ -70,7 +70,7 @@ class TestLlmNotCalledWhenOfflineSucceeds:
 			return Diagnosis(category="C2", reason="filename as title", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
 
 		with patch.object(pmod, "detect_fn", fake_detect), \
-			 patch.object(pmod, "_safe_extract", lambda m: extracted):
+			 patch.object(pmod, "safe_extract", lambda m: extracted):
 			result = _process_book(
 				meta, enricher=None, skip_enrich=True, skip_verify=True,
 				llm_provider=RecordingProvider(), llm_categories=("ALL",), stats=stats,
@@ -115,7 +115,7 @@ class TestLlmNotCalledWhenOfflineSucceeds:
 			return Diagnosis(category="C2", reason="filename as title", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
 
 		with patch.object(pmod, "detect_fn", fake_detect), \
-			 patch.object(pmod, "_safe_extract", lambda m: extracted):
+			 patch.object(pmod, "safe_extract", lambda m: extracted):
 			result = _process_book(
 				meta, enricher=StubEnricher(), skip_enrich=False, skip_verify=True,
 				llm_provider=RecordingProvider(), llm_categories=("ALL",), stats=stats,
@@ -158,8 +158,8 @@ class TestLlmCalledWhenNothingElseWorks:
 			return Diagnosis(category="C2", reason="filename as title", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
 
 		with patch.object(pmod, "detect_fn", fake_detect), \
-			 patch.object(pmod, "_safe_extract", lambda m: extracted), \
-			 patch.object(pmod, "_has_usable_text", lambda t: True):
+			 patch.object(pmod, "safe_extract", lambda m: extracted), \
+			 patch.object(pmod, "has_usable_text", lambda t: True):
 			result = _process_book(
 				meta, enricher=StubEnricher(), skip_enrich=False, skip_verify=True,
 				llm_provider=StubProvider(), llm_categories=("ALL",), stats=stats,
@@ -187,7 +187,7 @@ class TestStatsSourceBreakdown:
 			return Diagnosis(category="C2", reason="x", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
 
 		with patch.object(pmod, "detect_fn", fake_detect), \
-			 patch.object(pmod, "_safe_extract", lambda m: extracted):
+			 patch.object(pmod, "safe_extract", lambda m: extracted):
 			_process_book(
 				meta, enricher=None, skip_enrich=True, skip_verify=True,
 				llm_provider=None, llm_categories=(), stats=stats,
@@ -215,7 +215,7 @@ class TestStatsSourceBreakdown:
 			return Diagnosis(category="C2", reason="x", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
 
 		with patch.object(pmod, "detect_fn", fake_detect), \
-			 patch.object(pmod, "_safe_extract", lambda m: extracted):
+			 patch.object(pmod, "safe_extract", lambda m: extracted):
 			_process_book(
 				meta, enricher=StubEnricher(), skip_enrich=False, skip_verify=True,
 				llm_provider=None, llm_categories=(), stats=stats,
@@ -244,7 +244,7 @@ class TestStatsSourceBreakdown:
 			return Diagnosis(category="C2", reason="x", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
 
 		with patch.object(pmod, "detect_fn", fake_detect), \
-			 patch.object(pmod, "_safe_extract", lambda m: extracted):
+			 patch.object(pmod, "safe_extract", lambda m: extracted):
 			_process_book(
 				meta, enricher=StubEnricher(), skip_enrich=False, skip_verify=True,
 				llm_provider=None, llm_categories=(), stats=stats,
@@ -278,24 +278,24 @@ class TestStatsSourceBreakdown:
 
 
 class TestAcquireIdentity:
-	"""_acquire_identity: content-verified identity cascade (no network)."""
+	"""acquire_identity: content-verified identity cascade (no network)."""
 
 	def test_content_isbn_wins(self):
-		from book_meta_fix.pipeline import _acquire_identity
+		from book_meta_fix.pipeline import acquire_identity
 
 		meta = _book(isbn="9788072072323")
 		ext = ExtractedMeta(title="Broken_epub", isbn_from_text="9788072072323")
-		ident = _acquire_identity(meta, ext)
+		ident = acquire_identity(meta, ext)
 		assert ident is not None and ident.has_isbn
 		assert ident.source == "content-isbn"
 
 	def test_metadata_isbn_verified_against_content(self):
-		from book_meta_fix.pipeline import _acquire_identity
+		from book_meta_fix.pipeline import acquire_identity
 
 		meta = _book(isbn="978-80-720-7232-3")
 		# ISBN appears in the page text but no content_isbn field set.
 		ext = ExtractedMeta(title="Broken_epub", first_page_text="ISBN 9788072072323 here")
-		ident = _acquire_identity(meta, ext)
+		ident = acquire_identity(meta, ext)
 		assert ident is not None and ident.has_isbn
 		assert ident.source == "metadata"
 
@@ -303,27 +303,27 @@ class TestAcquireIdentity:
 		"""A C2 book (broken title) whose metadata identity isn't in the text
 		falls to the offline extractor level — title+author mined from the page
 		text and present there."""
-		from book_meta_fix.pipeline import _acquire_identity
+		from book_meta_fix.pipeline import acquire_identity
 
 		meta = _book()  # title "Broken_epub", author "Neznamy" — not in text
 		ext = _extracted_with_text_title("Jádro Galaxie")
-		ident = _acquire_identity(meta, ext)
+		ident = acquire_identity(meta, ext)
 		assert ident is not None and ident.has_title_author
 		assert ident.title == "Jádro Galaxie"
 		assert ident.source == "extractor"
 
 	def test_no_verifiable_identity_returns_none(self):
-		from book_meta_fix.pipeline import _acquire_identity
+		from book_meta_fix.pipeline import acquire_identity
 
 		meta = _book()
 		# Garbage text, no ISBN, no extracted title/author.
 		ext = ExtractedMeta(title="Broken_epub", first_page_text="random noise " * 20)
-		assert _acquire_identity(meta, ext) is None
+		assert acquire_identity(meta, ext) is None
 
 	def test_no_extracted_returns_none(self):
-		from book_meta_fix.pipeline import _acquire_identity
+		from book_meta_fix.pipeline import acquire_identity
 
-		assert _acquire_identity(_book(), None) is None
+		assert acquire_identity(_book(), None) is None
 
 
 class TestOnlineFill:
@@ -412,7 +412,7 @@ class TestLlmBroaderRetry:
 			return Diagnosis(category="C2", reason="x", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
 
 		with patch.object(pmod, "detect_fn", fake_detect), \
-			 patch.object(pmod, "_safe_extract", lambda m: extracted):
+			 patch.object(pmod, "safe_extract", lambda m: extracted):
 			result = _process_book(
 				meta, enricher=None, skip_enrich=True, skip_verify=True,
 				llm_provider=RetryProvider(), llm_categories=("ALL",), stats=stats,
@@ -446,7 +446,7 @@ class TestLlmBroaderRetry:
 			return Diagnosis(category="C2", reason="x", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
 
 		with patch.object(pmod, "detect_fn", fake_detect), \
-			 patch.object(pmod, "_safe_extract", lambda m: extracted):
+			 patch.object(pmod, "safe_extract", lambda m: extracted):
 			_process_book(
 				meta, enricher=None, skip_enrich=True, skip_verify=True,
 				llm_provider=OnceProvider(), llm_categories=("ALL",), stats=stats,

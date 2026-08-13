@@ -107,11 +107,19 @@ def scan(library: Path | None, no_cache: bool, limit: int | None) -> None:
 @click.option("--limit", type=int, default=None, help="Process only the first N books (for testing)")
 @click.option("--category", default=None, help="Show only books in this category (C1..C10, MISSING_ISBN, ...)")
 @click.option("--samples", type=int, default=3, help="Number of sample books to show per category")
-def report(library: Path | None, no_cache: bool, limit: int | None, category: str | None, samples: int) -> None:
-	"""Run detector rules and print category counts + samples."""
+@click.option("--accept-missing/--no-accept-missing", "accept_missing", default=True, help="Apply the identity gate: a MISSING_ISBN/YEAR/COVER book whose author+title are confirmed against its content counts as OK (not broken). Default on, consistent with organize/analyze. --no-accept-missing keeps the pure detector verdict (no content reads; the historic fast report).")
+@click.option("--verify-ok", "verify_ok", is_flag=True, help="Audit: also verify books the detectors marked OK against their content. Reads every OK book's file (slower). A MISMATCH (or UNCERTAIN, see --no-strict-verify) is then counted as broken.")
+@click.option("--no-strict-verify", "no_strict_verify", is_flag=True, help="With --verify-ok: only treat a clear MISMATCH as broken. By default UNCERTAIN is too.")
+def report(library: Path | None, no_cache: bool, limit: int | None, category: str | None, samples: int, accept_missing: bool, verify_ok: bool, no_strict_verify: bool) -> None:
+	"""Run detector rules and print category counts + samples.
+
+	Classification is unified with organize/epubgen: an identified MISSING_*
+	book (author+title confirmed against the content) is counted as OK, so the
+	reported broken tally matches what `bmf organize` would route to needfix/.
+	"""
 	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 
-	from .detectors import detect as detect_fn
+	from .classify import classify as classify_fn
 
 	cfg = Config.from_env()
 	if library is not None:
@@ -142,21 +150,30 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 		console.print("[red]No books found.[/red]")
 		sys.exit(1)
 
-	# Run detectors (the per-book classify pass — wrap with a progress bar/ETA).
+	# Classify each book via the shared classifier (same rules as organize/analyze).
 	results = []
+	identified = 0
 	with Progress(
 		SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
 		BarColumn(complete_style="magenta", finished_style="magenta", pulse_style="magenta"), TextColumn("{task.completed}/{task.total}"),
 		TimeRemainingColumn(), console=console, transient=True,
 	) as progress:
-		task_id = progress.add_task("Detecting", total=len(books))
+		task_id = progress.add_task("Classifying", total=len(books))
 		for i, b in enumerate(books, start=1):
-			results.append((b, detect_fn(b)))
+			c = classify_fn(b, accept_missing=accept_missing, verify_ok=verify_ok, strict_verify=not no_strict_verify)
+			if c.identified:
+				identified += 1
+			results.append((b, c.diag))
 			progress.update(task_id, completed=i)
 	if cache is not None:
 		cache.close()
 
 	_print_detect_summary(results, category, samples)
+	if accept_missing and identified:
+		console.print(
+			f"[dim]  {identified} book(s) identified (accepted): MISSING_* with author+title "
+			"confirmed against content — these route to OK, not needfix.[/dim]"
+		)
 
 
 @main.command()
@@ -565,13 +582,19 @@ def apply(review_file: Path, library: Path | None, do_apply: bool) -> None:
 @click.option("--pattern", default=None, help="Path pattern for OK books (default: '{author}/{title} ({id})')")
 @click.option("--needfix-dir", default=None, help="Folder for broken books (default: 'needfix')")
 @click.option("--apply", "do_apply", is_flag=True, help="Actually move (default: dry-run)")
-@click.option("--skip-verify", is_flag=True, help="Skip content verification (faster, less reliable)")
-def organize(library: Path | None, no_cache: bool, limit: int | None, pattern: str | None, needfix_dir: str | None, do_apply: bool, skip_verify: bool) -> None:
-	"""Move OK books to a clean path pattern and broken books to needfix/."""
-	from .detectors import detect as detect_fn
+@click.option("--accept-missing/--no-accept-missing", "accept_missing", default=True, help="Apply the identity gate (same as analyze/report): a MISSING_ISBN/YEAR/COVER book whose author+title are confirmed against its content routes to the OK path, not needfix. Default on. --no-accept-missing routes them to needfix (the historic behaviour) and skips the content read.")
+@click.option("--verify-ok", "verify_ok", is_flag=True, help="Audit: also verify books the detectors marked OK against their content. Off by default (consistent with report/analyze). A MISMATCH (or UNCERTAIN, see --no-strict-verify) routes to needfix.")
+@click.option("--no-strict-verify", "no_strict_verify", is_flag=True, help="With --verify-ok: only a clear MISMATCH routes to needfix. By default UNCERTAIN does too.")
+def organize(library: Path | None, no_cache: bool, limit: int | None, pattern: str | None, needfix_dir: str | None, do_apply: bool, accept_missing: bool, verify_ok: bool, no_strict_verify: bool) -> None:
+	"""Move OK books to a clean path pattern and broken books to needfix/.
+
+	Classification is unified with report/analyze: identified MISSING_* books
+	(author+title confirmed against the content) route to the OK path. OK books
+	are not content-verified unless --verify-ok is given (consistent with report).
+	"""
+	from .classify import classify as classify_fn
 	from .mover import DEFAULT_NEEDFIX_DIR, DEFAULT_PATH_PATTERN
 	from .mover import organize as organize_fn
-	from .verifier import verify
 
 	cfg = Config.from_env()
 	if library is not None:
@@ -608,9 +631,11 @@ def organize(library: Path | None, no_cache: bool, limit: int | None, pattern: s
 		if limit is not None:
 			books = books[:limit]
 
-		# Classify each book: detector rules + content verify for OK books (a
-		# MISMATCH demotes to NEEDS_REVIEW). verify() reads the book file, so on
-		# NFS this phase can take a while — wrap it in a progress bar.
+		# Classify each book via the shared classifier (same rules as
+		# report/analyze). An identified MISSING_* book routes to OK; OK books are
+		# content-verified only with --verify-ok. classify() may read the book
+		# file (identity gate / OK audit), so on NFS this can take a while.
+		classifications = []
 		verdicts = []
 		with Progress(
 			SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
@@ -619,19 +644,9 @@ def organize(library: Path | None, no_cache: bool, limit: int | None, pattern: s
 		) as progress:
 			task_id = progress.add_task("Classifying", total=len(books))
 			for meta in books:
-				diag = detect_fn(meta)
-				# OK books get verified; if verification MISMATCHES, demote to NEEDS_REVIEW
-				v = diag.verdict
-				if v.value == "OK" and not skip_verify and meta.primary_file:
-					try:
-						ver = verify(meta)
-						if ver.result == "MISMATCH":
-							from .models import Verdict
-
-							v = Verdict.NEEDS_REVIEW
-					except Exception:  # noqa: BLE001
-						pass
-				verdicts.append((meta, v))
+				c = classify_fn(meta, accept_missing=accept_missing, verify_ok=verify_ok, strict_verify=not no_strict_verify)
+				classifications.append(c)
+				verdicts.append((meta, c.verdict))
 				progress.update(task_id, advance=1)
 
 		# Move books (verdict-driven) with a progress bar + ETA. cache is passed
@@ -651,20 +666,24 @@ def organize(library: Path | None, no_cache: bool, limit: int | None, pattern: s
 				path_pattern=pat, needfix_dir=needfix, dry_run=not do_apply, cache=cache,
 				progress_callback=_move_cb,
 			)
-		_print_organize_summary(results, verdicts)
+		_print_organize_summary(results, classifications)
 	finally:
 		if cache is not None:
 			cache.close()
 
 
-def _print_organize_summary(results, verdicts) -> None:  # noqa: ANN001
+def _print_organize_summary(results, classifications) -> None:  # noqa: ANN001
 	from collections import Counter
 
 
-	# Verdict distribution
+	# Verdict distribution (from the shared classifier's effective verdict — an
+	# identified MISSING_* book is already folded into OK here).
 	vc: Counter[str] = Counter()
-	for _m, v in verdicts:
-		vc[v.value] += 1
+	identified = 0
+	for c in classifications:
+		vc[c.verdict.value] += 1
+		if c.identified:
+			identified += 1
 	console.print()
 	t = Table(title="Classification", show_header=True, header_style="bold cyan")
 	t.add_column("Verdict")
@@ -674,6 +693,11 @@ def _print_organize_summary(results, verdicts) -> None:  # noqa: ANN001
 		dest = "OK path" if v in ("OK", "VERIFIED") else "needfix/"
 		t.add_row(v, str(n), dest)
 	console.print(t)
+	if identified:
+		console.print(
+			f"[dim]  {identified} identified (accepted): MISSING_* with author+title confirmed "
+			"against content — routed to OK, not needfix.[/dim]"
+		)
 
 	# Move results
 	rc: Counter[str] = Counter()
@@ -712,12 +736,18 @@ def _print_organize_summary(results, verdicts) -> None:  # noqa: ANN001
 @click.option("--no-cache", is_flag=True, help="Disable SQLite cache")
 @click.option("--limit", type=int, default=None, help="Process only the first N books")
 @click.option("--apply", "do_apply", is_flag=True, help="Actually generate EPUBs (default: dry-run)")
-@click.option("--skip-verify", is_flag=True, help="Skip content verification (faster)")
-def epubgen(library: Path | None, no_cache: bool, limit: int | None, do_apply: bool, skip_verify: bool) -> None:
-	"""Generate EPUBs for OK books that lack one, from the best source format."""
-	from .detectors import detect as detect_fn
+@click.option("--accept-missing/--no-accept-missing", "accept_missing", default=True, help="Apply the identity gate (same as organize/report): an identified MISSING_* book (author+title confirmed against content) is treated as OK and gets an EPUB. Default on.")
+@click.option("--verify-ok", "verify_ok", is_flag=True, help="Audit: verify OK books against their content before generating. Off by default (consistent with organize/report). A MISMATCH (or UNCERTAIN, see --no-strict-verify) skips generation.")
+@click.option("--no-strict-verify", "no_strict_verify", is_flag=True, help="With --verify-ok: only a clear MISMATCH skips generation. By default UNCERTAIN does too.")
+def epubgen(library: Path | None, no_cache: bool, limit: int | None, do_apply: bool, accept_missing: bool, verify_ok: bool, no_strict_verify: bool) -> None:
+	"""Generate EPUBs for OK books that lack one, from the best source format.
+
+	Classification is unified with organize/report: identified MISSING_* books
+	route as OK and get an EPUB. OK books are not content-verified unless
+	--verify-ok is given.
+	"""
+	from .classify import classify as classify_fn
 	from .epubgen import generate_epub
-	from .verifier import verify
 
 	cfg = Config.from_env()
 	if library is not None:
@@ -761,21 +791,12 @@ def epubgen(library: Path | None, no_cache: bool, limit: int | None, do_apply: b
 	) as progress:
 		task_id = progress.add_task("Generating EPUBs", total=len(books))
 		for i, meta in enumerate(books, start=1):
-			# Only OK books (verified clean)
-			diag = detect_fn(meta)
-			if diag.verdict.value not in ("OK", "VERIFIED"):
+			# Only OK books (verified clean) — identified MISSING_* route as OK too.
+			c = classify_fn(meta, accept_missing=accept_missing, verify_ok=verify_ok, strict_verify=not no_strict_verify)
+			if c.verdict.value not in ("OK", "VERIFIED"):
 				skipped_not_ok += 1
 				progress.update(task_id, completed=i)
 				continue
-			if diag.verdict.value == "OK" and not skip_verify and meta.primary_file:
-				try:
-					ver = verify(meta)
-					if ver.result == "MISMATCH":
-						skipped_not_ok += 1
-						progress.update(task_id, completed=i)
-						continue
-				except Exception:  # noqa: BLE001
-					pass
 			# Skip if already has epub
 			if ".epub" in meta.formats:
 				skipped_has_epub += 1

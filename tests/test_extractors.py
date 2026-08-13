@@ -66,7 +66,7 @@ class TestCatdocHelper:
 
 
 class TestSafeExtractFallback:
-	"""_safe_extract tries sibling formats when the primary yields no usable
+	"""safe_extract tries sibling formats when the primary yields no usable
 	page text (corrupt epub, image-only PDF, empty catdoc .doc)."""
 
 	def _meta_with_formats(self, tmp_path: Path, formats: list[str]):  # noqa: ANN001
@@ -84,48 +84,48 @@ class TestSafeExtractFallback:
 
 	def test_primary_with_usable_text_no_fallback(self, tmp_path):
 		from book_meta_fix.extractors import ExtractedMeta
-		from book_meta_fix.pipeline import _safe_extract
+		from book_meta_fix.verifier import safe_extract
 
 		meta = self._meta_with_formats(tmp_path, [".epub", ".pdb"])
 		good = ExtractedMeta(first_page_text="Božena Němcová Babička text " * 10)
-		with patch("book_meta_fix.pipeline.extract", return_value=good) as me:
-			result = _safe_extract(meta)
+		with patch("book_meta_fix.verifier.extract", return_value=good) as me:
+			result = safe_extract(meta)
 		assert result is good
 		assert me.call_count == 1  # only the primary, no sibling tried
 
 	def test_falls_back_when_primary_text_unusable(self, tmp_path):
 		from book_meta_fix.extractors import ExtractedMeta
-		from book_meta_fix.pipeline import _safe_extract
+		from book_meta_fix.verifier import safe_extract
 
 		meta = self._meta_with_formats(tmp_path, [".epub", ".pdb"])
 		bad = ExtractedMeta(first_page_text=None, title="from epub")
 		good = ExtractedMeta(first_page_text="Karel Čapek R.U.R. text " * 10)
-		with patch("book_meta_fix.pipeline.extract", side_effect=[bad, good]) as me:
-			result = _safe_extract(meta)
+		with patch("book_meta_fix.verifier.extract", side_effect=[bad, good]) as me:
+			result = safe_extract(meta)
 		assert result is good  # fell back to the pdb sibling
 		assert me.call_count == 2  # primary + one sibling
 
 	def test_falls_back_when_primary_returns_none(self, tmp_path):
 		from book_meta_fix.extractors import ExtractedMeta
-		from book_meta_fix.pipeline import _safe_extract
+		from book_meta_fix.verifier import safe_extract
 
 		meta = self._meta_with_formats(tmp_path, [".epub", ".pdb"])
 		good = ExtractedMeta(first_page_text="Franz Kafka Zámek text " * 10)
-		with patch("book_meta_fix.pipeline.extract", side_effect=[None, good]):
-			result = _safe_extract(meta)
+		with patch("book_meta_fix.verifier.extract", side_effect=[None, good]):
+			result = safe_extract(meta)
 		assert result is good
 
 	def test_returns_primary_when_no_sibling_helps(self, tmp_path):
 		"""If no sibling yields usable text either, return the primary (it may
 		still carry embedded metadata even without page text)."""
 		from book_meta_fix.extractors import ExtractedMeta
-		from book_meta_fix.pipeline import _safe_extract
+		from book_meta_fix.verifier import safe_extract
 
 		meta = self._meta_with_formats(tmp_path, [".epub", ".pdb"])
 		bad = ExtractedMeta(first_page_text=None, title="from epub")
 		bad2 = ExtractedMeta(first_page_text=None)
-		with patch("book_meta_fix.pipeline.extract", side_effect=[bad, bad2]):
-			result = _safe_extract(meta)
+		with patch("book_meta_fix.verifier.extract", side_effect=[bad, bad2]):
+			result = safe_extract(meta)
 		assert result is bad
 
 
