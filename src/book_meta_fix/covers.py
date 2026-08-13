@@ -167,6 +167,45 @@ def extract_cover_from_book(book_path: str | Path, dest: Path | None = None) -> 
 		return None
 
 
+def recover_cover_from_book(book_path: str | Path, dest_path: str | Path) -> bool:
+	"""Extract the book's embedded cover into *dest_path*, validating it first.
+
+	The fallback when ``cover.jpg`` is missing or a Calibre placeholder and no
+	web cover was found. Extracts via :func:`extract_cover_from_book` (calibre
+	``ebook-meta --get-cover``) into a temp file, REJECTS the result if it is
+	itself a generated placeholder, then atomically moves it into place with a
+	``.bak`` backup — mirroring :func:`download_cover`. Never raises; returns
+	True only when a real cover landed at *dest_path*.
+
+	The generated-placeholder gate is mandatory and uses the SAME pixel math as
+	the C11 detector (:func:`analyze_cover`): anything we would flag as a
+	generated sidecar is rejected here too. Calibre embeds the covers it
+	generates, so without this gate a C11 book would simply extract its own
+	placeholder back out — and a generated extract can never become ``cover.jpg``
+	(the book would just re-fire C11 on the next scan).
+	"""
+	tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False, prefix="bmf-cover-")
+	tmp.close()
+	tmp_path = Path(tmp.name)
+	try:
+		if extract_cover_from_book(book_path, dest=tmp_path) is None:
+			return False  # calibre absent, or the file has no embedded cover
+		# Generated-placeholder gate — see docstring.
+		if analyze_cover(tmp_path).is_generated:
+			log.info("extracted cover for %s looks generated; discarding", book_path)
+			return False
+		dest_path = Path(dest_path)
+		if dest_path.is_file():  # backup existing, mirroring download_cover
+			bak = dest_path.with_suffix(dest_path.suffix + ".bak")
+			shutil.copy2(dest_path, bak)
+		os.replace(tmp_path, dest_path)
+		log.info("cover extracted from book: %s -> %s", Path(book_path).name, dest_path.name)
+		return True
+	finally:
+		if tmp_path.exists():
+			tmp_path.unlink(missing_ok=True)
+
+
 def download_cover(url: str, dest_path: str | Path, *, timeout: float = 15.0) -> bool:
 	"""Download a cover image from *url* to *dest_path* atomically.
 

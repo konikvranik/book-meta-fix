@@ -261,11 +261,19 @@ class ReviewWriter:
 		# the right book. No title/author change risk — just a cover download.
 		if action is None and diag.category in _COVER_CATEGORIES and proposed and proposed.get("cover_url"):
 			action = "accept"
+		# Cover-only entry with NO proposed change: the record is fine except
+		# for the cover, and extracting the book's own cover (the _apply_action
+		# fallback when there is no cover_url) carries zero identity risk. Pre-
+		# fill accept so the cover is recovered in bulk even when no enricher
+		# had a cover_url and identity was never confirmed. *proposed* must be
+		# empty so _apply_action applies only the cover recovery — never a
+		# title/author/isbn mutation on an unconfirmed record.
+		if action is None and diag.category in _COVER_CATEGORIES and not proposed:
+			action = "accept"
 		# identity_confirmed with no proposed change: identity was verified
 		# against the book's content, so the record is correct — accept as-is.
 		# The pipeline sets this for MISSING_* books where author+title were
-		# confirmed and nothing was recovered. `bmf apply` then prunes it
-		# (safe no-op: _apply_action skips when proposed is empty).
+		# confirmed and nothing was recovered. `bmf apply` then prunes it.
 		if action is None and enriched is not None and getattr(enriched, "identity_confirmed", False) and not proposed:
 			action = "accept"
 		entry: dict[str, Any] = {

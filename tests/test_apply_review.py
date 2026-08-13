@@ -230,6 +230,74 @@ class TestCoverDownloadGate:
 			apply_review(review, library, dry_run=False)
 		dl.assert_not_called()
 
+	def test_extract_for_missing_cover_empty_proposed(self, tmp_path):
+		"""MISSING_COVER + empty proposed + accept -> extract from the book file.
+
+		This is the identity-confirmed auto-accept segment: proposed is
+		intentionally empty, so the field-application guard is skipped but cover
+		recovery still runs and falls back to extraction (no cover_url)."""
+		library = tmp_path / "lib"
+		self._seed_book(library)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [{
+			"id": 1, "path": "author_1/book_1",
+			"diagnosis": {"category": "MISSING_COVER", "reason": "r"},
+			"current": {"title": "T"}, "proposed": {}, "action": "accept",
+		}])
+		with patch("book_meta_fix.covers.recover_cover_from_book", return_value=True) as rec, \
+			patch("book_meta_fix.covers.download_cover") as dl:
+			apply_review(review, library, dry_run=False)
+		rec.assert_called_once()
+		dl.assert_not_called()
+
+	def test_extract_when_download_fails(self, tmp_path):
+		"""A cover_url whose download fails falls back to extracting the cover."""
+		library = tmp_path / "lib"
+		self._seed_book(library)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._entry(1, "C11")])  # has cover_url
+		with patch("book_meta_fix.covers.download_cover", return_value=False), \
+			patch("book_meta_fix.covers.recover_cover_from_book", return_value=True) as rec:
+			apply_review(review, library, dry_run=False)
+		rec.assert_called_once()
+
+	def test_no_extract_when_download_succeeds(self, tmp_path):
+		"""A successful download must not also trigger extraction."""
+		library = tmp_path / "lib"
+		self._seed_book(library)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._entry(1, "C11")])
+		with patch("book_meta_fix.covers.download_cover", return_value=True), \
+			patch("book_meta_fix.covers.recover_cover_from_book") as rec:
+			apply_review(review, library, dry_run=False)
+		rec.assert_not_called()
+
+	def test_no_extract_for_non_cover_category(self, tmp_path):
+		"""A C2 book (even with a stray cover_url) never reaches extraction."""
+		library = tmp_path / "lib"
+		self._seed_book(library)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._entry(1, "C2")])
+		with patch("book_meta_fix.covers.recover_cover_from_book") as rec, \
+			patch("book_meta_fix.covers.download_cover") as dl:
+			apply_review(review, library, dry_run=False)
+		rec.assert_not_called()
+		dl.assert_not_called()
+
+	def test_idempotent_skip_extraction_when_cover_present(self, tmp_path):
+		"""MISSING_COVER + cover.jpg now present -> no download AND no extraction
+		(already fixed on a previous run)."""
+		library = tmp_path / "lib"
+		book = self._seed_book(library)
+		(book / "cover.jpg").write_bytes(b"filled")
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._entry(1, "MISSING_COVER")])
+		with patch("book_meta_fix.covers.recover_cover_from_book") as rec, \
+			patch("book_meta_fix.covers.download_cover") as dl:
+			apply_review(review, library, dry_run=False)
+		rec.assert_not_called()
+		dl.assert_not_called()
+
 
 class TestPruning:
 	"""Successfully-applied entries are pruned from review.yaml; pending,

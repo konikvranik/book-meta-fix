@@ -1044,34 +1044,40 @@ def _apply_action(meta: BookMeta, item) -> None:  # noqa: ANN001
 	they involve a network fetch — the caller (apply_review) wraps this in a
 	try/except and reports download failures via the summary dict.
 	"""
-	if item.action == "accept" and item.proposed:
-		# Apply all proposed fields
-		if "title" in item.proposed:
-			meta.title = item.proposed["title"]
-		if "author" in item.proposed:
-			meta.authors = [item.proposed["author"]] + (meta.authors[1:] if len(meta.authors) > 1 else [])
-		if "isbn" in item.proposed:
-			meta.isbn = item.proposed["isbn"]
-		if "year" in item.proposed:
-			meta.year = item.proposed["year"]
-		if "publisher" in item.proposed:
-			meta.publisher = item.proposed["publisher"]
-		if "language" in item.proposed:
-			meta.language = item.proposed["language"]
-		if "genres" in item.proposed:
-			genres = item.proposed["genres"]
-			meta.genres = genres if isinstance(genres, list) else [genres]
-		# Cover replacement: download cover_url to cover.jpg — but only when the
-		# book has a cover diagnosis (C11 placeholder / MISSING_COVER) among ANY
-		# of its diagnoses, not just the primary. A book whose primary issue is
-		# C2 but that also has a generated cover must get its cover replaced in
-		# the same pass. cover_url rides along on every enriched book's proposed
-		# block in older review.yaml files, so this gate also neutralises those
-		# legacy entries. Idempotent: a re-run must not re-download a fixed cover.
+	if item.action == "accept":
+		# Apply proposed fields. *proposed* may be empty — e.g. an identity-
+		# confirmed MISSING_COVER auto-accept proposes nothing — so the field
+		# application is optional but the cover recovery below still runs.
+		if item.proposed:
+			if "title" in item.proposed:
+				meta.title = item.proposed["title"]
+			if "author" in item.proposed:
+				meta.authors = [item.proposed["author"]] + (meta.authors[1:] if len(meta.authors) > 1 else [])
+			if "isbn" in item.proposed:
+				meta.isbn = item.proposed["isbn"]
+			if "year" in item.proposed:
+				meta.year = item.proposed["year"]
+			if "publisher" in item.proposed:
+				meta.publisher = item.proposed["publisher"]
+			if "language" in item.proposed:
+				meta.language = item.proposed["language"]
+			if "genres" in item.proposed:
+				genres = item.proposed["genres"]
+				meta.genres = genres if isinstance(genres, list) else [genres]
+		# Cover recovery: runs whenever the book has a cover diagnosis (C11
+		# placeholder / MISSING_COVER) among ANY of its diagnoses — not just the
+		# primary — and regardless of whether *proposed* is empty. Try the
+		# enricher cover_url first; if there is none (or the download fails),
+		# fall back to extracting the cover from the book's own file. The
+		# extractor rejects generated placeholders, so a C11 book can't pull
+		# Calibre's own junk back out. cover_url rides along on every enriched
+		# book's proposed block in older review.yaml files, so the category gate
+		# also neutralises those legacy entries. Idempotent: a re-run skips a
+		# cover that's already been fixed.
 		diag_dicts = item.diagnoses or ([item.diagnosis] if item.diagnosis else [])
 		cats = {d.get("category") for d in diag_dicts}
-		if "cover_url" in item.proposed and cats & set(_COVER_CATEGORIES):
-			from .covers import analyze_cover, download_cover
+		if cats & set(_COVER_CATEGORIES):
+			from .covers import analyze_cover, download_cover, recover_cover_from_book
 
 			cover_path = Path(meta.path) / "cover.jpg"
 			if "C11" in cats and cover_path.is_file() and not analyze_cover(cover_path).is_generated:
@@ -1081,9 +1087,13 @@ def _apply_action(meta: BookMeta, item) -> None:  # noqa: ANN001
 				# Missing cover already filled.
 				log.info("cover already present, skipping id=%s", item.id)
 			else:
-				ok = download_cover(item.proposed["cover_url"], cover_path)
+				ok = False
+				if item.proposed and "cover_url" in item.proposed:
+					ok = download_cover(item.proposed["cover_url"], cover_path)
+				if not ok and meta.primary_file:
+					ok = recover_cover_from_book(meta.primary_file, cover_path)
 				if not ok:
-					log.warning("cover download failed for id=%s url=%s", item.id, item.proposed["cover_url"])
+					log.warning("cover recovery failed for id=%s", item.id)
 	elif item.action == "swap":
 		# Swap author <-> title
 		old_title = meta.title
