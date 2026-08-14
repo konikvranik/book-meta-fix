@@ -8,7 +8,9 @@ from book_meta_fix.encoding import (
 	detect_double_decode,
 	detect_mojibake,
 	recode,
+	recode_failure_reason,
 	repair,
+	repair_chain,
 	repair_double_decode,
 )
 
@@ -211,3 +213,99 @@ class TestRecode:
 
 	def test_empty(self):
 		assert recode("", "cp1250", "utf-8") == ""
+
+
+class TestRecodeFailureReason:
+	"""Diagnostics for a z/do pair that recode() cannot run — the GUI hint."""
+
+	def test_working_pair_has_no_reason(self):
+		moji = _corrupt("Vytváříme si domovskou stránku", "cp1250")
+		assert recode_failure_reason(moji, "cp1250", "utf-8") is None
+
+	def test_undefined_cp1250_byte_names_byte_and_codec(self):
+		# The classic inverted-direction trap: Á encodes to C3 81 in utf-8 and
+		# 0x81 is one of cp1250's five undefined positions, so the decode side
+		# raises and recode returns None — the reason must say so.
+		reason = recode_failure_reason("Árie", "utf-8", "cp1250")
+		assert reason is not None
+		assert "0x81" in reason
+		assert "cp1250" in reason
+		assert recode("Árie", "utf-8", "cp1250") is None
+
+	def test_unrepresentable_char_names_char_and_codec(self):
+		reason = recode_failure_reason("あ", "cp1250", "utf-8")
+		assert reason is not None
+		assert "U+3042" in reason
+		assert "cp1250" in reason
+		assert recode("あ", "cp1250", "utf-8") is None
+
+	def test_utf8_target_never_fails_on_decode_side(self):
+		# dst=utf-8 goes through the tolerant per-byte decoder: even bytes
+		# that are invalid utf-8 fall back to the single-byte codec, so only
+		# the encode side can fail.
+		assert recode_failure_reason("Předchozí Á stránka", "cp1250", "utf-8") is None
+
+	def test_unknown_codec(self):
+		assert "neznámý kodek" in (recode_failure_reason("abc", "utf-9", "utf-8") or "")
+
+	def test_empty(self):
+		assert recode_failure_reason("", "cp1250", "utf-8") is None
+
+
+class TestRecodeLostBytes:
+	"""U+FFFD marks bytes already destroyed by an errors="replace" decode —
+	it can be re-encoded by NO codec, but it must not block repairing the
+	rest of the text (that was the "checkbox greyed out" bug)."""
+
+	def test_lost_byte_does_not_block_recode(self):
+		moji = _corrupt("Vytváříme si domovskou stránku", "cp1250")
+		# kill one ASCII byte so no UTF-8 run is orphaned — pure marker test
+		broken = moji[:1] + "\ufffd" + moji[2:]
+		out = recode(broken, "cp1250", "utf-8")
+		assert out is not None
+		assert "domovskou stránku" in out
+		assert "\ufffd" in out  # the lost position stays visible, not hidden
+
+	def test_repair_double_decode_tolerates_lost_bytes(self):
+		moji = _corrupt("Vytváříme si domovskou stránku", "cp1250")
+		broken = moji[:1] + "\ufffd" + moji[2:]
+		out = repair_double_decode(broken)
+		assert out is not None
+		assert "domovskou stránku" in out
+
+	def test_only_fffd_is_tolerated(self):
+		# Hiragana is genuinely unencodable in cp1250 — still a hard failure.
+		assert recode("あ\ufffd", "cp1250", "utf-8") is None
+
+
+class TestRepairChain:
+	"""Two-layer chains: cp1250 CZ text mis-read as cp1251 (Cyrillic
+	look-alikes), saved utf-8, mis-read as cp1250, saved utf-8 again.
+	SAMPLE is a real wild book (an old Czech HTML tutorial)."""
+
+	SAMPLE = (
+		"vŃŤsledek 1. opakovacĐ˝ lekce "
+		"Toto je mŃ‰j prvnĐ˝ pŃ�Đ˝klad v jazyce HTML "
+		"ĐŞvod ĐŞĐ¸el a hlavnĐ˝ funkce systĐąmu "
+		"FunkĐ¸nĐ˝ rozhranĐ˝ DatovĐą rozhranĐ˝ "
+		"ZpĐĽt Â  na opakovacĐ˝ lekci"
+	)
+
+	def test_repairs_wild_two_layer_sample(self):
+		res = repair_chain(self.SAMPLE)
+		assert res is not None
+		fixed, desc = res
+		for word in ("výsledek", "opakovací", "můj", "klad", "Účel",
+		             "systému", "Funkční", "Datové", "Zpět"):
+			assert word in fixed, word
+		assert "cp1251" in desc
+		assert "\ufffd" in fixed  # the lost ř bytes stay marked
+
+	def test_single_layer_mojibake_is_not_chained(self):
+		# Plain double-decode territory — repair_double_decode handles it,
+		# the chain must not fire (false-positive guard).
+		moji = _corrupt("Vytváříme si domovskou stránku", "cp1250")
+		assert repair_chain(moji) is None
+
+	def test_clean_text_returns_none(self):
+		assert repair_chain("příliš žluťoučký kůň") is None
