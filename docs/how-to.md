@@ -83,7 +83,8 @@ through, "skutečně je" the real one, and `⇄` swaps them; a failing pair is
 explained in the hint, which offers the reversed direction as a click;
 bytes lost to an earlier replace-decode (`�`) don't block the repair and
 stay marked; two-layer chains are repaired automatically and named in the
-hint; always rendered as UTF-8). The
+hint; always rendered as UTF-8). Drag the grip under the content preview to
+resize it vertically (double-click resets). The
 detail column scrolls; every action has a `Ctrl+letter` shortcut (`F1` lists
 them); `PgUp`/`PgDn` move between books and `Tab` cycles only the editable
 fields (`Ctrl+A` selects all in a field). Requires the Tk bindings
