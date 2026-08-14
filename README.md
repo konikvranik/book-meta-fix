@@ -156,8 +156,9 @@ replace-decode (shown as `�`) don't block the repair — they stay marked at
 their position. Two-layer chains (a wild sample: cp1250 text mis-read as
 cp1251, re-saved utf-8, mis-read as cp1250 again) are repaired
 automatically and named in the hint. The result is always rendered as
-UTF-8. The whole detail column scrolls; hovering a thumbnail in the list
-pops up a larger cover.
+UTF-8. Drag the grip under the content preview to resize it vertically
+(double-click resets). The whole detail column scrolls; hovering a thumbnail
+in the list pops up a larger cover.
 
 **Everything is bound to `Ctrl+letter`** (bare letters keep typing into the
 fields): `PgUp`/`PgDn` move between books, `Tab` cycles only the editable

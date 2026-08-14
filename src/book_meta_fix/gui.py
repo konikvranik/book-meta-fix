@@ -311,8 +311,15 @@ class _Tooltip:
 		widget.bind("<Leave>", self._hide, add="+")
 		widget.bind("<Motion>", self._schedule, add="+")
 
-	def _schedule(self, _event=None) -> None:
+	def _schedule(self, event=None) -> None:
 		self._cancel()
+		# While a button is held (e.g. dragging the preview grip), suppress
+		# the tooltip entirely: this tip's default position is right BELOW
+		# the widget — exactly where a drag is heading — so popping up
+		# mid-drag hijacks the pointer area and reads as a jerky resize.
+		if event is not None and getattr(event, "state", 0) & 0x0100:
+			self._hide()
+			return
 		if self.text:
 			self._id = self.widget.after(self._delay, self._show)
 
@@ -853,7 +860,8 @@ class ReviewEditorApp:
 		self._recode_from.trace_add("write", lambda *_: self._recode_changed())
 		self._recode_to.trace_add("write", lambda *_: self._recode_changed())
 		body = ttk.Frame(box)
-		body.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+		body.pack(fill="both", expand=True, padx=6, pady=0)
+		self._content_body = body
 		self._content_txt = self._style_text(
 			tk.Text(body, wrap="word", state="disabled", height=12)
 		)
@@ -861,6 +869,82 @@ class ReviewEditorApp:
 		vsb = ttk.Scrollbar(body, orient="vertical", command=self._content_txt.yview)
 		self._content_txt.configure(yscrollcommand=vsb.set)
 		vsb.pack(side="right", fill="y")
+		# Pixel-continuous height: a Text's own height option is quantized to
+		# whole LINES by Tk (that was the choppy one-line-at-a-time drag), so
+		# propagation is turned off and body's -height — pixels — rules; the
+		# Text and scrollbar just fill it. Horizontal sizing is unaffected
+		# (body is packed fill="both").
+		body.pack_propagate(False)
+		try:
+			ls = max(1, int(self.root.tk.call(
+				"font", "metrics", self._content_txt.cget("font"), "-linespace",
+			)))
+		except Exception:  # noqa: BLE001
+			ls = 16  # typical 10pt line; resize still works
+		self._content_linespace = ls
+		self._preview_h_default = 12 * ls + 8  # ~the old 12-line height
+		body.configure(height=self._preview_h_default)
+		# Drag-to-resize grip flush with the preview's bottom edge. Inside the
+		# scrollable column the Text's height IN LINES is the only geometry
+		# knob that matters (the inner frame grows, _on_inner_configure
+		# re-derives the scrollregion), so a plain drag handle suffices — no
+		# PanedWindow. Highlight ring instead of a fill so the bar reads as an
+		# edge, both on light and dark themes.
+		try:
+			grip_bg = self._style.lookup("TFrame", "background") or "#d9d9d9"
+		except Exception:  # noqa: BLE001
+			grip_bg = "#d9d9d9"
+		self._content_grip = tk.Frame(
+			box, height=7, cursor="sb_v_double_arrow", background=grip_bg,
+			highlightthickness=1, highlightbackground="#999999",
+		)
+		self._content_grip.pack(fill="x", padx=6, pady=(2, 6))
+		self._content_grip.bind("<Button-1>", self._start_preview_resize)
+		self._content_grip.bind("<B1-Motion>", self._drag_preview_resize)
+		self._content_grip.bind(
+			"<Double-Button-1>", lambda _e: self._set_preview_height(self._preview_h_default),
+		)
+		self._grip_tip = _Tooltip(
+			self._content_grip,
+			"Tahem nahoru/dolů změníš výšku náhledu (dvojklik = výchozí výška)",
+		)
+
+	def _set_preview_height(self, px: int) -> None:
+		"""Set the content preview height in pixels, clamped to sane bounds.
+
+		The bounds are expressed in lines (3–80) so they track the actual
+		font, but the value itself is raw pixels — no line quantization.
+		Deliberately does NOT touch the canvas scrollregion here: this runs
+		inside motion events, where ``bbox("all")`` still reflects the OLD
+		geometry (layout happens at idle), so setting it synchronously means
+		TWO clashing updates per mouse move — the visible jerk. The inner
+		frame's <Configure> binding (_on_inner_configure) recomputes it once,
+		after the real layout lands.
+		"""
+		ls = getattr(self, "_content_linespace", 16)
+		px = max(3 * ls, min(80 * ls, int(px)))
+		self._content_body.configure(height=px)
+
+	def _start_preview_resize(self, event) -> str | None:
+		# Defaults via getattr: B1-Motion cannot arrive without a Button-1 on
+		# the same widget (implicit pointer grab), these are pure paranoia.
+		self._resize_y0 = event.y_root
+		# Snap the request to the CURRENT allocation: when the window is
+		# large enough that the parcel exceeds the request, a drag would feel
+		# dead until the request passes the allocation (and then jump).
+		# Snapping is visually a no-op and makes every pixel 1:1 from here on.
+		self._resize_h0 = self._content_body.winfo_height()
+		self._set_preview_height(self._resize_h0)
+		return "break"
+
+	def _drag_preview_resize(self, event) -> str | None:
+		dy = event.y_root - getattr(self, "_resize_y0", event.y_root)
+		h0 = getattr(self, "_resize_h0", self._content_body.winfo_height())
+		# Absolute (not incremental) mapping from the press anchor: rounding
+		# cannot accumulate jitter across motion events — and in pixels there
+		# is nothing left to quantize.
+		self._set_preview_height(h0 + dy)
+		return "break"
 
 	def _build_status_bar(self) -> None:
 		self._status = tk.StringVar(value="")
