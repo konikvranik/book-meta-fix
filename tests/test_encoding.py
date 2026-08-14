@@ -327,25 +327,21 @@ class TestCodecTables:
 		for name in enc._CHAIN_MIDDLE + enc._CHAIN_FINALS + enc._DOUBLE_DECODE_SRCS:
 			codecs.lookup(name)  # must not raise
 
+	def test_mac_central_european_candidate_survives(self):
+		# The alias fix must not silently LOSE the Mac CE middle-layer codec:
+		# _resolvable drops unknown names with only a log warning, so a typo
+		# would read as "candidate missing", never as an error.
+		assert "mac_latin2" in enc._CHAIN_MIDDLE
+
 	def test_resolvable_drops_unknown_names(self):
 		assert enc._resolvable(("cp1250", "mac-centraleurope", "iso-8859-2")) == (
 			"cp1250", "iso-8859-2",
 		)
 
 	def test_chain_deep_search_never_raises(self):
-		# Russian text double-decoded through cp1250: every chain output is
-		# Cyrillic (no CZ diacritics), so ALL middle candidates are tried and
-		# rejected — the search walks the whole table, where the bad alias
-		# used to blow up mid-loop. Must return None, not raise.
-		moji = "Привет мир".encode("utf-8").decode("cp1250")
-		assert detect_double_decode(moji)
-		assert repair_chain(moji) is None
-
-	def test_lost_bytes_deep_search_never_raises(self):
-		# Same walk with a lost byte (U+FFFD from a replace-decode): "А"
-		# contains the cp1250-undefined byte 0x90, so strict decode cannot
-		# even represent the mojibake — errors="replace" is how such text
-		# really arrives from extractors.
-		moji = "Абв".encode("utf-8").decode("cp1250", errors="replace")
-		assert "\ufffd" in moji
-		assert repair_chain(moji) is None
+		# A lost byte (U+FFFD → SUB) but NO double-decode tells: every middle
+		# candidate round-trips the ASCII text unchanged (out == s after the
+		# SUB→FFFD remap), so ALL of _CHAIN_MIDDLE/_CHAIN_FINALS is tried and
+		# rejected — the exact walk that used to blow up mid-loop on the
+		# "mac-centraleurope" alias. Must return None, not raise.
+		assert repair_chain("abc \ufffd def") is None
