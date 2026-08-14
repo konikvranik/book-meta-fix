@@ -6,6 +6,8 @@ tested headlessly — it is kept thin and delegates to these helpers.
 """
 from __future__ import annotations
 
+import io
+import zipfile
 from pathlib import Path
 
 import book_meta_fix.gui as gui
@@ -15,6 +17,7 @@ from book_meta_fix.gui import (
 	delete_covers,
 	embedded_cover_thumb,
 	list_format_files,
+	open_folder_in_manager,
 	render_review_text,
 	restore_bak_cover,
 )
@@ -25,6 +28,34 @@ def _make_jpeg(path: Path, size: tuple[int, int] = (600, 800), color: tuple = (1
 	from PIL import Image
 
 	Image.new("RGB", size, color).save(path, format="JPEG")
+
+
+def _jpeg_bytes(size: tuple[int, int] = (600, 800), color: tuple = (10, 20, 30)) -> bytes:
+	from PIL import Image
+
+	buf = io.BytesIO()
+	Image.new("RGB", size, color).save(buf, format="JPEG")
+	return buf.getvalue()
+
+
+def _make_epub(path: Path) -> Path:
+	"""Minimal EPUB whose OPF wires images/cover.jpg as the cover."""
+	with zipfile.ZipFile(path, "w") as zf:
+		zf.writestr("mimetype", "application/epub+zip")
+		zf.writestr(
+			"META-INF/container.xml",
+			'<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+			'<rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
+		)
+		zf.writestr(
+			"content.opf",
+			'<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="2.0">'
+			'<metadata><meta name="cover" content="cvr"/></metadata>'
+			'<manifest><item id="cvr" href="images/cover.jpg" media-type="image/jpeg"/></manifest>'
+			"<spine/></package>",
+		)
+		zf.writestr("images/cover.jpg", _jpeg_bytes())
+	return path
 
 
 class TestComposeEdited:
@@ -129,20 +160,35 @@ class TestRenderReviewText:
 
 
 class TestEmbeddedCoverThumb:
-	"""embedded_cover_thumb = extract (calibre) -> thumbnail -> clean temp."""
+	"""EPUB previews come from the zip probe; other formats extract via calibre."""
 
-	def test_returns_thumbnail_and_cleans_temp(self, tmp_path, monkeypatch):
+	def test_epub_thumb_from_zip_without_calibre(self, tmp_path, monkeypatch):
+		# The EPUB path must NOT shell out to calibre: the zip probe is the
+		# truth (ebook-meta would render page 1 even for a coverless book).
+		def fail_extract(*_a, **_k):  # pragma: no cover - must not run
+			raise AssertionError("extract_cover_from_book called for an EPUB")
+
+		monkeypatch.setattr(gui, "extract_cover_from_book", fail_extract)
+		img = embedded_cover_thumb(_make_epub(tmp_path / "book.epub"), 240, 320)
+		assert img is not None
+		assert img.size <= (240, 320)
+
+	def test_epub_without_cover_returns_none(self, tmp_path):
+		empty = tmp_path / "empty.epub"
+		with zipfile.ZipFile(empty, "w") as zf:
+			zf.writestr("mimetype", "application/epub+zip")
+		assert embedded_cover_thumb(empty, 240, 320) is None
+
+	def test_other_format_thumb_and_temp_cleanup(self, tmp_path, monkeypatch):
 		# Fake calibre extraction: the "extracted" cover is a real JPEG on disk.
 		def fake_extract(book_path, dest=None):
-			assert Path(book_path).name == "book.epub"
-			out = (dest or tmp_path / "extracted.jpg")
-			if dest is None:
-				out = tmp_path / "bmf-cover-fake.jpg"
+			assert Path(book_path).name == "book.mobi"
+			out = tmp_path / "bmf-cover-fake.jpg" if dest is None else dest
 			_make_jpeg(out)
 			return out
 
 		monkeypatch.setattr(gui, "extract_cover_from_book", fake_extract)
-		img = embedded_cover_thumb(tmp_path / "book.epub", 240, 320)
+		img = embedded_cover_thumb(tmp_path / "book.mobi", 240, 320)
 		assert img is not None
 		assert img.size <= (240, 320)
 		# The temp file must be removed — nothing may land in the library.
@@ -157,3 +203,46 @@ class TestEmbeddedCoverThumb:
 		# calibre absent / unreadable book -> extract returns None -> None.
 		monkeypatch.setattr(gui, "extract_cover_from_book", lambda *_a, **_k: None)
 		assert embedded_cover_thumb(tmp_path / "nope.epub") is None
+
+
+class TestOpenFolderInManager:
+	"""open_folder_in_manager = platform-delegated, detached folder opening."""
+
+	def test_missing_folder_reports_error(self, tmp_path):
+		err = open_folder_in_manager(tmp_path / "neexistuje")
+		assert err is not None
+		assert "neexistuje" in err
+
+	def test_file_opens_its_parent(self, tmp_path, monkeypatch):
+		import sys
+		import types
+
+		opened = []
+		monkeypatch.setattr(gui, "subprocess", types.SimpleNamespace(
+			Popen=lambda argv: opened.append(argv)))
+		monkeypatch.setattr(gui, "shutil", types.SimpleNamespace(
+			which=lambda name: f"/usr/bin/{name}"))
+		book = tmp_path / "kniha.epub"
+		book.write_bytes(b"x")
+		assert open_folder_in_manager(book) is None
+		expect = {"darwin": "open", "win32": "explorer"}.get(sys.platform, "xdg-open")
+		assert opened[0][0] == expect
+		assert opened[0][1] == str(tmp_path)
+
+	def test_no_opener_available(self, tmp_path, monkeypatch):
+		import types
+
+		monkeypatch.setattr(gui, "shutil", types.SimpleNamespace(which=lambda _n: None))
+		assert open_folder_in_manager(tmp_path) is not None
+
+	def test_spawn_failure_reported(self, tmp_path, monkeypatch):
+		import types
+
+		def boom(_argv):
+			raise OSError("spawn failed")
+
+		monkeypatch.setattr(gui, "subprocess", types.SimpleNamespace(Popen=boom))
+		monkeypatch.setattr(gui, "shutil", types.SimpleNamespace(which=lambda n: f"/usr/bin/{n}"))
+		err = open_folder_in_manager(tmp_path)
+		assert err is not None
+		assert "selhalo" in err or "selhal" in err

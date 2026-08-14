@@ -137,13 +137,19 @@ bmf apply review.yaml                 # commit the decisions (dry-run first)
 
 **What it shows per book:** read-only *current* fields next to editable
 *target* fields (copy any single field over with `Ctrl+L`), one-key
-author↔title swap (`Ctrl+W`), a read-only view of the *proposed* block, cover
+author↔title swap (`Ctrl+W`), a read-only view of the *proposed* block, the
+book's folder path as a clickable link that opens it in your file manager
+(double-clicking a list row does the same), cover
 previews — current / `.bak` / recommended, plus the cover EMBEDDED in each
-format file (calibre extraction) — each deletable one with its own checkbox
-on the cover (`Ctrl+M` deletes what is checked; e-book files after a confirm),
+format file — each with its own checkbox on the cover, and clicking the
+cover itself ticks it (`Ctrl+M` then removes
+the checked embedded covers from the e-book files, which themselves stay
+put — useful for cleaning out invalid calibre placeholders; EPUB only),
 and a per-format content view with double-encoding repair (`Ctrl+G`, for
-texts broken by a redundant cp1250→utf8 recode). The whole detail column
-scrolls; hovering a thumbnail in the list pops up a larger cover.
+texts broken by a redundant cp1250→utf8 recode — or pick the `z`/`do` codecs
+manually and watch the live first-page preview; the result is always rendered
+as UTF-8). The whole detail column scrolls; hovering a thumbnail in the list
+pops up a larger cover.
 
 **Everything is bound to `Ctrl+letter`** (bare letters keep typing into the
 fields): `PgUp`/`PgDn` move between books, `Tab` cycles only the editable

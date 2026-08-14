@@ -70,7 +70,8 @@ src/book_meta_fix/
   covers.py        generated-cover detection (pixel math) + replacement & in-book extraction fallback
   gui.py           bmf gui — keyboard-first Tkinter review.yaml editor (no new writer: loads raw
                   entry dicts, writes via review._header + review._render_entry; scrollable detail
-                  column, Tab-trap bindtag, per-format embedded covers, Ctrl+G double-decode recode)
+                  column, Tab-trap bindtag, per-format embedded covers, Ctrl+G double-decode recode,
+                  clickable path link / list double-click = open folder via open_folder_in_manager)
   cli.py           click commands: scan, report, analyze, apply, organize, epubgen, crosscheck, gui
 ```
 
@@ -185,8 +186,19 @@ src/book_meta_fix/
   pack then squeezes the trailing cells out of shape. Per-format EMBEDDED
   covers are previewed via ``gui.embedded_cover_thumb`` — no
   generated-placeholder gate there (unlike ``covers.recover_cover_from_book``)
-  because the point is to SEE a calibre placeholder; their checkboxes delete
-  the format FILE itself (confirmed — irreversible). The content view's
+  because the point is to SEE a calibre placeholder. For EPUB the preview
+  reads the zip directly (``covers.epub_cover_image``): calibre's
+  ``ebook-meta --get-cover`` renders page 1 as a "default cover" even for a
+  genuinely coverless EPUB, which would fake a cover right after a strip.
+  Their checkboxes STRIP the embedded cover via
+  ``covers.strip_cover_from_book`` — surgical zip+OPF rewrite, the e-book
+  file itself is never deleted; EPUB only (MOBI/AZW3/PRC covers live in
+  binary EXTH headers with no safe removal path, so their checkboxes are
+  disabled). Clicking anywhere on a cover toggles its checkbox (the tiny
+  overlay square alone is a hard target; a click on the checkbox widget
+  itself goes to the checkbox, so the label binding never double-toggles).
+  Cover detection is defined once in ``covers._opf_cover_parts``
+  and shared by the strip and the probe. The content view's
   ``Ctrl+G`` repair uses ``encoding.repair_double_decode`` — a DIFFERENT
   corruption than the single mojibake ``readers`` repairs (utf-8 bytes
   mis-decoded twice through a single-byte codec; often only PART of the text,

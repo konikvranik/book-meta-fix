@@ -34,10 +34,18 @@ import io
 import logging
 import os
 import shutil
+import subprocess
+import sys
 import threading
 from pathlib import Path
 
-from .covers import analyze_cover, download_cover, extract_cover_from_book
+from .covers import (
+	analyze_cover,
+	download_cover,
+	epub_cover_image,
+	extract_cover_from_book,
+	strip_cover_from_book,
+)
 from .encoding import detect_double_decode, recode
 from .extractors import extract
 from .readers import EBOOK_EXTS
@@ -222,16 +230,50 @@ def fetch_url_bytes(url: str, timeout: float = 15.0) -> bytes | None:
 		return None
 
 
+def open_folder_in_manager(folder: Path | str) -> str | None:
+	"""Open *folder* in the platform file manager; None on success, else why.
+
+	Detached (``Popen`` — the GUI must never block on the manager). A path
+	pointing at a file opens its parent. The opener is platform-delegated:
+	``xdg-open`` on Linux/BSD, ``open`` on macOS, ``explorer`` on Windows.
+	Returns a short Czech error for the status line, or None when spawned.
+	"""
+	folder = Path(folder)
+	try:
+		if folder.is_file():
+			folder = folder.parent
+		if not folder.is_dir():
+			return f"složka neexistuje: {folder}"
+		opener = {"darwin": "open", "win32": "explorer"}.get(sys.platform, "xdg-open")
+		if shutil.which(opener) is None:
+			return f"nenalezen nástroj '{opener}'"
+		subprocess.Popen([opener, str(folder)])  # noqa: S603 - fixed argv, user-visible folder
+		return None
+	except OSError as exc:
+		return f"otevření selhalo: {exc}"
+
+
 def embedded_cover_thumb(book_path: Path | str, max_w: int = 240, max_h: int = 320):
 	"""Preview thumbnail of the cover EMBEDDED in an ebook file (any format).
 
-	Extracts via :func:`covers.extract_cover_from_book` (calibre ebook-meta)
-	into a temp file, thumbnails it, and removes the temp — nothing lands in
-	the library. Unlike :func:`covers.recover_cover_from_book` this does NOT
-	gate on generated placeholders: the point of the GUI preview is to SEE a
-	calibre-written placeholder, so the file can be flagged for deletion.
-	Returns a PIL image or None (calibre absent / no embedded cover / corrupt).
+	EPUBs are read straight from the zip via :func:`covers.epub_cover_image`
+	— deterministic, no calibre subprocess, and no rendered-first-page
+	fallback, so after a :func:`covers.strip_cover_from_book` the preview
+	correctly shows nothing (calibre's ``ebook-meta --get-cover`` would hand
+	back a render of page 1 and look like the cover survived). Other formats
+	extract via :func:`covers.extract_cover_from_book` (calibre ebook-meta)
+	into a temp file, which is removed — nothing lands in the library.
+	Unlike :func:`covers.recover_cover_from_book` this does NOT gate on
+	generated placeholders: the point of the GUI preview is to SEE a
+	calibre-written placeholder, so the embedded cover can be flagged for
+	stripping. Returns a PIL image or None (nothing embedded / corrupt).
 	"""
+	if Path(book_path).suffix.lower() == ".epub":
+		# Zip probe ONLY — no calibre fallback here. An SVG cover is the price
+		# of truthfulness: calibre's --get-cover renders page 1 as a "default
+		# cover" even for a genuinely coverless EPUB, so a fallback path would
+		# show a fake "cover" right after a successful strip.
+		return load_thumb(epub_cover_image(book_path) or b"", max_w, max_h)
 	tmp = extract_cover_from_book(book_path)
 	if tmp is None:
 		return None
@@ -437,16 +479,17 @@ class ReviewEditorApp:
 	# ------------------------------------------------------------------
 
 	def _setup_style(self) -> None:
-		"""Pick up the platform ttk theme and sync tk.Text palette to it.
+		"""Keep the platform's default ttk theme; sync the tk.Text palette to it.
 
-		Why: Tk's ``tk.Text`` widgets default to a hard white background that
-		looks like a bright island under a dark desktop theme. Reading the
-		ttk ``TEntry`` field colors and applying them to the Text widgets keeps
-		the whole window visually consistent. True automatic light/dark
-		switching (reading GNOME's color-scheme) is out of scope without an
-		optional extra; this gets the consistency right.
+		Deliberately platform-independent: no GTK/theme emulation, whatever
+		look the platform's Tk picks is the look we use. The only styling is
+		consistency — Tk's ``tk.Text`` widgets default to a hard white
+		background that looks like a bright island next to the ttk widgets,
+		so they borrow the ttk ``TEntry`` field colours.
 		"""
-		self._style = ttk.Style()
+		# master=self.root — a bare ttk.Style() would bind to the interpreter's
+		# DEFAULT root (the first Tk created), styling the wrong window.
+		self._style = ttk.Style(self.root)
 		try:
 			# Uniform row height so list rows align with or without a cover
 			# thumbnail (the user's "texty zarovnány pod sebou" request).
@@ -520,6 +563,7 @@ class ReviewEditorApp:
 		# lingers on a row that has a thumbnail.
 		self.tree.bind("<Motion>", self._on_tree_motion, add="+")
 		self.tree.bind("<Leave>", self._on_tree_leave, add="+")
+		self.tree.bind("<Double-1>", self._on_tree_double, add="+")
 
 		parent.add(frame, weight=1)
 
@@ -527,6 +571,12 @@ class ReviewEditorApp:
 		frame = ttk.Frame(parent)
 		# Scrollable detail column: Canvas + inner frame + scrollbar.
 		self.canvas = tk.Canvas(frame, highlightthickness=0)
+		try:
+			self.canvas.configure(
+				background=self._style.lookup("TFrame", "background") or "#d9d9d9"
+			)
+		except Exception:  # noqa: BLE001
+			pass
 		vsb = ttk.Scrollbar(frame, orient="vertical", command=self.canvas.yview)
 		self.canvas.configure(yscrollcommand=vsb.set)
 		vsb.pack(side="right", fill="y")
@@ -540,6 +590,26 @@ class ReviewEditorApp:
 
 		self._header_lbl = ttk.Label(self._scroll_inner, text="", anchor="w", justify="left")
 		self._header_lbl.pack(fill="x", padx=8, pady=(6, 2))
+		# The book's folder path as a clickable link ("open in file manager"
+		# without reaching for a terminal). Blue + underlined over the theme
+		# default; the launch itself is delegated to the platform opener.
+		self._path_link = ttk.Label(
+			self._scroll_inner, text="", anchor="w", cursor="hand2",
+			foreground="#1a5fb4", wraplength=1200,
+		)
+		self._path_link.pack(fill="x", padx=8, pady=(0, 2))
+		self._path_link.bind("<Button-1>", lambda _e: (self.open_current_folder(), "break")[1])
+		_Tooltip(self._path_link, "Otevřít složku knihy ve správci souborů")
+		try:
+			import tkinter.font as tkfont
+			# NB: keep a reference — tkinter's Font.__del__ DELETES the Tcl
+			# font when the Python wrapper is GC'd (a local variable dies as
+			# soon as this builder returns, silently un-underlining the link).
+			self._link_font = tkfont.nametofont("TkDefaultFont").copy()
+			self._link_font.configure(underline=True)
+			self._path_link.configure(font=self._link_font)
+		except Exception:  # noqa: BLE001
+			pass
 		self._build_fields_section()
 		self._build_covers_section()
 		self._build_content_section()
@@ -628,14 +698,19 @@ class ReviewEditorApp:
 		# Tab cycle = the target fields + the notes entry (nothing else).
 		self._editable_widgets = list(self._field_entries) + [self._notes_entry]
 
-	def _cover_cell(self, parent, title: str, var=None, tip: str | None = None):
+	def _cover_cell(self, parent, title: str, var=None, tip: str | None = None,
+	                check_enabled: bool = True):
 		"""One fixed-size cover cell: a slot box + caption; ``(label, caption)``.
 
 		The slot is a fixed-size ``tk.Frame`` with ``pack_propagate(False)``
 		so a missing or undersized cover renders as an identically-sized box
 		— the previews stay aligned side by side regardless of image size or
 		absence. The selection checkbox (when *var* is given) overlays the
-		slot's top-left corner.
+		slot's top-left corner; a disabled one (check_enabled=False) still
+		shows, so an un-strippable format explains itself via its tooltip.
+		Clicking anywhere on the cover toggles the checkbox — the tiny
+		square alone is a hard target (a click on the checkbox itself is
+		delivered to the checkbox widget, so this never double-toggles).
 		"""
 		cell = ttk.Frame(parent)
 		cell.pack(side="left", padx=6)
@@ -648,10 +723,18 @@ class ReviewEditorApp:
 		lbl = ttk.Label(slot, text="(načítám…)", anchor="center")
 		lbl.pack(fill="both", expand=True)
 		if var is not None:
-			chk = ttk.Checkbutton(lbl, variable=var)
+			chk = ttk.Checkbutton(
+				lbl, variable=var, state="normal" if check_enabled else "disabled"
+			)
 			chk.place(x=4, y=4, anchor="nw")
 			if tip:
 				_Tooltip(chk, tip)
+			if check_enabled:
+				lbl.bind("<Button-1>", lambda _e: (var.set(not var.get()), "break")[1])
+				try:
+					lbl.configure(cursor="hand2")  # pointable: whole cover is clickable
+				except Exception:  # noqa: BLE001
+					pass
 		cap = ttk.Label(cell, text=title, anchor="center", wraplength=self.COVER_SLOT_W)
 		cap.pack(fill="x")
 		return lbl, cap
@@ -699,9 +782,10 @@ class ReviewEditorApp:
 			self._cover_imgs.append(lbl)
 			self._cover_caps.append(cap)
 		# Embedded covers of the book's format files (calibre extraction) —
-		# rebuilt per book in _apply_fmt_covers. Their checkbox deletes the
-		# format FILE itself (cleaning out invalid calibre-titled copies).
-		ttk.Label(box, text="Vložené obálky ve formátech (☐ = smazat soubor):").pack(anchor="w", padx=6)
+		# rebuilt per book in _apply_fmt_covers. Their checkbox strips the
+		# cover EMBEDDED in the file (the invalid calibre placeholder) while
+		# the ebook file itself stays; only EPUB supports that surgery.
+		ttk.Label(box, text="Vložené obálky ve formátech (☐ = odstranit z e-knihy):").pack(anchor="w", padx=6)
 		self._fmt_cover_row = ttk.Frame(box)
 		self._fmt_cover_row.pack(fill="x", padx=6, pady=(2, 8))
 		# Keep the slot widths equal and fitted on every pane resize.
@@ -1043,6 +1127,29 @@ class ReviewEditorApp:
 		self._hide_cover_popup()
 		self._hover_uuid = None
 
+	# ------------------------------------------------------------------
+	# Open folder in file manager
+	# ------------------------------------------------------------------
+
+	def open_current_folder(self) -> None:
+		"""Open the current book's folder (click on the header path link)."""
+		self._open_entry_folder(self.entries[self._cur])
+
+	def _open_entry_folder(self, e) -> None:
+		path = e.get("path") or ""
+		folder = (self.library / path) if path else self.library
+		err = open_folder_in_manager(folder)
+		self._flash(err or f"otevřeno: {folder}")
+
+	def _on_tree_double(self, event) -> str:
+		"""Double-click a list row = open that book's folder."""
+		iid = self.tree.identify_row(event.y)
+		if iid and iid.lstrip("-").isdigit():
+			idx = int(iid)
+			if 0 <= idx < len(self.entries):
+				self._open_entry_folder(self.entries[idx])
+		return ""
+
 	def _cancel_hover(self) -> None:
 		if self._hover_after is not None:
 			try:
@@ -1126,7 +1233,7 @@ class ReviewEditorApp:
 		e = self.entries[idx]
 		self._loading = True
 		try:
-			# Header.
+			# Header. The path lives on its own clickable line (open folder).
 			diag = e.get("diagnosis") or {}
 			uuid = e.get("uuid") or "—"
 			path = e.get("path") or ""
@@ -1134,10 +1241,10 @@ class ReviewEditorApp:
 			extra = f"  (+{len(all_d) - 1} další)" if len(all_d) > 1 else ""
 			self._header_lbl.configure(
 				text=f"Záznam {idx + 1}/{len(self.entries)}   uuid: {uuid}\n"
-				f"path: {path}\n"
 				f"diagnóza: {diag.get('category', '—')} – {diag.get('reason', '')} "
 				f"[{diag.get('confidence', '—')}]{extra}",
 			)
+			self._path_link.configure(text=path or "(bez cesty)")
 			# Fields.
 			cur = e.get("current") or {}
 			prop = e.get("proposed") or {}
@@ -1431,9 +1538,16 @@ class ReviewEditorApp:
 			return
 		for path, pil in fmt_covers:
 			var = tk.BooleanVar(value=False)
+			is_epub = path.suffix.lower() == ".epub"
 			lbl, _cap = self._cover_cell(
 				self._fmt_cover_row, path.name, var,
-				f"Smazat soubor {path.name} (při Smazat označené)",
+				(
+					f"Odstranit vloženou obálku z {path.name} (e-kniha zůstane)"
+					if is_epub else
+					f"Vloženou obálku nelze odstranit z {path.suffix or 'souboru'}"
+					" — umíme jen EPUB"
+				),
+				check_enabled=is_epub,
 			)
 			photo = self._fit_photo(pil, lbl)
 			if photo is None:
@@ -1479,23 +1593,34 @@ class ReviewEditorApp:
 			paths.append(cover_path)
 		if self._del_bak.get():
 			paths.append(bak_path)
+		# Checked format covers strip the EMBEDDED cover out of the ebook file
+		# — the file itself stays (cleaning calibre placeholders, not books).
 		fmt_paths = [Path(p) for p, v in self._del_formats.items() if v.get()]
 		if not paths and not fmt_paths:
-			self._flash("nic neoznačeno ke smazání")
+			self._flash("nic neoznačeno")
 			return
-		# Deleting ebook FILES is irreversible (sidecar covers are recoverable
-		# via the enrichers / .bak; a deleted format is gone) — confirm first.
+		# The strip rewrites the ebook in place (sidecar covers are plain
+		# deletions, recoverable via .bak/enrichers) — confirm first.
 		if fmt_paths and not messagebox.askyesno(
 			"bmf gui",
-			"Smazat tyto soubory e-knihy?\n\n" + "\n".join(f"  • {p.name}" for p in fmt_paths),
+			"Odstranit vloženou obálku z těchto e-knih?\n"
+			"(samotné soubory e-knih zůstávají)\n\n"
+			+ "\n".join(f"  • {p.name}" for p in fmt_paths),
 		):
 			return
-		n = delete_covers(paths + fmt_paths)
+		n = delete_covers(paths)
+		stripped = sum(1 for p in fmt_paths if strip_cover_from_book(p))
 		self._del_cover.set(False)
 		self._del_bak.set(False)
 		for v in self._del_formats.values():
 			v.set(False)
-		self._flash(f"smazáno {n}")
+		msg = f"smazáno {n}" if paths else ""
+		if fmt_paths:
+			part = f"obálky odstraněny {stripped}/{len(fmt_paths)}"
+			if stripped < len(fmt_paths):
+				part += " (jen EPUB)"
+			msg = f"{msg}; {part}" if msg else part
+		self._flash(msg)
 		self._refresh_covers()
 		self._refresh_formats()  # the format radios / content changed too
 
@@ -1730,9 +1855,10 @@ class ReviewEditorApp:
 			("Ctrl+N", "obálka: aplikovat novou"),
 			("Ctrl+B", "obálka: obnovit .bak"),
 			("Ctrl+P", "obálka: ponechat"),
-			("Ctrl+M", "obálka: smazat označené (cover/.bak/soubory formátů)"),
+			("Ctrl+M", "obálka: smazat označené cover/.bak, odstranit vložené obálky"),
 			("Ctrl+T", "obsah: první strana / širší text"),
 			("Ctrl+G", "obsah: překódovat (z/do kodeky volí komboboxy; výsledek vždy UTF-8)"),
+			("", "(klik na obálku = ☑; klik na path / dvojklik v seznamu = otevřít složku)"),
 			("", "(kolečko: prvek pod myší, na jeho hraně formulář; obálka v seznamu → hover popup)"),
 		]
 		for k, d in shortcuts:

@@ -28,11 +28,16 @@ from __future__ import annotations
 
 import logging
 import os
+import posixpath
 import shutil
 import subprocess
 import tempfile
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import unquote
+
+from lxml import etree
 
 log = logging.getLogger(__name__)
 
@@ -217,6 +222,238 @@ def recover_cover_from_book(book_path: str | Path, dest_path: str | Path) -> boo
 		return True
 	finally:
 		if tmp_path.exists():
+			tmp_path.unlink(missing_ok=True)
+
+
+# EPUB container / package namespaces (container.xml points at the OPF).
+_OCF_NS = "urn:oasis:names:tc:opendocument:xmlns:container"
+_OPF_NS = "http://www.idpf.org/2007/opf"
+
+
+def _opf_cover_parts(opf_root):
+	"""Locate every cover element in a parsed OPF; single detection source.
+
+	Returns ``(manifest, metadata, spine, guide, img_items, page_items,
+	guide_refs)`` — the three core sections plus the cover IMAGE manifest
+	items, the cover PAGE items and the guide references. Both the strip
+	surgery (:func:`_epub_strip_cover_opf`) and the read-only probe
+	(:func:`epub_cover_image`) go through here, so "what counts as the
+	embedded cover" is defined exactly once. Recognises the idioms found in
+	the wild (calibre writes the first two):
+
+	- EPUB2 ``<meta name="cover" content="item-id">`` + a guide
+	  ``<reference type="cover">`` page,
+	- EPUB3 ``<item properties="cover-image">``,
+	- a spine entry whose idref is the manifest item "cover"/"coverpage".
+
+	EPUB2 meta content ids may point at the image OR (non-standard but
+	common) at the cover page itself — told apart by media-type.
+	"""
+	ns = {"o": _OPF_NS}
+	manifest = opf_root.find("o:manifest", ns)
+	metadata = opf_root.find("o:metadata", ns)
+	spine = opf_root.find("o:spine", ns)
+	guide = opf_root.find("o:guide", ns)
+	img_items: list = []
+	page_items: list = []
+	guide_refs: list = []
+	if manifest is None:
+		return manifest, metadata, spine, guide, img_items, page_items, guide_refs
+
+	items = {i.get("id"): i for i in manifest.findall("o:item", ns)}
+	for item in items.values():
+		if "cover-image" in (item.get("properties") or "").split():
+			img_items.append(item)
+	if metadata is not None:
+		for meta in metadata.findall("o:meta", ns):
+			if meta.get("name") != "cover":
+				continue
+			item = items.get(meta.get("content") or "")
+			if item is None:
+				continue
+			if (item.get("media-type") or "").startswith("image/"):
+				if item not in img_items:  # one item, one removal pass
+					img_items.append(item)
+			elif item not in page_items:
+				page_items.append(item)
+	if spine is not None:
+		for iref in spine.findall("o:itemref", ns):
+			item = items.get(iref.get("idref") or "")
+			if item is not None and item.get("id") in ("cover", "coverpage") and item not in page_items:
+				page_items.append(item)
+	if guide is not None:
+		guide_refs = [r for r in guide.findall("o:reference", ns) if r.get("type") == "cover"]
+		for ref in guide_refs:
+			href = (ref.get("href") or "").split("#", 1)[0]
+			for item in items.values():
+				if (item.get("href") or "").split("#", 1)[0] == href and item not in page_items:
+					page_items.append(item)
+	return manifest, metadata, spine, guide, img_items, page_items, guide_refs
+
+
+def epub_cover_image(book_path: str | Path) -> bytes | None:
+	"""Raw bytes of the cover image wired into an EPUB's OPF, or None.
+
+	Unlike calibre's ``ebook-meta --get-cover`` this never falls back to
+	RENDERING the first page (calibre calls that a "default cover" — on a
+	coverless EPUB it still hands out a 1240x1752 page render), so it is the
+	truth for "does this file carry an embedded cover": the GUI preview
+	correctly shows nothing after :func:`strip_cover_from_book`. Also saves
+	one subprocess per EPUB. Falls back gracefully (None) on any parse
+	doubt; callers that prefer the rendered fallback (cover RECOVERY) should
+	still use :func:`extract_cover_from_book`.
+	"""
+	book_path = Path(book_path)
+	if book_path.suffix.lower() != ".epub" or not book_path.is_file():
+		return None
+	try:
+		with zipfile.ZipFile(book_path, "r") as zf:
+			names = set(zf.namelist())
+			if "META-INF/container.xml" not in names:
+				return None
+			container = etree.fromstring(zf.read("META-INF/container.xml"))
+			rootfile = container.find(f".//{{{_OCF_NS}}}rootfile")
+			if rootfile is None or not rootfile.get("full-path"):
+				return None
+			opf_path = rootfile.get("full-path")
+			opf_root = etree.fromstring(zf.read(opf_path))
+			_manifest, _m, _s, _g, img_items, _p, _r = _opf_cover_parts(opf_root)
+			for item in img_items:
+				href = (item.get("href") or "").split("#", 1)[0]
+				if not href:
+					continue
+				img = posixpath.normpath(posixpath.join(
+					posixpath.dirname(opf_path), unquote(href),
+				))
+				if img in names:
+					return zf.read(img)
+		return None
+	except (etree.XMLSyntaxError, zipfile.BadZipFile, KeyError, RuntimeError, OSError):
+		return None
+
+
+def _epub_strip_cover_opf(opf_root, opf_dir: str, docs: dict[str, bytes]) -> set[str]:
+	"""Cut all cover wiring out of a parsed OPF tree; return zip files to drop.
+
+	Mutates *opf_root* in place. Cover detection comes from
+	:func:`_opf_cover_parts` (shared with :func:`epub_cover_image`). The
+	cover STATUS markers (meta / guide reference / cover-image property) are
+	always removed — that is what makes readers render the title page
+	instead of the placeholder. The image and page FILES are dropped too,
+	unless a surviving document still references the image inline: deleting
+	it then would leave a dangling ``<img src>`` and a broken book, so the
+	manifest item stays and only the status goes. *docs* maps every zip
+	entry to its bytes for that guard.
+	"""
+	ns = {"o": _OPF_NS}
+	manifest, metadata, spine, guide, img_items, page_items, guide_refs = _opf_cover_parts(opf_root)
+	if manifest is None:
+		return set()
+
+	def zip_path(href: str) -> str:
+		href = unquote((href or "").split("#", 1)[0])
+		return posixpath.normpath(posixpath.join(opf_dir, href))
+
+	drop: set[str] = set()
+	dropped_pages = {zip_path(i.get("href")) for i in page_items}
+	for item in img_items:
+		img = zip_path(item.get("href"))
+		# Safety guard: referenced from a surviving document → the file (and
+		# its manifest item) must stay; only the cover status is removed.
+		referenced = any(
+			posixpath.basename(img).encode() in data
+			for name, data in docs.items()
+			if name.endswith((".xhtml", ".html", ".htm")) and name not in dropped_pages
+		)
+		if referenced:
+			props = (item.get("properties") or "").split()
+			if "cover-image" in props:
+				props.remove("cover-image")
+				item.set("properties", " ".join(props))
+			continue
+		drop.add(img)
+		manifest.remove(item)
+	page_ids = set()
+	for item in page_items:
+		drop.add(zip_path(item.get("href")))
+		page_ids.add(item.get("id"))
+		if item.getparent() is manifest:  # id/media-type splits make dupes impossible; cheap guard
+			manifest.remove(item)
+	for itemref in list(spine.findall("o:itemref", ns)) if spine is not None else []:
+		if (itemref.get("idref") or "") in page_ids:
+			spine.remove(itemref)
+	for ref in guide_refs:
+		guide.remove(ref)
+	if metadata is not None:
+		for meta in list(metadata.findall("o:meta", ns)):
+			if meta.get("name") == "cover":
+				metadata.remove(meta)
+	return drop
+
+
+def strip_cover_from_book(book_path: str | Path) -> bool:
+	"""Remove the cover EMBEDDED in an ebook file, keeping the book itself.
+
+	The "clean out the invalid calibre cover" counterpart to
+	:func:`extract_cover_from_book`: the embedded (typically calibre-written
+	placeholder) cover is cut out of the file instead of the whole format
+	file being deleted. Only EPUB is supported — calibre's CLI can set/get a
+	cover but not remove one, and an EPUB is plain zip+XML so the surgery is
+	deterministic; MOBI/AZW3/PRC keep their covers in binary EXTH headers
+	(no safe removal without calibre's Python API) and a PDF "cover" is just
+	page 1 of the content.
+
+	The zip is rewritten atomically (temp file + ``os.replace``): the cover
+	image and cover page entries are dropped, the OPF loses its cover wiring
+	(see :func:`_epub_strip_cover_opf`), everything else is byte-identical.
+	On ANY doubt (not an EPUB, corrupt zip, unparseable OPF) the file is
+	left untouched and False is returned.
+	"""
+	book_path = Path(book_path)
+	if book_path.suffix.lower() != ".epub" or not book_path.is_file():
+		return False
+	tmp_path: Path | None = None
+	try:
+		with zipfile.ZipFile(book_path, "r") as zin:
+			infos = zin.infolist()
+			names = {i.filename for i in infos}
+			if "META-INF/container.xml" not in names:
+				return False
+			docs = {i.filename: zin.read(i.filename) for i in infos}
+		container = etree.fromstring(docs["META-INF/container.xml"])
+		rootfile = container.find(f".//{{{_OCF_NS}}}rootfile")
+		if rootfile is None or not rootfile.get("full-path"):
+			return False
+		opf_path = rootfile.get("full-path")
+		opf_root = etree.fromstring(docs[opf_path])
+		drop = _epub_strip_cover_opf(opf_root, posixpath.dirname(opf_path), docs)
+		if not drop:
+			return False  # no cover wiring found — nothing to strip
+		fd, name = tempfile.mkstemp(
+			suffix=".epub", prefix="bmf-strip-", dir=str(book_path.parent)
+		)
+		os.close(fd)
+		tmp_path = Path(name)
+		with zipfile.ZipFile(tmp_path, "w") as zout:
+			for info in infos:
+				if info.filename == opf_path or info.filename in drop:
+					continue
+				# writestr(ZipInfo, ...) keeps each entry's original
+				# compress_type/date_time — the leading STORED "mimetype"
+				# entry the EPUB spec requires survives untouched.
+				zout.writestr(info, docs[info.filename])
+			zout.writestr(
+				opf_path, etree.tostring(opf_root, xml_declaration=True, encoding="UTF-8")
+			)
+		os.replace(tmp_path, book_path)
+		tmp_path = None
+		log.info("embedded cover stripped from %s", book_path.name)
+		return True
+	except (etree.XMLSyntaxError, zipfile.BadZipFile, KeyError, RuntimeError, OSError) as exc:
+		log.warning("cover strip failed for %s: %s", book_path, exc)
+		return False
+	finally:
+		if tmp_path is not None:
 			tmp_path.unlink(missing_ok=True)
 
 
