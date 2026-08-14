@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from book_meta_fix.enrichers import EnrichedMeta
 from book_meta_fix.models import BookMeta, Confidence, Diagnosis, Verdict
-from book_meta_fix.review import _build_proposed, build_review, parse_review
+from book_meta_fix.review import _build_proposed, _header, build_review, parse_review
 
 
 def _meta(calibre_id: int, title: str = "T", author: str = "A") -> BookMeta:
@@ -205,3 +205,14 @@ class TestCoverUrlProposalGate:
 		meta = _meta(1)
 		entry = _entry_dict(meta, _diag(), None, None, None, library_root=None)
 		assert "diagnoses" not in entry
+
+
+class TestHeaderDocumentsActions:
+	def test_header_lists_keep_action(self):
+		"""The review.yaml header must document the ``keep`` action so a human
+		editor knows it exists (and that it is retained, not pruned)."""
+		h = _header(3)
+		assert "keep" in h
+		# All canonical actions are documented.
+		for a in ("accept", "reject", "swap", "edit", "delete", "keep"):
+			assert a in h

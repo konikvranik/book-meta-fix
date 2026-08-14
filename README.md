@@ -48,8 +48,9 @@ bmf analyze --skip-enrich -o review.yaml --limit 1000
 #    the proposed block.
 bmf analyze --databazeknih -o review.yaml --limit 1000
 
-# 3. Edit review.yaml — set `action: accept|reject|swap|edit` per entry
+# 3. Edit review.yaml — set `action: accept|reject|swap|edit|keep` per entry
 $EDITOR review.yaml
+#    (or use the keyboard-driven GUI: `bmf gui --review review.yaml`)
 
 # 4. Preview the changes (dry-run, no writes)
 bmf apply review.yaml
@@ -97,6 +98,7 @@ can recover the pre-run state.
 | `bmf analyze` | Full pipeline (scan+detect+extract+verify+enrich) → generate `review.yaml` |
 | `bmf apply <file>` | Apply approved changes from a review.yaml (dry-run by default) |
 | `bmf apply --apply <file>` | Actually write `metadata.json` + `metadata.opf` |
+| `bmf gui` | Interactive keyboard-driven Tkinter editor for `review.yaml` |
 | `bmf organize` | Move OK books to a clean path pattern; broken to `needfix/` |
 | `bmf organize --apply` | Actually move the folders |
 | `bmf epubgen` | Generate missing `.epub` files for OK books (from pdb/mobi/pdf/doc/txt) |
@@ -115,6 +117,47 @@ not an identity problem). `bmf apply` then prunes it in bulk — it's a safe
 no-op when nothing was recovered. Use `--no-accept-missing` to keep these for
 manual review. Books with a co-occurring `NEEDS_REVIEW` diagnosis (e.g. a
 generated cover) are still sent to review.
+
+## Interactive editor (`bmf gui`)
+
+`bmf gui` is a keyboard-first Tkinter editor for walking `review.yaml` one
+book at a time, instead of hand-editing the YAML. It edits the same
+`action` / `edited` / `notes` fields — the actual metadata is still written by
+`bmf apply` afterwards.
+
+```bash
+bmf analyze -o review.yaml            # generate first (as above)
+bmf gui --review review.yaml          # open the editor
+bmf apply review.yaml                 # commit the decisions (dry-run first)
+```
+
+**Prerequisite:** the Tk bindings. On Debian/Ubuntu install
+`python3-tk` (`sudo apt install python3-tk`). No extra pip package — Pillow
+(already a dependency) drives the cover thumbnails.
+
+**What it shows per book:** read-only *current* fields next to editable
+*target* fields (copy any single field over with `Ctrl+L`), one-key
+author↔title swap (`Ctrl+W`), a read-only view of the *proposed* block, cover
+previews — current / `.bak` / recommended, plus the cover EMBEDDED in each
+format file (calibre extraction) — each deletable one with its own checkbox
+on the cover (`Ctrl+M` deletes what is checked; e-book files after a confirm),
+and a per-format content view with double-encoding repair (`Ctrl+G`, for
+texts broken by a redundant cp1250→utf8 recode). The whole detail column
+scrolls; hovering a thumbnail in the list pops up a larger cover.
+
+**Everything is bound to `Ctrl+letter`** (bare letters keep typing into the
+fields): `PgUp`/`PgDn` move between books, `Tab` cycles only the editable
+fields (never buttons or read-only labels), `Ctrl+A` selects all in a field,
+focus stays on the same field when you change book. Actions: `Ctrl+Enter`
+accept, `Ctrl+R` reject, `Ctrl+E` edit, `Ctrl+D` delete, `Ctrl+K` keep,
+`Ctrl+G` recode content, `Ctrl+S` save. Press `F1` for the full shortcut
+overlay.
+
+**The `keep` action** applies the proposal like `accept`, but the entry is
+**retained** in `review.yaml` (not pruned) and `bmf analyze` **skips** the
+book on the next run — useful for a record you've settled but want to keep
+visible. To re-decide a kept book, set its action back to `pending`
+(`Ctrl+0`) and re-run `analyze`.
 
 ## Enrichment sources
 

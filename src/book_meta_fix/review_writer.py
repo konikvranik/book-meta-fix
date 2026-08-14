@@ -115,6 +115,16 @@ class ReviewWriter:
 		"""
 		self._queue.put(result)
 
+	def keep_uuids(self) -> set:
+		"""Uuids of prior entries the user marked ``action: keep``.
+
+		The caller (analyze) passes this set to ``run_pipeline(skip_uuids=...)``
+		so kept books are not re-processed; their review.yaml entry is carried
+		over verbatim by :meth:`finish`. Read from the already-loaded prior map,
+		so no extra I/O.
+		"""
+		return {u for u, e in self._prior.items() if e.get("action") == "keep"}
+
 	# ------------------------------------------------------------------
 	# Writer thread
 	# ------------------------------------------------------------------
