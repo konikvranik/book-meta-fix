@@ -1,7 +1,20 @@
 """Unit tests for mojibake detection and repair."""
 from __future__ import annotations
 
-from book_meta_fix.encoding import MojibakeKind, detect_mojibake, repair
+import pytest
+
+from book_meta_fix.encoding import (
+	MojibakeKind,
+	detect_double_decode,
+	detect_mojibake,
+	repair,
+	repair_double_decode,
+)
+
+
+def _corrupt(text: str, wrong: str) -> str:
+	"""Simulate a double-decode: utf-8 bytes mis-decoded as *wrong*."""
+	return text.encode("utf-8").decode(wrong)
 
 
 class TestDetection:
@@ -87,3 +100,47 @@ class TestRepair:
 	def test_repair_empty(self):
 		assert repair("")[0] == ""
 		assert repair(None)[0] is None
+
+
+class TestDoubleDecodeRepair:
+	"""The double-utf8 corruption seen in some book files' extracted text."""
+
+	@pytest.mark.parametrize("wrong", ["cp1250", "iso-8859-2", "cp1252", "latin-1"])
+	@pytest.mark.parametrize(
+		"clean",
+		[
+			"Vytváříme si domovskou stránku -- Seznamy & spol.",
+			"Další příběh o dědečkovi",
+			"Žluťoučký kůň pěl ďábelské ódy",
+		],
+	)
+	def test_detects_and_repairs_each_codec(self, clean, wrong):
+		# Some CZ letters can't be encoded/decoded through every codec, so a
+		# few (clean, wrong) combos can't be simulated — skip those.
+		try:
+			mojibake = _corrupt(clean, wrong)
+		except (UnicodeEncodeError, UnicodeDecodeError):
+			pytest.skip(f"{clean!r} not representable for simulation via {wrong}")
+		assert detect_double_decode(mojibake) is True
+		assert repair_double_decode(mojibake) == clean
+
+	def test_detects_real_world_sample(self):
+		# The exact mojibake the user reported (utf-8 read as cp1250 twice).
+		s = "Vytv" + "\u0102\u02c7\u0139\u2122\u0102" + "me si domovskou str" + "\u0102\u02c7" + "nku"
+		assert detect_double_decode(s) is True
+
+	def test_clean_czech_not_flagged(self):
+		# Legit CZ diacritics in Latin Extended-A (č ď ě ň ř š ť ů ž) must NOT
+		# be mistaken for double-decode artefacts.
+		assert detect_double_decode("Kamenické Štěpánov") is False
+		assert detect_double_decode("Žluťoučký kůň") is False
+
+	def test_clean_inputs_return_none(self):
+		assert repair_double_decode("Agatha Christie") is None
+		assert repair_double_decode("Vytváříme si domovskou stránku") is None
+		assert repair_double_decode("") is None
+		assert repair_double_decode(None) is None
+
+	def test_unrepairable_returns_none(self):
+		# Replacement chars mean the original UTF-8 bytes are gone for good.
+		assert repair_double_decode("Darko\ufffd je bytost") is None

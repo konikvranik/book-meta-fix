@@ -504,3 +504,39 @@ class TestCoverOnlyAccept:
 		parsed = parse_review(out)
 		assert len(parsed) == 1
 		assert parsed[0].action == "accept"
+
+
+class TestKeepUuids:
+	"""keep_uuids() exposes the uuids the user marked ``action: keep`` so
+	``analyze`` can pass them to run_pipeline(skip_uuids=...)."""
+
+	def _write_prior(self, out, entries):
+		import yaml
+		body = "".join(f"---\n{yaml.safe_dump(e, sort_keys=False)}" for e in entries)
+		out.write_text(body, encoding="utf-8")
+
+	def test_returns_only_keep_entries(self, tmp_path):
+		out = tmp_path / "review.yaml"
+		self._write_prior(out, [
+			{"uuid": "k1", "path": "a", "current": {}, "action": "keep"},
+			{"uuid": "k2", "path": "b", "current": {}, "action": "keep"},
+			{"uuid": "a1", "path": "c", "current": {}, "action": "accept"},
+			{"uuid": "p1", "path": "d", "current": {}, "action": None},
+		])
+		w = ReviewWriter(out)
+		try:
+			assert w.keep_uuids() == {"k1", "k2"}
+		finally:
+			w.finish()
+
+	def test_empty_when_no_keep_entries(self, tmp_path):
+		out = tmp_path / "review.yaml"
+		self._write_prior(out, [
+			{"uuid": "a1", "path": "a", "current": {}, "action": "accept"},
+			{"uuid": "r1", "path": "b", "current": {}, "action": "reject"},
+		])
+		w = ReviewWriter(out)
+		try:
+			assert w.keep_uuids() == set()
+		finally:
+			w.finish()

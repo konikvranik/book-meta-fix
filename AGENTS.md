@@ -68,7 +68,10 @@ src/book_meta_fix/
   epubgen.py       bmf epubgen
   crosscheck.py    bmf crosscheck
   covers.py        generated-cover detection (pixel math) + replacement & in-book extraction fallback
-  cli.py           click commands: scan, report, analyze, apply, organize, epubgen, crosscheck
+  gui.py           bmf gui — keyboard-first Tkinter review.yaml editor (no new writer: loads raw
+                  entry dicts, writes via review._header + review._render_entry; scrollable detail
+                  column, Tab-trap bindtag, per-format embedded covers, Ctrl+G double-decode recode)
+  cli.py           click commands: scan, report, analyze, apply, organize, epubgen, crosscheck, gui
 ```
 
 ## Non-obvious gotchas
@@ -135,6 +138,17 @@ src/book_meta_fix/
   matched by the book's **uuid** (NOT calibre_id) so a decision survives an
   `organize` folder move. `bmf apply` reads both the multi-doc and legacy
   single-list forms.
+- **The `keep` action is accept-but-retain.** `action: keep` applies the
+  proposed fields + cover exactly like `accept` (reuses the `_apply_action`
+  accept branch) but is **NOT pruned** from `review.yaml` after a WRITE apply
+  (`apply_review` skips adding its uuid to `succeeded_uuids`; counted in
+  `summary["kept"]`). The next `bmf analyze` **skips** the book entirely:
+  `run_pipeline(skip_uuids=...)` filters it out before any detect/extract/
+  enrich work, and its review entry is carried over byte-for-byte by
+  `ReviewWriter.finish()`. So a kept book is frozen — visible in review.yaml
+  but never re-processed — until the user flips its action back to `null`,
+  which re-includes it. The skip set is built by `ReviewWriter.keep_uuids()`
+  from the prior `review.yaml` and passed in by the `analyze` CLI.
 - **The book `uuid` is the unified identity** (`models.BookMeta.uuid`): it lives
   in `metadata.json` (source of truth), mirrored to `metadata.opf`, and is the
   single key for **carry-over** (`.bak` match), **pruning** (`apply` drops
@@ -154,6 +168,21 @@ src/book_meta_fix/
   (identity augmentation, not a content mutation; deliberately not dry-run
   gated). A genuinely legacy `review.yaml` whose entries predate uuids cannot be
   matched and is re-decided fresh (clean break).
+- **GUI conventions** (`gui.py`): the detail side is ONE scrollable canvas (no
+  Notebook) — covers and content sit below the fields. ``Tab`` cycles ONLY
+  the editable fields; this is implemented by prepending a custom bindtag
+  FIRST in every focusable widget's bindtags, because ``bind_all`` binds the
+  "all" tag which runs LAST and loses to Tk's default focus traversal (the
+  original bug). Dynamically created widgets (format radios, embedded-cover
+  checkboxes) must be re-trapped via ``_trap_subtree``. ``Ctrl+A`` is
+  rebound per Entry (X11's default is "home", not select-all). Per-format
+  EMBEDDED covers are previewed via ``gui.embedded_cover_thumb`` — no
+  generated-placeholder gate there (unlike ``covers.recover_cover_from_book``)
+  because the point is to SEE a calibre placeholder; their checkboxes delete
+  the format FILE itself (confirmed — irreversible). The content view's
+  ``Ctrl+G`` repair uses ``encoding.repair_double_decode`` — a DIFFERENT
+  corruption than the single mojibake ``readers`` repairs (utf-8 bytes
+  mis-decoded twice through a single-byte codec); keep the two paths separate.
 - **Every command runs an internal scan** via the SQLite cache — `bmf scan` is
   only for summary stats, not a prerequisite.
 - **Every mutating command is dry-run by default** (`--apply` to write).

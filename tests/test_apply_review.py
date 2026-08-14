@@ -491,3 +491,82 @@ class TestApplyProgressCallback:
 		# Must not raise when progress_callback is omitted.
 		summary = apply_review(review, library, dry_run=True)
 		assert summary["rejected"] == 1
+
+
+class TestKeepAction:
+	"""``action: keep`` applies the proposal like accept, but the entry is
+	RETAINED in review.yaml (not pruned) and counted separately."""
+
+	def _seed_book(self, library: Path, bid: int) -> Path:
+		folder = library / f"a{bid}" / f"b{bid}"
+		folder.mkdir(parents=True)
+		(folder / "metadata.json").write_text("{}\n", encoding="utf-8")
+		(folder / f"b{bid}.epub").write_text("x", encoding="utf-8")
+		return folder
+
+	def test_keep_applies_proposed_and_writes_metadata(self, tmp_path):
+		library = tmp_path / "lib"
+		folder = self._seed_book(library, 1)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [{
+			"id": 1, "uuid": "u1", "path": "a1/b1",
+			"current": {"title": "Old"}, "proposed": {"title": "KeptTitle"}, "action": "keep",
+		}])
+		summary = apply_review(review, library, dry_run=False)
+		# Counted as kept (not applied), no errors, and the metadata was written.
+		assert summary["kept"] == 1
+		assert summary["applied"] == 0
+		assert summary["errors"] == []
+		assert "KeptTitle" in (folder / "metadata.json").read_text(encoding="utf-8")
+
+	def test_keep_entry_is_not_pruned(self, tmp_path):
+		"""The defining behaviour: keep is retained in review.yaml after WRITE,
+		whereas accept would have been pruned."""
+		library = tmp_path / "lib"
+		self._seed_book(library, 1)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [{
+			"id": 1, "uuid": "u1", "path": "a1/b1",
+			"current": {"title": "Old"}, "proposed": {"title": "New"}, "action": "keep",
+		}])
+		summary = apply_review(review, library, dry_run=False)
+		assert summary["pruned"] == 0
+		assert summary["remaining"] is None  # prune_review was never called
+		# The entry survives verbatim (same id, still action: keep).
+		remaining = parse_review(review)
+		assert len(remaining) == 1
+		assert remaining[0].id == 1
+		assert remaining[0].action == "keep"
+
+	def test_keep_contrasted_with_accept(self, tmp_path):
+		"""accept prunes; keep retains — same proposal, opposite retention."""
+		library = tmp_path / "lib"
+		self._seed_book(library, 1)
+		self._seed_book(library, 2)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [
+			{"id": 1, "uuid": "u1", "path": "a1/b1", "current": {}, "proposed": {"title": "A"}, "action": "accept"},
+			{"id": 2, "uuid": "u2", "path": "a2/b2", "current": {}, "proposed": {"title": "B"}, "action": "keep"},
+		])
+		summary = apply_review(review, library, dry_run=False)
+		assert summary["applied"] == 1  # accept
+		assert summary["kept"] == 1  # keep
+		assert summary["pruned"] == 1  # only the accept entry
+		remaining = {r.id for r in parse_review(review)}
+		assert remaining == {2}  # accept gone, keep retained
+
+	def test_keep_runs_cover_recovery_like_accept(self, tmp_path):
+		"""keep reuses the accept branch, so cover recovery fires for a
+		MISSING_COVER book (tries the proposed cover_url)."""
+		library = tmp_path / "lib"
+		self._seed_book(library, 1)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [{
+			"id": 1, "uuid": "u1", "path": "a1/b1", "current": {},
+			"diagnosis": {"category": "MISSING_COVER", "reason": "no cover", "confidence": "LOW"},
+			"proposed": {"cover_url": "https://example.invalid/cover.jpg"}, "action": "keep",
+		}])
+		with patch("book_meta_fix.covers.download_cover", return_value=True) as dl:
+			summary = apply_review(review, library, dry_run=False)
+		assert summary["kept"] == 1
+		dl.assert_called_once()  # cover_url was attempted, exactly like accept

@@ -52,13 +52,34 @@ first.
 ## 3. Edit + apply
 
 ```bash
-$EDITOR review.yaml               # set action: accept|reject|swap|edit per entry
+$EDITOR review.yaml               # set action: accept|reject|swap|edit|keep per entry
 bmf apply review.yaml             # dry-run preview
 bmf apply --apply review.yaml     # actually write metadata.json + metadata.opf
 ```
 
 Actions: `accept` (apply proposed), `reject` (leave), `swap` (author↔title for
-C1), `edit` (apply only the fields under `edited:`).
+C1), `edit` (apply only the fields under `edited:`), `keep` (apply proposed
+but retain the entry — `analyze` skips it next time; set back to `pending` to
+re-decide).
+
+### 3b. Edit via the GUI (optional)
+
+Instead of hand-editing the YAML, use the keyboard-driven editor:
+
+```bash
+bmf gui --review review.yaml
+```
+
+It shows read-only current fields next to editable targets, a one-key
+author↔title swap, cover previews (current / `.bak` / recommended, plus the
+cover embedded in each format file — `Ctrl+M` deletes the checked ones,
+e-book files after a confirm), and a per-format content view with
+double-encoding repair (`Ctrl+G`). The detail column scrolls; every action
+has a `Ctrl+letter` shortcut (`F1` lists them); `PgUp`/`PgDn` move between
+books and `Tab` cycles only the editable fields (`Ctrl+A` selects all in a
+field). Requires the Tk bindings (`sudo apt install python3-tk` on
+Debian/Ubuntu). Edits are written back to `review.yaml` — commit them with
+`bmf apply` as above.
 
 ## 4. Organize the library
 

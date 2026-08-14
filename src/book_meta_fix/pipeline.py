@@ -59,6 +59,7 @@ def run_pipeline(
 	progress_callback: Any = None,
 	only_needs_review: bool = True,
 	review_writer: Any = None,
+	skip_uuids: set[str] | None = None,
 	verify_ok: bool = False,
 	strict_verify: bool = True,
 	llm_loop: bool = True,
@@ -104,6 +105,11 @@ def run_pipeline(
 	*review_writer* (optional): if a ReviewWriter is supplied, each processed
 	result is also streamed to review.yaml via ``review_writer.submit()`` as it
 	completes (Unix-pipe style), instead of writing the whole file at the end.
+
+	*skip_uuids* (optional): a set of book uuids to skip entirely (no detect /
+	extract / verify / enrich / LLM). Used by ``analyze`` to freeze books the
+	user marked ``action: keep`` — their existing review.yaml entry is carried
+	over verbatim by ReviewWriter.finish() instead of being regenerated.
 	"""
 	all_books = scan_library(library, cache=cache)
 	# Apply the detector cheaply to filter out already-OK books (incremental).
@@ -123,6 +129,17 @@ def run_pipeline(
 				"pipeline: %d total books, verify-ok mode (OK books kept for content check)",
 				len(all_books),
 			)
+	# Skip books the user already decided to ``keep``: their review.yaml entry
+	# is retained verbatim (ReviewWriter.finish() carry-over) and analyze must
+	# not re-detect/extract/enrich them. The set is built by the caller from the
+	# prior review.yaml (ReviewWriter.keep_uuids), so a kept book stays frozen
+	# until the user flips its action back to null. Applied after the detector
+	# filter so it also drops keep-decided books that are now OK.
+	if skip_uuids:
+		before = len(books)
+		books = [b for b in books if b.uuid not in skip_uuids]
+		if before != len(books):
+			log.info("pipeline: skipping %d keep-decided book(s)", before - len(books))
 	if limit is not None:
 		books = books[:limit]
 	total = len(books)
@@ -907,11 +924,13 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cach
 	After a successful WRITE run, successfully-applied entries (accept/swap/
 	edit/delete without error) are pruned from review.yaml so the file reflects
 	only remaining work; pending (action: null), rejected, and errored entries
-	are kept. Dry-run never prunes.
+	are kept. ``action: keep`` is the exception: it applies the proposal like
+	accept but is NOT pruned — the entry is retained and skipped on the next
+	analyze. Dry-run never prunes.
 	"""
 
 	items = parse_review(review_path)
-	summary = {"applied": 0, "rejected": 0, "deleted": 0, "pruned": 0, "remaining": None, "snapshot": None, "errors": [], "dry_run": dry_run}
+	summary = {"applied": 0, "rejected": 0, "deleted": 0, "kept": 0, "pruned": 0, "remaining": None, "snapshot": None, "errors": [], "dry_run": dry_run}
 	succeeded_uuids: set = set()  # uuids of entries committed this run → pruned
 	# delete collects (folder, uuid) so removal success can be tracked per entry.
 	deletions: list[tuple[Path, str | None]] = []
@@ -929,7 +948,7 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cach
 		if item.action == "reject":
 			summary["rejected"] += 1
 			continue
-		if item.action not in ("accept", "swap", "edit", "delete"):
+		if item.action not in ("accept", "swap", "edit", "delete", "keep"):
 			summary["errors"].append(f"id={item.id}: unknown action {item.action!r}")
 			continue
 
@@ -963,9 +982,17 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cach
 			if result.get("error"):
 				summary["errors"].append(f"id={item.id}: {result['error']}")
 			else:
-				summary["applied"] += 1
+				# ``keep`` writes metadata like accept/swap/edit but is NOT pruned
+				# from review.yaml — the entry is retained and skipped on the next
+				# analyze (see run_pipeline's skip_uuids). Count it separately so
+				# the summary distinguishes "written and done" from "written and
+				# kept"; only non-keep actions enter the prune set.
+				if item.action == "keep":
+					summary["kept"] += 1
+				else:
+					summary["applied"] += 1
 				if not dry_run:
-					if item.uuid is not None:
+					if item.uuid is not None and item.action != "keep":
 						succeeded_uuids.add(item.uuid)
 					# The folder's metadata just changed on disk; drop its cached
 					# BookMeta so the next scan re-parses it. Especially matters
@@ -1044,7 +1071,7 @@ def _apply_action(meta: BookMeta, item) -> None:  # noqa: ANN001
 	they involve a network fetch — the caller (apply_review) wraps this in a
 	try/except and reports download failures via the summary dict.
 	"""
-	if item.action == "accept":
+	if item.action in ("accept", "keep"):
 		# Apply proposed fields. *proposed* may be empty — e.g. an identity-
 		# confirmed MISSING_COVER auto-accept proposes nothing — so the field
 		# application is optional but the cover recovery below still runs.

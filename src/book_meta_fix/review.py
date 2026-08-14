@@ -2,7 +2,7 @@
 
 The review.yaml is the primary human-in-the-loop mechanism. It lists books
 flagged as NEEDS_REVIEW with their current metadata, our proposed fix, and an
-`action` field the human fills in (accept/reject/swap/edit).
+`action` field the human fills in (accept/reject/swap/edit/delete/keep).
 
 Format: a multi-document YAML stream. Each book is its own top-level document
 prefixed by `---`, which lets ReviewWriter append entries one-at-a-time (Unix
@@ -30,7 +30,7 @@ from .models import BookMeta, Diagnosis
 
 log = logging.getLogger(__name__)
 
-Action = Literal["accept", "reject", "swap", "edit", "delete"]
+Action = Literal["accept", "reject", "swap", "edit", "delete", "keep"]
 
 
 @dataclass
@@ -63,6 +63,7 @@ def _header(count: int) -> str:
 		f"#   swap    - swap author <-> title (for C1 cases)\n"
 		f"#   edit    - apply fields under `edited` (uncomment and modify)\n"
 		f"#   delete  - remove the book folder (C6 ~$ Word lock-file; tar.gz-backed)\n"
+		f"#   keep    - like accept, but retained (not pruned); skipped on next analyze\n"
 		f"# Then run: bmf apply review.yaml\n"
 		f"\n"
 	)

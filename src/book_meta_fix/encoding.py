@@ -244,6 +244,79 @@ def _looks_clean(s: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Double-decode mojibake (utf-8 bytes read as cp1250/iso-8859-2, then re-saved
+# as utf-8). Distinct from MISDECODED above: there a cp1250 *byte stream* was
+# misread as latin-1; here the corruption happened to text already encoded as
+# UTF-8 (e.g. an EPUB HTML file whose bytes were decoded with the wrong codec
+# and written back). The book FILE on disk now holds the double-corrupted
+# bytes, so reading it as UTF-8 yields garbage like "VytvĂˇĹ™Ăme".
+# ---------------------------------------------------------------------------
+
+
+# Legit CZ/SK letters that live in Latin Extended-A (U+0100–U+017E). These are
+# NOT double-decode artefacts — exclude them from detection.
+_CZ_SK_LATIN_EXT = set("čďěľňŕřšťůžÇĎĚĽŇŔŘŠŤŮŽčďěľňŕřšťůž")
+# Standalone chars that almost never appear in clean CZ/SK prose but DO appear
+# when a UTF-8 byte pair is mis-decoded as a Central-European single-byte codec:
+#   ˇ (U+02C7 caron), ˝ (U+02DD double acute) — cp1250/iso-8859-2 trail bytes
+#   ™ (U+2122)        — cp1250 0x99 trail byte
+#   ­ (U+00AD shy)     — cp1250 0xAD trail byte
+#   Â Ã (U+00C2/C3)   — latin-1/cp1252 lead-byte artefacts
+_DOUBLE_DECODE_TELLS = {"\u02c7", "\u02dd", "\u2122", "\u00ad", "\u00c2", "\u00c3"}
+
+# Candidate single-byte codecs that the UTF-8 bytes may have been misread AS.
+# Order: Central-European first (the common CZ/SK case), then the western
+# fallbacks. The correct one is self-identifying — see repair_double_decode.
+_DOUBLE_DECODE_SRCS = ("cp1250", "iso-8859-2", "cp1252", "latin-1")
+
+
+def detect_double_decode(s: str | None) -> bool:
+	"""Heuristic: does *s* look like UTF-8 text that was mis-decoded twice?
+
+	Flags Latin Extended-A chars that are not legitimate CZ/SK letters, and the
+	common double-decode artefact chars (ˇ ˝ ™ ­ Â Ã). Deliberately liberal —
+	the actual repair (see :func:`repair_double_decode`) is self-validating, so
+	a false positive here just means a no-op repair.
+	"""
+	if not s:
+		return False
+	for c in s:
+		o = ord(c)
+		if 0x0100 <= o <= 0x017F and c not in _CZ_SK_LATIN_EXT:
+			return True
+		if c in _DOUBLE_DECODE_TELLS:
+			return True
+	return False
+
+
+def repair_double_decode(s: str | None) -> str | None:
+	"""Reverse a double-decode of UTF-8 text through a single-byte codec.
+
+	The corruption chain is:  ``proper text --utf-8--> bytes --mis-decoded as
+	<codec>--> mojibake str --utf-8--> bytes on disk``. Reading the file as
+	UTF-8 yields the mojibake str. To reverse it we encode that str back
+	through <codec> (recovering the original UTF-8 bytes) and decode as UTF-8.
+
+	The result is a plain ``str`` (valid UTF-8) — exactly the "mark the result
+	as UTF-8" semantics a caller wants for display. Returns ``None`` when the
+	string shows no double-decode signals or no candidate round-trips into a
+	clean, Czech-looking, *different* string (so a clean input is never
+	mangled). Only the correct <codec> round-trips without raising
+	``UnicodeEncodeError``/``UnicodeDecodeError``; the others are skipped.
+	"""
+	if not s or not detect_double_decode(s):
+		return None
+	for src in _DOUBLE_DECODE_SRCS:
+		try:
+			fixed = s.encode(src).decode("utf-8")
+		except (UnicodeEncodeError, UnicodeDecodeError, LookupError):
+			continue
+		if fixed != s and _looks_clean(fixed) and _looks_czechish(fixed):
+			return fixed
+	return None
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 

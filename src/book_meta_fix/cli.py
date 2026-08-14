@@ -332,6 +332,7 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 			workers=workers,
 			progress_callback=_cb,
 			review_writer=review_writer,
+			skip_uuids=review_writer.keep_uuids(),
 			verify_ok=verify_ok,
 			strict_verify=not no_strict_verify,
 			llm_loop=cfg.llm_loop,
@@ -559,6 +560,7 @@ def apply(review_file: Path, library: Path | None, do_apply: bool) -> None:
 	t.add_column("Count", justify="right")
 	t.add_row("Mode", "WRITE" if do_apply else "DRY-RUN")
 	t.add_row("Applied", str(summary["applied"]))
+	t.add_row("Kept", str(summary.get("kept", 0)))
 	t.add_row("Rejected", str(summary["rejected"]))
 	t.add_row("Deleted", str(summary.get("deleted", 0)))
 	if summary.get("snapshot"):
@@ -573,6 +575,27 @@ def apply(review_file: Path, library: Path | None, do_apply: bool) -> None:
 		console.print("[red]Errors:[/red]")
 		for e in summary["errors"][:20]:
 			console.print(f"  {e}")
+
+
+@main.command()
+@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help="Library root")
+@click.option("--review", "review_file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="review.yaml to edit (default: $BMF_REVIEW or review.yaml)")
+def gui(library: Path | None, review_file: Path | None) -> None:
+	"""Launch the interactive Tkinter editor for review.yaml.
+
+	Keyboard-driven: PgUp/PgDn move between books, Tab between fields, every
+	action has a Ctrl+letter shortcut. Edits are written back to review.yaml;
+	metadata is then committed by `bmf apply`. Requires the optional Tk
+	bindings (python3-tk on Debian/Ubuntu).
+	"""
+	from .gui import run_gui
+
+	cfg = Config.from_env()
+	if library is not None:
+		cfg.library = library
+	if review_file is not None:
+		cfg.review_file = review_file
+	run_gui(cfg)
 
 
 @main.command()

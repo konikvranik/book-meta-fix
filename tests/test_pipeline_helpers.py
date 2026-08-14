@@ -247,3 +247,45 @@ class TestAcceptMissingIdentified:
 		item = SimpleNamespace(action="accept", proposed=None, diagnoses=None, diagnosis=None, id=10, path=meta.path)
 		_apply_action(meta, item)
 		assert (meta.title, list(meta.authors), meta.isbn, meta.year, meta.publisher) == before
+
+
+class TestSkipUuids:
+	"""run_pipeline(skip_uuids=...) freezes keep-decided books: they are filtered
+	out before the processing loop, so they never reach _process_book (no
+	detect/extract/enrich/LLM), while the rest are processed normally."""
+
+	def _two_books(self, tmp_path):
+		from book_meta_fix.models import BookMeta
+		return [
+			BookMeta(calibre_id=1, uuid="keep-me", title="A", authors=["X"], path=str(tmp_path / "a")),
+			BookMeta(calibre_id=2, uuid="process-me", title="B", authors=["Y"], path=str(tmp_path / "b")),
+		]
+
+	def test_skipped_book_is_not_processed(self, tmp_path):
+		from book_meta_fix.pipeline import run_pipeline
+
+		seen = []
+
+		def fake_process(meta, *a, **k):
+			seen.append(meta.uuid)
+			return (meta, None, None, None)
+
+		with patch("book_meta_fix.pipeline.scan_library", return_value=self._two_books(tmp_path)), \
+			patch("book_meta_fix.pipeline._process_book", side_effect=fake_process):
+			results = run_pipeline(tmp_path, skip_uuids={"keep-me"}, workers=1, only_needs_review=False)
+		assert seen == ["process-me"]
+		assert {r[0].uuid for r in results} == {"process-me"}
+
+	def test_no_skip_processes_all(self, tmp_path):
+		from book_meta_fix.pipeline import run_pipeline
+
+		seen = []
+
+		def fake_process(meta, *a, **k):
+			seen.append(meta.uuid)
+			return (meta, None, None, None)
+
+		with patch("book_meta_fix.pipeline.scan_library", return_value=self._two_books(tmp_path)), \
+			patch("book_meta_fix.pipeline._process_book", side_effect=fake_process):
+			run_pipeline(tmp_path, skip_uuids=None, workers=1, only_needs_review=False)
+		assert set(seen) == {"keep-me", "process-me"}
