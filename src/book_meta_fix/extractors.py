@@ -827,6 +827,88 @@ def extract_comic(path: str | Path) -> ExtractedMeta:
 	return result
 
 
+# Mobipocket annotations sidecar (.mbp) — bookmarks/reading position, not a
+# book. Layout observed on the real library: NUL-padded docname header, then
+# length-prefixed records under BPAR/DATA structures with 4-char tags; the
+# AUTH/TITL payloads are UTF-16LE strings written by the Mobipocket Reader
+# device/app at READING time. Unlike calibre-written OPF/PDF-Info (which
+# mirrors the possibly-corrupt DB back), the .mbp was never touched by
+# calibre — in folders where the book file itself was lost it is the only
+# identity evidence left.
+_MBP_MAX_RECORD = 4096
+
+
+def _mbp_utf16(payload: bytes) -> str | None:
+	"""Decode a record payload as UTF-16, BE or LE — whichever looks sane.
+
+	Mobipocket descends from PalmOS and writes UTF-16 **big-endian**; feeding
+	BE bytes to an LE decode yields printable-but-CJK garbage ("䄀搀愀洀猀"
+	for "Adams"), which sails through any isprintable filter. So both
+	variants are decoded strictly and scored by Latin-share (CZ/SK letters
+	all live under U+0250); the winner must actually look Latin. Returns
+	None when neither decodes or neither looks like text.
+	"""
+	best, best_score = None, -1.0
+	for enc in ("utf-16-be", "utf-16-le"):
+		try:
+			text = payload.decode(enc)
+		except UnicodeDecodeError:
+			continue
+		score = sum(1 for c in text if ord(c) < 0x0250) / max(len(text), 1)
+		if score > best_score:
+			best, best_score = text, score
+	if best is None or best_score < 0.75:
+		return None
+	return best.strip("\x00").strip()
+
+
+def _mbp_records(data: bytes) -> dict[str, str]:
+	"""Pull AUTH/TITL UTF-16 records out of Mobipocket .mbp bytes.
+
+	A blunt magic scan rather than a full BPAR/DATA tree walk: the files are
+	tiny (a few hundred bytes), each record is a 4-ASCII-char tag + uint32
+	BIG-endian length + payload, and false hits are filtered by the length
+	sanity check plus _mbp_utf16's strict-decode + Latin-score gate.
+	"""
+	out: dict[str, str] = {}
+	for tag in (b"AUTH", b"TITL"):
+		pos = data.find(tag)
+		if pos < 0 or pos + 8 > len(data):
+			continue
+		length = int.from_bytes(data[pos + 4 : pos + 8], "big")
+		if not 0 < length <= _MBP_MAX_RECORD or pos + 8 + length > len(data):
+			continue
+		text = _mbp_utf16(data[pos + 8 : pos + 8 + length])
+		if text:
+			out[tag.decode()] = text
+	return out
+
+
+def extract_mbp(path: str | Path) -> ExtractedMeta:
+	"""Extract author/title from a Mobipocket annotations sidecar (.mbp).
+
+	The .mbp is NOT an e-book: no page text, no cover, nothing to convert —
+	so it fills only the embedded title/author fields. It exists next to
+	(or, after a book-file loss, INSTEAD of) the real format file. The
+	author string is kept WHOLE ("Vyhídka, Petr" is one person, not two) —
+	Mobipocket stores a single display name, unlike ComicInfo's ";" lists.
+	"""
+	result = ExtractedMeta(source_format="mbp")
+	try:
+		data = Path(path).read_bytes()
+	except OSError as e:
+		result.error = f"read: {e}"
+		return result
+	recs = _mbp_records(data)
+	if recs.get("TITL"):
+		result.title = recs["TITL"]
+	if recs.get("AUTH"):
+		result.authors = [recs["AUTH"]]
+	if not (result.title or result.authors):
+		result.error = "no AUTH/TITL records"
+	return result
+
+
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
@@ -850,6 +932,8 @@ _EXTRACTORS = {
 	".cbz": extract_comic,
 	".cbr": extract_comic,
 	".cb7": extract_comic,
+	# Mobipocket annotations sidecar (see extract_mbp)
+	".mbp": extract_mbp,
 }
 
 

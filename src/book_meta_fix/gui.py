@@ -1884,6 +1884,8 @@ class ReviewEditorApp:
 		total = len(self.entries)
 		if 0 <= self._cur < total and self._cur in idxs:
 			base = f"{idxs.index(self._cur) + 1}/{len(idxs)}"
+		elif 0 <= self._cur < total:
+			base = f"–/{len(idxs)}"  # current book filtered out of the view
 		else:
 			base = f"{len(idxs)} záznamů"
 		if len(idxs) != total:

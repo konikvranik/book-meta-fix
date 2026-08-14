@@ -334,3 +334,92 @@ class TestOcrFallback:
 
 		with patch("book_meta_fix.extractors.shutil.which", return_value=None):
 			assert _ocr_image_bytes(b"some png bytes") is None
+
+
+class TestExtractMbp:
+	"""Mobipocket annotations sidecar (.mbp) — UTF-16-BE AUTH/TITL records.
+
+	Real wild layout (library has 64 of these, several folders where the
+	.mbp is the ONLY surviving format file): NUL-padded docname header,
+	BPAR/MOBI structures, then tagged records — 4-char tag + uint32
+	big-endian length + UTF-16 payload. Mobipocket is PalmOS-descended, so
+	the payload is UTF-16 **big-endian** (little-endian decode yields
+	printable CJK garbage — see test_be_payload_not_misread_as_le).
+	"""
+
+	def _make_mbp(self, path, *, author="Vyhídka, Petr", title="Efekt Gun Clubu"):
+		def rec(tag, text):
+			payload = text.encode("utf-16-be")
+			return tag + len(payload).to_bytes(4, "big") + payload
+
+		data = b"Efekt Gun Clubu_PAR" + b"\x00" * 33 + b"BPARMOBI" + b"\x00" * 24
+		if author is not None:
+			data += rec(b"AUTH", author)
+		if title is not None:
+			data += rec(b"TITL", title)
+		path.write_bytes(data)
+		return path
+
+	def test_reads_author_and_title(self, tmp_path):
+		from book_meta_fix.extractors import extract_mbp
+
+		f = self._make_mbp(tmp_path / "kniha.mbp")
+		m = extract_mbp(f)
+		assert m.error is None
+		assert m.title == "Efekt Gun Clubu"
+		# the author string is kept WHOLE — "Vyhídka, Petr" is one person
+		assert m.authors == ["Vyhídka, Petr"]
+		assert m.source_format == "mbp"
+		assert not m.first_page_text  # not a book: no page text to mine
+
+	def test_be_payload_not_misread_as_le(self, tmp_path):
+		# Regression: LE decoding of the BE payload gives CJK garbage
+		# ("䄀搀愀洀猀" for "Adams") which passes isprintable — the dual
+		# decode + Latin-score gate must pick the sane variant.
+		from book_meta_fix.extractors import extract_mbp
+
+		f = self._make_mbp(tmp_path / "a.mbp", author="Adams, Douglas", title="Stopařův průvodce")
+		m = extract_mbp(f)
+		assert m.authors == ["Adams, Douglas"]
+		assert m.title == "Stopařův průvodce"
+
+	def test_dispatch_by_extension(self, tmp_path):
+		from book_meta_fix.extractors import extract
+
+		f = self._make_mbp(tmp_path / "kniha.mbp")
+		m = extract(f)
+		assert m.source_format == "mbp"
+		assert m.error is None
+		assert m.title == "Efekt Gun Clubu"
+
+	def test_no_records_reports_error(self, tmp_path):
+		from book_meta_fix.extractors import extract_mbp
+
+		f = tmp_path / "kniha.mbp"
+		f.write_bytes(b"Efekt Gun Clubu_PAR" + b"\x00" * 64)
+		m = extract_mbp(f)
+		assert m.error == "no AUTH/TITL records"
+		assert m.title is None and not m.authors
+
+	def test_corrupt_length_record_skipped(self, tmp_path):
+		# AUTH claiming more bytes than the file has is skipped; TITL survives.
+		from book_meta_fix.extractors import extract_mbp
+
+		f = tmp_path / "kniha.mbp"
+		payload = "Vyhídka, Petr".encode("utf-16-be")
+		data = b"AUTH" + (len(payload) + 9999).to_bytes(4, "big") + payload
+		data += b"TITL" + len("Efekt Gun Clubu".encode("utf-16-be")).to_bytes(4, "big")
+		data += "Efekt Gun Clubu".encode("utf-16-be")
+		f.write_bytes(data)
+		m = extract_mbp(f)
+		assert m.error is None
+		assert m.title == "Efekt Gun Clubu"
+		assert m.authors == []
+
+	def test_mbp_registered_last_in_ebook_exts(self):
+		# .mbp must be in EBOOK_EXTS but LAST — a real book is always the
+		# primary format; the .mbp only steps up in book-less folders.
+		from book_meta_fix.readers import EBOOK_EXTS
+
+		assert ".mbp" in EBOOK_EXTS
+		assert EBOOK_EXTS[-1] == ".mbp"

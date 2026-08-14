@@ -19,6 +19,7 @@ The repair pipeline:
 """
 from __future__ import annotations
 
+import codecs
 import logging
 import re
 
@@ -264,10 +265,36 @@ _CZ_SK_LATIN_EXT = set("čďěľňŕřšťůžÇĎĚĽŇŔŘŠŤŮŽčďěľňŕ
 #   Â Ã (U+00C2/C3)   — latin-1/cp1252 lead-byte artefacts
 _DOUBLE_DECODE_TELLS = {"\u02c7", "\u02dd", "\u2122", "\u00ad", "\u00c2", "\u00c3"}
 
+def _resolvable(names: tuple[str, ...]) -> tuple[str, ...]:
+	"""Drop codec names this Python build cannot look up.
+
+	Codec aliases are a minefield: e.g. the Mac Central-European codec
+	resolves as ``maccentraleurope``/``mac_latin2``, but the equally
+	plausible ``mac-centraleurope`` raises LookupError (there is an
+	``encodings/mac_cyrillic.py`` module, yet no ``mac_centraleurope``
+	one). An unresolvable candidate must merely be ABSENT from the search
+	(a lost repair opportunity, logged), never crash the repair loop —
+	until this guard, one bad alias escaped ``_encode_dropping`` (it only
+	caught UnicodeEncodeError), tore through the Tk callback and left the
+	GUI content preview wedged on "(načítám…)". Validating the tables once
+	at import makes every later encode/decode in the repairs total by
+	construction and costs nothing per call.
+	"""
+	resolved = []
+	for name in names:
+		try:
+			codecs.lookup(name)
+		except LookupError:
+			log.warning("kodek %r není na této platformě dostupný; vyřazen z kandidátů opravy", name)
+			continue
+		resolved.append(name)
+	return tuple(resolved)
+
+
 # Candidate single-byte codecs that the UTF-8 bytes may have been misread AS.
 # Order: Central-European first (the common CZ/SK case), then the western
 # fallbacks. The correct one is self-identifying — see repair_double_decode.
-_DOUBLE_DECODE_SRCS = ("cp1250", "iso-8859-2", "cp1252", "latin-1")
+_DOUBLE_DECODE_SRCS = _resolvable(("cp1250", "iso-8859-2", "cp1252", "latin-1"))
 
 
 def detect_double_decode(s: str | None) -> bool:
@@ -409,15 +436,18 @@ def repair_double_decode(s: str | None) -> str | None:
 # text was ONCE mis-read through on top of the usual double-decode. Cyrillic
 # first — the wild sample was cp1250 CZ text mis-read as cp1251. Cheap to be
 # generous: a candidate that cannot encode the intermediate fails in C.
-_CHAIN_MIDDLE = (
+# NOTE: the Mac Central-European codec must be spelled ``mac_latin2`` (alias
+# ``maccentraleurope``) — ``mac-centraleurope`` does NOT resolve and is the
+# exact alias that once crashed repair_chain with LookupError.
+_CHAIN_MIDDLE = _resolvable((
 	"cp1251", "iso-8859-5", "koi8-r", "koi8-u", "mac-cyrillic",
 	"cp1250", "cp1252", "cp1257", "cp1254", "cp1255", "cp1256", "cp1258",
 	"iso-8859-1", "iso-8859-2", "iso-8859-7", "iso-8859-9", "iso-8859-15",
-	"iso-8859-16", "mac-centraleurope", "cp852", "cp850", "cp866", "cp874",
+	"iso-8859-16", "mac_latin2", "cp852", "cp850", "cp866", "cp874",
 	"latin-1",
-)
+))
 # What the recovered bytes of the innermost layer actually are: a CZ/SK book.
-_CHAIN_FINALS = ("cp1250", "iso-8859-2")
+_CHAIN_FINALS = _resolvable(("cp1250", "iso-8859-2"))
 
 
 def repair_chain(s: str | None) -> tuple[str, str] | None:

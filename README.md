@@ -575,6 +575,15 @@ the metadata). Formats with no extractable text (image-only PDFs, comics without
 `ComicInfo.xml`/OCR) are UNCERTAIN and never auto-quarantined. Pairwise
 disagreements that the metadata can't resolve are reported but not auto-resolved.
 
+**`.mbp` sidecars.** Mobipocket annotation files (`.mbp`, the reading-position
+bookmarks from the old Mobipocket Reader) are recognized as format files. They
+are not books — but they carry UTF-16 `AUTH`/`TITL` records written by the
+reading device, which calibre never touched. In folders where the actual book
+file was lost (64 in this library, several book-less), the `.mbp` is the only
+identity evidence left, and its author/title flow into the review as
+suggestions. A `.mbp` never becomes the primary format when a real book exists
+(it is last in the format preference) and is excluded from `epubgen` sources.
+
 ## Optional external tools
 
 - **`pdftotext` / `pdfinfo`** (poppler-utils) — PDF content & metadata extraction
