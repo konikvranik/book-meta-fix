@@ -38,12 +38,19 @@ import threading
 from pathlib import Path
 
 from .covers import analyze_cover, download_cover, extract_cover_from_book
-from .encoding import detect_double_decode, repair_double_decode
+from .encoding import detect_double_decode, recode
 from .extractors import extract
 from .readers import EBOOK_EXTS
 from .review import _header, _load_raw_entries, _render_entry
 
 log = logging.getLogger(__name__)
+
+# Codec choices for the manual z/do recode experiment (result is always
+# displayed as UTF-8 text — a str is a str; the pair only says how to recover
+# the original bytes).
+ENCODING_CHOICES = (
+	"utf-8", "cp1250", "iso-8859-2", "cp1252", "latin-1", "cp1251", "maccentraleurope",
+)
 
 # Optional Tk — guarded so the pure helpers stay importable without python3-tk.
 try:  # pragma: no cover - exercised only when Tk is present
@@ -327,6 +334,15 @@ class ReviewEditorApp:
 	# Action radio values; "pending" serialises to ``action: null``.
 	ACTIONS = ["pending", "accept", "reject", "swap", "edit", "delete", "keep"]
 
+	# Cover-preview slot (px): every preview cell in a row occupies the SAME
+	# box whether the image is present, smaller, or missing, so the cells stay
+	# aligned side by side. The width is synced per-row to the available pane
+	# width (between MIN and W) — a purely fixed width overflows a narrow pane
+	# and pack then squeezes the trailing cells out of shape.
+	COVER_SLOT_W = 248
+	COVER_SLOT_MIN = 140
+	COVER_SLOT_H = 330
+
 	def __init__(self, cfg) -> None:
 		self.cfg = cfg
 		self.review_path = Path(cfg.review_file)
@@ -338,6 +354,7 @@ class ReviewEditorApp:
 		self._alive = True
 		self._loading = False  # suppress dirty while populating fields
 		self._last_field_role: str | None = None  # focus persistence across books
+		self._flash_after_id = None  # pending transient status-line message
 
 		# Cover thumbnail caches (uuid -> image). PIL loaded off-thread;
 		# PhotoImage created lazily in the main thread (Tk is not thread-safe).
@@ -391,6 +408,8 @@ class ReviewEditorApp:
 		self._content_cache: dict[str, object] = {}  # file path -> ExtractedMeta
 		self._format_files: list = []
 		self._recode_var = tk.BooleanVar(value=False)
+		self._recode_from = tk.StringVar(value="cp1250")
+		self._recode_to = tk.StringVar(value="utf-8")
 		self._content_raw = ""
 		self._content_repaired: str | None = None
 
@@ -609,6 +628,57 @@ class ReviewEditorApp:
 		# Tab cycle = the target fields + the notes entry (nothing else).
 		self._editable_widgets = list(self._field_entries) + [self._notes_entry]
 
+	def _cover_cell(self, parent, title: str, var=None, tip: str | None = None):
+		"""One fixed-size cover cell: a slot box + caption; ``(label, caption)``.
+
+		The slot is a fixed-size ``tk.Frame`` with ``pack_propagate(False)``
+		so a missing or undersized cover renders as an identically-sized box
+		— the previews stay aligned side by side regardless of image size or
+		absence. The selection checkbox (when *var* is given) overlays the
+		slot's top-left corner.
+		"""
+		cell = ttk.Frame(parent)
+		cell.pack(side="left", padx=6)
+		slot = tk.Frame(
+			cell, width=self.COVER_SLOT_W, height=self.COVER_SLOT_H,
+			relief="sunken", borderwidth=1, background=self._field_bg,
+		)
+		slot.pack_propagate(False)
+		slot.pack()
+		lbl = ttk.Label(slot, text="(načítám…)", anchor="center")
+		lbl.pack(fill="both", expand=True)
+		if var is not None:
+			chk = ttk.Checkbutton(lbl, variable=var)
+			chk.place(x=4, y=4, anchor="nw")
+			if tip:
+				_Tooltip(chk, tip)
+		cap = ttk.Label(cell, text=title, anchor="center", wraplength=self.COVER_SLOT_W)
+		cap.pack(fill="x")
+		return lbl, cap
+
+	def _sync_cover_slots(self, *_) -> None:
+		"""Give every cover cell in a row the SAME width, fitted to the pane.
+
+		The right pane's width varies (PanedWindow sash, window size), so a
+		row of fixed-width slots can overflow it — and pack then squeezes the
+		trailing cells (the "messed up previews, especially missing ones"
+		bug). Each row's slots are therefore set to one common width:
+		``clamp(available / n, MIN, W)`` — always equal, never overflowing.
+		"""
+		try:
+			for row in (self._cover_row, self._fmt_cover_row):
+				cells = [c for c in row.winfo_children() if c.winfo_class() == "TFrame"]
+				if not cells:
+					continue
+				per = row.winfo_width() // len(cells) - 14
+				per = max(min(per, self.COVER_SLOT_W), self.COVER_SLOT_MIN)
+				for c in cells:
+					for sub in c.winfo_children():
+						if sub.winfo_class() == "Frame":  # the slot box
+							sub.configure(width=per)
+		except Exception:  # noqa: BLE001
+			pass
+
 	def _build_covers_section(self) -> None:
 		box = ttk.LabelFrame(self._scroll_inner, text="Obálky")
 		box.pack(fill="x", padx=8, pady=4)
@@ -616,8 +686,8 @@ class ReviewEditorApp:
 		# the customary selection spot); "Smazat označené" then removes what
 		# is checked. The recommended cover is a URL preview, not a file, so
 		# it gets no checkbox.
-		row = ttk.Frame(box)
-		row.pack(fill="x", padx=6, pady=8)
+		self._cover_row = ttk.Frame(box)
+		self._cover_row.pack(fill="x", padx=6, pady=8)
 		self._cover_imgs = []
 		self._cover_caps = []
 		for title, var, tip in (
@@ -625,16 +695,7 @@ class ReviewEditorApp:
 			(".bak záloha", self._del_bak, "Smazat cover.jpg.bak (při Smazat označené)"),
 			("Doporučená", None, None),
 		):
-			cell = ttk.Frame(row)
-			cell.pack(side="left", expand=True)
-			lbl = ttk.Label(cell, text="(načítám…)", anchor="center")
-			lbl.pack()
-			cap = ttk.Label(cell, text=title, anchor="center")
-			cap.pack()
-			if var is not None:
-				chk = ttk.Checkbutton(lbl, variable=var)
-				chk.place(x=4, y=4, anchor="nw")
-				_Tooltip(chk, tip)
+			lbl, cap = self._cover_cell(self._cover_row, title, var, tip)
 			self._cover_imgs.append(lbl)
 			self._cover_caps.append(cap)
 		# Embedded covers of the book's format files (calibre extraction) —
@@ -643,6 +704,9 @@ class ReviewEditorApp:
 		ttk.Label(box, text="Vložené obálky ve formátech (☐ = smazat soubor):").pack(anchor="w", padx=6)
 		self._fmt_cover_row = ttk.Frame(box)
 		self._fmt_cover_row.pack(fill="x", padx=6, pady=(2, 8))
+		# Keep the slot widths equal and fitted on every pane resize.
+		self._cover_row.bind("<Configure>", self._sync_cover_slots, add="+")
+		self._fmt_cover_row.bind("<Configure>", self._sync_cover_slots, add="+")
 		btns = ttk.Frame(box)
 		btns.pack(fill="x", padx=6, pady=4)
 		ttk.Button(btns, text="Ponechat (Ctrl+P)", command=self.cover_keep).pack(side="left", padx=2)
@@ -671,8 +735,25 @@ class ReviewEditorApp:
 			command=self._apply_content_text, state="disabled",
 		)
 		self._recode_chk.pack(side="left")
+		# Manual codec experiment: pick z (what the text should be re-encoded
+		# through) and do (what the recovered bytes really are); the preview
+		# re-renders live, always as UTF-8 text, whatever the pair.
+		ttk.Label(rec, text="  z:").pack(side="left")
+		self._recode_from_box = ttk.Combobox(
+			rec, textvariable=self._recode_from, values=list(ENCODING_CHOICES),
+			width=13, state="readonly",
+		)
+		self._recode_from_box.pack(side="left", padx=(1, 4))
+		ttk.Label(rec, text="do:").pack(side="left")
+		self._recode_to_box = ttk.Combobox(
+			rec, textvariable=self._recode_to, values=list(ENCODING_CHOICES),
+			width=13, state="readonly",
+		)
+		self._recode_to_box.pack(side="left", padx=(1, 4))
 		self._recode_hint = ttk.Label(rec, text="", foreground="#a00")
 		self._recode_hint.pack(side="left", padx=8)
+		self._recode_from.trace_add("write", lambda *_: self._recode_changed())
+		self._recode_to.trace_add("write", lambda *_: self._recode_changed())
 		body = ttk.Frame(box)
 		body.pack(fill="both", expand=True, padx=6, pady=(0, 6))
 		self._content_txt = self._style_text(
@@ -1234,8 +1315,9 @@ class ReviewEditorApp:
 		if not self._do_save():
 			return
 		self._dirty = False
-		self._set_status()
-		messagebox.showinfo("bmf gui", f"Uloženo do {self.review_path}")
+		# Non-intrusive confirmation (the modal dialog interrupted the flow):
+		# the status line carries it for a few seconds, then reverts.
+		self._flash(f"uloženo → {self.review_path}", seconds=4)
 
 	def _do_save(self) -> bool:
 		text = render_review_text(self.entries)
@@ -1300,6 +1382,23 @@ class ReviewEditorApp:
 
 		threading.Thread(target=work, daemon=True).start()
 
+	def _fit_photo(self, pil, lbl):
+		"""PhotoImage for *pil*, downscaled to the cover slot's current width.
+
+		The slot width follows the pane (see _sync_cover_slots); a 240px
+		thumbnail in a narrower slot would otherwise be clipped at the sides.
+		Returns None on any failure (caller shows the placeholder text).
+		"""
+		try:
+			img = pil
+			w = lbl.master.winfo_width() - 10
+			if 0 < w < pil.width:
+				img = pil.copy()
+				img.thumbnail((w, self.COVER_SLOT_H))
+			return ImageTk.PhotoImage(img)
+		except Exception:  # noqa: BLE001
+			return None
+
 	def _apply_covers(self, idx, cur, bak, rec, info, has_url) -> None:
 		if not self._alive or self._cur != idx:
 			return  # user already switched to another book — drop stale paint
@@ -1311,11 +1410,12 @@ class ReviewEditorApp:
 		caps.append("doporučená" if has_url else "bez URL")
 		for lbl, _cap, pil in zip(self._cover_imgs, self._cover_caps, imgs, strict=False):
 			if pil is not None:
-				photo = ImageTk.PhotoImage(pil)
-				self._cover_photos[id(pil)] = photo
-				lbl.configure(image=photo, text="")
-			else:
-				lbl.configure(image="", text="(žádný náhled)")
+				photo = self._fit_photo(pil, lbl)
+				if photo is not None:
+					self._cover_photos[id(pil)] = photo
+					lbl.configure(image=photo, text="")
+					continue
+			lbl.configure(image="", text="(žádný náhled)")
 		for _cap_lbl, text in zip(self._cover_caps, caps, strict=False):
 			_cap_lbl.configure(text=text)
 
@@ -1330,22 +1430,21 @@ class ReviewEditorApp:
 			ttk.Label(self._fmt_cover_row, text="(žádné / calibre nedostupné)").pack(side="left")
 			return
 		for path, pil in fmt_covers:
-			try:
-				photo = ImageTk.PhotoImage(pil)
-			except Exception:  # noqa: BLE001
-				continue
-			cell = ttk.Frame(self._fmt_cover_row)
-			cell.pack(side="left", expand=True)
-			lbl = ttk.Label(cell, image=photo, text="", anchor="center")
-			lbl.pack()
-			self._cover_photos[f"fmt:{path}"] = photo
 			var = tk.BooleanVar(value=False)
-			chk = ttk.Checkbutton(lbl, variable=var)
-			chk.place(x=4, y=4, anchor="nw")
-			_Tooltip(chk, f"Smazat soubor {path.name} (při Smazat označené)")
-			ttk.Label(cell, text=path.name, anchor="center").pack()
-			self._trap_subtree(cell)  # Tab must never land on these checkboxes
+			lbl, _cap = self._cover_cell(
+				self._fmt_cover_row, path.name, var,
+				f"Smazat soubor {path.name} (při Smazat označené)",
+			)
+			photo = self._fit_photo(pil, lbl)
+			if photo is None:
+				continue
+			self._cover_photos[f"fmt:{path}"] = photo
+			lbl.configure(image=photo, text="")
 			self._del_formats[str(path)] = var
+		# Tab must never land on the (dynamically created) checkboxes.
+		self._trap_subtree(self._fmt_cover_row)
+		# The rebuilt row must re-fit its slot widths (n may have changed).
+		self.root.after_idle(self._sync_cover_slots)
 
 	def cover_new(self) -> None:
 		e = self.entries[self._cur]
@@ -1461,17 +1560,52 @@ class ReviewEditorApp:
 		elif not raw:
 			raw = "(žádný text)"
 		self._content_raw = raw
-		# Detect double-encoding (utf-8 mis-decoded twice) and offer repair.
-		self._content_repaired = repair_double_decode(raw) if detect_double_decode(raw) else None
-		if self._content_repaired:
-			self._recode_hint.configure(text="⚠ detekováno dvojí kódování — viz Ctrl+G")
-			self._recode_chk.configure(state="normal")
+		# Detect double-encoding (utf-8 mis-decoded twice): default the z/do
+		# selectors to the usual CZ suspect and show the repaired text. A
+		# clean book keeps the user's last pair, so manual experimenting
+		# works even when the detector saw nothing.
+		if detect_double_decode(raw):
+			self._recode_hint.configure(text="⚠ detekováno dvojí kódování")
+			self._recode_from.set("cp1250")
+			self._recode_to.set("utf-8")
 			self._recode_var.set(True)  # default to the readable, repaired text
-		else:
-			self._recode_hint.configure(text="")
+		self._recompute_recode()
+		self._apply_content_text()
+
+	def _recompute_recode(self) -> None:
+		"""Recompute the transformed text from the current z/do pair.
+
+		The toggle is enabled only when the pair yields an actual change; a
+		failing pair is reported in the hint — the user is experimenting, so
+		telling them a combination cannot run is the point.
+		"""
+		frm, to = self._recode_from.get(), self._recode_to.get()
+		self._content_repaired = recode(self._content_raw, frm, to)
+		if self._content_repaired is None:
 			self._recode_chk.configure(state="disabled")
 			self._recode_var.set(False)
+			if self._content_raw:
+				self._recode_hint.configure(text=f"⚠ z {frm} do {to}: převod selhal")
+		elif self._content_repaired == self._content_raw:
+			self._recode_chk.configure(state="disabled")
+			self._recode_var.set(False)
+		else:
+			self._recode_chk.configure(state="normal")
+
+	def _recode_changed(self, *_args) -> None:
+		"""A codec was picked (z/do) — live-preview the result from page one."""
+		if not self._content_raw:
+			return
+		self._recompute_recode()
+		if self._content_repaired is not None and self._content_repaired != self._content_raw:
+			self._recode_var.set(True)
+			self._recode_hint.configure(
+				text=f"z {self._recode_from.get()} → {self._recode_to.get()} ✓")
 		self._apply_content_text()
+		try:
+			self._content_txt.yview_moveto(0.0)  # first-page preview
+		except Exception:  # noqa: BLE001
+			pass
 
 	def _apply_content_text(self) -> None:
 		repaired = self._content_repaired if (self._recode_var.get() and self._content_repaired) else None
@@ -1545,8 +1679,21 @@ class ReviewEditorApp:
 		except RuntimeError:
 			pass
 
-	def _flash(self, msg: str) -> None:
+	def _flash(self, msg: str, seconds: float | None = None) -> None:
+		"""Show *msg* in the status line; optionally auto-clear after *seconds*."""
 		self._set_status(extra=msg)
+		if self._flash_after_id is not None:
+			try:
+				self.root.after_cancel(self._flash_after_id)
+			except Exception:  # noqa: BLE001
+				pass
+			self._flash_after_id = None
+		if seconds:
+			self._flash_after_id = self.root.after(int(seconds * 1000), self._clear_flash)
+
+	def _clear_flash(self) -> None:
+		self._flash_after_id = None
+		self._set_status()
 
 	def _set_status(self, extra: str = "") -> None:
 		if not (0 <= self._cur < len(self.entries)):
@@ -1585,7 +1732,7 @@ class ReviewEditorApp:
 			("Ctrl+P", "obálka: ponechat"),
 			("Ctrl+M", "obálka: smazat označené (cover/.bak/soubory formátů)"),
 			("Ctrl+T", "obsah: první strana / širší text"),
-			("Ctrl+G", "obsah: překódovat (opravit dvojí kódování)"),
+			("Ctrl+G", "obsah: překódovat (z/do kodeky volí komboboxy; výsledek vždy UTF-8)"),
 			("", "(kolečko: prvek pod myší, na jeho hraně formulář; obálka v seznamu → hover popup)"),
 		]
 		for k, d in shortcuts:

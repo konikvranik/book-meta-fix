@@ -175,14 +175,23 @@ src/book_meta_fix/
   "all" tag which runs LAST and loses to Tk's default focus traversal (the
   original bug). Dynamically created widgets (format radios, embedded-cover
   checkboxes) must be re-trapped via ``_trap_subtree``. ``Ctrl+A`` is
-  rebound per Entry (X11's default is "home", not select-all). Per-format
-  EMBEDDED covers are previewed via ``gui.embedded_cover_thumb`` — no
+  rebound per Entry (X11's default is "home", not select-all). Wheel routing
+  (``_on_wheel``): the widget under the pointer scrolls first (its class
+  binding already ran — "all" runs last); the form canvas takes over only at
+  that widget's edge, and ``_scroll_canvas`` hard-refuses to scroll while the
+  form fits the viewport (the form is FIXED, never drifts). Cover previews
+  sit in fixed-HEIGHT slots whose WIDTH is synced per row
+  (``_sync_cover_slots``) — a purely fixed width overflows a narrow pane and
+  pack then squeezes the trailing cells out of shape. Per-format EMBEDDED
+  covers are previewed via ``gui.embedded_cover_thumb`` — no
   generated-placeholder gate there (unlike ``covers.recover_cover_from_book``)
   because the point is to SEE a calibre placeholder; their checkboxes delete
   the format FILE itself (confirmed — irreversible). The content view's
   ``Ctrl+G`` repair uses ``encoding.repair_double_decode`` — a DIFFERENT
   corruption than the single mojibake ``readers`` repairs (utf-8 bytes
-  mis-decoded twice through a single-byte codec); keep the two paths separate.
+  mis-decoded twice through a single-byte codec; often only PART of the text,
+  which is why the repair decodes byte-wise via ``_mixed_utf8_decode``
+  instead of a whole-string round-trip); keep the two paths separate.
 - **Every command runs an internal scan** via the SQLite cache — `bmf scan` is
   only for summary stats, not a prerequisite.
 - **Every mutating command is dry-run by default** (`--apply` to write).
