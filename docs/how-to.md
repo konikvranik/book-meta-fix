@@ -71,15 +71,19 @@ bmf gui --review review.yaml
 ```
 
 It shows read-only current fields next to editable targets, a one-key
-author↔title swap, cover previews (current / `.bak` / recommended, plus the
-cover embedded in each format file — `Ctrl+M` deletes the checked ones,
-e-book files after a confirm), and a per-format content view with
-double-encoding repair (`Ctrl+G`). The detail column scrolls; every action
-has a `Ctrl+letter` shortcut (`F1` lists them); `PgUp`/`PgDn` move between
-books and `Tab` cycles only the editable fields (`Ctrl+A` selects all in a
-field). Requires the Tk bindings (`sudo apt install python3-tk` on
-Debian/Ubuntu). Edits are written back to `review.yaml` — commit them with
-`bmf apply` as above.
+author↔title swap, the book's folder as a clickable "open in file manager"
+link (double-clicking a list row does the same), cover previews (current /
+`.bak` / recommended, plus the
+cover embedded in each format file — `Ctrl+M` removes the checked embedded
+covers out of the e-book files, which stay put; EPUB only), and a
+per-format content view with
+double-encoding repair (`Ctrl+G`; the `z`/`do` codec boxes let you experiment
+manually with a live first-page preview, always rendered as UTF-8). The
+detail column scrolls; every action has a `Ctrl+letter` shortcut (`F1` lists
+them); `PgUp`/`PgDn` move between books and `Tab` cycles only the editable
+fields (`Ctrl+A` selects all in a field). Requires the Tk bindings
+(`sudo apt install python3-tk` on Debian/Ubuntu). Edits are written back to
+`review.yaml` — commit them with `bmf apply` as above.
 
 ## 4. Organize the library
 
