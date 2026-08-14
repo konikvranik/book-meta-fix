@@ -229,6 +229,16 @@ src/book_meta_fix/
   swallows that — so with plain ``update()`` polling every async load
   (content, thumbnails) silently never applies and the smoke fails in
   confusing, load-dependent ways.
+- **`.mbp` is an annotations sidecar, not a book** — recognized in
+  ``readers.EBOOK_EXTS`` but deliberately LAST (never the primary format when a
+  real book exists; excluded from epubgen's own ``_FORMAT_PRIORITY``).
+  ``extractors.extract_mbp`` pulls the UTF-16 **big-endian** ``AUTH``/``TITL``
+  records (Mobipocket is PalmOS-descended — an LE decode yields printable CJK
+  garbage, so ``_mbp_utf16`` scores both variants and keeps the Latin one).
+  The records were written by the reading device, NOT by calibre, so in
+  book-less folders (64 in the library) they are the only identity evidence —
+  but they fill only the EMBEDDED fields: no page text, so the verifier stays
+  UNCERTAIN (honest — the content is gone), and proposals remain review-gated.
 - **Every command runs an internal scan** via the SQLite cache — `bmf scan` is
   only for summary stats, not a prerequisite.
 - **Every mutating command is dry-run by default** (`--apply` to write).

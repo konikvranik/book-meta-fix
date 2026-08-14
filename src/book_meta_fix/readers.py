@@ -36,9 +36,15 @@ _NULL_DATE = "0101-01-01"
 # Known ebook extensions, ordered by extraction preference (richest metadata
 # first). Hoisted to module level so other modules (e.g. mover.merge_folders)
 # can reuse the same set instead of re-hardcoding it.
+# .mbp (Mobipocket annotations sidecar) is deliberately LAST: it is not a
+# book, but in folders where the book file was lost it is the ONLY format
+# file left — and the only identity evidence (AUTH/TITL records, see
+# extractors.extract_mbp). Being last, it never becomes the primary format
+# when a real book exists.
 EBOOK_EXTS = (
 	".epub", ".pdf", ".mobi", ".azw", ".azw3", ".prc", ".pdb",
 	".doc", ".rtf", ".txt", ".lit", ".djvu", ".cbz", ".cbr", ".cb7",
+	".mbp",
 )
 
 

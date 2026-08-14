@@ -1,8 +1,11 @@
 """Unit tests for mojibake detection and repair."""
 from __future__ import annotations
 
+import codecs
+
 import pytest
 
+from book_meta_fix import encoding as enc
 from book_meta_fix.encoding import (
 	MojibakeKind,
 	detect_double_decode,
@@ -309,3 +312,40 @@ class TestRepairChain:
 
 	def test_clean_text_returns_none(self):
 		assert repair_chain("příliš žluťoučký kůň") is None
+
+
+class TestCodecTables:
+	"""Every codec name in the repair tables must resolve on this Python.
+
+	Regression: the plausible-looking alias "mac-centraleurope" raises
+	LookupError (the codec lives in encodings.mac_latin2, alias
+	"maccentraleurope"), escaped _encode_dropping and crashed the Tk
+	callback — the GUI content preview wedged on "(načítám…)".
+	"""
+
+	def test_all_candidate_names_resolve(self):
+		for name in enc._CHAIN_MIDDLE + enc._CHAIN_FINALS + enc._DOUBLE_DECODE_SRCS:
+			codecs.lookup(name)  # must not raise
+
+	def test_resolvable_drops_unknown_names(self):
+		assert enc._resolvable(("cp1250", "mac-centraleurope", "iso-8859-2")) == (
+			"cp1250", "iso-8859-2",
+		)
+
+	def test_chain_deep_search_never_raises(self):
+		# Russian text double-decoded through cp1250: every chain output is
+		# Cyrillic (no CZ diacritics), so ALL middle candidates are tried and
+		# rejected — the search walks the whole table, where the bad alias
+		# used to blow up mid-loop. Must return None, not raise.
+		moji = "Привет мир".encode("utf-8").decode("cp1250")
+		assert detect_double_decode(moji)
+		assert repair_chain(moji) is None
+
+	def test_lost_bytes_deep_search_never_raises(self):
+		# Same walk with a lost byte (U+FFFD from a replace-decode): "А"
+		# contains the cp1250-undefined byte 0x90, so strict decode cannot
+		# even represent the mojibake — errors="replace" is how such text
+		# really arrives from extractors.
+		moji = "Абв".encode("utf-8").decode("cp1250", errors="replace")
+		assert "\ufffd" in moji
+		assert repair_chain(moji) is None
