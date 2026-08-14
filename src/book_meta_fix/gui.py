@@ -46,7 +46,7 @@ from .covers import (
 	extract_cover_from_book,
 	strip_cover_from_book,
 )
-from .encoding import detect_double_decode, recode
+from .encoding import detect_double_decode, recode, recode_failure_reason, repair_chain
 from .extractors import extract
 from .readers import EBOOK_EXTS
 from .review import _header, _load_raw_entries, _render_entry
@@ -819,23 +819,37 @@ class ReviewEditorApp:
 			command=self._apply_content_text, state="disabled",
 		)
 		self._recode_chk.pack(side="left")
-		# Manual codec experiment: pick z (what the text should be re-encoded
-		# through) and do (what the recovered bytes really are); the preview
+		# Manual codec experiment: „přečteno jako“ is the codec the text was
+		# WRONGLY read through (the encode side), „skutečně je“ is what the
+		# recovered bytes really are (nearly always utf-8); the preview
 		# re-renders live, always as UTF-8 text, whatever the pair.
-		ttk.Label(rec, text="  z:").pack(side="left")
+		ttk.Label(rec, text="  přečteno jako:").pack(side="left")
 		self._recode_from_box = ttk.Combobox(
 			rec, textvariable=self._recode_from, values=list(ENCODING_CHOICES),
 			width=13, state="readonly",
 		)
 		self._recode_from_box.pack(side="left", padx=(1, 4))
-		ttk.Label(rec, text="do:").pack(side="left")
+		ttk.Label(rec, text="skutečně je:").pack(side="left")
 		self._recode_to_box = ttk.Combobox(
 			rec, textvariable=self._recode_to, values=list(ENCODING_CHOICES),
 			width=13, state="readonly",
 		)
 		self._recode_to_box.pack(side="left", padx=(1, 4))
+		swap_btn = ttk.Button(rec, text="⇄", width=3, command=self._swap_recode_codecs)
+		swap_btn.pack(side="left")
+		_recode_tip = (
+			"Oprava dvojitého kódování: „přečteno jako“ = kodek, kterým byl text "
+			"původně špatně přečten (typicky cp1250); „skutečně je“ = reálné "
+			"kódování bajtů (téměř vždy utf-8). Náhled je vždy UTF-8."
+		)
+		_Tooltip(swap_btn, "Prohodit směr převodu (přečteno jako ↔ skutečně je)")
+		_Tooltip(self._recode_from_box, _recode_tip)
+		_Tooltip(self._recode_to_box, _recode_tip)
 		self._recode_hint = ttk.Label(rec, text="", foreground="#a00")
 		self._recode_hint.pack(side="left", padx=8)
+		# Clickable when it offers the swapped (working) direction — see
+		# _recompute_recode / _on_recode_hint_click.
+		self._recode_hint.bind("<Button-1>", self._on_recode_hint_click)
 		self._recode_from.trace_add("write", lambda *_: self._recode_changed())
 		self._recode_to.trace_add("write", lambda *_: self._recode_changed())
 		body = ttk.Frame(box)
@@ -1642,7 +1656,7 @@ class ReviewEditorApp:
 			self._content_repaired = None
 			self._recode_var.set(False)
 			self._recode_chk.configure(state="disabled")
-			self._recode_hint.configure(text="")
+			self._recode_hint.configure(text="", cursor="")
 			self._set_content_text("")
 			return
 		first = str(files[0])
@@ -1675,7 +1689,7 @@ class ReviewEditorApp:
 			self._content_raw = ""
 			self._content_repaired = None
 			self._recode_chk.configure(state="disabled")
-			self._recode_hint.configure(text="")
+			self._recode_hint.configure(text="", cursor="")
 			self._set_content_text("")
 			return
 		view = self._view_var.get()
@@ -1695,6 +1709,19 @@ class ReviewEditorApp:
 			self._recode_to.set("utf-8")
 			self._recode_var.set(True)  # default to the readable, repaired text
 		self._recompute_recode()
+		# Two-layer mojibake (wild sample: cp1250 CZ text mis-read as cp1251,
+		# re-saved utf-8, mis-read as cp1250, re-saved utf-8): a single z/do
+		# pair only reaches the Cyrillic middle layer. repair_chain searches
+		# the second layer; its result REPLACES the pair preview until the
+		# user touches the codecs (the var traces re-take over manually).
+		chain = repair_chain(raw)
+		if chain is not None:
+			repaired, desc = chain
+			if repaired != (self._content_repaired or ""):
+				self._content_repaired = repaired
+				self._recode_chk.configure(state="normal")
+				self._recode_var.set(True)
+				self._recode_hint.configure(text=f"⚠ vícenásobné překódování ({desc})")
 		self._apply_content_text()
 
 	def _recompute_recode(self) -> None:
@@ -1702,20 +1729,44 @@ class ReviewEditorApp:
 
 		The toggle is enabled only when the pair yields an actual change; a
 		failing pair is reported in the hint — the user is experimenting, so
-		telling them a combination cannot run is the point.
+		telling them a combination cannot run is the point. A failure usually
+		means the direction is INVERTED (utf-8 → cp1250 instead of cp1250 →
+		utf-8): cp1250 has 5 undefined byte positions, and common Czech chars
+		hit them when wrongly encoded to UTF-8 first (Á → C3 81, ‘ → E2 80 98).
+		So when the swapped pair converts, the hint offers it as a click.
 		"""
 		frm, to = self._recode_from.get(), self._recode_to.get()
 		self._content_repaired = recode(self._content_raw, frm, to)
+		self._recode_hint.configure(cursor="")
 		if self._content_repaired is None:
 			self._recode_chk.configure(state="disabled")
 			self._recode_var.set(False)
 			if self._content_raw:
-				self._recode_hint.configure(text=f"⚠ z {frm} do {to}: převod selhal")
+				reason = recode_failure_reason(self._content_raw, frm, to) or "neznámý důvod"
+				msg = f"⚠ {frm} → {to} selhal: {reason}"
+				if frm != to:
+					swapped = recode(self._content_raw, to, frm)
+					if swapped is not None and swapped != self._content_raw:
+						msg += f" — obráceně ({to} → {frm}) funguje, klikni sem"
+						self._recode_hint.configure(cursor="hand2")
+				self._recode_hint.configure(text=msg)
 		elif self._content_repaired == self._content_raw:
 			self._recode_chk.configure(state="disabled")
 			self._recode_var.set(False)
 		else:
 			self._recode_chk.configure(state="normal")
+
+	def _swap_recode_codecs(self) -> None:
+		"""Swap the z/do pair; the StringVar traces re-preview live."""
+		frm, to = self._recode_from.get(), self._recode_to.get()
+		self._recode_from.set(to)
+		self._recode_to.set(frm)
+
+	def _on_recode_hint_click(self, _event=None) -> None:
+		# Active only when the hint offers the swapped direction (cursor=hand2).
+		if str(self._recode_hint.cget("cursor")) != "hand2":
+			return
+		self._swap_recode_codecs()
 
 	def _recode_changed(self, *_args) -> None:
 		"""A codec was picked (z/do) — live-preview the result from page one."""
@@ -1821,10 +1872,22 @@ class ReviewEditorApp:
 		self._set_status()
 
 	def _set_status(self, extra: str = "") -> None:
-		if not (0 <= self._cur < len(self.entries)):
-			base = f"{len(self.entries)} záznamů"
+		"""Position/counters follow the FILTERED list, not all entries.
+
+		PgUp/PgDn already walk the filtered set (``_step`` uses
+		``_filtered_indices``), so the position and the denominator must both
+		come from the filter too — otherwise "3/120" while the user looks at a
+		17-book category is a lie. When a filter/search narrows the view, the
+		unfiltered total is appended in parentheses so it stays visible.
+		"""
+		idxs = self._filtered_indices()
+		total = len(self.entries)
+		if 0 <= self._cur < total and self._cur in idxs:
+			base = f"{idxs.index(self._cur) + 1}/{len(idxs)}"
 		else:
-			base = f"{self._cur + 1}/{len(self.entries)}"
+			base = f"{len(idxs)} záznamů"
+		if len(idxs) != total:
+			base += f" (z {total})"
 		dirty = " *" if self._dirty else ""
 		base += dirty
 		if extra:
@@ -1857,7 +1920,7 @@ class ReviewEditorApp:
 			("Ctrl+P", "obálka: ponechat"),
 			("Ctrl+M", "obálka: smazat označené cover/.bak, odstranit vložené obálky"),
 			("Ctrl+T", "obsah: první strana / širší text"),
-			("Ctrl+G", "obsah: překódovat (z/do kodeky volí komboboxy; výsledek vždy UTF-8)"),
+			("Ctrl+G", "obsah: překódovat („přečteno jako“ = špatné čtení, „skutečně je“ = reál. kódování; výsledek vždy UTF-8)"),
 			("", "(klik na obálku = ☑; klik na path / dvojklik v seznamu = otevřít složku)"),
 			("", "(kolečko: prvek pod myší, na jeho hraně formulář; obálka v seznamu → hover popup)"),
 		]

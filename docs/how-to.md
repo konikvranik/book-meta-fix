@@ -77,8 +77,13 @@ link (double-clicking a list row does the same), cover previews (current /
 cover embedded in each format file — `Ctrl+M` removes the checked embedded
 covers out of the e-book files, which stay put; EPUB only), and a
 per-format content view with
-double-encoding repair (`Ctrl+G`; the `z`/`do` codec boxes let you experiment
-manually with a live first-page preview, always rendered as UTF-8). The
+double-encoding repair (`Ctrl+G`; the codec boxes let you experiment
+manually — "přečteno jako" is the wrong codec the text was once read
+through, "skutečně je" the real one, and `⇄` swaps them; a failing pair is
+explained in the hint, which offers the reversed direction as a click;
+bytes lost to an earlier replace-decode (`�`) don't block the repair and
+stay marked; two-layer chains are repaired automatically and named in the
+hint; always rendered as UTF-8). The
 detail column scrolls; every action has a `Ctrl+letter` shortcut (`F1` lists
 them); `PgUp`/`PgDn` move between books and `Tab` cycles only the editable
 fields (`Ctrl+A` selects all in a field). Requires the Tk bindings

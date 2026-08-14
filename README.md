@@ -146,9 +146,17 @@ cover itself ticks it (`Ctrl+M` then removes
 the checked embedded covers from the e-book files, which themselves stay
 put — useful for cleaning out invalid calibre placeholders; EPUB only),
 and a per-format content view with double-encoding repair (`Ctrl+G`, for
-texts broken by a redundant cp1250→utf8 recode — or pick the `z`/`do` codecs
-manually and watch the live first-page preview; the result is always rendered
-as UTF-8). The whole detail column scrolls; hovering a thumbnail in the list
+texts broken by a redundant cp1250→utf8 recode — or pick the codec pair
+manually: "přečteno jako" = the wrong codec the text was once read through,
+"skutečně je" = the real encoding of the bytes, nearly always utf-8; a
+`⇄` swaps them). A pair that cannot run (e.g. utf-8→cp1250, whose undefined
+bytes choke on common Czech chars) is explained in the hint, which offers
+the reversed direction as a click; bytes already lost to an earlier
+replace-decode (shown as `�`) don't block the repair — they stay marked at
+their position. Two-layer chains (a wild sample: cp1250 text mis-read as
+cp1251, re-saved utf-8, mis-read as cp1250 again) are repaired
+automatically and named in the hint. The result is always rendered as
+UTF-8. The whole detail column scrolls; hovering a thumbnail in the list
 pops up a larger cover.
 
 **Everything is bound to `Ctrl+letter`** (bare letters keep typing into the

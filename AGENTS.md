@@ -199,11 +199,36 @@ src/book_meta_fix/
   itself goes to the checkbox, so the label binding never double-toggles).
   Cover detection is defined once in ``covers._opf_cover_parts``
   and shared by the strip and the probe. The content view's
-  ``Ctrl+G`` repair uses ``encoding.repair_double_decode`` — a DIFFERENT
+  ``Ctrl+G`` repair uses ``encoding.recode`` on the manually picked pair
+  ("přečteno jako" = the codec the text was wrongly read through,
+  "skutečně je" = the real encoding of the bytes) — a DIFFERENT
   corruption than the single mojibake ``readers`` repairs (utf-8 bytes
   mis-decoded twice through a single-byte codec; often only PART of the text,
   which is why the repair decodes byte-wise via ``_mixed_utf8_decode``
-  instead of a whole-string round-trip); keep the two paths separate.
+  instead of a whole-string round-trip); keep the two paths separate. A pair
+  that cannot run is diagnosed by ``encoding.recode_failure_reason`` and the
+  hint offers the reversed direction as a click (users pick the direction
+  backwards far more often than the codecs are wrong: utf-8→cp1250 chokes on
+  cp1250's five undefined byte positions, which common Czech chars hit —
+  Á = C3 81, ‘ = E2 80 98). U+FFFD (a byte lost to an earlier
+  ``errors="replace"`` decode) is tolerated everywhere via
+  ``_for_lost_bytes`` (FFFD→SUB, mapped back in the result so lost
+  positions stay visible) — one destroyed byte must not grey out the
+  repair. TWO-layer chains exist in the wild (real sample: cp1250 CZ text
+  mis-read as cp1251 → Cyrillic look-alikes → saved utf-8 → mis-read as
+  cp1250 → saved utf-8; one recode layer only reaches the Cyrillic middle):
+  ``encoding.repair_chain`` searches the second layer (encode → utf-8 →
+  ``_encode_dropping`` → decode, budgeted orphan-drop) and the GUI applies
+  it automatically, naming the chain in the hint; it never fires when the
+  plain single-layer repair already succeeds.
+- **GUI smoke harnesses under Xvfb must run their checks inside a real
+  ``mainloop()``** (``root.after(60, check); root.mainloop()``), never an
+  ``update()``-polling loop. This box has a threaded Tcl build: a worker
+  thread's ``root.after()`` raises ``RuntimeError: main thread is not in main
+  loop`` while no main loop is dispatching, and ``_after`` deliberately
+  swallows that — so with plain ``update()`` polling every async load
+  (content, thumbnails) silently never applies and the smoke fails in
+  confusing, load-dependent ways.
 - **Every command runs an internal scan** via the SQLite cache — `bmf scan` is
   only for summary stats, not a prerequisite.
 - **Every mutating command is dry-run by default** (`--apply` to write).
