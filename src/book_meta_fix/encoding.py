@@ -289,31 +289,103 @@ def detect_double_decode(s: str | None) -> bool:
 	return False
 
 
+def _utf8_seq_len(b: int) -> int:
+	"""Expected UTF-8 sequence length for lead byte *b* (0 = not a lead)."""
+	if b < 0x80:
+		return 1
+	if 0xC0 <= b <= 0xDF:
+		return 2
+	if 0xE0 <= b <= 0xEF:
+		return 3
+	if 0xF0 <= b <= 0xF7:
+		return 4
+	return 0
+
+
+def _mixed_utf8_decode(raw: bytes, fallback: str) -> str:
+	"""Decode *raw* as UTF-8 where valid, as *fallback* per byte where not.
+
+	Real-world corruption is often PARTIAL: a book repaired once and then
+	partly corrupted again has clean and mojibake segments side by side. A
+	whole-string ``encode(src).decode("utf-8")`` fails on the clean segments
+	(their single-byte fallback encodings are not valid UTF-8 — e.g. a clean
+	``á`` becomes a lone 0xE1), so the repair would refuse exactly the texts
+	that need it most. Greedy sequence validation at the byte level handles
+	both: valid UTF-8 runs (the mojibake) decode as UTF-8, and every byte that
+	cannot start/extend a valid sequence falls back to the single-byte codec
+	(the clean text, decoded back to itself).
+	"""
+	out = []
+	i, n = 0, len(raw)
+	while i < n:
+		b = raw[i]
+		length = _utf8_seq_len(b)
+		if length > 1:
+			chunk = raw[i : i + length]
+			if len(chunk) == length and all(0x80 <= c <= 0xBF for c in chunk[1:]):
+				try:
+					out.append(chunk.decode("utf-8"))
+					i += length
+					continue
+				except UnicodeDecodeError:  # overlong/surrogate — fall through
+					pass
+		out.append(bytes((b,)).decode(fallback))
+		i += 1
+	return "".join(out)
+
+
 def repair_double_decode(s: str | None) -> str | None:
 	"""Reverse a double-decode of UTF-8 text through a single-byte codec.
 
 	The corruption chain is:  ``proper text --utf-8--> bytes --mis-decoded as
 	<codec>--> mojibake str --utf-8--> bytes on disk``. Reading the file as
 	UTF-8 yields the mojibake str. To reverse it we encode that str back
-	through <codec> (recovering the original UTF-8 bytes) and decode as UTF-8.
+	through <codec> (recovering the original UTF-8 bytes) and decode as UTF-8
+	— via :func:`_mixed_utf8_decode`, so PARTIALLY corrupted text (clean and
+	mojibake segments mixed) repairs too, not just uniformly broken strings.
 
 	The result is a plain ``str`` (valid UTF-8) — exactly the "mark the result
 	as UTF-8" semantics a caller wants for display. Returns ``None`` when the
-	string shows no double-decode signals or no candidate round-trips into a
-	clean, Czech-looking, *different* string (so a clean input is never
-	mangled). Only the correct <codec> round-trips without raising
-	``UnicodeEncodeError``/``UnicodeDecodeError``; the others are skipped.
+	string shows no double-decode signals or no candidate yields a clean,
+	Czech-looking, *different* string (so a clean input is never mangled: its
+	bytes all fall back to the single-byte codec and come out unchanged).
 	"""
 	if not s or not detect_double_decode(s):
 		return None
 	for src in _DOUBLE_DECODE_SRCS:
 		try:
-			fixed = s.encode(src).decode("utf-8")
-		except (UnicodeEncodeError, UnicodeDecodeError, LookupError):
+			raw = s.encode(src)
+		except (UnicodeEncodeError, LookupError):
 			continue
+		fixed = _mixed_utf8_decode(raw, src)
 		if fixed != s and _looks_clean(fixed) and _looks_czechish(fixed):
 			return fixed
 	return None
+
+
+def recode(s: str, src: str, dst: str) -> str | None:
+	"""Re-interpret *s*: encode through *src*, decode as *dst*.
+
+	The MANUAL counterpart of :func:`repair_double_decode` (which auto-detects
+	the pair): lets a human experiment with codec combinations in the GUI
+	until the preview reads right. When *dst* is utf-8 the decode falls back
+	to :func:`_mixed_utf8_decode`, so partially corrupted text (clean and
+	mojibake segments mixed) converts too, and a fully clean input returns
+	unchanged. Returns ``None`` when the combination cannot run (a char not
+	representable in *src*, or undecodable as *dst*).
+	"""
+	if not s:
+		return s
+	try:
+		raw = s.encode(src)
+	except (UnicodeEncodeError, LookupError):
+		return None
+	if dst.lower().replace("-", "").replace("_", "") == "utf8":
+		return _mixed_utf8_decode(raw, src)
+	try:
+		return raw.decode(dst)
+	except (UnicodeDecodeError, LookupError):
+		return None
 
 
 # ---------------------------------------------------------------------------
