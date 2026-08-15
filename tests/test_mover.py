@@ -214,6 +214,39 @@ class TestPruneEmptyParents:
 		assert (tmp_path / "Bad Author").is_dir()
 
 
+class TestSeriesPatternFields:
+	"""{series}/{series_index} pattern placeholders read through
+	BookMeta.series_pair, so every stored shape works — including the
+	"sequence" key newer Audiobookshelf writes."""
+
+	def _with_series(self, series) -> BookMeta:
+		meta = _book(1, path="/lib/A/Book (1)", title="Book")
+		meta.series = series
+		return meta
+
+	def test_dict_with_index(self, tmp_path: Path) -> None:
+		meta = self._with_series([{"name": "Nadace", "index": "3"}])
+		dest = compute_target_path(meta, "{author}/{series}/{series_index} - {title}", tmp_path)
+		assert dest == tmp_path / "Author" / "Nadace" / "3 - Book"
+
+	def test_sequence_key_also_resolved(self, tmp_path: Path) -> None:
+		meta = self._with_series([{"name": "Nadace", "sequence": "3"}])
+		dest = compute_target_path(meta, "{author}/{series}/{series_index} - {title}", tmp_path)
+		assert dest == tmp_path / "Author" / "Nadace" / "3 - Book"
+
+	def test_plain_string_series_empty_index(self, tmp_path: Path) -> None:
+		meta = self._with_series(["Zaklínač #8"])
+		dest = compute_target_path(meta, "{author}/{series}/{title}", tmp_path)
+		assert dest == tmp_path / "Author" / "Zaklínač #8" / "Book"
+
+	def test_no_series_segment_becomes_placeholder(self, tmp_path: Path) -> None:
+		"""Without a series, sanitize_segment's empty-string placeholder ("_")
+		fills the {series} segment — same as any other optional field."""
+		meta = _book(1, path=str(tmp_path / "Author" / "Book (1)"), title="Book")
+		dest = compute_target_path(meta, "{author}/{series}/{title}", tmp_path)
+		assert dest == tmp_path / "Author" / "_" / "Book"
+
+
 class TestAnonymCanonicalFolder:
 	"""All anonym spellings ('Neznamy', 'neznámý - neuveden', 'Unknown',
 	'Anonymous', 'autor neuveden') must collapse into a single canonical

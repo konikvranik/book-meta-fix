@@ -26,7 +26,7 @@ test:  ## Run tests
 	$(BIN)/pytest
 
 # BMF defaults; override via env: make scan LIBRARY=/other/path
-LIBRARY ?= /mnt/share_nfs/Shared eBooks
+LIBRARY ?= $(HOME)/Books
 
 scan:  ## Scan library and print stats
 	$(BIN)/bmf scan --library "$(LIBRARY)"

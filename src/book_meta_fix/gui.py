@@ -30,6 +30,7 @@ require ``python3-tk``. Only :func:`run_gui` needs a working Tk.
 """
 from __future__ import annotations
 
+import bisect
 import io
 import logging
 import os
@@ -71,7 +72,8 @@ except ImportError:  # pragma: no cover
 
 
 # Editable target fields, in Tab-traversal order. ``authors`` / ``genres`` are
-# list-valued (stored comma-separated in the Entry, split on save).
+# list-valued (stored comma-separated in the Entry, split on save). ``series`` /
+# ``series_index`` are written into meta.series as {"name", "index"} at apply.
 FIELD_SPECS: list[tuple[str, str]] = [
 	("author", "Autor"),
 	("title", "Titul"),
@@ -79,6 +81,8 @@ FIELD_SPECS: list[tuple[str, str]] = [
 	("year", "Rok"),
 	("publisher", "Vydavatel"),
 	("language", "Jazyk"),
+	("series", "Série"),
+	("series_index", "Pořadí v sérii"),
 	("authors", "Autoři (odděleni čárkou)"),
 	("genres", "Žánry (odděleny čárkou)"),
 ]
@@ -356,6 +360,288 @@ class _Tooltip:
 			self._tip = None
 
 
+class _BookList:
+	"""Virtualized canvas book list with a Treeview-like API.
+
+	Ttk's Treeview can only render per-row images in the #0 tree column,
+	which Tk pins to the LEFT edge — the wanted layout (label always on the
+	left, cover thumbnail flush against the right edge) is impossible there.
+	Verified empirically on Tk 8.6: a PhotoImage put into a data column's
+	``values`` renders as its Tcl name (``pyimage1``), i.e. as text.
+
+	Exposes just the surface the editor uses (insert/delete/get_children/
+	selection_set/focus/see/exists/identify_row/bind/yview/configure), so
+	the rest of the GUI keeps talking to ``self.tree`` unchanged. Only the
+	VISIBLE rows are drawn — the library holds ~5000 entries and thousands
+	of canvas items would make both rebuilds and scrolling crawl; the
+	scrollregion is virtual, derived from the row count.
+	"""
+
+	ROW_H = 54
+	THUMB_W = 32
+	THUMB_H = 48
+	ACTION_W = 64
+	PAD = 6
+	HEADER_H = 24
+
+	def __init__(self, parent, style) -> None:
+		self._rows: list[dict] = []
+		self._by_iid: dict[str, dict] = {}
+		self._selected: str | None = None
+		self._select_cb = None
+		self._draw_pending = False
+		self._pending_top: float | None = None
+		self._font, self._bold = self._resolve_fonts(style)
+		self._bg, self._fg, self._sel_bg, self._sel_fg, self._border = self._resolve_colors(style)
+		self.canvas = tk.Canvas(
+			parent, highlightthickness=0, background=self._bg, yscrollincrement=1,
+		)
+		self.canvas.bind("<Configure>", lambda _e: self._schedule_draw())
+		self.canvas.bind("<Button-1>", self._on_click)
+		self.canvas.bind("<MouseWheel>", self._on_wheel, add="+")
+		self.canvas.bind("<Button-4>", self._on_wheel, add="+")
+		self.canvas.bind("<Button-5>", self._on_wheel, add="+")
+
+	@staticmethod
+	def _resolve_fonts(style):
+		import tkinter.font as tkfont
+		try:
+			name = style.lookup("Treeview", "font")
+			font = tkfont.nametofont(name) if name else tkfont.nametofont("TkDefaultFont")
+		except Exception:  # noqa: BLE001
+			font = tkfont.nametofont("TkDefaultFont")
+		try:
+			bold = font.copy()
+			bold.configure(weight="bold")
+		except Exception:  # noqa: BLE001
+			bold = font
+		return font, bold
+
+	@staticmethod
+	def _resolve_colors(style):
+		try:
+			bg = style.lookup("Treeview", "background") or "#ffffff"
+			fg = style.lookup("Treeview", "foreground") or "#000000"
+		except Exception:  # noqa: BLE001
+			bg, fg = "#ffffff", "#000000"
+		sel_bg, sel_fg = "#3465a4", "#ffffff"
+
+		def _map_val(option, default):
+			try:
+				for statespec, value in style.map("Treeview", option):
+					if "selected" in statespec and value:
+						return value
+			except Exception:  # noqa: BLE001
+				pass
+			return default
+
+		sel_bg = _map_val("background", sel_bg)
+		sel_fg = _map_val("foreground", sel_fg)
+		return bg, fg, sel_bg, sel_fg, "#999999"
+
+	# -- Treeview-like API --------------------------------------------------
+
+	def insert(self, _parent, _index, *, iid=None, text="", values=(), image=None):
+		row = {
+			"iid": str(iid), "text": text,
+			"action": values[0] if values else "", "image": image,
+		}
+		self._rows.append(row)
+		self._by_iid[row["iid"]] = row
+		self._update_scrollregion()
+		self._schedule_draw()
+
+	def delete(self, *iids):
+		if not iids:
+			iids = tuple(r["iid"] for r in self._rows)
+		# Bank the current view offset — the rows are about to be rebuilt
+		# (refresh_list pattern) and the interim empty list would otherwise
+		# clamp the canvas to the top. Closed by the batch's idle draw.
+		if self._pending_top is None:
+			self._pending_top = self.canvas.canvasy(0)
+		for iid in iids:
+			row = self._by_iid.pop(iid, None)
+			if row is not None and row in self._rows:
+				self._rows.remove(row)
+		if self._selected not in self._by_iid:
+			self._selected = None
+		self._update_scrollregion()
+		self._schedule_draw()
+
+	def get_children(self, *_parent) -> tuple:
+		return tuple(r["iid"] for r in self._rows)
+
+	def exists(self, iid) -> bool:
+		return iid in self._by_iid
+
+	def selection_set(self, iid, *, silent: bool = False) -> None:
+		if iid not in self._by_iid:
+			return
+		changed = iid != self._selected
+		self._selected = iid
+		if changed:
+			self._schedule_draw()
+			# Fire the select callback only on an actual CHANGE — like the
+			# Treeview's <<TreeviewSelect>>, which stays quiet when the same
+			# row is re-selected. ``silent`` skips the callback altogether:
+			# used by refresh_list (re-selecting the preserved row after a
+			# rebuild) and by _step (which loads the book explicitly) — a
+			# callback there would reload the detail pane and wipe the
+			# user's unsaved edits on every background thumbnail refresh.
+		if changed and not silent and self._select_cb is not None:
+			self._select_cb()
+
+	def focus(self, iid=None):
+		if iid is None:
+			return self._selected or ""
+		if iid in self._by_iid:
+			self._selected = iid
+			self._schedule_draw()
+
+	def see(self, iid) -> None:
+		row = self._by_iid.get(iid)
+		if row is None:
+			return
+		y = self.HEADER_H + self._rows.index(row) * self.ROW_H
+		total = self.HEADER_H + len(self._rows) * self.ROW_H
+		view_h = self.canvas.winfo_height()
+		top = self.canvas.canvasy(0)
+		if y < top:
+			self.canvas.yview_moveto(y / max(total, 1))
+		elif y + self.ROW_H > top + view_h and total > view_h:
+			self.canvas.yview_moveto((y + self.ROW_H - view_h) / max(total, 1))
+		self._draw()
+
+	def identify_row(self, y) -> str:
+		"""Widget-y → iid ("" when outside rows) — Treeview's signature."""
+		cy = self.canvas.canvasy(y) - self.HEADER_H
+		i = int(cy // self.ROW_H)
+		if cy >= 0 and 0 <= i < len(self._rows):
+			return self._rows[i]["iid"]
+		return ""
+
+	def bind(self, sequence, func=None, add=None):
+		if sequence == "<<TreeviewSelect>>":
+			self._select_cb = func
+			return
+		if func is None and add is None:
+			# Query mode — canvas.bind(seq, None, None) does NOT query (it
+			# returns None on this tkinter), delegate a bare query instead.
+			return self.canvas.bind(sequence)
+		self.canvas.bind(sequence, func, add)
+
+	def yview(self, *args):
+		out = self.canvas.yview(*args)
+		if args:
+			self._draw()
+		return out
+
+	def yview_moveto(self, fraction) -> None:
+		self.canvas.yview_moveto(fraction)
+		self._draw()
+
+	def configure(self, **kw):
+		self.canvas.configure(**kw)
+
+	# -- Internals ----------------------------------------------------------
+
+	def _update_scrollregion(self) -> None:
+		h = self.HEADER_H + len(self._rows) * self.ROW_H
+		# A rebuild (refresh_list: delete-all + re-inserts) shrinks the
+		# region to HEADER_H first, which makes Tk clamp the view to 0 —
+		# after that canvasy(0) is useless for restoring. The offset is
+		# therefore banked in _pending_top at delete() and re-applied after
+		# every region change until the batch's idle draw closes it.
+		top = self._pending_top if self._pending_top is not None else self.canvas.canvasy(0)
+		self.canvas.configure(scrollregion=(0, 0, 2500, h))
+		if top:
+			# NB: a CANVAS yview_moveto fraction is relative to the TOTAL
+			# content height (unlike a Text widget, where it is relative to
+			# the scrollable span) — divide by h, not by (h - view height).
+			self.canvas.yview_moveto(min(top / max(h, 1), 1.0))
+
+	def _schedule_draw(self) -> None:
+		# Coalesce: refresh_list re-inserts EVERY row; drawing per insert
+		# would render the whole list N times over. One idle callback after
+		# the burst = one repaint.
+		if self._draw_pending:
+			return
+		self._draw_pending = True
+		self.canvas.after_idle(self._draw_idle)
+
+	def _draw_idle(self) -> None:
+		self._draw_pending = False
+		self._pending_top = None  # rebuild batch finished
+		self._draw()
+
+	def _on_click(self, event):
+		iid = self.identify_row(event.y)
+		if iid:
+			self.selection_set(iid)
+		return "break"
+
+	def _on_wheel(self, event):
+		if event.num == 4 or (getattr(event, "delta", 0) or 0) > 0:
+			self.canvas.yview_scroll(-self.ROW_H, "units")
+		else:
+			self.canvas.yview_scroll(self.ROW_H, "units")
+		self._draw()
+		return "break"
+
+	def _elide(self, text: str, avail: int) -> str:
+		"""Trim *text* to *avail* px with an ellipsis (bisection)."""
+		if avail <= 4 or self._font.measure(text) <= avail:
+			return text
+		lo, hi = 0, len(text)
+		while lo < hi:
+			mid = (lo + hi) // 2
+			if self._font.measure(text[:mid] + "…") <= avail:
+				lo = mid + 1
+			else:
+				hi = mid
+		return text[: max(lo - 1, 0)] + "…"
+
+	def _draw(self) -> None:
+		c = self.canvas
+		c.delete("all")
+		w = c.winfo_width()
+		if w < 10:  # not laid out yet
+			return
+		ax = w - self.PAD - self.THUMB_W - 12 - self.ACTION_W  # action column x
+		thumb_x = w - self.PAD - self.THUMB_W
+		# Header (matches the old Treeview headings).
+		c.create_text(self.PAD, self.HEADER_H // 2, anchor="w",
+		              text="Autor – Titul", font=self._bold, fill=self._fg)
+		c.create_text(ax, self.HEADER_H // 2, anchor="w", text="Akce",
+		              font=self._bold, fill=self._fg)
+		c.create_line(0, self.HEADER_H, w, self.HEADER_H, fill=self._border)
+		# Visible slice only — the virtualized part.
+		first = max(0, int((c.canvasy(0) - self.HEADER_H) // self.ROW_H))
+		last = min(len(self._rows),
+		           int((c.canvasy(0) + c.winfo_height()) // self.ROW_H) + 2)
+		for i in range(first, last):
+			row = self._rows[i]
+			y = self.HEADER_H + i * self.ROW_H
+			cy = y + self.ROW_H // 2
+			sel = row["iid"] == self._selected
+			if sel:
+				c.create_rectangle(0, y, w, y + self.ROW_H,
+				                   fill=self._sel_bg, outline="")
+			c.create_text(self.PAD, cy, anchor="w",
+			              text=self._elide(row["text"], ax - 12 - self.PAD),
+			              font=self._font, fill=self._sel_fg if sel else self._fg)
+			if row["action"]:
+				c.create_text(ax, cy, anchor="w", text=row["action"],
+				              font=self._font,
+				              fill=self._sel_fg if sel else self._fg)
+			if row["image"] is not None:
+				c.create_image(thumb_x, y + (self.ROW_H - self.THUMB_H) // 2,
+				               anchor="nw", image=row["image"])
+			if i + 1 < len(self._rows):
+				c.create_line(0, y + self.ROW_H, w, y + self.ROW_H,
+				              fill=self._border if not sel else self._sel_bg)
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -478,6 +764,9 @@ class ReviewEditorApp:
 
 		# Load the first book and focus its first field (start focus rule).
 		if self.entries:
+			# Highlight row 0 silently — _select_index below loads it anyway;
+			# without this the list starts with NO visible indicator.
+			self.tree.selection_set("0", silent=True)
 			self._select_index(0, keep_focus=False)
 			self.root.after(50, self._focus_first_field)
 
@@ -497,12 +786,6 @@ class ReviewEditorApp:
 		# master=self.root — a bare ttk.Style() would bind to the interpreter's
 		# DEFAULT root (the first Tk created), styling the wrong window.
 		self._style = ttk.Style(self.root)
-		try:
-			# Uniform row height so list rows align with or without a cover
-			# thumbnail (the user's "texty zarovnány pod sebou" request).
-			self._style.configure("Treeview", rowheight=54)
-		except Exception:  # noqa: BLE001
-			pass
 		self._field_bg = self._style.lookup("TEntry", "fieldbackground") or "#ffffff"
 		self._field_fg = self._style.lookup("TEntry", "foreground") or "#000000"
 		try:
@@ -551,17 +834,14 @@ class ReviewEditorApp:
 		self._search_entry.pack(side="left", fill="x", expand=True)
 		self._bind_select_all(self._search_entry)
 
-		# Tree with per-row cover thumbnail + author/title + action.
+		# Book list — canvas-rendered (_BookList), NOT ttk.Treeview: the
+		# wanted row layout is label left + cover flush right, and Treeview
+		# can only show per-row images in its leftmost #0 column (verified
+		# empirically — see the _BookList docstring).
 		tree_frame = ttk.Frame(frame)
 		tree_frame.pack(fill="both", expand=True, padx=6, pady=(0, 4))
-		self.tree = ttk.Treeview(
-			tree_frame, columns=("action",), show="tree", selectmode="browse",
-		)
-		self.tree.heading("#0", text="Autor – Titul")
-		self.tree.heading("action", text="Akce")
-		self.tree.column("#0", width=300)
-		self.tree.column("action", width=70, anchor="w")
-		self.tree.pack(side="left", fill="both", expand=True)
+		self.tree = _BookList(tree_frame, self._style)
+		self.tree.canvas.pack(side="left", fill="both", expand=True)
 		vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
 		self.tree.configure(yscrollcommand=vsb.set)
 		vsb.pack(side="right", fill="y")
@@ -1038,8 +1318,11 @@ class ReviewEditorApp:
 			if node is self.canvas:
 				self._scroll_canvas(up)
 				return "break"
-			if node is self.tree:
-				return "break"  # the list scrolled itself; the form stays put
+			# The book list scrolls itself (its own wheel binding) — the
+			# form stays put. NB: _BookList is a COMPOSITION, the actual
+			# event widget is its .canvas.
+			if node is self.tree or node is self.tree.canvas:
+				return "break"
 			if node.winfo_class() == "Text":
 				if self._can_y_scroll(node, up):
 					return "break"  # the Text class binding already scrolled it
@@ -1147,11 +1430,15 @@ class ReviewEditorApp:
 			if img is not None:
 				kw["image"] = img
 			self.tree.insert("", "end", **kw)
-		# Preserve selection.
+		# Preserve selection (no `see` here: a periodic refresh — e.g. the
+		# thumbnail loader re-inserting rows — must keep the SCROLL position,
+		# not yank the view to the selected row; navigation scrolls via
+		# _step's explicit see()). SILENT re-select: firing <<TreeviewSelect>>
+		# here would reload the detail pane of the book the user may be
+		# editing — wiping unsaved field edits and re-running the cover /
+		# content loaders on every background refresh.
 		if sel_iid and self.tree.exists(sel_iid):
-			self.tree.selection_set(sel_iid)
-			self.tree.focus(sel_iid)
-			self.tree.see(sel_iid)
+			self.tree.selection_set(sel_iid, silent=True)
 		self._set_status()
 
 	def _filtered_indices(self) -> list[int]:
@@ -1307,6 +1594,11 @@ class ReviewEditorApp:
 
 	def _select_index(self, idx: int, *, keep_focus: bool) -> None:
 		if not (0 <= idx < len(self.entries)):
+			return
+		if self._cur == idx:
+			# Already showing this book. A reload would overwrite the target
+			# fields from the (stale) entry dict — silently discarding the
+			# user's unsaved edits; there is nothing new to load anyway.
 			return
 		# Persist the currently-shown entry's edits before switching.
 		if 0 <= self._cur < len(self.entries) and self._cur != idx:
@@ -1500,11 +1792,19 @@ class ReviewEditorApp:
 			return
 		try:
 			pos = idxs.index(self._cur)
+			nxt = idxs[(pos + delta) % len(idxs)]
 		except ValueError:
-			pos = -1 if delta < 0 else 0
-		nxt = idxs[(pos + delta) % len(idxs)]
-		self.tree.selection_set(str(nxt))
-		self.tree.focus(str(nxt))
+			# The current book is not in the filtered view (typically its
+			# action just changed under an active "Akce:" filter and a
+			# refresh dropped the row). Continue from where it WOULD sit —
+			# the old fallback (start of list for PgDn / end for PgUp) is
+			# the "indicator jumped back to the first book" jump.
+			pos = bisect.bisect_left(idxs, self._cur) - (1 if delta < 0 else 0)
+			nxt = idxs[pos % len(idxs)]
+		# Silent selection + the one explicit load below: going through the
+		# select callback here as well would load the book twice (callback
+		# runs _select_index, then _step's own call reloads).
+		self.tree.selection_set(str(nxt), silent=True)
 		self.tree.see(str(nxt))
 		self._select_index(nxt, keep_focus=True)
 
@@ -1784,27 +2084,30 @@ class ReviewEditorApp:
 			raw = "(žádný text)"
 		self._content_raw = raw
 		# Detect double-encoding (utf-8 mis-decoded twice): default the z/do
-		# selectors to the usual CZ suspect and show the repaired text. A
-		# clean book keeps the user's last pair, so manual experimenting
-		# works even when the detector saw nothing.
+		# selectors to the usual CZ suspect. A clean book keeps the user's
+		# last pair, so manual experimenting works even when the detector
+		# saw nothing. The TOGGLE itself is never auto-checked — showing the
+		# repaired text is the user's decision (they tick / press Ctrl+G);
+		# auto-ticking it kept flipping the preview as books were paged
+		# through, which read as the preview "looping" on its own.
 		if detect_double_decode(raw):
 			self._recode_hint.configure(text="⚠ detekováno dvojí kódování")
 			self._recode_from.set("cp1250")
 			self._recode_to.set("utf-8")
-			self._recode_var.set(True)  # default to the readable, repaired text
 		self._recompute_recode()
 		# Two-layer mojibake (wild sample: cp1250 CZ text mis-read as cp1251,
 		# re-saved utf-8, mis-read as cp1250, re-saved utf-8): a single z/do
 		# pair only reaches the Cyrillic middle layer. repair_chain searches
-		# the second layer; its result REPLACES the pair preview until the
-		# user touches the codecs (the var traces re-take over manually).
+		# the second layer; its result REPLACES the pair preview (available
+		# for when the user ticks the toggle) until the user touches the
+		# codecs (the var traces re-take over manually). Again: no
+		# auto-ticking — the user opts in to seeing the repaired text.
 		chain = repair_chain(raw)
 		if chain is not None:
 			repaired, desc = chain
 			if repaired != (self._content_repaired or ""):
 				self._content_repaired = repaired
 				self._recode_chk.configure(state="normal")
-				self._recode_var.set(True)
 				self._recode_hint.configure(text=f"⚠ vícenásobné překódování ({desc})")
 		self._apply_content_text()
 
@@ -1853,12 +2156,17 @@ class ReviewEditorApp:
 		self._swap_recode_codecs()
 
 	def _recode_changed(self, *_args) -> None:
-		"""A codec was picked (z/do) — live-preview the result from page one."""
+		"""A codec was picked (z/do) — live-preview the result from page one.
+
+		NB: no auto-checking here either. This trace fires for PROGRAMMATIC
+		pair defaults too (the detector in _apply_content sets cp1250/utf-8),
+		so an auto-check in this path is exactly the "toggle keeps turning
+		itself on while paging books" loop — the checkbox is the user's.
+		"""
 		if not self._content_raw:
 			return
 		self._recompute_recode()
 		if self._content_repaired is not None and self._content_repaired != self._content_raw:
-			self._recode_var.set(True)
 			self._recode_hint.configure(
 				text=f"z {self._recode_from.get()} → {self._recode_to.get()} ✓")
 		self._apply_content_text()

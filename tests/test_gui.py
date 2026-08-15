@@ -77,6 +77,19 @@ class TestComposeEdited:
 		assert compose_edited({"author": (False, "X")}) is None
 		assert compose_edited({}) is None
 
+	def test_series_fields_pass_through_as_strings(self):
+		"""Série / Pořadí are plain string fields (no comma split, no int
+		coercion) — apply packs them into meta.series as {"name","index"}."""
+		sel = {"series": (True, "Nadace"), "series_index": (True, "3"), "title": (False, "X")}
+		assert compose_edited(sel) == {"series": "Nadace", "series_index": "3"}
+
+	def test_field_specs_cover_all_apply_fields(self):
+		"""Every field _apply_action understands from ``edited`` must be
+		editable in the GUI, otherwise the user cannot reach it by hand."""
+		editable = {role for role, _label in gui.FIELD_SPECS}
+		assert {"author", "title", "isbn", "year", "publisher", "language",
+				"series", "series_index", "authors", "genres"} <= editable
+
 
 class TestCoverPaths:
 	def test_paths_beside_book_folder(self):

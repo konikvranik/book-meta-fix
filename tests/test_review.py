@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from book_meta_fix.enrichers import EnrichedMeta
 from book_meta_fix.models import BookMeta, Confidence, Diagnosis, Verdict
-from book_meta_fix.review import _build_proposed, _header, build_review, parse_review
+from book_meta_fix.review import _build_current, _build_proposed, _header, build_review, parse_review
 
 
 def _meta(calibre_id: int, title: str = "T", author: str = "A") -> BookMeta:
@@ -205,6 +205,68 @@ class TestCoverUrlProposalGate:
 		meta = _meta(1)
 		entry = _entry_dict(meta, _diag(), None, None, None, library_root=None)
 		assert "diagnoses" not in entry
+
+
+class TestLanguageAndDescriptionProposal:
+	"""language was fetched by every enricher but historically never proposed
+	(the apply branch existed with nothing feeding it); description was dropped
+	for every source that returns a real annotation. Both must now flow."""
+
+	def test_language_proposed_when_differing(self):
+		meta = _meta(1)
+		meta.language = "cs"
+		enr = EnrichedMeta(language="sk", source="google_books")
+		proposed = _build_proposed(meta, None, enr, _diag())
+		assert proposed is not None
+		assert proposed["language"] == "sk"
+
+	def test_language_proposed_when_missing(self):
+		enr = EnrichedMeta(language="cs", source="llm:high")
+		proposed = _build_proposed(_meta(1), None, enr, _diag())
+		assert proposed["language"] == "cs"
+
+	def test_language_not_proposed_when_equal(self):
+		meta = _meta(1)
+		meta.language = "cs"
+		enr = EnrichedMeta(language="cs", year=2001, source="databazeknih")
+		proposed = _build_proposed(meta, None, enr, _diag())
+		assert "language" not in proposed
+		# The year still is (guards against an empty-proposed shortcut).
+		assert proposed["year"] == 2001
+
+	def test_description_from_real_source(self):
+		enr = EnrichedMeta(description="Anotace knihy.", source="databazeknih")
+		proposed = _build_proposed(_meta(1), None, enr, _diag())
+		assert proposed["description"] == "Anotace knihy."
+
+	def test_legie_description_not_proposed(self):
+		"""legie.info stashes the original title in the description field — a
+		cross-check aid, not an annotation; it must not reach the book."""
+		enr = EnrichedMeta(description="originál: Foundation", source="legie")
+		proposed = _build_proposed(_meta(1), None, enr, _diag())
+		assert proposed is None or "description" not in proposed
+
+	def test_llm_description_stays_reasoning(self):
+		"""The LLM's description field carries reasoning — shown as
+		``reasoning``, never written as the book's annotation."""
+		enr = EnrichedMeta(description="the model's reasoning", series="Nadace", source="llm:high")
+		proposed = _build_proposed(_meta(1), None, enr, _diag())
+		assert proposed["reasoning"] == "the model's reasoning"
+		assert "description" not in proposed
+
+
+class TestBuildCurrentSeries:
+	def test_includes_series_fields(self):
+		meta = _meta(1)
+		meta.series = [{"name": "Zaklínač", "index": "8"}]
+		cur = _build_current(meta)
+		assert cur["series"] == "Zaklínač"
+		assert cur["series_index"] == "8"
+
+	def test_omits_series_when_absent(self):
+		cur = _build_current(_meta(1))
+		assert "series" not in cur
+		assert "series_index" not in cur
 
 
 class TestHeaderDocumentsActions:

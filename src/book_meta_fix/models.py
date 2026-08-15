@@ -70,6 +70,25 @@ class BookMeta:
 	# Fields where mojibake was detected but could NOT be repaired (need LLM/content lookup).
 	encoding_unrepairable: list[str] = field(default_factory=list)
 
+	def series_pair(self) -> tuple[str, str]:
+		"""First series as ``(name, index)``, normalising the wild shapes.
+
+		metadata.json in this library carries series either as plain strings
+		(``"Zaklínač #8"``) or as ``{"name", "index"}`` dicts; newer
+		Audiobookshelf builds write ``sequence`` for the index key. This is the
+		ONE accessor for display / organize / OPF, so every consumer sees the
+		same (name, index) regardless of the stored shape.
+		"""
+		if not self.series:
+			return "", ""
+		s0 = self.series[0]
+		if not isinstance(s0, dict):
+			return str(s0), ""
+		idx = s0.get("index")
+		if idx is None:
+			idx = s0.get("sequence")
+		return str(s0.get("name") or ""), str(idx) if idx is not None else ""
+
 	def to_dict(self) -> dict[str, Any]:
 		d = asdict(self)
 		# Normalize for YAML/report readability

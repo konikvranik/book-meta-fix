@@ -286,6 +286,25 @@ def _render_opf(meta: BookMeta) -> str:
 	if meta.description:
 		etree.SubElement(md, f"{{{NS_DC}}}description").text = _sanitize_xml_text(meta.description)
 
+	# Series — calibre reads these exact meta names back (see readers.py's
+	# OPF fallback), so the mirror stays lossless for series data.
+	series_name, series_index = meta.series_pair()
+	if series_name:
+		etree.SubElement(
+			md, f"{{{NS_OPF}}}meta",
+			attrib={"name": "calibre:series", "content": _sanitize_xml_text(series_name)},
+		)
+		if series_index:
+			etree.SubElement(
+				md, f"{{{NS_OPF}}}meta",
+				attrib={"name": "calibre:series_index", "content": _sanitize_xml_text(series_index) or ""},
+			)
+
+	# Genres + tags as dc:subject (calibre's representation for both); de-dup
+	# while keeping order, genres first.
+	for subject in dict.fromkeys([*(meta.genres or []), *(meta.tags or [])]):
+		etree.SubElement(md, f"{{{NS_DC}}}subject").text = _sanitize_xml_text(str(subject))
+
 	# Contributor (us)
 	etree.SubElement(
 		md, f"{{{NS_DC}}}contributor",

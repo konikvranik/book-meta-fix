@@ -14,7 +14,9 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-DEFAULT_LIBRARY = Path("/mnt/share_nfs/Shared eBooks")
+# Neutral fallback — every real setup overrides this via $BMF_LIBRARY or
+# --library; the built-in default only needs to exist, not point anywhere real.
+DEFAULT_LIBRARY = Path("~/Books").expanduser()
 DEFAULT_CACHE = Path("bmf_cache.db")
 DEFAULT_REVIEW = Path("review.yaml")
 

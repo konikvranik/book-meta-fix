@@ -696,6 +696,7 @@ def _strip_diacritics(s: str) -> str:
 def _build_llm_evidence(meta: BookMeta, diag: Diagnosis, extracted: ExtractedMeta | None) -> dict:  # noqa: F821
 	"""Assemble the evidence dict passed to the LLM provider."""
 	first_page = extracted.first_page_text if extracted is not None else None
+	series_name, series_index = meta.series_pair()
 	return {
 		"category": diag.category,
 		"current": {
@@ -704,6 +705,10 @@ def _build_llm_evidence(meta: BookMeta, diag: Diagnosis, extracted: ExtractedMet
 			"isbn": meta.isbn,
 			"year": meta.year,
 			"publisher": meta.publisher,
+			"language": meta.language,
+			# Series as {name, index} mirrors the LLM's output schema, so it
+			# can correct a wrong name or fill in a missing index.
+			"series": {"name": series_name, "index": series_index} if series_name else None,
 		},
 		"first_page_text": first_page,
 		"file_name": meta.primary_file,
@@ -1091,6 +1096,17 @@ def _apply_action(meta: BookMeta, item) -> None:  # noqa: ANN001
 			if "genres" in item.proposed:
 				genres = item.proposed["genres"]
 				meta.genres = genres if isinstance(genres, list) else [genres]
+			if "description" in item.proposed:
+				meta.description = item.proposed["description"]
+			# Series arrives as flat strings; BookMeta stores the ABS shape
+			# [{"name", "index"}]. A proposal may carry either half — keep the
+			# current value for the missing one (an enricher that doesn't know
+			# the index must not wipe it).
+			if "series" in item.proposed or "series_index" in item.proposed:
+				cur_name, cur_idx = meta.series_pair()
+				name = item.proposed.get("series", cur_name)
+				idx = item.proposed.get("series_index", cur_idx)
+				meta.series = [{"name": name, "index": str(idx) if idx is not None else ""}]
 		# Cover recovery: runs whenever the book has a cover diagnosis (C11
 		# placeholder / MISSING_COVER) among ANY of its diagnoses — not just the
 		# primary — and regardless of whether *proposed* is empty. Try the
@@ -1145,3 +1161,13 @@ def _apply_action(meta: BookMeta, item) -> None:  # noqa: ANN001
 			meta.language = item.edited["language"]
 		if "genres" in item.edited:
 			meta.genres = item.edited["genres"] if isinstance(item.edited["genres"], list) else [item.edited["genres"]]
+		if "description" in item.edited:
+			# Empty string clears the description (the GUI sends "" when
+			# the user empties a ticked field).
+			meta.description = item.edited["description"] or None
+		if "series" in item.edited or "series_index" in item.edited:
+			cur_name, cur_idx = meta.series_pair()
+			name = str(item.edited.get("series", cur_name) or "")
+			idx = item.edited.get("series_index", cur_idx)
+			# An explicitly emptied name clears the series entirely.
+			meta.series = [{"name": name, "index": str(idx) if idx else ""}] if name else []

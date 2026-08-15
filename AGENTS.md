@@ -84,6 +84,18 @@ src/book_meta_fix/
   confirm a record. Don't "fix" the verifier to trust embedded OPF.
 - **Source of truth = `metadata.json`**, not `.opf`. Writers update *both*.
   Readers prefer `metadata.json`, fall back to `.opf`.
+- **Field coverage is end-to-end**: whatever the enrichers/LLM return must
+  reach disk. `_build_proposed` (`review.py`) proposes it, `_apply_action`
+  (`pipeline.py`) maps it onto `BookMeta`, writers emit it in BOTH
+  metadata.json and metadata.opf (series as `calibre:series` /
+  `calibre:series_index`, genres+tags as `dc:subject`). When adding a field,
+  wire all three links — historically series/language/description were
+  fetched but silently dropped at one of them. Series travels through
+  review.yaml as flat strings and is packed into the ABS
+  `[{"name", "index"}]` list at apply; the wild stored shapes (plain string
+  `"Name #N"`, `sequence` key) are normalised by `BookMeta.series_pair()` —
+  the single accessor for GUI display, `organize` patterns and the OPF
+  mirror. An edit with an emptied series name clears the series.
 - **Classification is unified in `classify.py`.** The rule "an identified
   MISSING_* book (author+title confirmed against the content, no co-occurring
   `NEEDS_REVIEW`) is acceptable, not broken" lives EXACTLY ONCE in

@@ -31,7 +31,7 @@ from .isbn import canonicalize
 
 log = logging.getLogger(__name__)
 
-USER_AGENT = "book-meta-fix/0.1 (https://github.com/pvranik/book-meta-fix)"
+USER_AGENT = "book-meta-fix/0.1 (https://github.com/konikvranik/book-meta-fix)"
 
 
 @dataclass
