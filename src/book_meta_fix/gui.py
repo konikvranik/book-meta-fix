@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import bisect
 import io
+import json
 import logging
 import os
 import shutil
@@ -50,6 +51,7 @@ from .covers import (
 from .encoding import detect_double_decode, recode, recode_failure_reason, repair_chain
 from .extractors import extract
 from .i18n import _
+from .library import iter_book_folders
 from .readers import EBOOK_EXTS
 from .review import _header, _load_raw_entries, _render_entry
 
@@ -140,6 +142,40 @@ def list_format_files(folder: Path | str) -> list[Path]:
 		return []
 	found.sort(key=lambda e: pref.get(e.suffix.lower(), 999))
 	return found
+
+
+def collect_vocab_values(library: Path | str) -> tuple[list[str], list[str]]:
+	"""Distinct ``(authors, series)`` names across the whole library.
+
+	Feeds the Entry autocomplete in the editor: the pools must contain not
+	just the review entries' own values but every author/series already in
+	use, so a repair can be typed consistently with the rest of the library.
+	Reads only ``metadata.json`` (the source of truth) — no OPF fallback, no
+	cover/content work; unreadable folders are skipped. Series names are
+	pulled from the ABS ``[{"name", ...}]`` shape (plain strings tolerated).
+	"""
+	authors: set[str] = set()
+	series: set[str] = set()
+	try:
+		folders = list(iter_book_folders(Path(library)))
+	except (OSError, ValueError):
+		return [], []
+	for folder in folders:
+		try:
+			data = json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
+		except (OSError, ValueError):
+			continue
+		for a in data.get("authors") or []:
+			if isinstance(a, str) and a.strip():
+				authors.add(a.strip())
+		s = data.get("series") or []
+		if isinstance(s, str):
+			s = [s]
+		for item in s:
+			name = item.get("name") if isinstance(item, dict) else item
+			if isinstance(name, str) and name.strip():
+				series.add(name.strip())
+	return sorted(authors), sorted(series)
 
 
 def compose_edited(values: dict[str, str]) -> dict | None:
@@ -362,6 +398,139 @@ class _Tooltip:
 			except Exception:  # noqa: BLE001
 				pass
 			self._tip = None
+
+
+class _Autocomplete:
+	"""Dropdown autocomplete attached to a plain ttk.Entry.
+
+	Keyboard-first, matching the editor's philosophy: the popup NEVER takes
+	focus (the Entry keeps it — that is also why a ttk.Combobox was not used;
+	swapping the widget class would disturb the Tab trap and the field
+	widget bookkeeping). Up/Down move the popup selection, Return/Tab accept,
+	Escape closes. The value pool is polled via ``values()`` on every
+	keystroke, so it can back onto a mutable app-level set that grows as the
+	user types in new names.
+	"""
+
+	MAX_SHOWN = 12
+	# Keys that must not (re)open the popup while editing.
+	_NAV_KEYS = {"Up", "Down", "Left", "Right", "Return", "Escape", "Tab",
+	             "Home", "End", "Prior", "Next", "Shift_L", "Shift_R",
+	             "Control_L", "Control_R", "Alt_L", "Alt_R"}
+
+	def __init__(self, entry, values) -> None:
+		# ``values`` is a zero-arg callable returning the current pool (list).
+		self.entry = entry
+		self.values = values
+		self.popup = None
+		self.listbox = None
+		self._matches: list[str] = []
+		entry.bind("<KeyRelease>", self._on_key, add="+")
+		entry.bind("<Down>", self._on_arrow, add="+")
+		entry.bind("<Up>", self._on_arrow, add="+")
+		entry.bind("<Return>", self._on_return, add="+")
+		entry.bind("<Escape>", lambda _e: self.hide() or "break", add="+")
+		entry.bind("<FocusOut>", self._on_focus_out, add="+")
+
+	def _on_focus_out(self, _event=None) -> None:
+		# Delayed teardown: clicking a suggestion first moves focus out of the
+		# Entry, and the popup must survive long enough for the click's
+		# ButtonRelease to accept the highlighted row.
+		if self.popup is not None:
+			try:
+				self.entry.after(150, self.hide)
+			except Exception:  # noqa: BLE001
+				self.hide()
+
+	@property
+	def is_open(self) -> bool:
+		return self.popup is not None
+
+	def _on_key(self, event) -> None:
+		if (event.keysym or "") in self._NAV_KEYS or event.state & 0x4:  # Ctrl held
+			return
+		self._refresh()
+
+	def _refresh(self) -> None:
+		text = self.entry.get().strip().lower()
+		if not text:
+			self.hide()
+			return
+		self._matches = [
+			v for v in self.values()
+			if v.lower().startswith(text) and v.lower() != text
+		][: self.MAX_SHOWN]
+		if not self._matches:
+			self.hide()
+			return
+		if self.popup is None:
+			self.popup = tk.Toplevel(self.entry)
+			self.popup.overrideredirect(True)
+			self.listbox = tk.Listbox(
+				self.popup, activestyle="dotbox",
+				height=min(len(self._matches), self.MAX_SHOWN))
+			self.listbox.pack(fill="both", expand=True)
+			self.listbox.bind("<ButtonRelease-1>", self._on_click)
+		else:
+			assert self.listbox is not None
+			self.listbox.delete(0, "end")
+			self.listbox.configure(height=min(len(self._matches), self.MAX_SHOWN))
+		for v in self._matches:
+			self.listbox.insert("end", v)
+		self.listbox.activate(0)
+		self.listbox.selection_clear(0, "end")
+		self.listbox.selection_set(0)
+		# Place the dropdown right under the Entry (best effort; clamp to screen).
+		x = self.entry.winfo_rootx()
+		y = self.entry.winfo_rooty() + self.entry.winfo_height() + 2
+		w = max(self.entry.winfo_width(), 180)
+		h = self.listbox.winfo_reqheight()
+		sw = self.entry.winfo_screenwidth()
+		sh = self.entry.winfo_screenheight()
+		self.popup.wm_geometry(f"{w}x{h}+{min(max(x, 0), sw - w)}+{min(y, sh - h)}")
+
+	def _on_arrow(self, event) -> str | None:
+		if self.popup is None or self.listbox is None or not self._matches:
+			return None
+		delta = 1 if event.keysym == "Down" else -1
+		n = len(self._matches)
+		i = self.listbox.index("active")
+		i = (i + delta) % n
+		self.listbox.activate(i)
+		self.listbox.selection_clear(0, "end")
+		self.listbox.selection_set(i)
+		self.listbox.see(i)
+		return "break"  # keep the Entry cursor put while browsing suggestions
+
+	def _on_return(self, _event) -> str | None:
+		if self.is_open:
+			self.accept()
+			return "break"
+		return None
+
+	def _on_click(self, _event) -> None:
+		self.accept()
+
+	def accept(self) -> None:
+		"""Write the highlighted suggestion into the Entry and close."""
+		if self.listbox is None:
+			return
+		i = self.listbox.index("active")
+		if 0 <= i < len(self._matches):
+			self.entry.delete(0, "end")
+			self.entry.insert(0, self._matches[i])
+			self.entry.icursor("end")
+		self.hide()
+
+	def hide(self) -> None:
+		if self.popup is not None:
+			try:
+				self.popup.destroy()
+			except Exception:  # noqa: BLE001
+				pass
+			self.popup = None
+			self.listbox = None
+			self._matches = []
 
 
 class _BookList:
@@ -751,6 +920,28 @@ class ReviewEditorApp:
 			self.root.destroy()
 			return
 
+		# Autocomplete pools for author/series: seeded synchronously from the
+		# review entries themselves (instant), then widened off-thread by a
+		# full-library scan (see _start_vocab_loader). New names the user
+		# types are learned back into the pools (see _vocab_learn).
+		self._vocab_authors: set[str] = set()
+		self._vocab_series: set[str] = set()
+		self._acs: dict = {}  # Entry widget -> its _Autocomplete
+		for e in self.entries:
+			for src in (e.get("current") or {}, e.get("proposed") or {}):
+				a = src.get("author")
+				if isinstance(a, str) and a.strip():
+					self._vocab_authors.add(a.strip())
+				for x in src.get("authors") or []:
+					if isinstance(x, str) and x.strip():
+						self._vocab_authors.add(x.strip())
+				s = src.get("series")
+				items = [s] if isinstance(s, str) else (s if isinstance(s, list) else [])
+				for item in items:
+					name = item.get("name") if isinstance(item, dict) else item
+					if isinstance(name, str) and name.strip():
+						self._vocab_series.add(name.strip())
+
 		# Filter / search state.
 		self._filter_action = tk.StringVar(value="all")
 		self._filter_category = tk.StringVar(value="all")
@@ -800,6 +991,7 @@ class ReviewEditorApp:
 		self._bind_shortcuts()
 		self.refresh_list()
 		self._start_thumb_loader()
+		self._start_vocab_loader()
 
 		# Load the first book and focus its first field (start focus rule).
 		if self.entries:
@@ -1008,6 +1200,14 @@ class ReviewEditorApp:
 				"current": current, "value": value, "entry": entry,
 				"cur_disp": "", "prop_disp": "",  # both RO sets, mode picks one
 			}
+			if role in ("author", "series"):
+				# Autocomplete against the library-wide pool; learn the typed
+				# value back when the user leaves the field (a brand-new name
+				# must immediately complete elsewhere).
+				pool = self._vocab_authors if role == "author" else self._vocab_series
+				ac = _Autocomplete(entry, lambda p=pool: sorted(p))
+				self._acs[entry] = ac
+				entry.bind("<FocusOut>", lambda _e, r=role: self._vocab_learn(r), add="+")
 			self._field_entries.append(entry)
 			# Trace value -> dirty (but not during programmatic load).
 			value.trace_add("write", lambda *_: self._mark_dirty())
@@ -1404,6 +1604,11 @@ class ReviewEditorApp:
 		w = self.focus_get_safe()
 		if w not in self._editable_widgets:
 			return None
+		# Tab with an autocomplete dropdown open first accepts the highlighted
+		# suggestion, THEN moves on — the usual "pick and continue" flow.
+		ac = self._acs.get(w)
+		if ac is not None and ac.is_open:
+			ac.accept()
 		shift = bool(event.state & 0x1)
 		self._cycle_editable(forward=not shift)
 		return "break"
@@ -1438,6 +1643,19 @@ class ReviewEditorApp:
 			step = 1 if forward else -1
 			target = ws[(i + step) % len(ws)]
 		target.focus_set()
+		# Tabbing into a field selects its whole content: the common case is
+		# overwriting the value, and X11 would otherwise leave the cursor at
+		# position 0 with nothing selected. Mouse clicks still place the
+		# cursor normally — this path only runs from Tab/Shift-Tab.
+		try:
+			cls = target.winfo_class()
+			if cls in ("Entry", "TEntry", "TCombobox"):
+				target.select_range(0, "end")
+				target.icursor("end")
+			else:  # Text (notes)
+				target.tag_add("sel", "1.0", "end")
+		except Exception:  # noqa: BLE001
+			pass
 		self._see_widget(target)
 
 	def focus_get_safe(self):
@@ -1674,11 +1892,26 @@ class ReviewEditorApp:
 		action = self._action_var.get()
 		e["action"] = action if action != "pending" else None
 		e["edited"] = compose_edited({r: f["value"].get() for r, f in self._fields.items()})
+		# A newly typed author/series becomes part of the vocabulary — the
+		# very next book the user edits must be able to complete against it.
+		for r in ("author", "series"):
+			self._vocab_learn(r)
 		notes = self._notes_var.get().strip()
 		e["notes"] = notes or None
 
+	def _vocab_learn(self, role: str) -> None:
+		"""Add the field's current value into its autocomplete pool (if any)."""
+		f = self._fields.get(role)
+		if not f:
+			return
+		v = f["value"].get().strip()
+		if v:
+			(self._vocab_authors if role == "author" else self._vocab_series).add(v)
+
 	def _load_book(self, idx: int) -> None:
 		e = self.entries[idx]
+		for ac in self._acs.values():
+			ac.hide()  # a dropdown must not survive into the next book
 		self._loading = True
 		try:
 			# Header. The path lives on its own clickable line (open folder).
@@ -2244,6 +2477,22 @@ class ReviewEditorApp:
 	# Thumbnail loader (left panel)
 	# ------------------------------------------------------------------
 
+	def _start_vocab_loader(self) -> None:
+		"""Widen the autocomplete pools with a full-library scan (off-thread).
+
+		~5k tiny metadata.json reads — a second or two on disk cache, but far
+		too slow to run on the Tk main loop before the window becomes usable.
+		"""
+		def work():
+			authors, series = collect_vocab_values(self.library)
+			if self._alive:
+				def apply():
+					self._vocab_authors.update(authors)
+					self._vocab_series.update(series)
+				self._after(apply)
+
+		threading.Thread(target=work, daemon=True).start()
+
 	def _start_thumb_loader(self) -> None:
 		def work():
 			for i, e in enumerate(self.entries):
@@ -2358,6 +2607,7 @@ class ReviewEditorApp:
 			("Ctrl+M", _("cover: delete checked cover/.bak, strip embedded covers")),
 			("Ctrl+T", _("content: first page / broader text")),
 			("Ctrl+G", _("content: recode (“read as” = the wrong read, “actually is” = the real encoding; result always UTF-8)")),
+			("↑ ↓ / Enter / Tab", _("author & series: autocomplete from the library (arrows pick, Enter/Tab insert)")),
 			("", _("(click on a cover = ☑; click on path / double-click in the list = open folder)")),
 			("", _("(wheel: widget under the mouse, at its edge the form; cover in the list → hover popup)")),
 		]

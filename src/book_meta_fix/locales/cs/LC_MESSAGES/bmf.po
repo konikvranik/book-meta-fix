@@ -1331,6 +1331,13 @@ msgstr ""
 "obsah: překódování („přečteno jako“ = chybné čtení, „skutečně je“ = "
 "reálné kódování; výsledek vždy UTF-8)"
 
+#: src/book_meta_fix/gui.py:2610
+msgid ""
+"author & series: autocomplete from the library (arrows pick, Enter/Tab "
+"insert)"
+msgstr ""
+"autor a série: našeptávač z knihovny (šipky vyberou, Enter/Tab vloží)"
+
 #: src/book_meta_fix/gui.py:2350
 msgid ""
 "(click on a cover = ☑; click on path / double-click in the list = open "

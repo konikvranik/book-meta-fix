@@ -12,6 +12,7 @@ from pathlib import Path
 
 import book_meta_fix.gui as gui
 from book_meta_fix.gui import (
+	collect_vocab_values,
 	compose_edited,
 	cover_paths,
 	delete_covers,
@@ -259,3 +260,28 @@ class TestOpenFolderInManager:
 		err = open_folder_in_manager(tmp_path)
 		assert err is not None
 		assert "failed" in err
+
+
+class TestCollectVocabValues:
+	def test_authors_and_series_from_library(self, tmp_path):
+		import json
+		for name, payload in {
+			"A B (1)": {"authors": ["Jan Amos Komen", ""], "series": [{"name": "Světová próza", "sequence": 3}]},
+			"C D (2)": {"authors": ["Karel Čapek"], "series": "Světová próza"},
+		}.items():
+			d = tmp_path / name
+			d.mkdir()
+			(d / "metadata.json").write_text(json.dumps(payload), encoding="utf-8")
+		authors, series = collect_vocab_values(tmp_path)
+		assert authors == ["Jan Amos Komen", "Karel Čapek"]
+		assert series == ["Světová próza"]  # dict + plain-string shapes collapse
+
+	def test_unreadable_folders_skipped(self, tmp_path):
+		for name, text in {"broken": "{not json", "empty": "{}"}.items():
+			d = tmp_path / name
+			d.mkdir()
+			(d / "metadata.json").write_text(text, encoding="utf-8")
+		assert collect_vocab_values(tmp_path) == ([], [])
+
+	def test_missing_library_returns_empty(self, tmp_path):
+		assert collect_vocab_values(tmp_path / "nope") == ([], [])
