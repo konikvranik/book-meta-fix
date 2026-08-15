@@ -14,7 +14,7 @@ Audiobookshelf and Kavita pick up the fixes on rescan.
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | Module map, data flow, concurrency model, caching, atomicity |
 | [docs/concepts.md](docs/concepts.md) | Verdict buckets, verification philosophy, fix cascade, LLM loop, review.yaml format |
-| [docs/how-to.md](docs/how-to.md) | Step-by-step recipes (run a batch, tune the rate limit, debug, …) |
+| [docs/how-to/](docs/how-to/index.md) | Step-by-step recipes (run a batch, tune the rate limit, debug, …) |
 | [docs/corruption-catalog.md](docs/corruption-catalog.md) | The C1–C10 categories with real examples |
 | [AGENTS.md](AGENTS.md) | Guide for AI agents editing this codebase (conventions, layout, gotchas) |
 
@@ -316,7 +316,7 @@ layers:
    final model immediately — but that final call now *waits* for the cooldown
    rather than instantly 429-ing too.
 
-See [how-to.md → Tuning the LLM rate limit](docs/how-to.md#tuning-the-llm-rate-limit)
+See [how-to/llm.md → Tuning the LLM rate limit](docs/how-to/llm.md#tuning-the-llm-rate-limit)
 for practical guidance.
 
 **Invalid-JSON salvage**: GLM models often emit slightly broken JSON

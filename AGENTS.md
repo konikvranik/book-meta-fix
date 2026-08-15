@@ -4,7 +4,7 @@ Read this before editing. It captures the conventions, layout, and
 non-obvious gotchas that matter when changing this code. Companion docs:
 [docs/architecture.md](docs/architecture.md),
 [docs/concepts.md](docs/concepts.md),
-[docs/how-to.md](docs/how-to.md),
+[docs/how-to/index.md](docs/how-to/index.md),
 [README.md](README.md).
 
 ## What this project is

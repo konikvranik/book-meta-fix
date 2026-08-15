@@ -2,7 +2,7 @@
 
 The mental model behind `book-meta-fix`. This complements
 [architecture.md](architecture.md) (how it's built) and
-[how-to.md](how-to.md) (how to run it). The per-category corruption reference
+[how-to/index.md](how-to/index.md) (how to run it). The per-category corruption reference
 with real examples lives in [corruption-catalog.md](corruption-catalog.md).
 
 ## The central bet: don't trust embedded metadata

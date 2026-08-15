@@ -4,7 +4,7 @@ This document describes how `book-meta-fix` (`bmf`) is structured internally:
 the module map, the data flow for a single book, the concurrency model, and
 the key design decisions. For *what* the corruption categories mean see
 [concepts.md](concepts.md); for *how to run things* see
-[how-to.md](how-to.md); for the command reference see the [README](../README.md).
+[how-to/index.md](how-to/index.md); for the command reference see the [README](../README.md).
 
 ## Goal
 
@@ -171,7 +171,7 @@ Two layers keep the LLM call rate under Z.AI's dynamic RPM limit:
    server's `Retry-After`, capped at `--llm-rate-limit-max` default 60 s). One
    429 parks the whole fleet instead of every worker hammering and 429-ing.
 
-See [how-to.md → Tuning the LLM rate limit](how-to.md#tuning-the-llm-rate-limit)
+See [how-to/llm.md → Tuning the LLM rate limit](how-to/llm.md#tuning-the-llm-rate-limit)
 for practical guidance.
 
 ## Caching

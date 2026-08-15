@@ -1,0 +1,18 @@
+.venv/
+.git/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+# Never bake local data/secrets into the image
+.env
+bmf_cache.db
+review.yaml
+review.yaml.bak
+*.bak
+docs/
+tests/
+scripts/

@@ -1,4 +1,4 @@
-.PHONY: help venv install dev-install clean lint test scan report verify apply i18n-extract i18n-compile
+.PHONY: help venv install dev-install clean lint test scan report verify apply i18n-extract i18n-compile docker-build docker-build-multi
 
 PY ?= python3
 VENV := .venv
@@ -53,6 +53,16 @@ verify:  ## Verify OK books against content
 
 apply:  ## Apply changes from review.yaml (dry-run by default)
 	$(BIN)/bmf apply review.yaml
+
+# --- docker ------------------------------------------------------------------
+# Local single-arch image
+docker-build:  ## Build the local docker image (native arch)
+	docker build -t bmf .
+
+# Multi-arch manifest (amd64 + arm64 + arm/v7); needs buildx + binfmt for
+# foreign architectures (docker run --privileged --rm tonistiigi/binfmt --install all)
+docker-build-multi:  ## Build multi-arch image (linux/amd64,linux/arm64,linux/arm/v7)
+	docker buildx build --platform linux/amd64,linux/arm64,linux/arm/v7 -t bmf:multi .
 
 clean:  ## Remove venv, caches, build artifacts
 	rm -rf $(VENV) .pytest_cache .ruff_cache build *.egg-info dist
