@@ -33,6 +33,20 @@ _TITLE_ID_RE = re.compile(r"^(?P<title>.*)\s+\((?P<id>\d+)\)\s*$")
 # Calibre NULL date marker
 _NULL_DATE = "0101-01-01"
 
+# Known ebook extensions, ordered by extraction preference (richest metadata
+# first). Hoisted to module level so other modules (e.g. mover.merge_folders)
+# can reuse the same set instead of re-hardcoding it.
+# .mbp (Mobipocket annotations sidecar) is deliberately LAST: it is not a
+# book, but in folders where the book file was lost it is the ONLY format
+# file left — and the only identity evidence (AUTH/TITL records, see
+# extractors.extract_mbp). Being last, it never becomes the primary format
+# when a real book exists.
+EBOOK_EXTS = (
+	".epub", ".pdf", ".mobi", ".azw", ".azw3", ".prc", ".pdb",
+	".doc", ".rtf", ".txt", ".lit", ".djvu", ".cbz", ".cbr", ".cb7",
+	".mbp",
+)
+
 
 def read_book_folder(folder: Path) -> BookMeta:
 	"""Read a single book folder, building a normalized BookMeta.
@@ -136,8 +150,7 @@ def _parse_path(folder: Path) -> BookMeta:
 
 def _collect_formats(folder: Path, meta: BookMeta) -> None:
 	"""List book file extensions present and pick a primary file for extraction."""
-	# Known ebook extensions, ordered by extraction preference (richest metadata first)
-	pref = [".epub", ".pdf", ".mobi", ".azw", ".pdb", ".doc", ".rtf", ".txt", ".lit", ".djvu"]
+	pref = list(EBOOK_EXTS)
 	seen: list[str] = []
 	for entry in folder.iterdir():
 		if not entry.is_file():
@@ -159,6 +172,11 @@ def _collect_formats(folder: Path, meta: BookMeta) -> None:
 def _fill_from_json(path: Path, meta: BookMeta) -> None:
 	"""Populate BookMeta from a metadata.json (Audiobookshelf manifest)."""
 	data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+
+	# bmf uuid: the stable per-book identity (source of truth lives in the
+	# manifest). Minted lazily by writers.ensure_uuid the first time a book is
+	# needed by the cache or apply; once present it round-trips forever.
+	meta.uuid = data.get("uuid")
 
 	authors = data.get("authors") or []
 	# ABS often stores translators alongside real authors; we keep them all here
@@ -253,6 +271,15 @@ def _fill_from_opf(path: Path, meta: BookMeta) -> None:
 					meta.calibre_id = int(ident.text)
 				except ValueError:
 					pass
+				break
+
+	# bmf uuid from <dc:identifier opf:scheme="uuid"> — fallback only, used
+	# when the manifest had none (e.g. a book never written by bmf). The json
+	# value above is authoritative; we never overwrite a populated meta.uuid.
+	if meta.uuid is None:
+		for ident in md.findall("dc:identifier", NS):
+			if ident.get(f"{{{NS['opf']}}}scheme") == "uuid" and ident.text:
+				meta.uuid = ident.text.strip()
 				break
 
 	# Series: <meta name="calibre:series" content="..."/> + calibre:series_index

@@ -19,6 +19,7 @@ The repair pipeline:
 """
 from __future__ import annotations
 
+import codecs
 import logging
 import re
 
@@ -241,6 +242,320 @@ def _looks_clean(s: str) -> bool:
 	has_cyr = any(ord(c) in _CYRILLIC_RANGE for c in s)
 	has_lat = any(c.isascii() and c.isalpha() for c in s)
 	return not (has_cyr and has_lat)
+
+
+# ---------------------------------------------------------------------------
+# Double-decode mojibake (utf-8 bytes read as cp1250/iso-8859-2, then re-saved
+# as utf-8). Distinct from MISDECODED above: there a cp1250 *byte stream* was
+# misread as latin-1; here the corruption happened to text already encoded as
+# UTF-8 (e.g. an EPUB HTML file whose bytes were decoded with the wrong codec
+# and written back). The book FILE on disk now holds the double-corrupted
+# bytes, so reading it as UTF-8 yields garbage like "VytvĂˇĹ™Ăme".
+# ---------------------------------------------------------------------------
+
+
+# Legit CZ/SK letters that live in Latin Extended-A (U+0100–U+017E). These are
+# NOT double-decode artefacts — exclude them from detection.
+_CZ_SK_LATIN_EXT = set("čďěľňŕřšťůžÇĎĚĽŇŔŘŠŤŮŽčďěľňŕřšťůž")
+# Standalone chars that almost never appear in clean CZ/SK prose but DO appear
+# when a UTF-8 byte pair is mis-decoded as a Central-European single-byte codec:
+#   ˇ (U+02C7 caron), ˝ (U+02DD double acute) — cp1250/iso-8859-2 trail bytes
+#   ™ (U+2122)        — cp1250 0x99 trail byte
+#   ­ (U+00AD shy)     — cp1250 0xAD trail byte
+#   Â Ã (U+00C2/C3)   — latin-1/cp1252 lead-byte artefacts
+_DOUBLE_DECODE_TELLS = {"\u02c7", "\u02dd", "\u2122", "\u00ad", "\u00c2", "\u00c3"}
+
+def _resolvable(names: tuple[str, ...]) -> tuple[str, ...]:
+	"""Drop codec names this Python build cannot look up.
+
+	Codec aliases are a minefield: e.g. the Mac Central-European codec
+	resolves as ``maccentraleurope``/``mac_latin2``, but the equally
+	plausible ``mac-centraleurope`` raises LookupError (there is an
+	``encodings/mac_cyrillic.py`` module, yet no ``mac_centraleurope``
+	one). An unresolvable candidate must merely be ABSENT from the search
+	(a lost repair opportunity, logged), never crash the repair loop —
+	until this guard, one bad alias escaped ``_encode_dropping`` (it only
+	caught UnicodeEncodeError), tore through the Tk callback and left the
+	GUI content preview wedged on "(načítám…)". Validating the tables once
+	at import makes every later encode/decode in the repairs total by
+	construction and costs nothing per call.
+	"""
+	resolved = []
+	for name in names:
+		try:
+			codecs.lookup(name)
+		except LookupError:
+			log.warning("kodek %r není na této platformě dostupný; vyřazen z kandidátů opravy", name)
+			continue
+		resolved.append(name)
+	return tuple(resolved)
+
+
+# Candidate single-byte codecs that the UTF-8 bytes may have been misread AS.
+# Order: Central-European first (the common CZ/SK case), then the western
+# fallbacks. The correct one is self-identifying — see repair_double_decode.
+_DOUBLE_DECODE_SRCS = _resolvable(("cp1250", "iso-8859-2", "cp1252", "latin-1"))
+
+
+def detect_double_decode(s: str | None) -> bool:
+	"""Heuristic: does *s* look like UTF-8 text that was mis-decoded twice?
+
+	Flags Latin Extended-A chars that are not legitimate CZ/SK letters, and the
+	common double-decode artefact chars (ˇ ˝ ™ ­ Â Ã). Deliberately liberal —
+	the actual repair (see :func:`repair_double_decode`) is self-validating, so
+	a false positive here just means a no-op repair.
+	"""
+	if not s:
+		return False
+	for c in s:
+		o = ord(c)
+		if 0x0100 <= o <= 0x017F and c not in _CZ_SK_LATIN_EXT:
+			return True
+		if c in _DOUBLE_DECODE_TELLS:
+			return True
+	return False
+
+
+def _utf8_seq_len(b: int) -> int:
+	"""Expected UTF-8 sequence length for lead byte *b* (0 = not a lead)."""
+	if b < 0x80:
+		return 1
+	if 0xC0 <= b <= 0xDF:
+		return 2
+	if 0xE0 <= b <= 0xEF:
+		return 3
+	if 0xF0 <= b <= 0xF7:
+		return 4
+	return 0
+
+
+def _mixed_utf8_decode(raw: bytes, fallback: str) -> str:
+	"""Decode *raw* as UTF-8 where valid, as *fallback* per byte where not.
+
+	Real-world corruption is often PARTIAL: a book repaired once and then
+	partly corrupted again has clean and mojibake segments side by side. A
+	whole-string ``encode(src).decode("utf-8")`` fails on the clean segments
+	(their single-byte fallback encodings are not valid UTF-8 — e.g. a clean
+	``á`` becomes a lone 0xE1), so the repair would refuse exactly the texts
+	that need it most. Greedy sequence validation at the byte level handles
+	both: valid UTF-8 runs (the mojibake) decode as UTF-8, and every byte that
+	cannot start/extend a valid sequence falls back to the single-byte codec
+	(the clean text, decoded back to itself).
+	"""
+	out = []
+	i, n = 0, len(raw)
+	while i < n:
+		b = raw[i]
+		length = _utf8_seq_len(b)
+		if length > 1:
+			chunk = raw[i : i + length]
+			if len(chunk) == length and all(0x80 <= c <= 0xBF for c in chunk[1:]):
+				try:
+					out.append(chunk.decode("utf-8"))
+					i += length
+					continue
+				except UnicodeDecodeError:  # overlong/surrogate — fall through
+					pass
+		out.append(bytes((b,)).decode(fallback))
+		i += 1
+	return "".join(out)
+
+
+def _for_lost_bytes(s: str) -> str:
+	"""Map U+FFFD (a byte lost to an earlier ``errors="replace"`` decode) to SUB.
+
+	No codec can re-encode U+FFFD, but one lost byte must not block
+	repairing the rest of the text. SUB (0x1A) is the classic "unknown
+	byte" sentinel — it encodes everywhere; the repairs map it back to
+	U+FFFD so the lost positions stay VISIBLE in the preview instead of
+	silently vanishing. Only U+FFFD is touched — a genuinely unencodable
+	char (Hiragana in a Central-European codec) still fails the strict
+	encode, preserving the self-validation signal for codec selection.
+	"""
+	return s.replace("\ufffd", "\x1a")
+
+
+def _encode_dropping(s: str, codec: str, budget: int) -> bytes | None:
+	"""Encode *s* through *codec*, dropping up to *budget* unencodable chars.
+
+	The stragglers this removes are UTF-8 lead bytes orphaned by lost bytes
+	(e.g. a "Ń" left standing when the continuation byte after it became
+	SUB) — they would block the middle encode of a chained repair (see
+	:func:`repair_chain`). Beyond the budget the whole encode fails: a
+	genuinely wrong codec must not eat the text. Implemented as
+	retry-on-first-failure rather than an ``errors=`` handler because
+	builtin ``str.encode`` only accepts REGISTERED handler names, and
+	per-call registration would leak the global registry.
+	"""
+	work = s
+	dropped = 0
+	while True:
+		try:
+			return work.encode(codec)
+		except UnicodeEncodeError as exc:
+			span = exc.end - exc.start
+			if dropped + span > budget:
+				return None
+			dropped += span
+			work = work[:exc.start] + work[exc.end:]
+
+
+def repair_double_decode(s: str | None) -> str | None:
+	"""Reverse a double-decode of UTF-8 text through a single-byte codec.
+
+	The corruption chain is:  ``proper text --utf-8--> bytes --mis-decoded as
+	<codec>--> mojibake str --utf-8--> bytes on disk``. Reading the file as
+	UTF-8 yields the mojibake str. To reverse it we encode that str back
+	through <codec> (recovering the original UTF-8 bytes) and decode as UTF-8
+	— via :func:`_mixed_utf8_decode`, so PARTIALLY corrupted text (clean and
+	mojibake segments mixed) repairs too, not just uniformly broken strings.
+
+	The result is a plain ``str`` (valid UTF-8) — exactly the "mark the result
+	as UTF-8" semantics a caller wants for display. Returns ``None`` when the
+	string shows no double-decode signals or no candidate yields a clean,
+	Czech-looking, *different* string (so a clean input is never mangled: its
+	bytes all fall back to the single-byte codec and come out unchanged).
+	"""
+	if not s or not detect_double_decode(s):
+		return None
+	lost = "\ufffd" in s
+	for src in _DOUBLE_DECODE_SRCS:
+		try:
+			raw = _for_lost_bytes(s).encode(src)
+		except (UnicodeEncodeError, LookupError):
+			continue
+		fixed = _mixed_utf8_decode(raw, src)
+		if lost:
+			fixed = fixed.replace("\x1a", "\ufffd")
+		if fixed != s and _looks_clean(fixed.replace("\ufffd", "")) and _looks_czechish(fixed):
+			return fixed
+	return None
+
+
+# Middle-layer codec candidates for a two-layer chain: the wrong codec the
+# text was ONCE mis-read through on top of the usual double-decode. Cyrillic
+# first — the wild sample was cp1250 CZ text mis-read as cp1251. Cheap to be
+# generous: a candidate that cannot encode the intermediate fails in C.
+# NOTE: the Mac Central-European codec must be spelled ``mac_latin2`` (alias
+# ``maccentraleurope``) — ``mac-centraleurope`` does NOT resolve and is the
+# exact alias that once crashed repair_chain with LookupError.
+_CHAIN_MIDDLE = _resolvable((
+	"cp1251", "iso-8859-5", "koi8-r", "koi8-u", "mac-cyrillic",
+	"cp1250", "cp1252", "cp1257", "cp1254", "cp1255", "cp1256", "cp1258",
+	"iso-8859-1", "iso-8859-2", "iso-8859-7", "iso-8859-9", "iso-8859-15",
+	"iso-8859-16", "mac_latin2", "cp852", "cp850", "cp866", "cp874",
+	"latin-1",
+))
+# What the recovered bytes of the innermost layer actually are: a CZ/SK book.
+_CHAIN_FINALS = _resolvable(("cp1250", "iso-8859-2"))
+
+
+def repair_chain(s: str | None) -> tuple[str, str] | None:
+	"""Repair a TWO-LAYER mojibake chain; returns ``(repaired, chain)`` or None.
+
+	Wild case (an old Czech HTML tutorial in the library): cp1250 Czech text
+	was mis-decoded as cp1251 (Czech letters became Cyrillic look-alikes —
+	í 0xED → н), re-saved as UTF-8, then mis-decoded AGAIN as cp1250
+	(н → D0 BD → "Đ˝") and re-saved as UTF-8. One recode layer only reaches
+	the Cyrillic middle layer; the second pair below reaches the original
+	cp1250 bytes. Structure, outermost inwards::
+
+		encode(a1) → utf-8 → encode(a2) → decode(a3)
+
+	Only runs when the single-layer :func:`repair_double_decode` refuses
+	(its best output still does not look clean), so a plain double-decode
+	never gets a chain false-positive. U+FFFD lost bytes pass through as
+	SUB and stay visible in the result; the orphaned lead chars they leave
+	behind are dropped within a bounded budget (``_encode_dropping``).
+	"""
+	if not s or (not detect_double_decode(s) and "\ufffd" not in s):
+		return None
+	if repair_double_decode(s) is not None:
+		return None
+	lost = "\ufffd" in s
+	budget = s.count("\ufffd") * 2 + 4
+	for a1 in _DOUBLE_DECODE_SRCS:
+		try:
+			raw = _for_lost_bytes(s).encode(a1)
+		except (UnicodeEncodeError, LookupError):
+			continue
+		mid = _mixed_utf8_decode(raw, a1)
+		if mid == s:
+			continue
+		for a2 in _CHAIN_MIDDLE:
+			inner = _encode_dropping(mid, a2, budget)
+			if inner is None:
+				continue
+			for a3 in _CHAIN_FINALS:
+				try:
+					out = inner.decode(a3)
+				except (UnicodeDecodeError, LookupError):
+					continue
+				if lost:
+					out = out.replace("\x1a", "\ufffd")
+				if out != s and _looks_clean(out.replace("\ufffd", "")) and _looks_czechish(out):
+					return out, f"{a1}→utf-8→{a2}→{a3}"
+	return None
+
+
+def recode(s: str, src: str, dst: str) -> str | None:
+	"""Re-interpret *s*: encode through *src*, decode as *dst*.
+
+	The MANUAL counterpart of :func:`repair_double_decode` (which auto-detects
+	the pair): lets a human experiment with codec combinations in the GUI
+	until the preview reads right. When *dst* is utf-8 the decode falls back
+	to :func:`_mixed_utf8_decode`, so partially corrupted text (clean and
+	mojibake segments mixed) converts too, and a fully clean input returns
+	unchanged. Returns ``None`` when the combination cannot run (a char not
+	representable in *src*, or undecodable as *dst*). Lost bytes (U+FFFD
+	from an earlier replace-decode) pass through as SUB and come back
+	marked as U+FFFD, so one destroyed byte never blocks the repair.
+	"""
+	if not s:
+		return s
+	try:
+		raw = _for_lost_bytes(s).encode(src)
+	except (UnicodeEncodeError, LookupError):
+		return None
+	if dst.lower().replace("-", "").replace("_", "") == "utf8":
+		out = _mixed_utf8_decode(raw, src)
+	else:
+		try:
+			out = raw.decode(dst)
+		except (UnicodeDecodeError, LookupError):
+			return None
+	# Lost bytes (U+FFFD) travelled as SUB; map them back so the preview
+	# shows WHERE the unrecoverable positions are instead of hiding them.
+	return out.replace("\x1a", "\ufffd") if "\ufffd" in s else out
+
+
+def recode_failure_reason(s: str, src: str, dst: str) -> str | None:
+	"""Why :func:`recode` returns ``None`` for this pair (``None`` = it runs).
+
+	Mirrors recode's control flow, but keeps the exception instead of
+	swallowing it, so the GUI can explain a failed codec experiment
+	(char not representable in *src* / byte undefined in *dst*) instead of a
+	bare "failed". Messages are Czech — this helper exists for the GUI hint.
+	"""
+	if not s:
+		return None
+	try:
+		raw = _for_lost_bytes(s).encode(src)
+	except UnicodeEncodeError as exc:
+		ch = s[exc.start] if 0 <= exc.start < len(s) else "?"
+		return f"znak „{ch}“ (U+{ord(ch):04X}) nelze zapsat v {src}"
+	except LookupError:
+		return f"neznámý kodek {src}"
+	if dst.lower().replace("-", "").replace("_", "") == "utf8":
+		return None  # _mixed_utf8_decode never fails (per-byte fallback)
+	try:
+		raw.decode(dst)
+	except UnicodeDecodeError as exc:
+		byte = exc.object[exc.start] if 0 <= exc.start < len(exc.object) else 0
+		return f"bajt 0x{byte:02X} na pozici {exc.start} v {dst} není definován"
+	except LookupError:
+		return f"neznámý kodek {dst}"
+	return None
 
 
 # ---------------------------------------------------------------------------

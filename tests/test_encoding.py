@@ -1,7 +1,26 @@
 """Unit tests for mojibake detection and repair."""
 from __future__ import annotations
 
-from book_meta_fix.encoding import MojibakeKind, detect_mojibake, repair
+import codecs
+
+import pytest
+
+from book_meta_fix import encoding as enc
+from book_meta_fix.encoding import (
+	MojibakeKind,
+	detect_double_decode,
+	detect_mojibake,
+	recode,
+	recode_failure_reason,
+	repair,
+	repair_chain,
+	repair_double_decode,
+)
+
+
+def _corrupt(text: str, wrong: str) -> str:
+	"""Simulate a double-decode: utf-8 bytes mis-decoded as *wrong*."""
+	return text.encode("utf-8").decode(wrong)
 
 
 class TestDetection:
@@ -87,3 +106,242 @@ class TestRepair:
 	def test_repair_empty(self):
 		assert repair("")[0] == ""
 		assert repair(None)[0] is None
+
+
+class TestDoubleDecodeRepair:
+	"""The double-utf8 corruption seen in some book files' extracted text."""
+
+	@pytest.mark.parametrize("wrong", ["cp1250", "iso-8859-2", "cp1252", "latin-1"])
+	@pytest.mark.parametrize(
+		"clean",
+		[
+			"Vytváříme si domovskou stránku -- Seznamy & spol.",
+			"Další příběh o dědečkovi",
+			"Žluťoučký kůň pěl ďábelské ódy",
+		],
+	)
+	def test_detects_and_repairs_each_codec(self, clean, wrong):
+		# Some CZ letters can't be encoded/decoded through every codec, so a
+		# few (clean, wrong) combos can't be simulated — skip those.
+		try:
+			mojibake = _corrupt(clean, wrong)
+		except (UnicodeEncodeError, UnicodeDecodeError):
+			pytest.skip(f"{clean!r} not representable for simulation via {wrong}")
+		assert detect_double_decode(mojibake) is True
+		assert repair_double_decode(mojibake) == clean
+
+	def test_detects_real_world_sample(self):
+		# The exact mojibake the user reported (utf-8 read as cp1250 twice).
+		s = "Vytv" + "\u0102\u02c7\u0139\u2122\u0102" + "me si domovskou str" + "\u0102\u02c7" + "nku"
+		assert detect_double_decode(s) is True
+
+	def test_clean_czech_not_flagged(self):
+		# Legit CZ diacritics in Latin Extended-A (č ď ě ň ř š ť ů ž) must NOT
+		# be mistaken for double-decode artefacts.
+		assert detect_double_decode("Kamenické Štěpánov") is False
+		assert detect_double_decode("Žluťoučký kůň") is False
+
+	def test_clean_inputs_return_none(self):
+		assert repair_double_decode("Agatha Christie") is None
+		assert repair_double_decode("Vytváříme si domovskou stránku") is None
+		assert repair_double_decode("") is None
+		assert repair_double_decode(None) is None
+
+	def test_unrepairable_returns_none(self):
+		# Replacement chars mean the original UTF-8 bytes are gone for good.
+		assert repair_double_decode("Darko\ufffd je bytost") is None
+
+	def test_repairs_partial_mojibake(self):
+		# A book repaired once, then partly corrupted again: clean segments
+		# (WITH diacritics) and mojibake segments coexist. A whole-string
+		# round-trip fails on the clean parts (a clean "á" becomes a lone
+		# 0xE1) — _mixed_utf8_decode must fix only the broken segments and
+		# leave the clean ones byte-identical.
+		text = (
+			"Kapitola první\n"
+			+ _corrupt("Vytváříme si domovskou stránku -- Seznamy & spol.", "cp1250")
+			+ "\nText, který už je v pořádku: příliš žluťoučký kůň.\n"
+			+ _corrupt("Další rozbitá část ďábelských ód", "cp1250")
+			+ "\n"
+		)
+		assert detect_double_decode(text) is True
+		assert repair_double_decode(text) == (
+			"Kapitola první\n"
+			"Vytváříme si domovskou stránku -- Seznamy & spol.\n"
+			"Text, který už je v pořádku: příliš žluťoučký kůň.\n"
+			"Další rozbitá část ďábelských ód\n"
+		)
+
+	def test_partial_mojibake_within_one_line(self):
+		# The originally reported sample shape: clean words and mojibake words
+		# mixed in the SAME line ("Vytv<mojibake> si domovskou str<mojibake>nku").
+		s = _corrupt("Vytváříme", "cp1250") + " si domovskou " + _corrupt("stránku", "cp1250")
+		assert repair_double_decode(s) == "Vytváříme si domovskou stránku"
+
+	def test_detected_but_clean_text_not_rewritten(self):
+		# "™" trips detection, but the text is clean: every byte falls back to
+		# the single-byte codec unchanged, fixed == s -> no rewrite.
+		assert repair_double_decode("Seznamy & spol. ™ 2025") is None
+
+
+class TestRecode:
+	"""The manual z/do codec experiment used by the GUI content preview."""
+
+	def test_double_decode_pair(self):
+		moji = _corrupt("Vytváříme si domovskou stránku", "cp1250")
+		assert recode(moji, "cp1250", "utf-8") == "Vytváříme si domovskou stránku"
+
+	def test_single_misdecode_reverse_direction(self):
+		# cp1250 bytes mis-read as latin-1: fix = encode latin-1, decode cp1250
+		good = "Čas přílivu"
+		moji = good.encode("cp1250").decode("latin-1")
+		assert recode(moji, "latin-1", "cp1250") == good
+
+	def test_partial_text_via_tolerant_utf8_target(self):
+		# dst=utf-8 goes through the tolerant byte-level decoder, so a text
+		# with clean and mojibake segments mixed converts too.
+		text = "Kapitola\n" + _corrupt("Vytváříme", "cp1250") + "\npříliš žluťoučký kůň"
+		assert recode(text, "cp1250", "utf-8") == "Kapitola\nVytváříme\npříliš žluťoučký kůň"
+
+	def test_clean_text_unchanged(self):
+		assert recode("příliš žluťoučký kůň", "cp1250", "utf-8") == "příliš žluťoučký kůň"
+
+	def test_unrepresentable_char_returns_none(self):
+		# Hiragana cannot be encoded through a Central-European single byte codec.
+		assert recode("あ", "cp1250", "utf-8") is None
+
+	def test_undecodable_target_returns_none(self):
+		# ä -> 0xE4, which is not decodable as ascii.
+		assert recode("ä", "cp1250", "ascii") is None
+
+	def test_empty(self):
+		assert recode("", "cp1250", "utf-8") == ""
+
+
+class TestRecodeFailureReason:
+	"""Diagnostics for a z/do pair that recode() cannot run — the GUI hint."""
+
+	def test_working_pair_has_no_reason(self):
+		moji = _corrupt("Vytváříme si domovskou stránku", "cp1250")
+		assert recode_failure_reason(moji, "cp1250", "utf-8") is None
+
+	def test_undefined_cp1250_byte_names_byte_and_codec(self):
+		# The classic inverted-direction trap: Á encodes to C3 81 in utf-8 and
+		# 0x81 is one of cp1250's five undefined positions, so the decode side
+		# raises and recode returns None — the reason must say so.
+		reason = recode_failure_reason("Árie", "utf-8", "cp1250")
+		assert reason is not None
+		assert "0x81" in reason
+		assert "cp1250" in reason
+		assert recode("Árie", "utf-8", "cp1250") is None
+
+	def test_unrepresentable_char_names_char_and_codec(self):
+		reason = recode_failure_reason("あ", "cp1250", "utf-8")
+		assert reason is not None
+		assert "U+3042" in reason
+		assert "cp1250" in reason
+		assert recode("あ", "cp1250", "utf-8") is None
+
+	def test_utf8_target_never_fails_on_decode_side(self):
+		# dst=utf-8 goes through the tolerant per-byte decoder: even bytes
+		# that are invalid utf-8 fall back to the single-byte codec, so only
+		# the encode side can fail.
+		assert recode_failure_reason("Předchozí Á stránka", "cp1250", "utf-8") is None
+
+	def test_unknown_codec(self):
+		assert "neznámý kodek" in (recode_failure_reason("abc", "utf-9", "utf-8") or "")
+
+	def test_empty(self):
+		assert recode_failure_reason("", "cp1250", "utf-8") is None
+
+
+class TestRecodeLostBytes:
+	"""U+FFFD marks bytes already destroyed by an errors="replace" decode —
+	it can be re-encoded by NO codec, but it must not block repairing the
+	rest of the text (that was the "checkbox greyed out" bug)."""
+
+	def test_lost_byte_does_not_block_recode(self):
+		moji = _corrupt("Vytváříme si domovskou stránku", "cp1250")
+		# kill one ASCII byte so no UTF-8 run is orphaned — pure marker test
+		broken = moji[:1] + "\ufffd" + moji[2:]
+		out = recode(broken, "cp1250", "utf-8")
+		assert out is not None
+		assert "domovskou stránku" in out
+		assert "\ufffd" in out  # the lost position stays visible, not hidden
+
+	def test_repair_double_decode_tolerates_lost_bytes(self):
+		moji = _corrupt("Vytváříme si domovskou stránku", "cp1250")
+		broken = moji[:1] + "\ufffd" + moji[2:]
+		out = repair_double_decode(broken)
+		assert out is not None
+		assert "domovskou stránku" in out
+
+	def test_only_fffd_is_tolerated(self):
+		# Hiragana is genuinely unencodable in cp1250 — still a hard failure.
+		assert recode("あ\ufffd", "cp1250", "utf-8") is None
+
+
+class TestRepairChain:
+	"""Two-layer chains: cp1250 CZ text mis-read as cp1251 (Cyrillic
+	look-alikes), saved utf-8, mis-read as cp1250, saved utf-8 again.
+	SAMPLE is a real wild book (an old Czech HTML tutorial)."""
+
+	SAMPLE = (
+		"vŃŤsledek 1. opakovacĐ˝ lekce "
+		"Toto je mŃ‰j prvnĐ˝ pŃ�Đ˝klad v jazyce HTML "
+		"ĐŞvod ĐŞĐ¸el a hlavnĐ˝ funkce systĐąmu "
+		"FunkĐ¸nĐ˝ rozhranĐ˝ DatovĐą rozhranĐ˝ "
+		"ZpĐĽt Â  na opakovacĐ˝ lekci"
+	)
+
+	def test_repairs_wild_two_layer_sample(self):
+		res = repair_chain(self.SAMPLE)
+		assert res is not None
+		fixed, desc = res
+		for word in ("výsledek", "opakovací", "můj", "klad", "Účel",
+		             "systému", "Funkční", "Datové", "Zpět"):
+			assert word in fixed, word
+		assert "cp1251" in desc
+		assert "\ufffd" in fixed  # the lost ř bytes stay marked
+
+	def test_single_layer_mojibake_is_not_chained(self):
+		# Plain double-decode territory — repair_double_decode handles it,
+		# the chain must not fire (false-positive guard).
+		moji = _corrupt("Vytváříme si domovskou stránku", "cp1250")
+		assert repair_chain(moji) is None
+
+	def test_clean_text_returns_none(self):
+		assert repair_chain("příliš žluťoučký kůň") is None
+
+
+class TestCodecTables:
+	"""Every codec name in the repair tables must resolve on this Python.
+
+	Regression: the plausible-looking alias "mac-centraleurope" raises
+	LookupError (the codec lives in encodings.mac_latin2, alias
+	"maccentraleurope"), escaped _encode_dropping and crashed the Tk
+	callback — the GUI content preview wedged on "(načítám…)".
+	"""
+
+	def test_all_candidate_names_resolve(self):
+		for name in enc._CHAIN_MIDDLE + enc._CHAIN_FINALS + enc._DOUBLE_DECODE_SRCS:
+			codecs.lookup(name)  # must not raise
+
+	def test_mac_central_european_candidate_survives(self):
+		# The alias fix must not silently LOSE the Mac CE middle-layer codec:
+		# _resolvable drops unknown names with only a log warning, so a typo
+		# would read as "candidate missing", never as an error.
+		assert "mac_latin2" in enc._CHAIN_MIDDLE
+
+	def test_resolvable_drops_unknown_names(self):
+		assert enc._resolvable(("cp1250", "mac-centraleurope", "iso-8859-2")) == (
+			"cp1250", "iso-8859-2",
+		)
+
+	def test_chain_deep_search_never_raises(self):
+		# A lost byte (U+FFFD → SUB) but NO double-decode tells: every middle
+		# candidate round-trips the ASCII text unchanged (out == s after the
+		# SUB→FFFD remap), so ALL of _CHAIN_MIDDLE/_CHAIN_FINALS is tried and
+		# rejected — the exact walk that used to blow up mid-loop on the
+		# "mac-centraleurope" alias. Must return None, not raise.
+		assert repair_chain("abc \ufffd def") is None

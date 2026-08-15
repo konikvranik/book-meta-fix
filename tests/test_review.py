@@ -5,10 +5,9 @@ single-list), and the format's backward compatibility.
 """
 from __future__ import annotations
 
-from pathlib import Path
-
+from book_meta_fix.enrichers import EnrichedMeta
 from book_meta_fix.models import BookMeta, Confidence, Diagnosis, Verdict
-from book_meta_fix.review import build_review, parse_review
+from book_meta_fix.review import _build_current, _build_proposed, _header, build_review, parse_review
 
 
 def _meta(calibre_id: int, title: str = "T", author: str = "A") -> BookMeta:
@@ -122,3 +121,160 @@ class TestParseLegacySingleList:
 		path.write_text(hybrid, encoding="utf-8")
 		parsed = parse_review(path)
 		assert len(parsed) == 2
+
+
+def _enriched_with_cover() -> EnrichedMeta:
+	"""An enriched hit that carries a cover_url plus a year, so proposed is
+	guaranteed non-empty even when cover_url is gated out."""
+	return EnrichedMeta(
+		title="Some Title",
+		authors=["Some Author"],
+		year=2001,
+		cover_url="https://example.com/cover.jpg",
+		source="databazeknih",
+	)
+
+
+class TestCoverUrlProposalGate:
+	"""cover_url must only land in `proposed` for C11 / MISSING_COVER books.
+
+	Every enriched book carries a cover_url, but downloading is reserved for the
+	cover-problem categories — otherwise apply would fetch covers for every
+	metadata fix and the Covers report would never match apply's behaviour.
+	"""
+
+	def test_cover_url_proposed_for_c11(self):
+		meta = _meta(1)
+		diag = _diag(category="C11")
+		proposed = _build_proposed(meta, None, _enriched_with_cover(), diag)
+		assert proposed is not None
+		assert proposed.get("cover_url") == "https://example.com/cover.jpg"
+
+	def test_cover_url_proposed_for_missing_cover(self):
+		meta = _meta(1)
+		diag = _diag(category="MISSING_COVER")
+		proposed = _build_proposed(meta, None, _enriched_with_cover(), diag)
+		assert proposed is not None
+		assert proposed.get("cover_url") == "https://example.com/cover.jpg"
+
+	def test_cover_url_not_proposed_for_non_cover_category(self):
+		"""A C2 (metadata) book keeps its enriched year but NOT the cover_url."""
+		meta = _meta(1)
+		diag = _diag(category="C2")
+		proposed = _build_proposed(meta, None, _enriched_with_cover(), diag)
+		assert proposed is not None
+		assert "cover_url" not in proposed
+		# Other enriched fields are still proposed.
+		assert proposed.get("year") == 2001
+
+	def test_cover_url_not_proposed_without_diag(self):
+		"""No diagnosis available → be conservative, don't propose a cover."""
+		meta = _meta(1)
+		proposed = _build_proposed(meta, None, _enriched_with_cover(), None)
+		assert proposed is not None
+		assert "cover_url" not in proposed
+
+	def test_cover_url_proposed_when_c11_is_additional(self):
+		"""A book whose primary issue is NOT a cover but that also has a
+		generated cover (C11 in diag.additional) still gets cover_url proposed —
+		so apply can fix both the title and the cover in one pass."""
+		meta = _meta(1)
+		diag = _diag(category="C2")  # primary is a title issue
+		diag.additional = [_diag(category="C11")]
+		proposed = _build_proposed(meta, None, _enriched_with_cover(), diag)
+		assert proposed is not None
+		assert proposed.get("cover_url") == "https://example.com/cover.jpg"
+
+	def test_entry_exposes_diagnoses_list(self):
+		"""When a book carries additional diagnoses, the review entry exposes
+		the full list (primary first) so apply sees every problem."""
+		from book_meta_fix.review import _entry_dict
+
+		meta = _meta(1)
+		diag = _diag(category="C2")
+		diag.additional = [_diag(category="C11")]
+		entry = _entry_dict(meta, diag, None, None, None, library_root=None)
+		assert entry["diagnosis"]["category"] == "C2"  # primary stays
+		cats = [d["category"] for d in entry["diagnoses"]]
+		assert cats == ["C2", "C11"]
+
+	def test_entry_no_diagnoses_key_for_single_issue(self):
+		"""A single-issue book keeps the legacy shape (no `diagnoses` key)."""
+		from book_meta_fix.review import _entry_dict
+
+		meta = _meta(1)
+		entry = _entry_dict(meta, _diag(), None, None, None, library_root=None)
+		assert "diagnoses" not in entry
+
+
+class TestLanguageAndDescriptionProposal:
+	"""language was fetched by every enricher but historically never proposed
+	(the apply branch existed with nothing feeding it); description was dropped
+	for every source that returns a real annotation. Both must now flow."""
+
+	def test_language_proposed_when_differing(self):
+		meta = _meta(1)
+		meta.language = "cs"
+		enr = EnrichedMeta(language="sk", source="google_books")
+		proposed = _build_proposed(meta, None, enr, _diag())
+		assert proposed is not None
+		assert proposed["language"] == "sk"
+
+	def test_language_proposed_when_missing(self):
+		enr = EnrichedMeta(language="cs", source="llm:high")
+		proposed = _build_proposed(_meta(1), None, enr, _diag())
+		assert proposed["language"] == "cs"
+
+	def test_language_not_proposed_when_equal(self):
+		meta = _meta(1)
+		meta.language = "cs"
+		enr = EnrichedMeta(language="cs", year=2001, source="databazeknih")
+		proposed = _build_proposed(meta, None, enr, _diag())
+		assert "language" not in proposed
+		# The year still is (guards against an empty-proposed shortcut).
+		assert proposed["year"] == 2001
+
+	def test_description_from_real_source(self):
+		enr = EnrichedMeta(description="Anotace knihy.", source="databazeknih")
+		proposed = _build_proposed(_meta(1), None, enr, _diag())
+		assert proposed["description"] == "Anotace knihy."
+
+	def test_legie_description_not_proposed(self):
+		"""legie.info stashes the original title in the description field — a
+		cross-check aid, not an annotation; it must not reach the book."""
+		enr = EnrichedMeta(description="originál: Foundation", source="legie")
+		proposed = _build_proposed(_meta(1), None, enr, _diag())
+		assert proposed is None or "description" not in proposed
+
+	def test_llm_description_stays_reasoning(self):
+		"""The LLM's description field carries reasoning — shown as
+		``reasoning``, never written as the book's annotation."""
+		enr = EnrichedMeta(description="the model's reasoning", series="Nadace", source="llm:high")
+		proposed = _build_proposed(_meta(1), None, enr, _diag())
+		assert proposed["reasoning"] == "the model's reasoning"
+		assert "description" not in proposed
+
+
+class TestBuildCurrentSeries:
+	def test_includes_series_fields(self):
+		meta = _meta(1)
+		meta.series = [{"name": "Zaklínač", "index": "8"}]
+		cur = _build_current(meta)
+		assert cur["series"] == "Zaklínač"
+		assert cur["series_index"] == "8"
+
+	def test_omits_series_when_absent(self):
+		cur = _build_current(_meta(1))
+		assert "series" not in cur
+		assert "series_index" not in cur
+
+
+class TestHeaderDocumentsActions:
+	def test_header_lists_keep_action(self):
+		"""The review.yaml header must document the ``keep`` action so a human
+		editor knows it exists (and that it is retained, not pruned)."""
+		h = _header(3)
+		assert "keep" in h
+		# All canonical actions are documented.
+		for a in ("accept", "reject", "swap", "edit", "delete", "keep"):
+			assert a in h

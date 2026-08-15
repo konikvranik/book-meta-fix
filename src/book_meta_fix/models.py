@@ -70,6 +70,25 @@ class BookMeta:
 	# Fields where mojibake was detected but could NOT be repaired (need LLM/content lookup).
 	encoding_unrepairable: list[str] = field(default_factory=list)
 
+	def series_pair(self) -> tuple[str, str]:
+		"""First series as ``(name, index)``, normalising the wild shapes.
+
+		metadata.json in this library carries series either as plain strings
+		(``"Zaklínač #8"``) or as ``{"name", "index"}`` dicts; newer
+		Audiobookshelf builds write ``sequence`` for the index key. This is the
+		ONE accessor for display / organize / OPF, so every consumer sees the
+		same (name, index) regardless of the stored shape.
+		"""
+		if not self.series:
+			return "", ""
+		s0 = self.series[0]
+		if not isinstance(s0, dict):
+			return str(s0), ""
+		idx = s0.get("index")
+		if idx is None:
+			idx = s0.get("sequence")
+		return str(s0.get("name") or ""), str(idx) if idx is not None else ""
+
 	def to_dict(self) -> dict[str, Any]:
 		d = asdict(self)
 		# Normalize for YAML/report readability
@@ -87,6 +106,13 @@ class Diagnosis:
 	# When verdict in (AUTO_FIXABLE, NEEDS_REVIEW), proposed may hold a fix
 	proposed: dict[str, Any] | None = None
 	proposed_source: str | None = None  # 'embedded' / 'obalkyknih' / 'llm' / ...
+	# Other problems found on the same book (the rules below the primary in
+	# priority order that also matched). detect() returns the first match as
+	# the primary and stashes the rest here, so one book can carry several
+	# diagnoses — e.g. C2 (filename-as-title) + C11 (generated cover). Consumers
+	# that care about "any problem of kind X" use all_diagnoses() rather than
+	# the single category. See detectors.detect_all.
+	additional: list[Diagnosis] = field(default_factory=list)
 
 	def to_dict(self) -> dict[str, Any]:
 		return {

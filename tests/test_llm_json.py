@@ -4,9 +4,17 @@ GLM models (trained on Python) frequently emit Python literals (None/True/
 False) instead of JSON (null/true/false), trailing commas, and truncated
 JSON when they hit the token limit. _parse_llm_json should salvage these
 rather than wasting 3 retry API calls and giving up.
+
+The hardest failures — unescaped double-quotes inside string values and raw
+control characters (newlines) inside strings — are salvaged by the optional
+``json-repair`` dependency (the [llm] extra). These tests cover the exact
+real-world responses that previously caused parse failures.
 """
 from __future__ import annotations
 
+import pytest
+
+from book_meta_fix import llm as llm_mod
 from book_meta_fix.llm import _parse_llm_json, _repair_truncated_json, _sanitize_json
 
 
@@ -153,3 +161,120 @@ class TestParseLlmJsonTolerance:
 	def test_completely_garbage_returns_none(self) -> None:
 		result = _parse_llm_json("not json at all, just rambling text")
 		assert result is None
+
+
+# Salvage of unescaped quotes / control chars needs the optional json-repair
+# dependency (the [llm] extra). Skip the salvage class gracefully without it so
+# the rest of the suite still runs in a minimal install.
+_json_repair_required = pytest.mark.skipif(
+	llm_mod.json_repair is None, reason="json-repair not installed (install the [llm] extra)"
+)
+
+
+@_json_repair_required
+class TestJsonRepairSalvage:
+	"""The real-world GLM responses that _sanitize_json cannot fix but
+	json-repair salvages: unescaped double-quotes inside string values and raw
+	control characters (newlines) inside strings. Each case below is taken from
+	an actual run log where it caused a JSONDecodeError and 3 wasted retries."""
+
+	def test_unescaped_quotes_in_reasoning_pán_prstenů(self) -> None:
+		# Exact content from the log: "Expecting ',' delimiter" because the
+		# reasoning value contains unescaped "PROLOG", "Tři prsteny...", etc.
+		content = (
+			'{\n'
+			'  "title": "Pán prstenů",\n'
+			'  "authors": [\n'
+			'    "J. R. R. Tolkien"\n'
+			'  ],\n'
+			'  "language": "eng",\n'
+			'  "genres": [\n'
+			'    "fantasy"\n'
+			'  ],\n'
+			'  "confidence": "high",\n'
+			'  "reasoning": "First-page text explicitly contains "PROLOG" and '
+			'"Tři prsteny pro krále elfů", confirming the title is "Pán prstenů". '
+			'The corrupted title "Dvě věže" is clearly incorrect."\n'
+			'}'
+		)
+		result = _parse_llm_json(content)
+		assert result is not None
+		assert result.title == "Pán prstenů"
+		assert result.authors == ["J. R. R. Tolkien"]
+		# reasoning survives as a (non-empty) string despite the inner quotes
+		assert isinstance(result.reasoning, str) and result.reasoning
+
+	def test_unescaped_quotes_in_reasoning_mark_stone(self) -> None:
+		# Log case: "Expecting ',' delimiter: line 16 column 35" — reasoning
+		# quotes the title inline with straight double-quotes.
+		content = (
+			'{\n'
+			'  "title": "Mark Stone 39 - O blo",\n'
+			'  "authors": ["J. P. Garen", "Mark Stone"],\n'
+			'  "series": "Mark Stone 39",\n'
+			'  "series_index": "39",\n'
+			'  "year": 2012,\n'
+			'  "language": "ces",\n'
+			'  "genres": ["sci-fi"],\n'
+			'  "confidence": "high",\n'
+			'  "reasoning": "First page title "Mark Stone 39 - O blo" matches '
+			'filename and file, confirming the correct title and series name."\n'
+			'}'
+		)
+		result = _parse_llm_json(content)
+		assert result is not None
+		assert result.title == "Mark Stone 39 - O blo"
+		assert result.year == 2012
+
+	def test_unescaped_quotes_in_reasoning_mojibake(self) -> None:
+		# Log case: "Expecting ',' delimiter: line 11 column 170" — reasoning
+		# quotes the (mojibake) title inline.
+		content = (
+			'{\n'
+			'  "title": "Vytváříme domovskou stránku",\n'
+			'  "authors": ["Jiří Kosek"],\n'
+			'  "language": "ces",\n'
+			'  "genres": ["technická dokumentace"],\n'
+			'  "confidence": "medium",\n'
+			'  "reasoning": "The title is visible at the top of the first page '
+			'as "Vytváříme domovskou stránku", and the author is "Jiří Kosek" '
+			'on the same page."\n'
+			'}'
+		)
+		result = _parse_llm_json(content)
+		assert result is not None
+		assert result.title == "Vytváříme domovskou stránku"
+		assert result.authors == ["Jiří Kosek"]
+
+	def test_control_char_newline_inside_string(self) -> None:
+		# Log case: "Invalid control character at: line 13 column 272" — the
+		# reasoning value contains a raw newline (literal \n in the bytes)
+		# instead of an escaped \\n.
+		content = (
+			'{\n'
+			'  "title": "Okruhliak na obzore",\n'
+			'  "authors": ["Isaac Asimov"],\n'
+			'  "series": "Robotická séria",\n'
+			'  "language": "slk",\n'
+			'  "genres": ["sci-fi"],\n'
+			'  "confidence": "high",\n'
+			'  "reasoning": "First page text contains the exact title '
+			'Okruhliak na obzore.\nThe book is clearly the first in the series."\n'
+			'}'
+		)
+		result = _parse_llm_json(content)
+		assert result is not None
+		assert result.title == "Okruhliak na obzore"
+		assert result.authors == ["Isaac Asimov"]
+
+	def test_combination_unescaped_quotes_and_control_char(self) -> None:
+		# Both failure modes at once: inner quotes AND a raw newline.
+		content = (
+			'{\n'
+			'  "title": "X",\n'
+			'  "reasoning": "Title "X" found.\nAlso a newline here."\n'
+			'}'
+		)
+		result = _parse_llm_json(content)
+		assert result is not None
+		assert result.title == "X"

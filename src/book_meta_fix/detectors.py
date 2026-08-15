@@ -1,9 +1,11 @@
 """Detector rules C1–C10 — classify each book's metadata corruption.
 
 Each rule is a function (meta: BookMeta) -> Diagnosis | None.
-`detect()` applies rules in priority order and returns the first match; if no
+`detect()` applies rules in priority order and returns the first match as the
+primary diagnosis, with every other match attached to ``.additional``; if no
 rule fires, the book is OK (and will be passed to the verifier for content
-validation).
+validation). `detect_all()` returns the full list of matches so one book can
+carry several problems at once.
 
 Corruption categories (from empirical study of the library):
 
@@ -19,13 +21,15 @@ Corruption categories (from empirical study of the library):
 	C9  anonym (mostly fake — real anonym is whitelisted) NEEDS_REVIEW
 	C10 long comma-separated author list    NEEDS_REVIEW (mostly real multi-author)
 	C11 generated cover (calibre placeholder) NEEDS_REVIEW (download replacement)
+	C12 author slug/artefact pollution      NEEDS_REVIEW (lost capitalization,
+	    leading _ or *, etc. — author recoverable from content/online)
 	EXTRA: missing ISBN / year              AUTO_FIXABLE (enrichable)
 	EXTRA: missing cover / generated cover  AUTO_FIXABLE / NEEDS_REVIEW (download)
 """
 from __future__ import annotations
 
 import re
-from typing import Callable
+from collections.abc import Callable
 
 from .models import BookMeta, Confidence, Diagnosis, Verdict
 
@@ -40,24 +44,70 @@ Rule = Callable[[BookMeta], "Diagnosis | None"]
 # Czech/Slovak "anonymous" spellings — almost always signal a corrupted record,
 # NOT a genuine anonymous work. Genuine anonym (Bible etc.) is whitelisted below.
 # Compared case-insensitively (callers .lower() before checking membership).
+#
+# 'autor' is included so compound phrases like "autor neuveden" or
+# "neznámý autor" are recognized as anonym. The bare word "autor" alone is
+# caught earlier by _PLACEHOLDER_RE (rule_c5), so it never reaches C9.
 _ANONYM_SPELLINGS = {
-	"", "anonym", "anonymní", "anonymni", "anonymous", "neznamy", "neznámý", "unknown",
+	"", "anonym", "anonymní", "anonymni", "anonymous",
+	"neznamy", "neznámý", "enznámý",  # last is a common typo of neznámý
+	"neuveden", "neuvedeno", "neuvedený", "neuvedeny",
+	"autor",  # only meaningful inside a compound (e.g. "autor neuveden")
+	"unknown", "unbekannt",
 }
+
+# Separators that join multiple anonym spellings into one field, e.g.
+# "neznámý - neuveden", "anonym / neuveden". A field whose tokens (after
+# splitting on these) are ALL anonym spellings is itself an anonym spelling.
+_ANONYM_SEP_RE = re.compile(r"[\s,/;-]+")
+
+
+def _is_anonym_spelling(name: str) -> bool:
+	"""True if *name* denotes 'anonymous' (exact match, or a compound of only
+	anonym spellings joined by separators like '-' or '/').
+
+	Handles 'neznámý - neuveden', 'autor neuveden', 'anonym/neuveden', etc.
+	without enumerating every combination. The bare token 'autor' is in the
+	set ONLY so compounds resolve; a standalone 'autor' is intercepted earlier
+	by _PLACEHOLDER_RE (rule_c5), so it never reaches C9 via this path.
+	"""
+	if name is None:
+		return False
+	low = name.strip().lower()
+	if low in _ANONYM_SPELLINGS:
+		# A bare 'autor' is a placeholder, not an anonym spelling — leave it
+		# to C5. Only accept it as part of a compound (handled below).
+		if low == "autor":
+			return False
+		return True
+	tokens = [t for t in _ANONYM_SEP_RE.split(low) if t]
+	# Must split into >1 token (a single token is covered by the set above)
+	# and every token must be a known anonym spelling.
+	return len(tokens) > 1 and all(t in _ANONYM_SPELLINGS for t in tokens)
 
 # Titles that indicate a GENUINE anonymous work (religion/folklore).
 _REAL_ANONYM_RE = re.compile(r"\b(bible|bibl[ei]|kralick|[mn]ový?\s+z[áa]kon|knihy\s+moj|koran|quran|edda)\b", re.IGNORECASE)
 
 # Filename-like patterns in the title
-_EXTENSION_RE = re.compile(r"\.(docx?|epub|pdf|pdb|mobi|azw|lit|rtf|txt|djvu|fm|prz)\b", re.IGNORECASE)
+_EXTENSION_RE = re.compile(r"\.(docx?|epub|pdf|pdb|mobi|azw3|azw|prc|lit|rtf|txt|djvu|fm|prz)\b", re.IGNORECASE)
 _WORD_TMP_RE = re.compile(r"^microsoft\s+word\s*-\s*", re.IGNORECASE)
 # Truncated-title markers (Calibre's slugify leaves these behind)
 _TRUNCATED_RE = re.compile(r"[_]n[_]?_$|_txt$|_n$")
 
 # Placeholder record: literally "title" / "author" / "subject"
-_PLACEHOLDER_RE = re.compile(r"^(title|author|subject|name|unknown)$", re.IGNORECASE)
+_PLACEHOLDER_RE = re.compile(r"^(title|author|autor|subject|name|unknown)$", re.IGNORECASE)
 
 # Word lock-file prefix
 _WORD_LOCK_RE = re.compile(r"^~\$")
+
+# Suspicious author-folder prefixes: leading underscore, asterisk, or other
+# non-name artefacts (e.g. "_ antologie", "* antologie", "_ Neznámý").
+_BAD_AUTHOR_PREFIX_RE = re.compile(r"^[_*]")
+
+# All-lowercase author: a real person name always has at least one capital
+# letter (the surname initial). All-lowercase signals filename-slug pollution
+# (e.g. "anthony burgess", "jsvoboda").
+_ALL_LOWER_RE = re.compile(r"^[^A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ]+$")
 
 # Glued-author patterns: "byX...andY", "XandY" without spaces around connectives
 _GLUED_RE = re.compile(r"\b(by[A-Z]|[a-z]and[A-Z]|[a-z]and\s|[A-Z][a-z]+[a-z]and[A-Z])")
@@ -141,14 +191,57 @@ def _looks_foreign_name(name: str) -> bool:
 
 
 def rule_c6_word_lockfile(meta: BookMeta) -> Diagnosis | None:
-	"""C6: MS-Word lock-file duplicate (~$ prefix)."""
-	if _WORD_LOCK_RE.match(meta.author_folder):
+	"""C6: MS-Word lock-file duplicate (~$ prefix).
+
+	The ``~$`` prefix can show up on the author_folder (the book was created
+	from a Word lock file) or directly in the authors metadata. The walker
+	does NOT prune ``~$`` directories so this rule can see them.
+	"""
+	if _WORD_LOCK_RE.match(meta.author_folder) or any(_WORD_LOCK_RE.match(a) for a in meta.authors):
 		return Diagnosis(
 			category="C6",
-			reason=f"author_folder začíná '~$' (Word lock-file dup): {meta.author_folder!r}",
+			reason=f"author začíná '~$' (Word lock-file dup): {meta.author_folder!r} / {meta.authors!r}",
 			confidence=Confidence.HIGH,
 			verdict=Verdict.AUTO_FIXABLE,
 			proposed={"action": "delete", "reason": "duplicate of a Word lock file"},
+		)
+	return None
+
+
+def rule_c12_bad_author(meta: BookMeta) -> Diagnosis | None:
+	"""C12: author field carries filename-slug / artefact pollution.
+
+	Catches names that are clearly not a real person name:
+	  - leading ``_`` or ``*`` (slug leftovers, e.g. "_ antologie",
+	    "* antologie")
+	  - all-lowercase (a real name always has a capital initial), e.g.
+	    "anthony burgess", "jsvoboda"
+
+	Checked against both ``meta.authors`` and ``meta.author_folder``. These
+	are NEEDS_REVIEW (not auto-fixable): the right author has to be looked
+	up from the book content or an online source.
+	"""
+	reasons: list[str] = []
+	for candidate in (meta.author_folder, *meta.authors):
+		if not candidate:
+			continue
+		# Leave anonym spellings to C9, which knows the genuine-anonym whitelist
+		# (Bible, Koran, …). Otherwise C12 swallows them as "all-lowercase".
+		if _is_anonym_spelling(candidate):
+			continue
+		if _BAD_AUTHOR_PREFIX_RE.match(candidate):
+			reasons.append(f"artefact prefix in author: {candidate!r}")
+		elif _ALL_LOWER_RE.match(candidate.strip()) and any(c.isalpha() for c in candidate):
+			# all-lowercase AND has at least one letter (exclude empty/punct)
+			reasons.append(f"all-lowercase author (lost capitalization): {candidate!r}")
+		if reasons:
+			break  # one signal is enough; report the first
+	if reasons:
+		return Diagnosis(
+			category="C12",
+			reason="; ".join(reasons),
+			confidence=Confidence.HIGH,
+			verdict=Verdict.NEEDS_REVIEW,
 		)
 	return None
 
@@ -294,7 +387,7 @@ def rule_c2_filename_title(meta: BookMeta) -> Diagnosis | None:
 
 		stem = os.path.basename(meta.primary_file)
 		# Strip extension
-		for ext in (".epub", ".pdb", ".pdf", ".mobi", ".doc", ".rtf", ".txt", ".lit", ".djvu"):
+		for ext in (".azw3", ".azw", ".prc", ".epub", ".pdb", ".pdf", ".mobi", ".doc", ".rtf", ".txt", ".lit", ".djvu"):
 			if stem.lower().endswith(ext):
 				stem = stem[: -len(ext)]
 				break
@@ -381,7 +474,7 @@ def rule_c9_anonym(meta: BookMeta) -> Diagnosis | None:
 	# A real (non-anonym) author in the metadata means the record is fine,
 	# regardless of what folder it happens to live in.
 	has_real_author = any(
-		a.strip().lower() not in _ANONYM_SPELLINGS
+		not _is_anonym_spelling(a)
 		for a in meta.authors
 		if a
 	)
@@ -391,7 +484,7 @@ def rule_c9_anonym(meta: BookMeta) -> Diagnosis | None:
 	# (author_folder alone, without an anonym authors[], is still C9 because
 	# the metadata has no author at all and the folder confirms it.)
 	is_anonym = any(
-		a.strip().lower() in _ANONYM_SPELLINGS
+		_is_anonym_spelling(a)
 		for a in (meta.author_folder, *meta.authors)
 		if a
 	)
@@ -480,9 +573,10 @@ def rule_generated_cover(meta: BookMeta) -> Diagnosis | None:
 def rule_missing_cover(meta: BookMeta) -> Diagnosis | None:
 	"""MISSING_COVER: no cover.jpg sidecar at all.
 
-	Auto-fixable: if an enricher has a cover_url, `bmf apply` will download it.
-	Fires only when cover.jpg is entirely absent (PDFs/PDBs may have an
-	embedded cover but no sidecar — those are left for a future extractor).
+	Auto-fixable: if an enricher has a cover_url, `bmf apply` will download it;
+	if not, the book's own embedded cover is extracted as a fallback
+	(covers.recover_cover_from_book). Fires only when cover.jpg is entirely
+	absent.
 	"""
 	from pathlib import Path
 
@@ -505,6 +599,7 @@ def rule_missing_cover(meta: BookMeta) -> Diagnosis | None:
 # author and title). Once C2 fires, C1 is skipped.
 RULES: list[Rule] = [
 	rule_c6_word_lockfile,
+	rule_c12_bad_author,
 	rule_c5_placeholder,
 	rule_c4_encoding,
 	rule_c2_filename_title,  # before C1 — filename pollution masks swap signals
@@ -528,26 +623,58 @@ ENRICHMENT_RULES: list[Rule] = [
 ]
 
 
-def detect(meta: BookMeta) -> Diagnosis:
-	"""Apply rules in priority order; return the first matching Diagnosis.
+def detect_all(meta: BookMeta) -> list[Diagnosis]:
+	"""Apply ALL rules and return every match, in priority order (structural
+	rules first, then enrichment rules).
 
-	If no structural rule fires, the book is OK. Then enrichment rules are
-	checked — if any fire, the book is OK-with-enrichment (still auto-fixable,
-	but for a different reason: missing data, not corruption).
+	Unlike detect(), this surfaces every problem on the book — e.g. a book with
+	a filename-as-title (C2) AND a generated cover (C11) returns [C2, C11], so
+	both can be reported and fixed in a single pass. If nothing matches, returns
+	a single OK diagnosis.
 	"""
+	matches: list[Diagnosis] = []
 	for rule in RULES:
 		d = rule(meta)
 		if d is not None:
-			return d
-	# No corruption found — check for enrichment opportunities
+			matches.append(d)
 	for rule in ENRICHMENT_RULES:
 		d = rule(meta)
 		if d is not None:
-			return d
-	# Truly clean
-	return Diagnosis(
-		category="OK",
-		reason="no structural or enrichment rule triggered",
-		confidence=Confidence.HIGH,
-		verdict=Verdict.OK,
-	)
+			matches.append(d)
+	if not matches:
+		return [
+			Diagnosis(
+				category="OK",
+				reason="no structural or enrichment rule triggered",
+				confidence=Confidence.HIGH,
+				verdict=Verdict.OK,
+			)
+		]
+	return matches
+
+
+def all_diagnoses(diag: Diagnosis | None) -> list[Diagnosis]:
+	"""The primary diagnosis plus its additional diagnoses, as a flat list.
+
+	Use this anywhere that needs to answer "does this book have ANY problem of
+	kind X?" rather than reading the single primary category. Returns an empty
+	list when *diag* is None (callers like _build_proposed accept diag=None).
+	"""
+	if diag is None:
+		return []
+	return [diag, *diag.additional]
+
+
+def detect(meta: BookMeta) -> Diagnosis:
+	"""Apply rules in priority order; return the first matching Diagnosis as
+	the primary, with every other match attached as ``.additional``.
+
+	The primary (first match) preserves the historical category/verdict that
+	drives the pipeline's branching and organize routing. The remaining matches
+	are carried in ``Diagnosis.additional`` so one book can report several
+	problems at once (e.g. C2 + C11). See detect_all / all_diagnoses.
+	"""
+	matches = detect_all(meta)
+	primary = matches[0]
+	primary.additional = matches[1:]
+	return primary

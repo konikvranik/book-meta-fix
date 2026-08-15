@@ -5,7 +5,11 @@ _is_better -> _looks_broken and raised TypeError.
 """
 from __future__ import annotations
 
-from book_meta_fix.pipeline import _is_better, _llm_wants, _looks_broken
+from unittest.mock import patch
+
+from book_meta_fix.extractors import ExtractedMeta
+from book_meta_fix.models import BookMeta, Confidence, Diagnosis, Verdict
+from book_meta_fix.pipeline import _is_better, _llm_wants, _looks_broken, _process_book
 
 
 class TestLooksBroken:
@@ -92,11 +96,12 @@ class TestIsBetter:
 
 
 class TestLlmWants:
-	def test_all_includes_every_category_except_c9(self):
-		# 'ALL' must cover C1..C8, C10 but NOT C9 (legitimate anonyms).
-		for cat in ("C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C10"):
+	def test_all_includes_every_category_including_c9(self):
+		# 'ALL' covers C1..C10. C9 is NO LONGER excluded: genuine anonymous works
+		# (Bible/Koran/…) are whitelisted to OK in rule_c9_anonym, so every C9
+		# reaching the LLM path is a corrupted record that needs author recovery.
+		for cat in ("C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10"):
 			assert _llm_wants(cat, ("ALL",)) is True, f"{cat} should be included by ALL"
-		assert _llm_wants("C9", ("ALL",)) is False
 
 	def test_explicit_list_only_matches_listed(self):
 		cats = ("C1", "C4")
@@ -110,14 +115,177 @@ class TestLlmWants:
 		for cat in ("C1", "C2", "C9"):
 			assert _llm_wants(cat, ()) is False
 
-	def test_all_with_explicit_exclusion(self):
-		# 'ALL' minus a manually-listed exclusion isn't a feature (the tuple is
-		# union-style), but ALL alone already excludes C9. Verify the sentinel
-		# takes precedence: ALL in tuple -> C9 excluded regardless of others.
-		assert _llm_wants("C9", ("ALL", "C9")) is False
+	def test_all_includes_c9_even_alongside_explicit_listing(self):
+		# 'ALL' is union-style; nothing is special-cased out any more, so C9 is
+		# included whenever 'ALL' is present (here together with an explicit C9).
+		assert _llm_wants("C9", ("ALL", "C9")) is True
 
 	def test_unknown_category_with_all(self):
 		# A category we've never heard of (e.g. 'ERROR', custom detectors)
-		# still gets sent under ALL — only C9 is special-cased.
+		# still gets sent under ALL — nothing is special-cased any more.
 		assert _llm_wants("ERROR", ("ALL",)) is True
 		assert _llm_wants("CUSTOM_X", ("ALL",)) is True
+
+
+# ---------------------------------------------------------------------------
+# accept_missing_if_identified: MISSING_* books whose author+title were
+# confirmed against the book's content are stamped with an identity_confirmed
+# EnrichedMeta so review_writer pre-fills action: accept (and `bmf apply`
+# prunes them). Covers the gap where no enricher/text_meta recovered the field.
+# ---------------------------------------------------------------------------
+
+
+def _missing_isbn_book(title="Bílá nemoc", author="Karel Čapek", calibre_id=10) -> BookMeta:
+	return BookMeta(
+		calibre_id=calibre_id, title=title, authors=[author],
+		path=f"/lib/{title} ({calibre_id})",
+		primary_file=f"/lib/{title} ({calibre_id})/book.epub",
+	)
+
+
+def _empty_stats() -> dict:
+	return {
+		"ok": 0, "needs_review": 0, "det_fixed": 0, "online_fixed": 0,
+		"llm_fixed": 0, "llm_skipped_no_text": 0, "llm_no_result": 0, "llm_error": 0,
+		"unfixed": 0, "errors": 0, "content_mismatch": 0,
+		"covers_generated": 0, "covers_missing": 0, "accepted_missing": 0,
+	}
+
+
+def _run_accept(meta, *, first_page_text, additional=None, accept=True):
+	"""Run _process_book with detect_fn -> MISSING_ISBN (AUTO_FIXABLE) and
+	safe_extract mocked to return an ExtractedMeta with *first_page_text*.
+	No enricher, no LLM. Returns (result_tuple, stats)."""
+	from book_meta_fix import pipeline as pmod
+
+	def fake_detect(_m):
+		d = Diagnosis(category="MISSING_ISBN", reason="no isbn", confidence=Confidence.LOW, verdict=Verdict.AUTO_FIXABLE)
+		if additional:
+			d.additional = list(additional)
+		return d
+
+	def fake_extract(_m):
+		if first_page_text is None:
+			return None
+		return ExtractedMeta(first_page_text=first_page_text)
+
+	patches = [patch.object(pmod, "detect_fn", fake_detect), patch.object(pmod, "safe_extract", fake_extract)]
+	for p in patches:
+		p.start()
+	try:
+		stats = _empty_stats()
+		result = _process_book(
+			meta, enricher=None, skip_enrich=True, skip_verify=False,
+			llm_provider=None, llm_categories=("ALL",), stats=stats,
+			accept_missing_if_identified=accept,
+		)
+	finally:
+		for p in patches:
+			p.stop()
+	return result, stats
+
+
+class TestAcceptMissingIdentified:
+	def test_identity_confirmed_no_proposal_stamps_accept(self):
+		# Title + author appear in the first-page text -> acquire_identity
+		# confirms -> a minimal identity_confirmed EnrichedMeta is stamped.
+		meta = _missing_isbn_book()
+		text = "Bílá nemoc\nKarel Čapek\nRomán o lidské slušnosti."
+		result, stats = _run_accept(meta, first_page_text=text)
+		_enriched = result[3]
+		assert _enriched is not None
+		assert _enriched.identity_confirmed is True
+		# No fields carried — proposed stays empty (accept-as-is, no fake change).
+		assert _enriched.title is None and not _enriched.authors
+		assert stats["accepted_missing"] == 1
+
+	def test_identity_not_confirmed_stays_unfixed(self):
+		# First-page text does NOT contain the title/author -> identity cannot be
+		# confirmed -> no stamp, falls through to unfixed (stays for review).
+		meta = _missing_isbn_book()
+		text = "Lorem ipsum dolor sit amet, consectetur adipiscing elit."
+		result, stats = _run_accept(meta, first_page_text=text)
+		assert result[3] is None
+		assert stats["accepted_missing"] == 0
+		assert stats["unfixed"] == 1
+
+	def test_no_content_stays_unfixed(self):
+		# No extractable text at all -> acquire_identity returns None -> unfixed.
+		meta = _missing_isbn_book()
+		result, stats = _run_accept(meta, first_page_text=None)
+		assert result[3] is None
+		assert stats["accepted_missing"] == 0
+
+	def test_additional_needs_review_blocks_accept(self):
+		# A co-occurring NEEDS_REVIEW diagnosis (e.g. generated cover C11) keeps
+		# the book in review even though identity is confirmed.
+		meta = _missing_isbn_book()
+		text = "Bíla nemoc\nKarel Čapek"
+		extra = [Diagnosis(category="C11", reason="generated cover", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)]
+		result, stats = _run_accept(meta, first_page_text=text, additional=extra)
+		assert result[3] is None
+		assert stats["accepted_missing"] == 0
+
+	def test_disabled_flag_no_stamp(self):
+		# --no-accept-missing: never stamp, even when identity is confirmed.
+		meta = _missing_isbn_book()
+		text = "Bílá nemoc\nKarel Čapek"
+		result, stats = _run_accept(meta, first_page_text=text, accept=False)
+		assert result[3] is None
+		assert stats["accepted_missing"] == 0
+		assert stats["unfixed"] == 1
+
+	def test_apply_action_accept_empty_proposal_is_noop(self):
+		# `bmf apply` on an accept-as-is entry (empty proposed) must NOT touch
+		# metadata — _apply_action gates the whole accept block on item.proposed.
+		from types import SimpleNamespace
+
+		from book_meta_fix.pipeline import _apply_action
+
+		meta = _missing_isbn_book()
+		before = (meta.title, list(meta.authors), meta.isbn, meta.year, meta.publisher)
+		item = SimpleNamespace(action="accept", proposed=None, diagnoses=None, diagnosis=None, id=10, path=meta.path)
+		_apply_action(meta, item)
+		assert (meta.title, list(meta.authors), meta.isbn, meta.year, meta.publisher) == before
+
+
+class TestSkipUuids:
+	"""run_pipeline(skip_uuids=...) freezes keep-decided books: they are filtered
+	out before the processing loop, so they never reach _process_book (no
+	detect/extract/enrich/LLM), while the rest are processed normally."""
+
+	def _two_books(self, tmp_path):
+		from book_meta_fix.models import BookMeta
+		return [
+			BookMeta(calibre_id=1, uuid="keep-me", title="A", authors=["X"], path=str(tmp_path / "a")),
+			BookMeta(calibre_id=2, uuid="process-me", title="B", authors=["Y"], path=str(tmp_path / "b")),
+		]
+
+	def test_skipped_book_is_not_processed(self, tmp_path):
+		from book_meta_fix.pipeline import run_pipeline
+
+		seen = []
+
+		def fake_process(meta, *a, **k):
+			seen.append(meta.uuid)
+			return (meta, None, None, None)
+
+		with patch("book_meta_fix.pipeline.scan_library", return_value=self._two_books(tmp_path)), \
+			patch("book_meta_fix.pipeline._process_book", side_effect=fake_process):
+			results = run_pipeline(tmp_path, skip_uuids={"keep-me"}, workers=1, only_needs_review=False)
+		assert seen == ["process-me"]
+		assert {r[0].uuid for r in results} == {"process-me"}
+
+	def test_no_skip_processes_all(self, tmp_path):
+		from book_meta_fix.pipeline import run_pipeline
+
+		seen = []
+
+		def fake_process(meta, *a, **k):
+			seen.append(meta.uuid)
+			return (meta, None, None, None)
+
+		with patch("book_meta_fix.pipeline.scan_library", return_value=self._two_books(tmp_path)), \
+			patch("book_meta_fix.pipeline._process_book", side_effect=fake_process):
+			run_pipeline(tmp_path, skip_uuids=None, workers=1, only_needs_review=False)
+		assert set(seen) == {"keep-me", "process-me"}

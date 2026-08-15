@@ -10,7 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from book_meta_fix.library import iter_book_folders
+from book_meta_fix.library import Cache, iter_book_folders
+from book_meta_fix.readers import read_book_folder
 
 
 def _make_book(folder: Path) -> None:
@@ -98,3 +99,132 @@ class TestIterBookFolders:
 		(json_book / "metadata.json").touch()
 		found = {p.name for p in iter_book_folders(tmp_path)}
 		assert found == {"Opf Book (1)", "Json Book (2)"}
+
+	def test_sees_tilde_dollar_author_folder(self, tmp_path: Path) -> None:
+		"""Regression: a book whose author metadata was polluted to '~$Foo'
+		lives under a '~$Foo/' author folder. The walker must NOT prune such
+		directories, otherwise the C6 detector can never see them and the book
+		is invisible to every bmf command. (Only concrete '~$ lock FILES are
+		pruned, not directories.)"""
+		_make_book(tmp_path / "Author" / "Normal (1)")
+		_make_book(tmp_path / "~$N. Shearer" / "Accident Report (2)")
+		found = {p.name for p in iter_book_folders(tmp_path)}
+		assert "Accident Report (2)" in found
+		assert "Normal (1)" in found
+
+
+def _prime_cache(cache: Cache, folder: Path) -> None:
+	"""Create a real book folder and put its BookMeta into the cache."""
+	folder.mkdir(parents=True, exist_ok=True)
+	(folder / "metadata.json").write_text("{}\n", encoding="utf-8")
+	meta = read_book_folder(folder)
+	# uuid is the cache PK — give each test book a unique one (path-derived).
+	meta.uuid = f"u-{folder.name}"
+	cache.put(meta)
+	cache.commit()
+
+
+class TestCacheInvalidation:
+	"""Cache.invalidate / invalidate_many / clear drop rows so the next scan
+	re-parses — the guarantee apply/organize rely on to avoid serving stale
+	BookMeta after a write/move (the mtime heuristic alone is unreliable on NFS).
+	"""
+
+	def _has_row(self, cache: Cache, path: Path) -> bool:
+		return cache.conn.execute("SELECT 1 FROM books WHERE path = ?", (str(path),)).fetchone() is not None
+
+	def test_invalidate_drops_entry(self, tmp_path: Path) -> None:
+		cache = Cache(tmp_path / "cache.db")
+		folder = tmp_path / "Author" / "Title (1)"
+		_prime_cache(cache, folder)
+		assert cache.get(folder) is not None  # served from cache while valid
+		cache.invalidate(folder)
+		cache.commit()
+		assert not self._has_row(cache, folder)
+		assert cache.get(folder) is None
+		cache.close()
+
+	def test_invalidate_accepts_str_or_path(self, tmp_path: Path) -> None:
+		"""str and Path forms must both match the key put() wrote."""
+		cache = Cache(tmp_path / "cache.db")
+		folder = tmp_path / "Author" / "Title (1)"
+		_prime_cache(cache, folder)
+		cache.invalidate(str(folder))
+		cache.commit()
+		assert not self._has_row(cache, folder)
+		cache.close()
+
+	def test_invalidate_missing_path_is_noop(self, tmp_path: Path) -> None:
+		"""Invalidating a path that was never cached must not raise."""
+		cache = Cache(tmp_path / "cache.db")
+		cache.invalidate(tmp_path / "never" / "seen (9)")
+		cache.commit()
+		cache.close()
+
+	def test_invalidate_many(self, tmp_path: Path) -> None:
+		cache = Cache(tmp_path / "cache.db")
+		paths = [tmp_path / "A" / "One (1)", tmp_path / "B" / "Two (2)", tmp_path / "C" / "Three (3)"]
+		for p in paths:
+			_prime_cache(cache, p)
+		cache.invalidate_many([paths[0], paths[2]])
+		cache.commit()
+		assert not self._has_row(cache, paths[0])
+		assert self._has_row(cache, paths[1])  # untouched
+		assert not self._has_row(cache, paths[2])
+		cache.close()
+
+	def test_clear_drops_all(self, tmp_path: Path) -> None:
+		cache = Cache(tmp_path / "cache.db")
+		for name in ("A/One (1)", "B/Two (2)"):
+			_prime_cache(cache, tmp_path / name)
+		cache.clear()
+		cache.commit()
+		n = cache.conn.execute("SELECT COUNT(*) FROM books").fetchone()[0]
+		assert n == 0
+		cache.close()
+
+
+class TestScanProgressCallback:
+	"""scan_library(progress_callback=cb) reports strictly-increasing done
+	counts, ending at the total number of book folders."""
+
+	@staticmethod
+	def _valid_book(folder: Path) -> None:
+		"""A book folder with a parseable metadata.json (empty manifest is fine)."""
+		folder.mkdir(parents=True)
+		(folder / "metadata.json").write_text("{}\n", encoding="utf-8")
+
+	def test_callback_reports_increasing_counts(self, tmp_path: Path) -> None:
+		from book_meta_fix.library import scan_library
+
+		for i in range(3):
+			self._valid_book(tmp_path / "Author" / f"Title {i} ({i})")
+		seen: list[tuple[int, int]] = []
+		books = scan_library(tmp_path, use_cache=False, progress_callback=lambda done, total: seen.append((done, total)))
+		assert len(books) == 3
+		# strictly increasing done; total reported from the first call and constant
+		assert [d for d, _ in seen] == [1, 2, 3]
+		assert all(t == 3 for _, t in seen)
+
+	def test_callback_fires_per_folder_with_cache(self, tmp_path: Path) -> None:
+		from book_meta_fix.library import scan_library
+
+		self._valid_book(tmp_path / "A" / "One (1)")
+		self._valid_book(tmp_path / "A" / "Two (2)")
+		cache = Cache(tmp_path / "cache.db")
+		seen: list[int] = []
+		# First run: fresh parses.
+		scan_library(tmp_path, cache=cache, progress_callback=lambda d, total: seen.append(d))
+		# Second run: all cached, but callback still fires per folder.
+		seen.clear()
+		scan_library(tmp_path, cache=cache, progress_callback=lambda d, total: seen.append(d))
+		assert seen == [1, 2]
+		cache.close()
+
+	def test_no_callback_is_default(self, tmp_path: Path) -> None:
+		from book_meta_fix.library import scan_library
+
+		self._valid_book(tmp_path / "A" / "One (1)")
+		# Must not raise when progress_callback is omitted.
+		books = scan_library(tmp_path, use_cache=False)
+		assert len(books) == 1

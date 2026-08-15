@@ -7,8 +7,12 @@ from __future__ import annotations
 
 import tarfile
 from pathlib import Path
+from unittest.mock import patch
 
+from book_meta_fix.covers import CoverInfo
+from book_meta_fix.library import Cache
 from book_meta_fix.pipeline import apply_review
+from book_meta_fix.review import parse_review
 
 
 def _seed_library(library: Path, ids: list[int]) -> None:
@@ -34,7 +38,7 @@ class TestDeleteAction:
 		_seed_library(library, [1])
 		review = tmp_path / "review.yaml"
 		_write_review(review, [{
-			"id": 1, "path": f"author_1/book_1",
+			"id": 1, "path": "author_1/book_1",
 			"current": {"title": "~$doc"}, "proposed": {"reason": "word lock"},
 			"action": "delete",
 		}])
@@ -100,3 +104,557 @@ class TestDeleteAction:
 		}])
 		summary = apply_review(review, library, dry_run=False)
 		assert any("unknown action" in e for e in summary["errors"])
+
+
+class TestCoverDownloadGate:
+	"""Covers are downloaded only for C11 / MISSING_COVER, and a re-run of apply
+	must not re-download a cover that's already been fixed (idempotent)."""
+
+	def _seed_book(self, library: Path, bid: int = 1) -> Path:
+		folder = library / f"author_{bid}" / f"book_{bid}"
+		folder.mkdir(parents=True)
+		(folder / "metadata.json").write_text("{}\n", encoding="utf-8")
+		(folder / f"book_{bid}.epub").write_text("x", encoding="utf-8")
+		return folder
+
+	def _entry(self, bid: int, category: str) -> dict:
+		return {
+			"id": bid, "path": f"author_{bid}/book_{bid}",
+			"diagnosis": {"category": category, "reason": "r"},
+			"current": {"title": "T"},
+			"proposed": {"cover_url": "https://example.com/cover.jpg"},
+			"action": "accept",
+		}
+
+	def test_no_download_for_non_cover_category(self, tmp_path):
+		"""A C2 book with a cover_url in proposed (legacy review.yaml) must not
+		trigger a download — the diagnosis isn't about the cover."""
+		library = tmp_path / "lib"
+		self._seed_book(library)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._entry(1, "C2")])
+		with patch("book_meta_fix.covers.download_cover") as dl:
+			apply_review(review, library, dry_run=False)
+		dl.assert_not_called()
+
+	def test_download_for_c11_when_no_cover(self, tmp_path):
+		library = tmp_path / "lib"
+		self._seed_book(library)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._entry(1, "C11")])
+		with patch("book_meta_fix.covers.download_cover") as dl:
+			apply_review(review, library, dry_run=False)
+		dl.assert_called_once()
+
+	def test_download_for_missing_cover(self, tmp_path):
+		library = tmp_path / "lib"
+		self._seed_book(library)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._entry(1, "MISSING_COVER")])
+		with patch("book_meta_fix.covers.download_cover") as dl:
+			apply_review(review, library, dry_run=False)
+		dl.assert_called_once()
+
+	def test_skip_c11_when_cover_already_real(self, tmp_path):
+		"""C11 + cover.jpg present + analyze says NOT a placeholder → already
+		replaced, skip the download (idempotent re-run)."""
+		library = tmp_path / "lib"
+		book = self._seed_book(library)
+		(book / "cover.jpg").write_bytes(b"real-cover-bytes")
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._entry(1, "C11")])
+		with patch("book_meta_fix.covers.analyze_cover", return_value=CoverInfo(is_generated=False)) as ac, \
+			patch("book_meta_fix.covers.download_cover") as dl:
+			apply_review(review, library, dry_run=False)
+		ac.assert_called_once()
+		dl.assert_not_called()
+
+	def test_download_c11_when_cover_still_placeholder(self, tmp_path):
+		"""C11 + cover.jpg present + analyze says still a placeholder → download."""
+		library = tmp_path / "lib"
+		book = self._seed_book(library)
+		(book / "cover.jpg").write_bytes(b"placeholder")
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._entry(1, "C11")])
+		with patch("book_meta_fix.covers.analyze_cover", return_value=CoverInfo(is_generated=True)), \
+			patch("book_meta_fix.covers.download_cover") as dl:
+			apply_review(review, library, dry_run=False)
+		dl.assert_called_once()
+
+	def test_skip_missing_cover_when_cover_exists(self, tmp_path):
+		"""MISSING_COVER + cover.jpg now exists → already filled, skip."""
+		library = tmp_path / "lib"
+		book = self._seed_book(library)
+		(book / "cover.jpg").write_bytes(b"filled")
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._entry(1, "MISSING_COVER")])
+		with patch("book_meta_fix.covers.download_cover") as dl:
+			apply_review(review, library, dry_run=False)
+		dl.assert_not_called()
+
+	def test_download_when_c11_is_secondary_diagnosis(self, tmp_path):
+		"""A book whose primary diagnosis is C2 but that also has C11 (in the
+		`diagnoses` list) gets its cover downloaded — multi-problem, one apply."""
+		library = tmp_path / "lib"
+		self._seed_book(library)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [{
+			"id": 1, "path": "author_1/book_1",
+			"diagnosis": {"category": "C2", "reason": "r"},
+			"diagnoses": [
+				{"category": "C2", "reason": "r"},
+				{"category": "C11", "reason": "generated cover"},
+			],
+			"current": {"title": "T"},
+			"proposed": {"cover_url": "https://example.com/cover.jpg"},
+			"action": "accept",
+		}])
+		with patch("book_meta_fix.covers.download_cover") as dl:
+			apply_review(review, library, dry_run=False)
+		dl.assert_called_once()
+
+	def test_no_download_legacy_entry_only_primary_c2(self, tmp_path):
+		"""Backward compat: an old entry with only `diagnosis: C2` (no diagnoses
+		list) and a stray cover_url must not download — C2 isn't a cover issue."""
+		library = tmp_path / "lib"
+		self._seed_book(library)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [{
+			"id": 1, "path": "author_1/book_1",
+			"diagnosis": {"category": "C2", "reason": "r"},
+			"current": {"title": "T"},
+			"proposed": {"cover_url": "https://example.com/cover.jpg"},
+			"action": "accept",
+		}])
+		with patch("book_meta_fix.covers.download_cover") as dl:
+			apply_review(review, library, dry_run=False)
+		dl.assert_not_called()
+
+	def test_extract_for_missing_cover_empty_proposed(self, tmp_path):
+		"""MISSING_COVER + empty proposed + accept -> extract from the book file.
+
+		This is the identity-confirmed auto-accept segment: proposed is
+		intentionally empty, so the field-application guard is skipped but cover
+		recovery still runs and falls back to extraction (no cover_url)."""
+		library = tmp_path / "lib"
+		self._seed_book(library)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [{
+			"id": 1, "path": "author_1/book_1",
+			"diagnosis": {"category": "MISSING_COVER", "reason": "r"},
+			"current": {"title": "T"}, "proposed": {}, "action": "accept",
+		}])
+		with patch("book_meta_fix.covers.recover_cover_from_book", return_value=True) as rec, \
+			patch("book_meta_fix.covers.download_cover") as dl:
+			apply_review(review, library, dry_run=False)
+		rec.assert_called_once()
+		dl.assert_not_called()
+
+	def test_extract_when_download_fails(self, tmp_path):
+		"""A cover_url whose download fails falls back to extracting the cover."""
+		library = tmp_path / "lib"
+		self._seed_book(library)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._entry(1, "C11")])  # has cover_url
+		with patch("book_meta_fix.covers.download_cover", return_value=False), \
+			patch("book_meta_fix.covers.recover_cover_from_book", return_value=True) as rec:
+			apply_review(review, library, dry_run=False)
+		rec.assert_called_once()
+
+	def test_no_extract_when_download_succeeds(self, tmp_path):
+		"""A successful download must not also trigger extraction."""
+		library = tmp_path / "lib"
+		self._seed_book(library)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._entry(1, "C11")])
+		with patch("book_meta_fix.covers.download_cover", return_value=True), \
+			patch("book_meta_fix.covers.recover_cover_from_book") as rec:
+			apply_review(review, library, dry_run=False)
+		rec.assert_not_called()
+
+	def test_no_extract_for_non_cover_category(self, tmp_path):
+		"""A C2 book (even with a stray cover_url) never reaches extraction."""
+		library = tmp_path / "lib"
+		self._seed_book(library)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._entry(1, "C2")])
+		with patch("book_meta_fix.covers.recover_cover_from_book") as rec, \
+			patch("book_meta_fix.covers.download_cover") as dl:
+			apply_review(review, library, dry_run=False)
+		rec.assert_not_called()
+		dl.assert_not_called()
+
+	def test_idempotent_skip_extraction_when_cover_present(self, tmp_path):
+		"""MISSING_COVER + cover.jpg now present -> no download AND no extraction
+		(already fixed on a previous run)."""
+		library = tmp_path / "lib"
+		book = self._seed_book(library)
+		(book / "cover.jpg").write_bytes(b"filled")
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._entry(1, "MISSING_COVER")])
+		with patch("book_meta_fix.covers.recover_cover_from_book") as rec, \
+			patch("book_meta_fix.covers.download_cover") as dl:
+			apply_review(review, library, dry_run=False)
+		rec.assert_not_called()
+		dl.assert_not_called()
+
+
+class TestPruning:
+	"""Successfully-applied entries are pruned from review.yaml; pending,
+	rejected, and errored entries are kept. Dry-run never prunes."""
+
+	def _seed_book(self, library: Path, bid: int) -> Path:
+		folder = library / f"a{bid}" / f"b{bid}"
+		folder.mkdir(parents=True)
+		(folder / "metadata.json").write_text("{}\n", encoding="utf-8")
+		(folder / f"b{bid}.epub").write_text("x", encoding="utf-8")
+		return folder
+
+	def test_applied_entries_pruned(self, tmp_path):
+		library = tmp_path / "lib"
+		self._seed_book(library, 1)
+		self._seed_book(library, 2)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [
+			{"id": 1, "uuid": "u1", "path": "a1/b1", "current": {"title": "A"}, "proposed": {}, "action": "accept"},
+			{"id": 2, "uuid": "u2", "path": "a2/b2", "current": {"title": "B"}, "proposed": {}, "action": "accept"},
+		])
+		summary = apply_review(review, library, dry_run=False)
+		assert summary["applied"] == 2
+		assert summary["pruned"] == 2
+		# Both applied → both removed; file is now header-only.
+		assert parse_review(review) == []
+
+	def test_pending_and_rejected_kept(self, tmp_path):
+		library = tmp_path / "lib"
+		self._seed_book(library, 1)
+		self._seed_book(library, 2)
+		self._seed_book(library, 3)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [
+			{"id": 1, "uuid": "u1", "path": "a1/b1", "current": {"title": "A"}, "proposed": {}, "action": "accept"},
+			{"id": 2, "uuid": "u2", "path": "a2/b2", "current": {"title": "B"}, "proposed": {}, "action": None},
+			{"id": 3, "uuid": "u3", "path": "a3/b3", "current": {"title": "C"}, "proposed": {}, "action": "reject"},
+		])
+		summary = apply_review(review, library, dry_run=False)
+		assert summary["applied"] == 1
+		assert summary["pruned"] == 1
+		remaining = {r.id for r in parse_review(review)}
+		assert remaining == {2, 3}  # pending + rejected kept
+
+	def test_errored_entries_kept(self, tmp_path):
+		"""An accept whose folder is missing errors out → not pruned, so the
+		user can fix it and re-run."""
+		library = tmp_path / "lib"
+		library.mkdir()
+		self._seed_book(library, 1)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [
+			{"id": 1, "uuid": "u1", "path": "a1/b1", "current": {"title": "A"}, "proposed": {}, "action": "accept"},
+			{"id": 9, "uuid": "u9", "path": "nope/missing", "current": {"title": "X"}, "proposed": {}, "action": "accept"},
+		])
+		summary = apply_review(review, library, dry_run=False)
+		assert summary["applied"] == 1
+		assert summary["pruned"] == 1
+		remaining = {r.id for r in parse_review(review)}
+		assert remaining == {9}
+
+	def test_dry_run_does_not_prune(self, tmp_path):
+		library = tmp_path / "lib"
+		self._seed_book(library, 1)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [
+			{"id": 1, "path": "a1/b1", "current": {"title": "A"}, "proposed": {}, "action": "accept"},
+		])
+		before = review.read_text(encoding="utf-8")
+		summary = apply_review(review, library, dry_run=True)
+		assert summary["pruned"] == 0
+		assert review.read_text(encoding="utf-8") == before
+
+	def test_null_calibre_id_with_uuid_is_pruned(self, tmp_path):
+		"""Regression for the original bug: a book with calibre_id=None (~16 real
+		books in the library) was never pruned because pruning keyed on id and
+		guarded `if item.id is not None`. Now that pruning keys on uuid, a null-id
+		book that carries a uuid IS pruned like any other."""
+		library = tmp_path / "lib"
+		self._seed_book(library, 1)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [
+			{"id": None, "uuid": "u-noid", "path": "a1/b1", "current": {"title": "A"}, "proposed": {}, "action": "accept"},
+		])
+		summary = apply_review(review, library, dry_run=False)
+		assert summary["applied"] == 1
+		assert summary["pruned"] == 1
+		assert parse_review(review) == []
+
+
+class TestCacheInvalidation:
+	"""apply_review must drop the cached BookMeta for folders it writes/deletes,
+	so the next scan re-parses instead of serving the pre-apply entry."""
+
+	def _seed_and_prime(self, library: Path, bid: int, cache: Cache) -> Path:
+		from book_meta_fix.readers import read_book_folder
+
+		folder = library / f"a{bid}" / f"b{bid}"
+		folder.mkdir(parents=True)
+		(folder / "metadata.json").write_text("{}\n", encoding="utf-8")
+		(folder / f"b{bid}.epub").write_text("x", encoding="utf-8")
+		meta = read_book_folder(folder)
+		meta.uuid = f"u{bid}"  # uuid is the cache PK
+		cache.put(meta)
+		cache.commit()
+		return folder
+
+	def _has_row(self, cache: Cache, path: Path) -> bool:
+		return cache.conn.execute("SELECT 1 FROM books WHERE path = ?", (str(path),)).fetchone() is not None
+
+	def test_accept_invalidates_folder(self, tmp_path):
+		library = tmp_path / "lib"
+		cache = Cache(tmp_path / "cache.db")
+		folder = self._seed_and_prime(library, 1, cache)
+		assert self._has_row(cache, folder)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [{
+			"id": 1, "path": "a1/b1",
+			"current": {"title": "Old"}, "proposed": {"title": "New"}, "action": "accept",
+		}])
+		apply_review(review, library, dry_run=False, cache=cache)
+		assert not self._has_row(cache, folder)
+		cache.close()
+
+	def test_delete_invalidates_folder(self, tmp_path):
+		import os
+
+		library = tmp_path / "lib"
+		cache = Cache(tmp_path / "cache.db")
+		folder = self._seed_and_prime(library, 1, cache)
+		assert self._has_row(cache, folder)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [{
+			"id": 1, "path": "a1/b1",
+			"current": {"title": "~$x"}, "proposed": {}, "action": "delete",
+		}])
+		# Snapshot is written to CWD; run from tmp_path so it doesn't land in the repo.
+		cwd = os.getcwd()
+		os.chdir(tmp_path)
+		try:
+			apply_review(review, library, dry_run=False, cache=cache)
+		finally:
+			os.chdir(cwd)
+		assert not folder.exists()
+		assert not self._has_row(cache, folder)
+		cache.close()
+
+	def test_dry_run_does_not_invalidate(self, tmp_path):
+		"""Dry-run writes nothing — the cache entry must survive untouched."""
+		library = tmp_path / "lib"
+		cache = Cache(tmp_path / "cache.db")
+		folder = self._seed_and_prime(library, 1, cache)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [{
+			"id": 1, "path": "a1/b1",
+			"current": {"title": "Old"}, "proposed": {"title": "New"}, "action": "accept",
+		}])
+		apply_review(review, library, dry_run=True, cache=cache)
+		assert self._has_row(cache, folder)
+		cache.close()
+
+
+class TestApplyProgressCallback:
+	"""apply_review(progress_callback=cb) reports per-item progress as
+	(done, total); the bar's total equals the number of review entries."""
+
+	def test_callback_reports_done_and_total(self, tmp_path):
+		library = tmp_path / "lib"
+		_seed_library(library, [1, 2, 3])
+		review = tmp_path / "review.yaml"
+		_write_review(review, [
+			{"id": bid, "path": f"author_{bid}/book_{bid}", "action": "accept",
+			 "proposed": {"title": f"Book {bid}", "authors": [f"Author {bid}"]}}
+			for bid in (1, 2, 3)
+		])
+		seen: list[tuple[int, int]] = []
+		summary = apply_review(review, library, dry_run=False, progress_callback=lambda d, t: seen.append((d, t)))
+		assert summary["applied"] == 3
+		# Every reported total is the entry count.
+		assert all(t == 3 for _, t in seen)
+		# done is non-decreasing and ends at total.
+		dones = [d for d, _ in seen]
+		assert dones == sorted(dones)
+		assert dones[-1] == 3
+
+	def test_no_callback_is_default(self, tmp_path):
+		library = tmp_path / "lib"
+		_seed_library(library, [1])
+		review = tmp_path / "review.yaml"
+		_write_review(review, [{"id": 1, "path": "author_1/book_1", "action": "reject"}])
+		# Must not raise when progress_callback is omitted.
+		summary = apply_review(review, library, dry_run=True)
+		assert summary["rejected"] == 1
+
+
+class TestKeepAction:
+	"""``action: keep`` applies the proposal like accept, but the entry is
+	RETAINED in review.yaml (not pruned) and counted separately."""
+
+	def _seed_book(self, library: Path, bid: int) -> Path:
+		folder = library / f"a{bid}" / f"b{bid}"
+		folder.mkdir(parents=True)
+		(folder / "metadata.json").write_text("{}\n", encoding="utf-8")
+		(folder / f"b{bid}.epub").write_text("x", encoding="utf-8")
+		return folder
+
+	def test_keep_applies_proposed_and_writes_metadata(self, tmp_path):
+		library = tmp_path / "lib"
+		folder = self._seed_book(library, 1)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [{
+			"id": 1, "uuid": "u1", "path": "a1/b1",
+			"current": {"title": "Old"}, "proposed": {"title": "KeptTitle"}, "action": "keep",
+		}])
+		summary = apply_review(review, library, dry_run=False)
+		# Counted as kept (not applied), no errors, and the metadata was written.
+		assert summary["kept"] == 1
+		assert summary["applied"] == 0
+		assert summary["errors"] == []
+		assert "KeptTitle" in (folder / "metadata.json").read_text(encoding="utf-8")
+
+	def test_keep_entry_is_not_pruned(self, tmp_path):
+		"""The defining behaviour: keep is retained in review.yaml after WRITE,
+		whereas accept would have been pruned."""
+		library = tmp_path / "lib"
+		self._seed_book(library, 1)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [{
+			"id": 1, "uuid": "u1", "path": "a1/b1",
+			"current": {"title": "Old"}, "proposed": {"title": "New"}, "action": "keep",
+		}])
+		summary = apply_review(review, library, dry_run=False)
+		assert summary["pruned"] == 0
+		assert summary["remaining"] is None  # prune_review was never called
+		# The entry survives verbatim (same id, still action: keep).
+		remaining = parse_review(review)
+		assert len(remaining) == 1
+		assert remaining[0].id == 1
+		assert remaining[0].action == "keep"
+
+	def test_keep_contrasted_with_accept(self, tmp_path):
+		"""accept prunes; keep retains — same proposal, opposite retention."""
+		library = tmp_path / "lib"
+		self._seed_book(library, 1)
+		self._seed_book(library, 2)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [
+			{"id": 1, "uuid": "u1", "path": "a1/b1", "current": {}, "proposed": {"title": "A"}, "action": "accept"},
+			{"id": 2, "uuid": "u2", "path": "a2/b2", "current": {}, "proposed": {"title": "B"}, "action": "keep"},
+		])
+		summary = apply_review(review, library, dry_run=False)
+		assert summary["applied"] == 1  # accept
+		assert summary["kept"] == 1  # keep
+		assert summary["pruned"] == 1  # only the accept entry
+		remaining = {r.id for r in parse_review(review)}
+		assert remaining == {2}  # accept gone, keep retained
+
+	def test_keep_runs_cover_recovery_like_accept(self, tmp_path):
+		"""keep reuses the accept branch, so cover recovery fires for a
+		MISSING_COVER book (tries the proposed cover_url)."""
+		library = tmp_path / "lib"
+		self._seed_book(library, 1)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [{
+			"id": 1, "uuid": "u1", "path": "a1/b1", "current": {},
+			"diagnosis": {"category": "MISSING_COVER", "reason": "no cover", "confidence": "LOW"},
+			"proposed": {"cover_url": "https://example.invalid/cover.jpg"}, "action": "keep",
+		}])
+		with patch("book_meta_fix.covers.download_cover", return_value=True) as dl:
+			summary = apply_review(review, library, dry_run=False)
+		assert summary["kept"] == 1
+		dl.assert_called_once()  # cover_url was attempted, exactly like accept
+
+
+class TestSeriesAndFieldCoverage:
+	"""The historic gap: series/series_index/language/description were proposed
+	(or fetched) but silently dropped by _apply_action — nothing reached disk.
+	These pin the full proposal → metadata.json/metadata.opf path."""
+
+	def _seed_book(self, library: Path, manifest: str = "{}\n") -> Path:
+		folder = library / "a1" / "b1"
+		folder.mkdir(parents=True)
+		(folder / "metadata.json").write_text(manifest, encoding="utf-8")
+		(folder / "b1.epub").write_text("x", encoding="utf-8")
+		return folder
+
+	def _apply(self, tmp_path, entry: dict) -> tuple[Path, dict]:
+		import json as _json
+
+		library = tmp_path / "lib"
+		folder = self._seed_book(library)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [entry])
+		summary = apply_review(review, library, dry_run=False)
+		assert summary["errors"] == []
+		data = _json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
+		return folder, data
+
+	def test_accept_applies_series_and_index_to_disk(self, tmp_path):
+		folder, data = self._apply(tmp_path, {
+			"id": 1, "uuid": "u1", "path": "a1/b1", "current": {},
+			"proposed": {"series": "Zaklínač", "series_index": "8"}, "action": "accept",
+		})
+		assert data["series"] == [{"name": "Zaklínač", "index": "8"}]
+		opf = (folder / "metadata.opf").read_text(encoding="utf-8")
+		assert 'name="calibre:series"' in opf and 'content="Zaklínač"' in opf
+		assert 'name="calibre:series_index"' in opf and 'content="8"' in opf
+
+	def test_series_without_index_keeps_current_index(self, tmp_path):
+		import json as _json
+
+		library = tmp_path / "lib"
+		folder = library / "a1" / "b1"
+		folder.mkdir(parents=True)
+		(folder / "metadata.json").write_text(
+			_json.dumps({"series": [{"name": "Old", "index": "3"}]}, ensure_ascii=False), encoding="utf-8")
+		(folder / "b1.epub").write_text("x", encoding="utf-8")
+		review = tmp_path / "review.yaml"
+		_write_review(review, [{
+			"id": 1, "uuid": "u1", "path": "a1/b1", "current": {},
+			"proposed": {"series": "New Name"}, "action": "accept",
+		}])
+		apply_review(review, library, dry_run=False)
+		data = _json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
+		# The enricher didn't know the index — the current one survives.
+		assert data["series"] == [{"name": "New Name", "index": "3"}]
+
+	def test_edit_applies_series_and_index(self, tmp_path):
+		_, data = self._apply(tmp_path, {
+			"id": 1, "uuid": "u1", "path": "a1/b1", "current": {"series": "Old"},
+			"edited": {"series": "Nadace", "series_index": "2"}, "action": "edit",
+		})
+		assert data["series"] == [{"name": "Nadace", "index": "2"}]
+
+	def test_edit_empty_series_name_clears_series(self, tmp_path):
+		_, data = self._apply(tmp_path, {
+			"id": 1, "uuid": "u1", "path": "a1/b1", "current": {"series": "Old"},
+			"edited": {"series": ""}, "action": "edit",
+		})
+		assert data["series"] == []
+
+	def test_accept_applies_language_and_description(self, tmp_path):
+		folder, data = self._apply(tmp_path, {
+			"id": 1, "uuid": "u1", "path": "a1/b1", "current": {},
+			"proposed": {"language": "cs", "description": "Anotace knihy."}, "action": "accept",
+		})
+		assert data["language"] == "cs"
+		assert data["description"] == "Anotace knihy."
+		opf = (folder / "metadata.opf").read_text(encoding="utf-8")
+		assert "<dc:language>cs</dc:language>" in opf
+		assert "Anotace knihy." in opf
+
+	def test_accept_applies_genres_as_subjects(self, tmp_path):
+		folder, data = self._apply(tmp_path, {
+			"id": 1, "uuid": "u1", "path": "a1/b1", "current": {},
+			"proposed": {"genres": ["sci-fi", "fantasy"]}, "action": "accept",
+		})
+		assert data["genres"] == ["sci-fi", "fantasy"]
+		opf = (folder / "metadata.opf").read_text(encoding="utf-8")
+		assert opf.count("<dc:subject>") == 2

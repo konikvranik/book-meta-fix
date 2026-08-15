@@ -1,4 +1,4 @@
-.PHONY: help venv install dev-install clean lint test scan detect verify apply
+.PHONY: help venv install dev-install clean lint test scan report verify apply
 
 PY ?= python3
 VENV := .venv
@@ -26,13 +26,13 @@ test:  ## Run tests
 	$(BIN)/pytest
 
 # BMF defaults; override via env: make scan LIBRARY=/other/path
-LIBRARY ?= /mnt/share_nfs/Shared eBooks
+LIBRARY ?= $(HOME)/Books
 
 scan:  ## Scan library and print stats
 	$(BIN)/bmf scan --library "$(LIBRARY)"
 
-detect:  ## Run detectors and print category counts
-	$(BIN)/bmf detect --library "$(LIBRARY)"
+report:  ## Run detectors and print category counts
+	$(BIN)/bmf report --library "$(LIBRARY)"
 
 verify:  ## Verify OK books against content
 	$(BIN)/bmf verify --library "$(LIBRARY)"

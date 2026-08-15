@@ -2,14 +2,15 @@
 
 Covers: append-on-complete, .bak move on construct, prior user-action merge,
 carry-over of unprocessed prior entries, .bak deletion on success, .bak kept
-on simulated crash, inline auto-apply, and legacy-format prior loading.
+on simulated crash, and legacy-format prior loading.
 """
 from __future__ import annotations
 
 import threading
 import time
-from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from book_meta_fix.enrichers import EnrichedMeta
 from book_meta_fix.models import BookMeta, Confidence, Diagnosis, Verdict
@@ -18,7 +19,7 @@ from book_meta_fix.review_writer import ReviewWriter
 
 
 def _meta(calibre_id: int, title: str = "T", author: str = "A") -> BookMeta:
-	return BookMeta(calibre_id=calibre_id, title=title, authors=[author], path=f"/lib/A/{title} ({calibre_id})", primary_file=None)
+	return BookMeta(calibre_id=calibre_id, uuid=f"u{calibre_id}", title=title, authors=[author], path=f"/lib/A/{title} ({calibre_id})", primary_file=None)
 
 
 def _result(calibre_id: int, *, title: str = "T", enriched: EnrichedMeta | None = None, verdict: Verdict = Verdict.NEEDS_REVIEW, category: str = "C2"):
@@ -101,7 +102,8 @@ class TestMediumConfidencePrefill:
 		assert parsed[0].action == "accept"
 
 	def test_flash_changing_title_stays_none(self, tmp_path):
-		"""llm:flash proposing a different title -> action stays None for review."""
+		"""llm:flash proposing ONLY a different title (no additive data) -> action
+		stays None for review — nothing safe to auto-apply."""
 		out = tmp_path / "review.yaml"
 		w = ReviewWriter(out)
 		enriched = EnrichedMeta(
@@ -110,6 +112,59 @@ class TestMediumConfidencePrefill:
 		_submit_all_and_finish(w, [_result(1, title="Old Title", enriched=enriched)])
 		parsed = parse_review(out)
 		assert parsed[0].action is None
+
+	def test_flash_changing_title_with_additive_stays_none(self, tmp_path):
+		"""llm:flash proposing a title change AND an isbn: the match is on an
+		unconfirmed identity (query built on the old title), so we cannot trust
+		the additive isbn either — it may belong to the wrong book. Whole
+		proposal stays action=None for review."""
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		enriched = EnrichedMeta(
+			title="New Title", authors=["A"], isbn="9782222222222", source="llm:flash",
+		)
+		_submit_all_and_finish(w, [_result(1, title="Old Title", enriched=enriched)])
+		parsed = parse_review(out)
+		entry = parsed[0]
+		assert entry.action is None
+		# Nothing stripped — the full proposal (title + isbn) is preserved for
+		# the human to review together.
+		assert entry.proposed.get("title") == "New Title"
+		assert entry.proposed.get("isbn") == "9782222222222"
+
+	def test_openlibrary_changing_title_with_year_stays_none(self, tmp_path):
+		"""openlibrary (medium) proposing a title fix for a broken current title
+		+ adding year: the match is on the (broken) current title, so identity is
+		unconfirmed → defer everything (additive year not trustworthy either)."""
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		enriched = EnrichedMeta(
+			title="New Title", authors=["A"], year=2005, source="openlibrary",
+		)
+		# Broken current title (underscore) so _looks_better lets the enriched
+		# title into the proposal — otherwise openlibrary (not trust-blindly)
+		# wouldn't propose a title change at all.
+		_submit_all_and_finish(w, [_result(1, title="Old_Title", enriched=enriched)])
+		parsed = parse_review(out)
+		entry = parsed[0]
+		assert entry.action is None
+		assert entry.proposed.get("title") == "New Title"
+
+	def test_identity_confirmed_auto_accepts_identity_change(self, tmp_path):
+		"""An identity_confirmed proposal (verified against the book's content)
+		auto-accepts even when it changes title/author — we know the book."""
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		enriched = EnrichedMeta(
+			title="New Title", authors=["New Author"], isbn="9782222222222",
+			source="openlibrary", identity_confirmed=True,
+		)
+		_submit_all_and_finish(w, [_result(1, title="Old Title", enriched=enriched)])
+		parsed = parse_review(out)
+		entry = parsed[0]
+		assert entry.action == "accept"
+		# The identity change is present in proposed (not stripped).
+		assert entry.proposed.get("title") == "New Title"
 
 	def test_flash_changing_author_stays_none(self, tmp_path):
 		"""llm:flash proposing a different author -> action stays None."""
@@ -214,18 +269,38 @@ class TestPriorUserActionMerge:
 		assert summary["skipped_user_decided"] == 1
 
 
+class TestCarryOverPathRefresh:
+	def test_prior_decision_refreshes_path_after_move(self, tmp_path):
+		"""A prior user decision is matched by uuid (so it survives an organize
+		move), and on re-analyze the entry's path is refreshed to the book's
+		current on-disk location — otherwise apply could not find the book."""
+		out = tmp_path / "review.yaml"
+		# Prior run: book u1 reviewed at its OLD path, user set action.
+		seed = "---\nid: 1\nuuid: u1\npath: old/A (1)\ncurrent: {title: T}\naction: accept\n"
+		out.write_text(seed, encoding="utf-8")
+		w = ReviewWriter(out)
+		# Same book (uuid u1) now lives at a new path (organize relocated it).
+		meta = BookMeta(calibre_id=1, uuid="u1", title="T", authors=["A"], path="/lib/needfix/A (1)", primary_file=None)
+		diag = Diagnosis(category="C2", reason="r", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
+		_submit_all_and_finish(w, [(meta, diag, None, None)])
+		parsed = parse_review(out)
+		by_uuid = {p.uuid: p for p in parsed}
+		assert by_uuid["u1"].action == "accept"   # prior decision preserved
+		assert "needfix" in by_uuid["u1"].path    # path refreshed to current location
+
+
 class TestCarryOverUnprocessed:
 	def test_unprocessed_prior_entries_carried_over(self, tmp_path):
 		"""A run with --limit processes only some books; the rest must be carried
 		over from .bak so user decisions aren't dropped."""
 		out = tmp_path / "review.yaml"
 		# Seed a review.yaml with 3 books, one of which the user acted on.
-		seed = "---\nid: 1\ncurrent: {title: A}\naction: accept\n---\nid: 2\ncurrent: {title: B}\naction: null\n---\nid: 3\ncurrent: {title: C}\naction: null\n"
+		seed = "---\nid: 1\nuuid: u1\ncurrent: {title: A}\naction: accept\n---\nid: 2\nuuid: u2\ncurrent: {title: B}\naction: null\n---\nid: 3\nuuid: u3\ncurrent: {title: C}\naction: null\n"
 		out.write_text(seed, encoding="utf-8")
 		# New run processes ONLY book 2 (e.g. --limit). Books 1 and 3 are not
 		# submitted — they must be carried over from .bak.
 		w = ReviewWriter(out)
-		summary = _submit_all_and_finish(w, [_result(2, title="B-new")])
+		_submit_all_and_finish(w, [_result(2, title="B-new")])
 		parsed = parse_review(out)
 		by_id = {p.id: p for p in parsed}
 		# All three present: 1 carried (action preserved), 2 refreshed, 3 carried.
@@ -259,50 +334,26 @@ class TestStreamingConcurrency:
 		assert {p.id for p in parsed} == set(range(20))
 
 
-class TestAutoApply:
-	def test_high_confidence_applied_not_appended(self, tmp_path):
-		"""With apply_threshold='high', an llm:high proposal is written to
-		metadata and NOT appended to review.yaml."""
+class TestReviewOnlyNoMetadataWrites:
+	"""auto-apply was removed: ReviewWriter must never write metadata files,
+	and ``apply_threshold`` is no longer a constructor parameter."""
+
+	def test_apply_threshold_param_removed(self, tmp_path):
 		out = tmp_path / "review.yaml"
-		w = ReviewWriter(out, apply_threshold="high")
+		with pytest.raises(TypeError):
+			ReviewWriter(out, apply_threshold="high")  # type: ignore[misc]
+
+	def test_never_writes_metadata(self, tmp_path):
+		"""Even a high-confidence proposal must land in review.yaml, not on disk."""
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
 		enriched = EnrichedMeta(title="Fixed", source="llm:high")
-		applied_ids: list[int] = []
-
-		# Patch the metadata writer so we don't touch real files; record calls.
-		def fake_apply(meta, enriched):
-			applied_ids.append(meta.calibre_id)
-			return True
-
-		with patch("book_meta_fix.pipeline._apply_enriched_to_meta", lambda m, e: m), \
-			 patch("book_meta_fix.writers.write_book_meta", lambda *a, **kw: None):
+		with patch("book_meta_fix.writers.write_book_meta") as fake_write:
 			summary = _submit_all_and_finish(w, [_result(1, enriched=enriched)])
-		assert summary["applied"] == 1
-		assert summary["written"] == 0
-		parsed = parse_review(out)
-		assert parsed == []
-
-	def test_low_confidence_goes_to_review(self, tmp_path):
-		"""With apply_threshold='high', an llm:low proposal is NOT auto-applied —
-		it goes to review.yaml for the human."""
-		out = tmp_path / "review.yaml"
-		w = ReviewWriter(out, apply_threshold="high")
-		enriched = EnrichedMeta(title="Guess", source="llm:low")
-		summary = _submit_all_and_finish(w, [_result(1, enriched=enriched)])
-		assert summary["applied"] == 0
-		assert summary["skipped_low_conf"] == 1
+		assert fake_write.call_count == 0
 		assert summary["written"] == 1
 		parsed = parse_review(out)
 		assert len(parsed) == 1 and parsed[0].id == 1
-
-	def test_no_proposal_goes_to_review(self, tmp_path):
-		out = tmp_path / "review.yaml"
-		w = ReviewWriter(out, apply_threshold="high")
-		summary = _submit_all_and_finish(w, [_result(1, enriched=None)])
-		assert summary["applied"] == 0
-		assert summary["skipped_no_proposal"] == 1
-		assert summary["written"] == 1
-		parsed = parse_review(out)
-		assert len(parsed) == 1
 
 
 class TestAutoFixable:
@@ -345,7 +396,7 @@ class TestAutoFixable:
 		"""If the user already set action on a C6 book in a prior run, that
 		decision wins over the pre-filled delete."""
 		out = tmp_path / "review.yaml"
-		seed = "---\nid: 1\ncurrent: {title: A}\naction: reject\n"
+		seed = "---\nid: 1\nuuid: u1\ncurrent: {title: A}\naction: reject\n"
 		out.write_text(seed, encoding="utf-8")
 		w = ReviewWriter(out)
 		meta = _meta(1, title="~$doc")
@@ -361,17 +412,131 @@ class TestAutoFixable:
 
 
 class TestLegacyPriorLoading:
-	def test_loads_legacy_single_list_bak(self, tmp_path):
-		"""A .bak in the OLD single-list format must load as a prior map."""
+	def test_loads_single_list_bak_keyed_by_uuid(self, tmp_path):
+		"""A .bak in the single-list format (vs the multi-doc stream) still loads
+		as a prior map, now keyed by uuid (the carry-over identity)."""
 		out = tmp_path / "review.yaml"
-		legacy = "# header\n- id: 1\n  current: {title: A}\n  action: accept\n- id: 2\n  current: {title: B}\n  action: null\n"
+		legacy = "# header\n- id: 1\n  uuid: u1\n  current: {title: A}\n  action: accept\n- id: 2\n  uuid: u2\n  current: {title: B}\n  action: null\n"
 		out.write_text(legacy, encoding="utf-8")
 		w = ReviewWriter(out)
-		assert set(w._prior) == {1, 2}
-		assert w._prior[1]["action"] == "accept"
+		assert set(w._prior) == {"u1", "u2"}
+		assert w._prior["u1"]["action"] == "accept"
 		# Submit only book 2; book 1 carried over with its action.
-		summary = _submit_all_and_finish(w, [_result(2, title="B-new")])
+		_submit_all_and_finish(w, [_result(2, title="B-new")])
 		parsed = parse_review(out)
 		by_id = {p.id: p for p in parsed}
 		assert by_id[1].action == "accept"  # carried
 		assert by_id[2].current["title"] == "B-new"  # refreshed
+
+	def test_truly_uuidless_legacy_entries_skipped(self, tmp_path):
+		"""Clean break: a genuine legacy .bak whose entries predate uuid keying
+		(carry no uuid) cannot be matched, so they are dropped from the prior map
+		and re-decided fresh rather than guessed wrong."""
+		out = tmp_path / "review.yaml"
+		legacy = "# header\n- id: 1\n  current: {title: A}\n  action: accept\n"
+		out.write_text(legacy, encoding="utf-8")
+		w = ReviewWriter(out)
+		assert w._prior == {}  # uuid-less entry not carryable
+
+
+class TestIdentityConfirmedAccept:
+	"""MISSING_* books whose identity was confirmed against the book's content
+	get action: accept pre-filled so `bmf apply` prunes them. Covers both the
+	no-proposal accept-as-is case (new branch) and the with-other-metadata case
+	(existing path — nothing is thrown away)."""
+
+	def test_identity_confirmed_no_proposal_prefills_accept(self, tmp_path):
+		"""A minimal identity_confirmed EnrichedMeta with no fields -> empty
+		proposed, but action: accept is still pre-filled (accept-as-is)."""
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		em = EnrichedMeta(identity_confirmed=True, source="content")
+		_submit_all_and_finish(w, [_result(1, verdict=Verdict.AUTO_FIXABLE, category="MISSING_ISBN", enriched=em)])
+		parsed = parse_review(out)
+		assert len(parsed) == 1
+		assert parsed[0].action == "accept"
+		# No fake proposed fields — it's an accept-as-is, not a change.
+		assert not parsed[0].proposed
+
+	def test_identity_confirmed_with_other_metadata_is_proposed(self, tmp_path):
+		"""When an enricher DID return data (publisher here) alongside an
+		identity confirmation, that metadata is proposed and action: accept is
+		pre-filled (existing path) — it is applied, not discarded."""
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		em = EnrichedMeta(identity_confirmed=True, source="databazeknih", publisher="Argo")
+		_submit_all_and_finish(w, [_result(1, verdict=Verdict.AUTO_FIXABLE, category="MISSING_ISBN", enriched=em)])
+		parsed = parse_review(out)
+		assert len(parsed) == 1
+		assert parsed[0].action == "accept"
+		assert parsed[0].proposed and parsed[0].proposed.get("publisher") == "Argo"
+
+	def test_identity_confirmed_missing_year_also_accepted(self, tmp_path):
+		"""The accept-as-is path applies to any MISSING_* category, not just
+		MISSING_ISBN. MISSING_YEAR + identity_confirmed -> accept."""
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		em = EnrichedMeta(identity_confirmed=True, source="content")
+		_submit_all_and_finish(w, [_result(1, verdict=Verdict.AUTO_FIXABLE, category="MISSING_YEAR", enriched=em)])
+		parsed = parse_review(out)
+		assert len(parsed) == 1 and parsed[0].action == "accept"
+
+
+class TestCoverOnlyAccept:
+	"""A cover-diagnosis entry (C11 / MISSING_COVER) with no other proposed
+	change pre-fills action: accept so the cover is recovered in bulk —
+	downloaded if a cover_url exists, otherwise extracted from the book file by
+	_apply_action. The book's own cover carries no identity risk, so this
+	pre-fills even without an identity confirmation."""
+
+	def test_missing_cover_empty_proposal_prefills_accept(self, tmp_path):
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		_submit_all_and_finish(w, [_result(1, verdict=Verdict.AUTO_FIXABLE, category="MISSING_COVER")])
+		parsed = parse_review(out)
+		assert len(parsed) == 1
+		assert parsed[0].action == "accept"
+
+	def test_c11_empty_proposal_prefills_accept(self, tmp_path):
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		_submit_all_and_finish(w, [_result(1, verdict=Verdict.NEEDS_REVIEW, category="C11")])
+		parsed = parse_review(out)
+		assert len(parsed) == 1
+		assert parsed[0].action == "accept"
+
+
+class TestKeepUuids:
+	"""keep_uuids() exposes the uuids the user marked ``action: keep`` so
+	``analyze`` can pass them to run_pipeline(skip_uuids=...)."""
+
+	def _write_prior(self, out, entries):
+		import yaml
+		body = "".join(f"---\n{yaml.safe_dump(e, sort_keys=False)}" for e in entries)
+		out.write_text(body, encoding="utf-8")
+
+	def test_returns_only_keep_entries(self, tmp_path):
+		out = tmp_path / "review.yaml"
+		self._write_prior(out, [
+			{"uuid": "k1", "path": "a", "current": {}, "action": "keep"},
+			{"uuid": "k2", "path": "b", "current": {}, "action": "keep"},
+			{"uuid": "a1", "path": "c", "current": {}, "action": "accept"},
+			{"uuid": "p1", "path": "d", "current": {}, "action": None},
+		])
+		w = ReviewWriter(out)
+		try:
+			assert w.keep_uuids() == {"k1", "k2"}
+		finally:
+			w.finish()
+
+	def test_empty_when_no_keep_entries(self, tmp_path):
+		out = tmp_path / "review.yaml"
+		self._write_prior(out, [
+			{"uuid": "a1", "path": "a", "current": {}, "action": "accept"},
+			{"uuid": "r1", "path": "b", "current": {}, "action": "reject"},
+		])
+		w = ReviewWriter(out)
+		try:
+			assert w.keep_uuids() == set()
+		finally:
+			w.finish()

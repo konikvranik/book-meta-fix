@@ -20,13 +20,6 @@ Lifecycle
 3. ``finish()``: signal the writer to drain, then append any prior entries the
    new run did NOT process (so a ``--limit`` run doesn't drop user decisions
    for untouched books). On success, delete ``.bak``. Returns a summary.
-
-Auto-apply
----------
-When an ``apply_threshold`` is configured, the writer applies high-confidence
-proposals directly to metadata files (via writers.write_book_meta) and does
-NOT append those books to review.yaml — exactly the split that auto_apply_results
-implements, but interleaved with streaming instead of as a post-pass.
 """
 from __future__ import annotations
 
@@ -37,8 +30,9 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from .detectors import all_diagnoses
 from .models import Verdict
-from .review import _build_current, _build_proposed, _header, _relative_path, _render_entry
+from .review import _COVER_CATEGORIES, _build_current, _build_proposed, _header, _relative_path, _render_entry
 
 log = logging.getLogger(__name__)
 
@@ -58,23 +52,16 @@ class ReviewWriter:
 		self,
 		output: Path,
 		library_root: Path | None = None,
-		*,
-		apply_threshold: str | None = None,
 	) -> None:
 		"""Set up the streaming writer.
 
 		*output*: review.yaml path. Moved to ``output + ".bak"`` on construction
 		(the original no longer exists at this path after construction).
 		*library_root*: used to render relative paths in entries.
-		*apply_threshold*: if given ('high'|'medium'|'low'), proposals at or
-		above this confidence are applied to metadata files directly (and
-		omitted from review.yaml). If None, every NEEDS_REVIEW book is appended.
 		"""
 		self.output = output
 		self.library_root = library_root
-		self.apply_threshold = apply_threshold
 		self._confidence_rank = {"high": 3, "medium": 2, "low": 1}
-		self._min_rank = self._confidence_rank.get(apply_threshold or "", 0)
 
 		# 1. Move output -> output.bak (overwrite a stale .bak if present).
 		bak = output.with_suffix(output.suffix + ".bak")
@@ -97,17 +84,20 @@ class ReviewWriter:
 		# 3. Start a fresh output with the header.
 		self._processed: set[Any] = set()
 		self._written = 0
-		self._apply_summary = {
-			"applied": 0,
-			"skipped_low_conf": 0,
-			"skipped_no_proposal": 0,
-			"skipped_user_decided": 0,
-		}
+		# Books skipped because the user already decided on them in a prior
+		# review.yaml (their `action` is preserved as-is on rerun).
+		self._skipped_user_decided = 0
+		# Action breakdown of the entries THIS run freshly decided (not the
+		# user-already-decoded or carried-over ones). Drives the summary the
+		# user actually cares about: auto-fix (accept) vs manual review (null).
+		self._action_accept = 0
+		self._action_null = 0
+		self._action_other = 0
 		output.write_text(_header(0), encoding="utf-8")
 
 		# 4. Writer thread + queue. The file is opened in append-binary mode and
 		#    kept open for the writer thread only; workers never touch it.
-		self._queue: "queue.Queue[Any]" = queue.Queue()
+		self._queue: queue.Queue[Any] = queue.Queue()
 		self._fh = open(output, "a", encoding="utf-8")
 		self._write_lock = threading.Lock()  # guards _fh between writer + finish()
 		self._writer_thread = threading.Thread(target=self._loop, name="review-writer", daemon=True)
@@ -124,6 +114,16 @@ class ReviewWriter:
 		by ``_process_book``. Cheap; safe to call from any worker thread.
 		"""
 		self._queue.put(result)
+
+	def keep_uuids(self) -> set:
+		"""Uuids of prior entries the user marked ``action: keep``.
+
+		The caller (analyze) passes this set to ``run_pipeline(skip_uuids=...)``
+		so kept books are not re-processed; their review.yaml entry is carried
+		over verbatim by :meth:`finish`. Read from the already-loaded prior map,
+		so no extra I/O.
+		"""
+		return {u for u, e in self._prior.items() if e.get("action") == "keep"}
 
 	# ------------------------------------------------------------------
 	# Writer thread
@@ -145,7 +145,7 @@ class ReviewWriter:
 				self._queue.task_done()
 
 	def _handle(self, result: tuple) -> None:
-		"""Apply/auto-apply/append one book result."""
+		"""Append one book result to review.yaml (prior user decisions preserved)."""
 		meta, diag, verification = result[0], result[1], result[2]
 		enriched = result[3] if len(result) > 3 else None
 		extracted = verification.extracted if verification else None
@@ -157,35 +157,35 @@ class ReviewWriter:
 		if not include:
 			return
 
-		bid = meta.calibre_id
+		bid = meta.uuid
 		prior_entry = self._prior.get(bid)
 
 		# Respect a prior user decision: if they already set action, keep the
-		# prior entry verbatim (refresh current) and don't re-apply/append-new.
+		# prior entry verbatim (refresh current AND path) and append it.
+		# Path is refreshed because organize may have relocated the folder since
+		# the prior run (uuid matched it, but apply still needs the live path to
+		# find the book on disk).
 		if prior_entry is not None and prior_entry.get("action") is not None:
-			self._apply_summary["skipped_user_decided"] += 1
+			self._skipped_user_decided += 1
 			entry = dict(prior_entry)
 			entry["current"] = _build_current(meta)
+			entry["path"] = _relative_path(meta, self.library_root)
 			self._append_entry(entry)
 			self._processed.add(bid)
 			return
 
-		# Auto-apply path: high-confidence proposal -> write metadata, skip review.
-		if self._min_rank > 0 and enriched is not None:
-			conf = self._confidence(enriched)
-			if self._confidence_rank.get(conf, 0) >= self._min_rank:
-				if self._apply_to_metadata(meta, enriched):
-					self._apply_summary["applied"] += 1
-					self._processed.add(bid)
-					return
-				# write failed -> fall through to review so the human can fix
-			elif enriched is not None:
-				self._apply_summary["skipped_low_conf"] += 1
-		elif self._min_rank > 0 and enriched is None:
-			self._apply_summary["skipped_no_proposal"] += 1
-
 		# Build the review entry, carrying prior user edits if any.
 		entry = self._build_entry(meta, diag, extracted, enriched, prior_entry)
+		# Tally the action this run decided (the prior-user-decided path above
+		# and the finish()-carryover loop are counted separately). This drives
+		# the summary's "auto-fix (accept) vs manual review (null)" breakdown.
+		a = entry.get("action")
+		if a == "accept":
+			self._action_accept += 1
+		elif a is None:
+			self._action_null += 1
+		else:
+			self._action_other += 1
 		self._append_entry(entry)
 		self._processed.add(bid)
 
@@ -193,22 +193,22 @@ class ReviewWriter:
 		"""Confidence label from an EnrichedMeta.source ('llm:high'|'embedded'|...).
 
 		Returns one of the three rank labels used by _confidence_rank:
-		'high' | 'medium' | 'low'.
+		'high' | 'medium' | 'low'. The label drives the action: accept pre-fill
+		in review.yaml (see _build_entry): high pre-fills unconditionally,
+		medium only when the proposal preserves the book's identity.
 
-		High-confidence sources (only these pre-fill action: accept without
-		--auto-apply, and only these are auto-applied with --auto-apply high):
+		High-confidence sources (pre-fill action: accept):
 		  - 'embedded'    — OPF metadata, deterministic
 		  - 'databazeknih' — authoritative CZ/SK source, fuzzy-match-gated
 		  - 'llm:high'    — paid reasoning model, verify_proposal-validated
 
-		Medium-confidence (pre-filled when the proposal preserves title/author;
-		auto-applied with --auto-apply-threshold medium):
+		Medium-confidence (pre-fill accept only when title/author are unchanged):
 		  - 'openlibrary' / 'google_books' — international, weaker CZ coverage
 		  - 'llm:flash' / 'llm:loop' / 'llm:medium' — Flash model that passed
 		    verify_proposal (title+author fuzzy-match the book's page text)
-		  - 'content'     — text_meta heuristic; useful but not auto-apply-safe
+		  - 'content'     — text_meta heuristic; identity must be preserved
 
-		Low (never pre-filled, never auto-applied at high threshold):
+		Low (never pre-filled):
 		  - 'llm:low'     — proposal that failed verify_proposal
 		  - unknown sources
 		"""
@@ -226,35 +226,9 @@ class ReviewWriter:
 			return "medium"
 		return "low"
 
-	def _apply_to_metadata(self, meta: Any, enriched: Any) -> bool:
-		"""Apply *enriched* to metadata files. Returns True on success.
-
-		Also downloads a replacement cover when the enricher has a cover_url
-		(the cover_url is not metadata — it's a one-time download to cover.jpg).
-		"""
-		try:
-			from .pipeline import _apply_enriched_to_meta
-			from .writers import write_book_meta
-
-			updated = _apply_enriched_to_meta(meta, enriched)
-			# Cover download: network side effect. Done before write_book_meta
-			# so the OPF <guide> cover reference is emitted for the new file.
-			if getattr(enriched, "cover_url", None):
-				from pathlib import Path
-
-				from .covers import download_cover
-
-				cover_path = Path(updated.path) / "cover.jpg"
-				download_cover(enriched.cover_url, cover_path)
-			write_book_meta(updated, dry_run=False, backup=True)
-			return True
-		except Exception:  # noqa: BLE001
-			log.exception("auto-apply write failed for %s; falling back to review", getattr(meta, "path", "?"))
-			return False
-
 	def _build_entry(self, meta: Any, diag: Any, extracted: Any, enriched: Any, prior_entry: dict | None) -> dict:
 		"""Build a review entry dict, carrying over prior user edits."""
-		proposed = _build_proposed(meta, extracted, enriched)
+		proposed = _build_proposed(meta, extracted, enriched, diag)
 		# AUTO_FIXABLE detectors may carry an explicit action/proposal on
 		# diag.proposed (e.g. C6 Word lock-file -> {"action": "delete"}).
 		# Pre-fill it so the user only has to confirm. Merge any extra keys
@@ -267,24 +241,27 @@ class ReviewWriter:
 				proposed = {**(proposed or {}), **extra}
 		# High-confidence enriched proposal (offline extraction, databazeknih,
 		# LLM high) -> pre-fill action: accept so the user can approve it in
-		# bulk via `bmf apply`. This only fires when --auto-apply is OFF (with
-		# --auto-apply on, high-confidence books are written directly and never
-		# reach review.yaml). Without a proposal there is nothing to accept.
-		# Threshold is fixed at 'high' (rank 3) regardless of the auto-apply
-		# threshold, because _min_rank is 0 when --auto-apply is off.
+		# bulk via `bmf apply`. Without a proposal there is nothing to accept.
+		# Threshold is fixed at 'high' (rank 3).
 		if action is None and enriched is not None and proposed:
 			conf = self._confidence(enriched)
-			if self._confidence_rank.get(conf, 0) >= self._confidence_rank["high"]:
+			if getattr(enriched, "identity_confirmed", False) or self._confidence_rank.get(conf, 0) >= self._confidence_rank["high"]:
+				# identity_confirmed: the book's identity was verified against its
+				# own content (ISBN agreement or title+author in the page text),
+				# independent of the online match — so the proposal is safe to
+				# auto-accept even when it changes title/author. We know the book.
 				action = "accept"
 			elif self._confidence_rank.get(conf, 0) >= self._confidence_rank["medium"]:
 				# Medium-confidence (llm:flash/loop, openlibrary, google_books,
-				# content): pre-fill accept ONLY when the proposal does not change
-				# title or author. When the LLM agrees with the existing title/
-				# author (both already passed verify_proposal against the book's
-				# text), the only risk is in the *added* metadata (isbn/year/
-				# genres/series) — which a human can bulk-verify far more easily
-				# than a title/author swap. Proposals that change title or author
-				# stay action=None so they get individual review.
+				# content): pre-fill accept ONLY when the proposal confirms the
+				# book's identity (leaves title/author unchanged). When the match
+				# AGREES with the existing title/author, the enrichment is about
+				# the right book, so its additive fields (isbn/year/genres) are
+				# safe to bulk-apply. When the proposal CHANGES title/author the
+				# match is on an unconfirmed identity — and because the query was
+				# built on those (possibly wrong) title/author values, we cannot
+				# trust the additive fields either: they may belong to the wrong
+				# book. So the whole proposal stays action=None for review.
 				if self._proposal_preserves_identity(proposed, meta):
 					action = "accept"
 		# Cover replacement: when the diagnosis is C11 (generated cover) or
@@ -292,10 +269,26 @@ class ReviewWriter:
 		# accept so the user can bulk-approve. The enricher already fuzzy-
 		# matched the book (databazeknih score >= 70), so the cover belongs to
 		# the right book. No title/author change risk — just a cover download.
-		if action is None and diag.category in ("C11", "MISSING_COVER") and proposed and proposed.get("cover_url"):
+		if action is None and diag.category in _COVER_CATEGORIES and proposed and proposed.get("cover_url"):
+			action = "accept"
+		# Cover-only entry with NO proposed change: the record is fine except
+		# for the cover, and extracting the book's own cover (the _apply_action
+		# fallback when there is no cover_url) carries zero identity risk. Pre-
+		# fill accept so the cover is recovered in bulk even when no enricher
+		# had a cover_url and identity was never confirmed. *proposed* must be
+		# empty so _apply_action applies only the cover recovery — never a
+		# title/author/isbn mutation on an unconfirmed record.
+		if action is None and diag.category in _COVER_CATEGORIES and not proposed:
+			action = "accept"
+		# identity_confirmed with no proposed change: identity was verified
+		# against the book's content, so the record is correct — accept as-is.
+		# The pipeline sets this for MISSING_* books where author+title were
+		# confirmed and nothing was recovered. `bmf apply` then prunes it.
+		if action is None and enriched is not None and getattr(enriched, "identity_confirmed", False) and not proposed:
 			action = "accept"
 		entry: dict[str, Any] = {
 			"id": meta.calibre_id,
+			"uuid": meta.uuid,
 			"path": _relative_path(meta, self.library_root),
 			"diagnosis": {
 				"category": diag.category,
@@ -306,6 +299,14 @@ class ReviewWriter:
 			"proposed": proposed,
 			"action": action,
 		}
+		# Expose the full diagnosis list when the book has additional problems,
+		# so apply and the reviewer see every issue (primary is already in
+		# `diagnosis` above). Single-issue books keep the legacy shape.
+		if diag.additional:
+			entry["diagnoses"] = [
+				{"category": d.category, "reason": d.reason, "confidence": d.confidence.value}
+				for d in all_diagnoses(diag)
+			]
 		if prior_entry is not None:
 			if prior_entry.get("edited"):
 				entry["edited"] = prior_entry["edited"]
@@ -355,8 +356,8 @@ class ReviewWriter:
 		After finish() the writer thread has stopped and the file is closed.
 		On success (no exception), the ``.bak`` is deleted unless *keep_backup*.
 
-		Returns a summary dict: {written, applied, skipped_*, remaining_count,
-		backup_path}.
+		Returns a summary dict: {written, skipped_user_decided,
+		remaining_count, backup_path}.
 		"""
 		# Tell the writer to drain and exit.
 		self._queue.put(_SENTINEL)
@@ -394,13 +395,14 @@ class ReviewWriter:
 
 		return {
 			"written": self._written,
-			"applied": self._apply_summary["applied"],
-			"skipped_low_conf": self._apply_summary["skipped_low_conf"],
-			"skipped_no_proposal": self._apply_summary["skipped_no_proposal"],
-			"skipped_user_decided": self._apply_summary["skipped_user_decided"],
-			"remaining_count": self._written - self._apply_summary["applied"],
+			"skipped_user_decided": self._skipped_user_decided,
+			"remaining_count": self._written,
 			"backup_path": backup_path,
-			"threshold": self.apply_threshold,
+			# Action breakdown of this run's freshly-decided entries. These are
+			# what the workflow cares about: accept → `bmf apply`, null → human.
+			"action_accept": self._action_accept,
+			"action_null": self._action_null,
+			"action_other": self._action_other,
 		}
 
 	def _rewrite_header_count(self, count: int) -> None:
@@ -419,7 +421,14 @@ class ReviewWriter:
 
 	@staticmethod
 	def _load_prior(bak: Path) -> dict[Any, dict]:
-		"""Load a backup review.yaml into {id: entry_dict}, best-effort."""
+		"""Load a backup review.yaml into {uuid: entry_dict}, best-effort.
+
+		Keyed by the book uuid (the stable identity that survives organize
+		moves), NOT calibre_id — so a book whose folder was relocated between
+		runs still keeps its prior user decision. Entries without a uuid (legacy
+		review.yaml from before uuid keying) cannot be matched and are skipped;
+		they are re-decided fresh once (clean break).
+		"""
 		import yaml
 
 		try:
@@ -438,6 +447,6 @@ class ReviewWriter:
 			else:
 				continue
 			for entry in items:
-				if isinstance(entry, dict) and entry.get("id") is not None:
-					prior[entry["id"]] = entry
+				if isinstance(entry, dict) and entry.get("uuid") is not None:
+					prior[entry["uuid"]] = entry
 		return prior

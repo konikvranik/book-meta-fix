@@ -24,7 +24,9 @@ dependencies = [
 # PDF metadata (pdfinfo/pdftotext are primary; pypdf is optional)
 pdf = ["pypdf>=4.0"]
 # LLM reconciliation via Z.AI (OpenAI-compatible client)
-llm = ["openai>=1.10"]
+# json-repair salvages invalid LLM JSON (unescaped quotes, control chars,
+# truncation) that the built-in sanitizer cannot recover.
+llm = ["openai>=1.10", "json-repair>=0.30"]
 dev = [
 	"pytest>=7.0",
 	"pytest-cov>=4.0",
@@ -43,7 +45,13 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B"]
-ignore = ["E501"]  # line length handled by formatter
+# E501: line length handled by formatter
+# W191/E101: project uses tabs for indentation (see .editorconfig); these
+# pycodestyle rules flag every tab-indented line, so they are baseline noise.
+ignore = ["E501", "W191", "E101"]
+
+[tool.ruff.format]
+indent-style = "tab"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

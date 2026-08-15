@@ -49,7 +49,7 @@ def _process(meta, *, verify_ok=False, strict_verify=True, verify_result=None):
 
 	patches = [
 		patch.object(pmod, "detect_fn", fake_detect),
-		patch.object(pmod, "_safe_extract", lambda m: None),
+		patch.object(pmod, "safe_extract", lambda m: None),
 	]
 	if verify_result is not None:
 		patches.append(patch.object(pmod, "verify", lambda m: verify_result))
@@ -150,7 +150,7 @@ class TestVerifyOkReclassify:
 class TestReclassifiedReusesExtracted:
 	def test_extracted_from_verify_is_not_re_extracted(self):
 		"""When an OK book is reclassified, the fix path must reuse the
-		ExtractedMeta already produced by verify(), not call _safe_extract again."""
+		ExtractedMeta already produced by verify(), not call safe_extract again."""
 		meta = _ok_book(6)
 		extracted = ExtractedMeta(title="Real", first_page_text="some text")
 		vr = Verification(result="MISMATCH", reason="mismatch", extracted=extracted)
@@ -169,13 +169,13 @@ class TestReclassifiedReusesExtracted:
 
 		with patch.object(pmod, "detect_fn", fake_detect), \
 			 patch.object(pmod, "verify", lambda m: vr), \
-			 patch.object(pmod, "_safe_extract", counting_safe_extract):
+			 patch.object(pmod, "safe_extract", counting_safe_extract):
 			result = _process_book(
 				meta, enricher=None, skip_enrich=True, skip_verify=False,
 				llm_provider=None, llm_categories=("ALL",), stats=stats,
 				verify_ok=True, strict_verify=True,
 			)
-		# _safe_extract must NOT have been called: verification.extracted reused.
+		# safe_extract must NOT have been called: verification.extracted reused.
 		assert safe_extract_calls["n"] == 0
 		_, diag, _verification, _enriched = result
 		assert diag.verdict == Verdict.NEEDS_REVIEW

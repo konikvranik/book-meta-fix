@@ -14,7 +14,15 @@ accent-stripped), so only genuine filename-as-title cases fire.
 """
 from __future__ import annotations
 
-from book_meta_fix.detectors import detect, rule_c2_filename_title, rule_c9_anonym
+from book_meta_fix.detectors import (
+	_is_anonym_spelling,
+	all_diagnoses,
+	detect,
+	detect_all,
+	rule_c2_filename_title,
+	rule_c9_anonym,
+	rule_c12_bad_author,
+)
 from book_meta_fix.models import BookMeta
 
 
@@ -188,3 +196,185 @@ class TestC2FilenameTitle:
 		d = rule_c2_filename_title(m)
 		assert d is not None
 		assert d.category == "C2"
+
+
+class TestC12BadAuthor:
+	"""rule_c12_bad_author catches author-field slug/artefact pollution that
+	organize() faithfully turned into author-folder names (e.g. 'anthony
+	burgess', '_ antologie', 'jsvoboda'). These were previously invisible to
+	detection and left sitting in the library root."""
+
+	def test_all_lowercase_author_fires_c12(self):
+		"""A real person name always has a capital; all-lowercase is slug pollution."""
+		m = _meta(author_folder="anthony burgess", authors=["anthony burgess"])
+		d = rule_c12_bad_author(m)
+		assert d is not None
+		assert d.category == "C12"
+		assert d.verdict.value == "NEEDS_REVIEW"
+		assert "lowercase" in d.reason
+
+	def test_glued_lowercase_author_fires_c12(self):
+		"""'jsvoboda' — glued, all-lowercase. Filename slug artefact."""
+		m = _meta(author_folder="jsvoboda", authors=["jsvoboda"])
+		d = rule_c12_bad_author(m)
+		assert d is not None
+		assert d.category == "C12"
+
+	def test_underscore_prefix_fires_c12(self):
+		"""Leading underscore is a slug artefact ('_ antologie')."""
+		m = _meta(author_folder="_ antologie", authors=["* antologie"])
+		d = rule_c12_bad_author(m)
+		assert d is not None
+		assert d.category == "C12"
+		assert "prefix" in d.reason
+
+	def test_asterisk_prefix_fires_c12(self):
+		"""Leading asterisk is a slug artefact."""
+		m = _meta(author_folder="* edice", authors=["* edice"])
+		d = rule_c12_bad_author(m)
+		assert d is not None
+		assert d.category == "C12"
+
+	def test_proper_name_not_c12(self):
+		"""A correctly capitalized name must not fire C12."""
+		m = _meta(author_folder="Karel Čapek", authors=["Karel Čapek"])
+		assert rule_c12_bad_author(m) is None
+
+	def test_foreign_capitalized_not_c12(self):
+		"""Foreign names with capitals are fine."""
+		m = _meta(author_folder="Agatha Christie", authors=["Agatha Christie"])
+		assert rule_c12_bad_author(m) is None
+
+	def test_anonym_not_swallowed_by_c12(self):
+		"""Anonym spellings must reach C9 (which knows the Bible/Koran whitelist),
+		not get caught here as 'all-lowercase'."""
+		m = _meta(author_folder="anonym", authors=["anonym"])
+		# C12 skips anonym; full detect() routes it to C9.
+		assert rule_c12_bad_author(m) is None
+		d = detect(m)
+		assert d.category == "C9"
+
+	def test_detect_routes_bad_author_to_c12(self):
+		"""End-to-end: detect() returns C12 for an all-lowercase author."""
+		m = _meta(author_folder="anthony burgess", authors=["anthony burgess"])
+		d = detect(m)
+		assert d.category == "C12"
+
+
+class TestAnonymSpellings:
+	"""_is_anonym_spelling and the C9 detector must recognize the full range
+	of anonym spellings found in the library ('Neznamy', 'neznámý - neuveden')
+	AND defensible variants not yet seen ('autor neuveden', 'Neznámý autor',
+	'enznámý' typo) — while leaving real-name phrases like 'Neznámý vojín'
+	(Unknown Soldier) alone."""
+
+	def test_basic_spellings(self):
+		"""The canonical spellings are all recognized."""
+		for s in ("anonym", "anonymní", "anonymous", "neznamy", "neznámý",
+		          "neuveden", "unknown", ""):
+			assert _is_anonym_spelling(s), f"{s!r} should be anonym"
+
+	def test_compound_phrase_is_anonym(self):
+		"""'neznámý - neuveden' — compound of two anonym spellings joined by
+		a separator. Found in the real library (Bible - Nový zákon)."""
+		assert _is_anonym_spelling("neznámý - neuveden") is True
+
+	def test_compound_with_autor_is_anonym(self):
+		"""'autor neuveden' and 'Neznámý autor' — 'autor' is a neutral token
+		that, combined with an anonym spelling, denotes anonym."""
+		assert _is_anonym_spelling("autor neuveden") is True
+		assert _is_anonym_spelling("Neznámý autor") is True
+
+	def test_enznamy_typo_is_anonym(self):
+		"""'enznámý' is a common typo of 'neznámý' (transposed first letters)."""
+		assert _is_anonym_spelling("enznámý") is True
+
+	def test_unknown_soldier_not_anonym(self):
+		"""'Neznámý vojín' (Unknown Soldier) is NOT anonym — 'vojín' is a real
+		noun. This is the key false-positive the user warned about."""
+		assert _is_anonym_spelling("neznámý vojín") is False
+		assert _is_anonym_spelling("Neznámý vojín") is False
+
+	def test_bare_autor_is_not_anonym(self):
+		"""The bare word 'autor' is a placeholder, not an anonym spelling —
+		it must be caught by C5 (_PLACEHOLDER_RE), not reach C9 via this path."""
+		assert _is_anonym_spelling("autor") is False
+
+	def test_real_author_not_anonym(self):
+		"""A real person name is never an anonym spelling."""
+		assert _is_anonym_spelling("Karel Čapek") is False
+		assert _is_anonym_spelling("Agatha Christie") is False
+
+	def test_none_not_anonym(self):
+		"""Defensive: None input returns False, not an exception."""
+		assert _is_anonym_spelling(None) is False
+
+	def test_detect_routes_compound_anonym_to_c9(self):
+		"""End-to-end: detect() returns C9 for a 'autor neuveden' author."""
+		m = _meta(author_folder="autor neuveden", authors=["autor neuveden"])
+		d = detect(m)
+		assert d.category == "C9"
+
+	def test_bible_in_neznamy_neuveden_is_ok(self):
+		"""Regression for the real library: Bible with author 'neznámý - neuveden'
+		is a genuine anonymous work and must be C9 verdict OK (whitelisted), not
+		C12 (all-lowercase) or C9 NEEDS_REVIEW."""
+		m = _meta(
+			author_folder="neznámý - neuveden",
+			authors=["neznámý - neuveden"],
+			title="Bible - Nový zákon",
+		)
+		d = detect(m)
+		assert d.category == "C9"
+		assert d.verdict.value == "OK"
+
+
+class TestDetectAll:
+	"""detect_all surfaces every matching rule, not just the first. detect()
+	returns the first match as primary with the rest in .additional."""
+
+	def test_multiple_enrichment_diagnoses(self):
+		"""A clean book missing ISBN/year/cover matches several enrichment rules
+		at once — detect_all returns all of them."""
+		# Default _meta: clean title/author, no isbn/year, no cover.jpg on disk.
+		m = _meta()
+		diags = detect_all(m)
+		cats = [d.category for d in diags]
+		# All three enrichment problems are present.
+		assert "MISSING_ISBN" in cats
+		assert "MISSING_YEAR" in cats
+		assert "MISSING_COVER" in cats
+
+	def test_detect_carries_additional(self):
+		"""detect() primary is the first match; the rest land in .additional."""
+		m = _meta()
+		diags = detect_all(m)
+		d = detect(m)
+		assert d.category == diags[0].category
+		assert {a.category for a in d.additional} == {x.category for x in diags[1:]}
+
+	def test_all_diagnoses_flattens(self):
+		m = _meta()
+		d = detect(m)
+		assert [x.category for x in all_diagnoses(d)] == [d.category, *(a.category for a in d.additional)]
+
+	def test_all_diagnoses_none_safe(self):
+		"""Callers (e.g. _build_proposed) may pass diag=None — must not raise."""
+		assert all_diagnoses(None) == []
+
+	def test_clean_book_has_no_enrichment_or_cover_diagnoses(self, tmp_path):
+		"""A book with isbn, year and a real (non-placeholder) cover triggers no
+		enrichment or cover rule."""
+		from PIL import Image
+
+		# A colour-rich gradient (not a solid fill) so analyze_cover does NOT
+		# classify it as a generated placeholder.
+		img = Image.new("RGB", (300, 450))
+		px = img.load()
+		for y in range(450):
+			for x in range(300):
+				px[x, y] = ((x + y) % 256, (x * 2) % 256, (y * 2) % 256)
+		img.save(tmp_path / "cover.jpg")
+		m = _meta(path=str(tmp_path), isbn="9788020403114", year=2001)
+		cats = {d.category for d in detect_all(m)}
+		assert cats.isdisjoint({"MISSING_ISBN", "MISSING_YEAR", "MISSING_COVER", "C11"})

@@ -1,13 +1,15 @@
 """Command-line interface for book-meta-fix.
 
-Subcommands implemented so far:
-	bmf scan    — traverse the library, build cache, print summary stats
-
-Upcoming (placeholders will be filled in later phases):
-	bmf detect  — run C1–C10 detector rules
-	bmf verify  — verify OK books against content
-	bmf enrich  — online metadata lookup
-	bmf apply   — apply changes from a review.yaml
+Subcommands:
+	bmf scan       — traverse the library, build cache, print summary stats
+	bmf report     — run C1–C10 detector rules, show category counts + samples
+	bmf analyze    — full pipeline (detect + extract + verify + enrich + LLM)
+	                 and generate a review.yaml for NEEDS_REVIEW books
+	bmf apply      — apply approved changes from a review.yaml
+	bmf organize   — move OK books to a clean path, broken books to needfix/
+	bmf epubgen    — generate missing .epub files from other formats
+	bmf crosscheck — verify all formats in a folder are the same book;
+	                 quarantine format files whose content differs from metadata
 """
 from __future__ import annotations
 
@@ -52,22 +54,39 @@ def main(verbose: bool) -> None:
 
 
 @main.command()
-@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help="Library root (default: $BMF_LIBRARY or /mnt/share_nfs/Shared eBooks)")
+@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help="Library root (default: $BMF_LIBRARY or ~/Books)")
 @click.option("--no-cache", is_flag=True, help="Disable SQLite cache (force full re-parse)")
 @click.option("--limit", type=int, default=None, help="Process only the first N books (for testing)")
 def scan(library: Path | None, no_cache: bool, limit: int | None) -> None:
 	"""Scan the library and print summary statistics."""
+	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
+
 	cfg = Config.from_env()
 	if library is not None:
 		cfg.library = library
 
-	console.print(f"[bold]Scanning[/bold] {cfg.library}")
+	console.print(f"[bold]Scanning[/bold] [cyan]{cfg.library}[/cyan]", highlight=False)
 
 	cache: Cache | None = None
 	if not no_cache:
 		cache = Cache(cfg.cache_db)
 
-	books = scan_library(cfg.library, cache=cache, use_cache=not no_cache)
+	# scan_library walks the tree once to learn the folder count, then reports
+	# (done, total) per folder — so the bar starts indeterminate and gains a
+	# total + ETA on the first callback (no separate pre-count walk needed).
+	with Progress(
+		SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+		BarColumn(complete_style="cyan", finished_style="cyan", pulse_style="cyan"), TextColumn("{task.completed}/{task.total}"),
+		TimeRemainingColumn(), console=console, transient=True,
+	) as progress:
+		task_id = progress.add_task("Scanning", total=None)
+
+		def _cb(done: int, total: int) -> None:
+			if progress.tasks[0].total is None and total:
+				progress.update(task_id, total=total)
+			progress.update(task_id, completed=done)
+
+		books = scan_library(cfg.library, cache=cache, use_cache=not no_cache, progress_callback=_cb)
 
 	if limit is not None:
 		books = books[:limit]
@@ -88,9 +107,19 @@ def scan(library: Path | None, no_cache: bool, limit: int | None) -> None:
 @click.option("--limit", type=int, default=None, help="Process only the first N books (for testing)")
 @click.option("--category", default=None, help="Show only books in this category (C1..C10, MISSING_ISBN, ...)")
 @click.option("--samples", type=int, default=3, help="Number of sample books to show per category")
-def detect(library: Path | None, no_cache: bool, limit: int | None, category: str | None, samples: int) -> None:
-	"""Run detector rules and print category counts + samples."""
-	from .detectors import detect as detect_fn
+@click.option("--accept-missing/--no-accept-missing", "accept_missing", default=True, help="Apply the identity gate: a MISSING_ISBN/YEAR/COVER book whose author+title are confirmed against its content counts as OK (not broken). Default on, consistent with organize/analyze. --no-accept-missing keeps the pure detector verdict (no content reads; the historic fast report).")
+@click.option("--verify-ok", "verify_ok", is_flag=True, help="Audit: also verify books the detectors marked OK against their content. Reads every OK book's file (slower). A MISMATCH (or UNCERTAIN, see --no-strict-verify) is then counted as broken.")
+@click.option("--no-strict-verify", "no_strict_verify", is_flag=True, help="With --verify-ok: only treat a clear MISMATCH as broken. By default UNCERTAIN is too.")
+def report(library: Path | None, no_cache: bool, limit: int | None, category: str | None, samples: int, accept_missing: bool, verify_ok: bool, no_strict_verify: bool) -> None:
+	"""Run detector rules and print category counts + samples.
+
+	Classification is unified with organize/epubgen: an identified MISSING_*
+	book (author+title confirmed against the content) is counted as OK, so the
+	reported broken tally matches what `bmf organize` would route to needfix/.
+	"""
+	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
+
+	from .classify import classify as classify_fn
 
 	cfg = Config.from_env()
 	if library is not None:
@@ -100,19 +129,51 @@ def detect(library: Path | None, no_cache: bool, limit: int | None, category: st
 	if not no_cache:
 		cache = Cache(cfg.cache_db)
 
-	books = scan_library(cfg.library, cache=cache, use_cache=not no_cache)
+	# Reading metadata for the whole library is I/O-heavy (especially on NFS);
+	# wrap it so there's no silent gap before the detect pass.
+	with Progress(
+		SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+		BarColumn(complete_style="magenta", finished_style="magenta", pulse_style="magenta"), TextColumn("{task.completed}/{task.total}"),
+		TimeRemainingColumn(), console=console, transient=True,
+	) as progress:
+		task_id = progress.add_task("Reading library", total=None)
+
+		def _scan_cb(done: int, total: int) -> None:
+			if progress.tasks[0].total is None and total:
+				progress.update(task_id, total=total)
+			progress.update(task_id, completed=done)
+
+		books = scan_library(cfg.library, cache=cache, use_cache=not no_cache, progress_callback=_scan_cb)
 	if limit is not None:
 		books = books[:limit]
 	if not books:
 		console.print("[red]No books found.[/red]")
 		sys.exit(1)
 
-	# Run detectors
-	results = [(b, detect_fn(b)) for b in books]
+	# Classify each book via the shared classifier (same rules as organize/analyze).
+	results = []
+	identified = 0
+	with Progress(
+		SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+		BarColumn(complete_style="magenta", finished_style="magenta", pulse_style="magenta"), TextColumn("{task.completed}/{task.total}"),
+		TimeRemainingColumn(), console=console, transient=True,
+	) as progress:
+		task_id = progress.add_task("Classifying", total=len(books))
+		for i, b in enumerate(books, start=1):
+			c = classify_fn(b, accept_missing=accept_missing, verify_ok=verify_ok, strict_verify=not no_strict_verify)
+			if c.identified:
+				identified += 1
+			results.append((b, c.diag))
+			progress.update(task_id, completed=i)
 	if cache is not None:
 		cache.close()
 
 	_print_detect_summary(results, category, samples)
+	if accept_missing and identified:
+		console.print(
+			f"[dim]  {identified} book(s) identified (accepted): MISSING_* with author+title "
+			"confirmed against content — these route to OK, not needfix.[/dim]"
+		)
 
 
 @main.command()
@@ -121,9 +182,11 @@ def detect(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--limit", type=int, default=None, help="Process only the first N books (for testing)")
 @click.option("--skip-enrich", is_flag=True, default=True, help="Skip online enrichment (offline mode)")
 @click.option("--databazeknih", "use_databazeknih", is_flag=True, help="Enable databazeknih.cz lookup (CZ/SK genres + metadata). Implies --no-skip-enrich.")
+@click.option("--legie", "use_legie", is_flag=True, help="Enable legie.info lookup (CZ/SK sci-fi/fantasy — short stories & series databazeknih misses). Implies --no-skip-enrich.")
 @click.option("--skip-verify", is_flag=True, help="Skip content verification")
 @click.option("--verify-ok", "verify_ok", is_flag=True, help="Audit: also verify books the detectors marked OK against their content. Reads every OK book's file (slower). A MISMATCH reclassifies it to NEEDS_REVIEW and seeks a fix (enrichment + LLM). Use periodically to catch corruption the structural detectors miss.")
 @click.option("--no-strict-verify", "no_strict_verify", is_flag=True, help="With --verify-ok: only reclassify a clear MISMATCH (fuzzy title < 0.5). By default (without this flag) UNCERTAIN (0.5–0.8) is also reclassified.")
+@click.option("--accept-missing/--no-accept-missing", "accept_missing", default=True, help="Auto-accept MISSING_ISBN/YEAR/COVER books whose author+title were confirmed against the book's content (pre-filled action: accept in review.yaml; pruned by `bmf apply`, safe no-op). Default on. Use --no-accept-missing to keep them for manual review.")
 @click.option("--output", "-o", type=click.Path(path_type=Path), default=None, help="Output review file (default: review.yaml)")
 @click.option("--llm", "use_llm", is_flag=True, help="Enable LLM reconciliation (needs ZAI_API_KEY or BMF_LLM_MOCK=1)")
 @click.option("--llm-categories", default="ALL", help="Comma-separated categories to send to LLM, or 'ALL' (default). ALL = every category except C9 (legitimate anonyms like the Bible, where an LLM-invented author would be wrong). Each book is one LLM request that returns all fields at once, so the cost is per-book, not per-category.")
@@ -135,13 +198,12 @@ def detect(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--no-llm-loop", "no_llm_loop", is_flag=True, help="Disable the self-correction loop. Default: loop on — try the free Flash model first (with verify feedback), then the paid final model as fallback. With this flag, a single LLM call (the configured --llm-model) is used as before.")
 @click.option("--llm-flash-model", "llm_flash_model", default=None, help="Free first-attempt model for the loop (default glm-4.7-flash — best CZ/SK quality among free models). Alternatives: glm-4.5-flash, glm-4.5-air.")
 @click.option("--llm-final-model", "llm_final_model", default=None, help="Paid high-quality fallback for the loop (default glm-5.2). Used when Flash fails verify or is rate-limited.")
-@click.option("--llm-burst", "llm_burst", type=float, default=None, help="Leaky-bucket burst capacity: how many LLM calls may fire in a short burst before the rate smoother engages (default 5). Lower (e.g. 1) for stricter matching of Z.AI's free-tier RPM; higher if you have a paid plan.")
-@click.option("--auto-apply", "auto_apply", is_flag=True, help="Auto-apply high-confidence LLM proposals directly (with snapshot + .bak). Lower-confidence go to review.yaml.")
-@click.option("--auto-apply-threshold", default="high", help="Confidence threshold for auto-apply: high (default) | medium | low.")
-@click.option("--snapshot-dir", default=None, help="Where to write the metadata tar.gz snapshot before auto-apply (default: CWD).")
-def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, skip_verify: bool, verify_ok: bool, no_strict_verify: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int, llm_min_interval: float | None, llm_model: str | None, llm_reasoning_effort: str | None, llm_thinking: str | None, no_llm_loop: bool, llm_flash_model: str | None, llm_final_model: str | None, llm_burst: float | None, auto_apply: bool, auto_apply_threshold: str, snapshot_dir: Path | None) -> None:
+@click.option("--llm-burst", "llm_burst", type=float, default=None, help="Leaky-bucket burst capacity: how many LLM calls may start inside one interval (default 1 = pure even drip, no bunching — one call every --llm-min-interval seconds). This is a count-per-time limiter, not a concurrency cap. Raise only with confirmed rate headroom; a burst >1 fires multiple calls in the same second and trips Z.AI's dynamic RPM limit (429).")
+@click.option("--llm-rate-limit-base", "llm_rate_limit_base", type=float, default=None, help="Base seconds of the global cooldown applied when a 429 is seen (default 5). When ANY worker hits a 429, ALL workers pause this long; the cooldown escalates 5/10/20/... with consecutive 429s, honours the server Retry-After when longer, and is capped by --llm-rate-limit-max. Higher = safer but slower; lower = more 429 risk.")
+@click.option("--llm-rate-limit-max", "llm_rate_limit_max", type=float, default=None, help="Cap (seconds) on the escalating 429 cooldown (default 60). Prevents a sustained outage from parking workers indefinitely.")
+def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, use_legie: bool, skip_verify: bool, verify_ok: bool, no_strict_verify: bool, accept_missing: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int, llm_min_interval: float | None, llm_model: str | None, llm_reasoning_effort: str | None, llm_thinking: str | None, no_llm_loop: bool, llm_flash_model: str | None, llm_final_model: str | None, llm_burst: float | None, llm_rate_limit_base: float | None, llm_rate_limit_max: float | None) -> None:
 	"""Run full pipeline and generate a review.yaml for NEEDS_REVIEW books."""
-	from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn
+	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 
 	from .enrichers import Enricher
 	from .llm import get_provider
@@ -152,19 +214,21 @@ def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich:
 		cfg.library = library
 	out = output or cfg.review_file
 
-	if auto_apply and not use_llm:
-		console.print("[yellow]--auto-apply requires --llm (nothing to apply without LLM). Enabling --llm.[/yellow]")
-		use_llm = True
-
 	# --databazeknih turns enrichment on (and opts the CZ/SK scraper in).
 	if use_databazeknih:
 		skip_enrich = False
 		cfg.databazeknih_enabled = True
+	# --legie opts the CZ/SK sci-fi/fantasy scraper in (also needs enrichment).
+	if use_legie:
+		skip_enrich = False
+		cfg.legie_enabled = True
 
-	console.print(f"[bold]Running pipeline[/bold] on {cfg.library} ({workers} workers)")
+	console.print(f"[bold]Running pipeline[/bold] on [cyan]{cfg.library}[/cyan] ({workers} workers)", highlight=False)
 	if cfg.databazeknih_enabled:
 		console.print("  [cyan]databazeknih.cz[/cyan] lookup enabled (genres + metadata)")
 		console.print("  [cyan]cover replacement[/cyan] enabled (C11 generated / MISSING_COVER → databazeknih cover_url)")
+	if cfg.legie_enabled:
+		console.print("  [cyan]legie.info[/cyan] lookup enabled (sci-fi/fantasy — short stories & series)")
 	if verify_ok:
 		strict = not no_strict_verify
 		console.print(f"  [cyan]--verify-ok[/cyan] audit: OK books checked against content (strict={strict})")
@@ -178,8 +242,10 @@ def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich:
 		enricher = Enricher(
 			cache_db=cfg.cache_db,
 			databazeknih_enabled=cfg.databazeknih_enabled,
+			legie_enabled=cfg.legie_enabled,
 			openlibrary_enabled=cfg.openlibrary_enabled,
 			google_books_enabled=cfg.google_books_enabled,
+			negative_ttl_sec=cfg.enrich_negative_ttl_sec,
 		)
 
 	# LLM provider
@@ -201,6 +267,10 @@ def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich:
 			cfg.zai_final_model = llm_final_model
 		if llm_burst is not None:
 			cfg.llm_burst = llm_burst
+		if llm_rate_limit_base is not None:
+			cfg.llm_rate_limit_base = llm_rate_limit_base
+		if llm_rate_limit_max is not None:
+			cfg.llm_rate_limit_max = llm_rate_limit_max
 		llm_provider = get_provider(cfg)
 		if llm_provider is None:
 			console.print("[yellow]--llm given but no provider available (set ZAI_API_KEY or BMF_LLM_MOCK=1)[/yellow]")
@@ -224,27 +294,16 @@ def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich:
 	# Streaming review writer: appends each processed book to review.yaml as it
 	# completes (Unix-pipe style). The original is moved to .bak on
 	# construction so user decisions are preserved; finish() carries over any
-	# unprocessed prior entries and deletes .bak on success. Auto-apply (if
-	# --auto-apply) happens inline: high-confidence proposals are written to
-	# metadata files directly and omitted from review.yaml.
+	# unprocessed prior entries and deletes .bak on success.
 	from .review_writer import ReviewWriter
-	from .writers import snapshot_metadata
 
-	# Safety snapshot before any metadata writes (auto-apply path).
-	if auto_apply:
-		snap_path = snapshot_metadata(cfg.library, output=Path(snapshot_dir) / f"metadata_snapshot.tar.gz" if snapshot_dir else None)
-		console.print(f"[dim]Snapshot: {snap_path}[/dim]")
-
-	review_writer = ReviewWriter(
-		out, library_root=cfg.library,
-		apply_threshold=auto_apply_threshold if auto_apply else None,
-	)
+	review_writer = ReviewWriter(out, library_root=cfg.library)
 
 	# Progress bar (updated from worker threads via callback)
 	progress = Progress(
 		SpinnerColumn(),
 		TextColumn("[progress.description]{task.description}"),
-		BarColumn(),
+		BarColumn(complete_style="blue", finished_style="blue", pulse_style="blue"),
 		TextColumn("{task.completed}/{task.total}"),
 		TimeRemainingColumn(),
 		console=console,
@@ -273,9 +332,11 @@ def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich:
 			workers=workers,
 			progress_callback=_cb,
 			review_writer=review_writer,
+			skip_uuids=review_writer.keep_uuids(),
 			verify_ok=verify_ok,
 			strict_verify=not no_strict_verify,
 			llm_loop=cfg.llm_loop,
+			accept_missing_if_identified=accept_missing,
 			stats=pipe_stats,
 		)
 	except KeyboardInterrupt:
@@ -297,36 +358,32 @@ def report(library: Path | None, no_cache: bool, limit: int | None, skip_enrich:
 			summary = review_writer.finish(keep_backup=interrupted)
 		except Exception as e:  # noqa: BLE001
 			console.print(f"[red]review writer finalize failed: {e}[/red]")
-			summary = {"written": 0, "applied": 0, "skipped_low_conf": 0, "skipped_no_proposal": 0, "skipped_user_decided": 0, "remaining_count": 0, "backup_path": None, "threshold": None}
+			summary = {"written": 0, "skipped_user_decided": 0, "remaining_count": 0, "backup_path": None, "action_accept": 0, "action_null": 0, "action_other": 0}
 
-	# Print pipeline summary (from the results list — still populated for stats)
-	_print_pipeline_summary(results, pipe_stats)
-
-	# Streaming auto-apply / review summary
-	console.print()
-	t = Table(title="Review & auto-apply results", show_header=True, header_style="bold cyan")
-	t.add_column("Metric", style="bold")
-	t.add_column("Count", justify="right")
-	if auto_apply:
-		t.add_row("Auto-apply threshold", auto_apply_threshold)
-		t.add_row("Applied (written to metadata)", str(summary["applied"]))
-		t.add_row("Skipped (low confidence)", str(summary["skipped_low_conf"]))
-		t.add_row("Skipped (no proposal)", str(summary["skipped_no_proposal"]))
-	t.add_row("Skipped (user already decided)", str(summary["skipped_user_decided"]))
-	t.add_row("Written to review", str(summary["written"]))
-	console.print(t)
+	# Print pipeline summary (action breakdown leads; results list still drives stats).
+	_print_pipeline_summary(results, pipe_stats, review_summary=summary)
 	if summary.get("backup_path"):
-		console.print(f"[yellow]Backup kept at {summary['backup_path']} (run did not finish cleanly)[/yellow]")
+		console.print(f"[yellow]Backup kept at {summary['backup_path']} (run did not finish cleanly)[/yellow]", highlight=False)
 	console.print()
-	console.print(f"[bold green]Wrote {summary['written']} review entries to {out}[/bold green]")
-	console.print(f"Edit the file, set `action` for each entry, then run: [bold]bmf apply {out}[/bold]")
+	console.print(f"[bold green]Wrote {summary['written']} review entries to {out}[/bold green]", highlight=False)
+	console.print(f"Edit the file, set `action` for each entry, then run: [bold]bmf apply {out}[/bold]", highlight=False)
 
 
-def _print_pipeline_summary(results, stats: dict | None = None) -> None:  # noqa: ANN001
-	"""Print a summary table of the pipeline's verdicts and fix sources.
+def _print_pipeline_summary(results, stats: dict | None = None, review_summary: dict | None = None) -> None:  # noqa: ANN001
+	"""Print a summary of what the pipeline produced.
+
+	Leads with the **actionable** breakdown the workflow cares about —
+	OK (done) vs auto-fix (pre-filled ``accept`` → ``bmf apply``) vs manual
+	review (``action: null``) — rather than the detector's pre-fix verdicts.
+	The verdict (OK / AUTO_FIXABLE / NEEDS_REVIEW) is decided BEFORE the
+	pipeline tries to fix anything, so it does not predict what will actually
+	be applied: a structurally-broken book can still be auto-accepted once a
+	confident, content-verified fix is found, and a merely-incomplete book can
+	stall at ``null`` when no source has the missing data. The ``action``
+	field is the post-fix truth, so that is what we surface.
 
 	*stats* (from run_pipeline) drives the fix-source breakdown table; when
-	None (e.g. when run_pipeline wasn't used), only the verdict/verification
+	None (e.g. when run_pipeline wasn't used), only the action/verification
 	tables are printed.
 	"""
 	from collections import Counter
@@ -341,13 +398,30 @@ def _print_pipeline_summary(results, stats: dict | None = None) -> None:  # noqa
 			verify_counter["(skipped)"] += 1
 
 	total = len(results)
+	ok = verdict_counter.get("OK", 0) + verdict_counter.get("VERIFIED", 0)
+	# Books the detector flagged but the pipeline is confident about: written
+	# to review with action: accept (apply will fix them). And the opposite —
+	# written with action: null (a human must decide).
+	acc = (review_summary or {}).get("action_accept", 0)
+	nul = (review_summary or {}).get("action_null", 0)
+	oth = (review_summary or {}).get("action_other", 0)
+	skipped = (review_summary or {}).get("skipped_user_decided", 0)
+	written = (review_summary or {}).get("written", 0)
+
 	console.print()
 	t = Table(title="Pipeline summary", show_header=True, header_style="bold cyan")
-	t.add_column("Verdict", style="bold")
+	t.add_column("Bucket", style="bold")
 	t.add_column("Count", justify="right")
-	t.add_column("%", justify="right")
-	for v, n in verdict_counter.most_common():
-		t.add_row(v, str(n), f"{n / total * 100:.1f}%")
+	t.add_row("OK (already correct — nothing to do)", str(ok), style="green")
+	t.add_row("Auto-fix (action: accept → `bmf apply`)", str(acc), style="bold green")
+	t.add_row("Manual review (action: null)", str(nul), style="yellow")
+	if oth:
+		t.add_row("Other action (swap/edit/delete)", str(oth))
+	if skipped:
+		t.add_row("Skipped (already decided earlier)", str(skipped), style="dim")
+	t.add_section()
+	t.add_row("Written to review.yaml", str(written))
+	t.add_row("Total books", str(total), style="bold")
 	console.print(t)
 
 	t = Table(title="Verification results", show_header=True, header_style="bold cyan")
@@ -380,6 +454,7 @@ def _print_fix_source_summary(stats: dict) -> None:
 		("  └ embedded OPF", stats.get("offline_embedded", 0), True),
 		("Online fixes", online_total, False),
 		("  └ databazeknih.cz", stats.get("online_databazeknih", 0), True),
+		("  └ legie.info", stats.get("online_legie", 0), True),
 		("  └ openlibrary.org", stats.get("online_openlibrary", 0), True),
 		("  └ Google Books", stats.get("online_google_books", 0), True),
 		("LLM fixes", llm_total, False),
@@ -408,6 +483,7 @@ def _print_fix_source_summary(stats: dict) -> None:
 	t.add_section()
 	t.add_row("Proposed (any source)", str(proposed_total), style="bold")
 	t.add_row("Unfixed (no proposal found)", str(unfixed), style="yellow")
+	t.add_row("Accepted (identity OK, field missing)", str(stats.get("accepted_missing", 0)), style="green")
 	console.print(t)
 
 	# LLM cost detail: how many books the LLM was asked about vs. how many it
@@ -447,24 +523,51 @@ def _print_fix_source_summary(stats: dict) -> None:
 @click.option("--apply", "do_apply", is_flag=True, help="Actually write changes (default: dry-run)")
 def apply(review_file: Path, library: Path | None, do_apply: bool) -> None:
 	"""Apply approved changes from a (human-edited) review.yaml."""
+	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
+
 	from .pipeline import apply_review
 
 	cfg = Config.from_env()
 	if library is not None:
 		cfg.library = library
 
-	console.print(f"[bold]Applying[/bold] {review_file} ({'WRITE' if do_apply else 'DRY-RUN'})")
-	summary = apply_review(review_file, cfg.library, dry_run=not do_apply)
+	console.print(f"[bold]Applying[/bold] {review_file} ({'WRITE' if do_apply else 'DRY-RUN'})", highlight=False)
+	# Open the books cache (if one exists) so we can invalidate the folders we
+	# rewrite — otherwise the next run may serve the pre-apply BookMeta, most
+	# painfully on NFS where the attribute cache masks the new mtime.
+	cache: Cache | None = Cache(cfg.cache_db) if cfg.cache_db.is_file() else None
+	progress = Progress(
+		SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+		BarColumn(complete_style="green", finished_style="green", pulse_style="green"), TextColumn("{task.completed}/{task.total}"),
+		TimeRemainingColumn(), console=console, transient=True,
+	)
+	task_id = progress.add_task("Applying", total=None)
+	progress.start()
+	try:
+		def _cb(done: int, total: int) -> None:
+			if progress.tasks[0].total is None and total:
+				progress.update(task_id, total=total)
+			progress.update(task_id, completed=done)
+
+		summary = apply_review(review_file, cfg.library, dry_run=not do_apply, cache=cache, progress_callback=_cb)
+	finally:
+		progress.stop()
+		if cache is not None:
+			cache.close()
 	console.print()
 	t = Table(title="Apply summary", show_header=True, header_style="bold cyan")
 	t.add_column("Metric", style="bold")
 	t.add_column("Count", justify="right")
 	t.add_row("Mode", "WRITE" if do_apply else "DRY-RUN")
 	t.add_row("Applied", str(summary["applied"]))
+	t.add_row("Kept", str(summary.get("kept", 0)))
 	t.add_row("Rejected", str(summary["rejected"]))
 	t.add_row("Deleted", str(summary.get("deleted", 0)))
 	if summary.get("snapshot"):
 		t.add_row("Deletion snapshot", summary["snapshot"])
+	if summary.get("pruned"):
+		t.add_row("Pruned from review", str(summary["pruned"]))
+		t.add_row("Remaining in review", str(summary["remaining"]))
 	t.add_row("Errors", str(len(summary["errors"])))
 	console.print(t)
 	if summary["errors"]:
@@ -476,17 +579,45 @@ def apply(review_file: Path, library: Path | None, do_apply: bool) -> None:
 
 @main.command()
 @click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help="Library root")
+@click.option("--review", "review_file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="review.yaml to edit (default: $BMF_REVIEW or review.yaml)")
+def gui(library: Path | None, review_file: Path | None) -> None:
+	"""Launch the interactive Tkinter editor for review.yaml.
+
+	Keyboard-driven: PgUp/PgDn move between books, Tab between fields, every
+	action has a Ctrl+letter shortcut. Edits are written back to review.yaml;
+	metadata is then committed by `bmf apply`. Requires the optional Tk
+	bindings (python3-tk on Debian/Ubuntu).
+	"""
+	from .gui import run_gui
+
+	cfg = Config.from_env()
+	if library is not None:
+		cfg.library = library
+	if review_file is not None:
+		cfg.review_file = review_file
+	run_gui(cfg)
+
+
+@main.command()
+@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help="Library root")
 @click.option("--no-cache", is_flag=True, help="Disable SQLite cache")
 @click.option("--limit", type=int, default=None, help="Process only the first N books")
 @click.option("--pattern", default=None, help="Path pattern for OK books (default: '{author}/{title} ({id})')")
 @click.option("--needfix-dir", default=None, help="Folder for broken books (default: 'needfix')")
 @click.option("--apply", "do_apply", is_flag=True, help="Actually move (default: dry-run)")
-@click.option("--skip-verify", is_flag=True, help="Skip content verification (faster, less reliable)")
-def organize(library: Path | None, no_cache: bool, limit: int | None, pattern: str | None, needfix_dir: str | None, do_apply: bool, skip_verify: bool) -> None:
-	"""Move OK books to a clean path pattern and broken books to needfix/."""
-	from .detectors import detect as detect_fn
-	from .mover import DEFAULT_NEEDFIX_DIR, DEFAULT_PATH_PATTERN, organize as organize_fn
-	from .verifier import verify
+@click.option("--accept-missing/--no-accept-missing", "accept_missing", default=True, help="Apply the identity gate (same as analyze/report): a MISSING_ISBN/YEAR/COVER book whose author+title are confirmed against its content routes to the OK path, not needfix. Default on. --no-accept-missing routes them to needfix (the historic behaviour) and skips the content read.")
+@click.option("--verify-ok", "verify_ok", is_flag=True, help="Audit: also verify books the detectors marked OK against their content. Off by default (consistent with report/analyze). A MISMATCH (or UNCERTAIN, see --no-strict-verify) routes to needfix.")
+@click.option("--no-strict-verify", "no_strict_verify", is_flag=True, help="With --verify-ok: only a clear MISMATCH routes to needfix. By default UNCERTAIN does too.")
+def organize(library: Path | None, no_cache: bool, limit: int | None, pattern: str | None, needfix_dir: str | None, do_apply: bool, accept_missing: bool, verify_ok: bool, no_strict_verify: bool) -> None:
+	"""Move OK books to a clean path pattern and broken books to needfix/.
+
+	Classification is unified with report/analyze: identified MISSING_* books
+	(author+title confirmed against the content) route to the OK path. OK books
+	are not content-verified unless --verify-ok is given (consistent with report).
+	"""
+	from .classify import classify as classify_fn
+	from .mover import DEFAULT_NEEDFIX_DIR, DEFAULT_PATH_PATTERN
+	from .mover import organize as organize_fn
 
 	cfg = Config.from_env()
 	if library is not None:
@@ -494,7 +625,7 @@ def organize(library: Path | None, no_cache: bool, limit: int | None, pattern: s
 	pat = pattern or DEFAULT_PATH_PATTERN
 	needfix = needfix_dir or DEFAULT_NEEDFIX_DIR
 
-	console.print(f"[bold]Organizing[/bold] {cfg.library}")
+	console.print(f"[bold]Organizing[/bold] [cyan]{cfg.library}[/cyan]", highlight=False)
 	console.print(f"  OK pattern:    [cyan]{pat}[/cyan]")
 	console.print(f"  needfix dir:   [cyan]{needfix}[/cyan]")
 	console.print(f"  mode:          [{'WRITE' if do_apply else 'DRY-RUN'}]")
@@ -502,46 +633,80 @@ def organize(library: Path | None, no_cache: bool, limit: int | None, pattern: s
 	cache: Cache | None = None
 	if not no_cache:
 		cache = Cache(cfg.cache_db)
-	books = scan_library(cfg.library, cache=cache, use_cache=not no_cache)
-	if cache is not None:
-		cache.close()
-	if limit is not None:
-		books = books[:limit]
+	try:
+		from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 
-	# Determine verdict for each book
-	console.print(f"\n[classifying] {len(books)} books...")
-	verdicts = []
-	for meta in books:
-		diag = detect_fn(meta)
-		# OK books get verified; if verification MISMATCHES, demote to NEEDS_REVIEW
-		v = diag.verdict
-		if v.value == "OK" and not skip_verify and meta.primary_file:
-			try:
-				ver = verify(meta)
-				if ver.result == "MISMATCH":
-					from .models import Verdict
+		# Reading metadata for the whole library is the slow, silent gap before
+		# classify — wrap it in a bar so it isn't a dead spot.
+		with Progress(
+			SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+			BarColumn(complete_style="yellow", finished_style="yellow", pulse_style="yellow"), TextColumn("{task.completed}/{task.total}"),
+			TimeRemainingColumn(), console=console, transient=True,
+		) as progress:
+			task_id = progress.add_task("Reading library", total=None)
 
-					v = Verdict.NEEDS_REVIEW
-			except Exception:  # noqa: BLE001
-				pass
-		verdicts.append((meta, v))
+			def _scan_cb(done: int, total: int) -> None:
+				if progress.tasks[0].total is None and total:
+					progress.update(task_id, total=total)
+				progress.update(task_id, completed=done)
 
-	results = organize_fn(
-		verdicts, cfg.library,
-		path_pattern=pat, needfix_dir=needfix, dry_run=not do_apply,
-	)
-	_print_organize_summary(results, verdicts)
+			books = scan_library(cfg.library, cache=cache, use_cache=not no_cache, progress_callback=_scan_cb)
+		if limit is not None:
+			books = books[:limit]
+
+		# Classify each book via the shared classifier (same rules as
+		# report/analyze). An identified MISSING_* book routes to OK; OK books are
+		# content-verified only with --verify-ok. classify() may read the book
+		# file (identity gate / OK audit), so on NFS this can take a while.
+		classifications = []
+		verdicts = []
+		with Progress(
+			SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+			BarColumn(complete_style="yellow", finished_style="yellow", pulse_style="yellow"), TextColumn("{task.completed}/{task.total}"),
+			TimeRemainingColumn(), console=console, transient=True,
+		) as progress:
+			task_id = progress.add_task("Classifying", total=len(books))
+			for meta in books:
+				c = classify_fn(meta, accept_missing=accept_missing, verify_ok=verify_ok, strict_verify=not no_strict_verify)
+				classifications.append(c)
+				verdicts.append((meta, c.verdict))
+				progress.update(task_id, advance=1)
+
+		# Move books (verdict-driven) with a progress bar + ETA. cache is passed
+		# down so organize can invalidate the folders it moves.
+		with Progress(
+			SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+			BarColumn(complete_style="yellow", finished_style="yellow", pulse_style="yellow"), TextColumn("{task.completed}/{task.total}"),
+			TimeRemainingColumn(), console=console, transient=True,
+		) as progress:
+			move_task = progress.add_task("Moving books", total=len(verdicts))
+
+			def _move_cb(done: int, total: int) -> None:
+				progress.update(move_task, completed=done)
+
+			results = organize_fn(
+				verdicts, cfg.library,
+				path_pattern=pat, needfix_dir=needfix, dry_run=not do_apply, cache=cache,
+				progress_callback=_move_cb,
+			)
+		_print_organize_summary(results, classifications)
+	finally:
+		if cache is not None:
+			cache.close()
 
 
-def _print_organize_summary(results, verdicts) -> None:  # noqa: ANN001
+def _print_organize_summary(results, classifications) -> None:  # noqa: ANN001
 	from collections import Counter
 
-	from .models import Verdict
 
-	# Verdict distribution
+	# Verdict distribution (from the shared classifier's effective verdict — an
+	# identified MISSING_* book is already folded into OK here).
 	vc: Counter[str] = Counter()
-	for _m, v in verdicts:
-		vc[v.value] += 1
+	identified = 0
+	for c in classifications:
+		vc[c.verdict.value] += 1
+		if c.identified:
+			identified += 1
 	console.print()
 	t = Table(title="Classification", show_header=True, header_style="bold cyan")
 	t.add_column("Verdict")
@@ -551,6 +716,11 @@ def _print_organize_summary(results, verdicts) -> None:  # noqa: ANN001
 		dest = "OK path" if v in ("OK", "VERIFIED") else "needfix/"
 		t.add_row(v, str(n), dest)
 	console.print(t)
+	if identified:
+		console.print(
+			f"[dim]  {identified} identified (accepted): MISSING_* with author+title confirmed "
+			"against content — routed to OK, not needfix.[/dim]"
+		)
 
 	# Move results
 	rc: Counter[str] = Counter()
@@ -564,29 +734,70 @@ def _print_organize_summary(results, verdicts) -> None:  # noqa: ANN001
 		t.add_row(a, str(n))
 	console.print(t)
 
+	# Collisions: same-book duplicates that were merged (one folder per work,
+	# all formats combined). Show a sample so the user can audit what merged
+	# into what. Disambiguated/dup-N moves show up as plain 'moved'/
+	# 'collision_renamed' above (their destination name carries the suffix).
+	merges = [r for r in results if r.action == "merged"]
+	if merges:
+		console.print()
+		t = Table(title=f"Merges ({len(merges)} folder{'s' if len(merges) != 1 else ''} merged away)", show_header=True, header_style="bold cyan")
+		t.add_column("Loser (merged in)")
+		t.add_column("→ Winner")
+		t.add_column("Formats moved", style="dim")
+		for r in merges[:25]:
+			moved = r.details or []
+			n_moved = sum(1 for _, out in moved if not out.startswith("<skipped"))
+			t.add_row(Path(r.source).name[:40], Path(r.destination).name[:40], f"{n_moved} file(s)")
+		if len(merges) > 25:
+			t.add_row(f"… ({len(merges) - 25} more)", "", "")
+		console.print(t)
+
 
 @main.command()
 @click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help="Library root")
 @click.option("--no-cache", is_flag=True, help="Disable SQLite cache")
 @click.option("--limit", type=int, default=None, help="Process only the first N books")
 @click.option("--apply", "do_apply", is_flag=True, help="Actually generate EPUBs (default: dry-run)")
-@click.option("--skip-verify", is_flag=True, help="Skip content verification (faster)")
-def epubgen(library: Path | None, no_cache: bool, limit: int | None, do_apply: bool, skip_verify: bool) -> None:
-	"""Generate EPUBs for OK books that lack one, from the best source format."""
-	from .detectors import detect as detect_fn
+@click.option("--accept-missing/--no-accept-missing", "accept_missing", default=True, help="Apply the identity gate (same as organize/report): an identified MISSING_* book (author+title confirmed against content) is treated as OK and gets an EPUB. Default on.")
+@click.option("--verify-ok", "verify_ok", is_flag=True, help="Audit: verify OK books against their content before generating. Off by default (consistent with organize/report). A MISMATCH (or UNCERTAIN, see --no-strict-verify) skips generation.")
+@click.option("--no-strict-verify", "no_strict_verify", is_flag=True, help="With --verify-ok: only a clear MISMATCH skips generation. By default UNCERTAIN does too.")
+def epubgen(library: Path | None, no_cache: bool, limit: int | None, do_apply: bool, accept_missing: bool, verify_ok: bool, no_strict_verify: bool) -> None:
+	"""Generate EPUBs for OK books that lack one, from the best source format.
+
+	Classification is unified with organize/report: identified MISSING_* books
+	route as OK and get an EPUB. OK books are not content-verified unless
+	--verify-ok is given.
+	"""
+	from .classify import classify as classify_fn
 	from .epubgen import generate_epub
-	from .verifier import verify
 
 	cfg = Config.from_env()
 	if library is not None:
 		cfg.library = library
 
-	console.print(f"[bold]Generating EPUBs[/bold] for {cfg.library} [{'WRITE' if do_apply else 'DRY-RUN'}]")
+	console.print(f"[bold]Generating EPUBs[/bold] for [cyan]{cfg.library}[/cyan] [{'WRITE' if do_apply else 'DRY-RUN'}]", highlight=False)
 
 	cache: Cache | None = None
 	if not no_cache:
 		cache = Cache(cfg.cache_db)
-	books = scan_library(cfg.library, cache=cache, use_cache=not no_cache)
+	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
+
+	# Reading metadata for the whole library is the slow, silent gap before
+	# EPUB generation — wrap it in a bar so it isn't a dead spot.
+	with Progress(
+		SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+		BarColumn(complete_style="bright_cyan", finished_style="bright_cyan", pulse_style="bright_cyan"), TextColumn("{task.completed}/{task.total}"),
+		TimeRemainingColumn(), console=console, transient=True,
+	) as progress:
+		task_id = progress.add_task("Reading library", total=None)
+
+		def _scan_cb(done: int, total: int) -> None:
+			if progress.tasks[0].total is None and total:
+				progress.update(task_id, total=total)
+			progress.update(task_id, completed=done)
+
+		books = scan_library(cfg.library, cache=cache, use_cache=not no_cache, progress_callback=_scan_cb)
 	if cache is not None:
 		cache.close()
 	if limit is not None:
@@ -595,26 +806,28 @@ def epubgen(library: Path | None, no_cache: bool, limit: int | None, do_apply: b
 	results = []
 	skipped_not_ok = 0
 	skipped_has_epub = 0
-	for meta in books:
-		# Only OK books (verified clean)
-		diag = detect_fn(meta)
-		if diag.verdict.value not in ("OK", "VERIFIED"):
-			skipped_not_ok += 1
-			continue
-		if diag.verdict.value == "OK" and not skip_verify and meta.primary_file:
-			try:
-				ver = verify(meta)
-				if ver.result == "MISMATCH":
-					skipped_not_ok += 1
-					continue
-			except Exception:  # noqa: BLE001
-				pass
-		# Skip if already has epub
-		if ".epub" in meta.formats:
-			skipped_has_epub += 1
-			continue
-		result = generate_epub(meta, dry_run=not do_apply)
-		results.append(result)
+
+	with Progress(
+		SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+		BarColumn(complete_style="bright_cyan", finished_style="bright_cyan", pulse_style="bright_cyan"), TextColumn("{task.completed}/{task.total}"),
+		TimeRemainingColumn(), console=console, transient=True,
+	) as progress:
+		task_id = progress.add_task("Generating EPUBs", total=len(books))
+		for i, meta in enumerate(books, start=1):
+			# Only OK books (verified clean) — identified MISSING_* route as OK too.
+			c = classify_fn(meta, accept_missing=accept_missing, verify_ok=verify_ok, strict_verify=not no_strict_verify)
+			if c.verdict.value not in ("OK", "VERIFIED"):
+				skipped_not_ok += 1
+				progress.update(task_id, completed=i)
+				continue
+			# Skip if already has epub
+			if ".epub" in meta.formats:
+				skipped_has_epub += 1
+				progress.update(task_id, completed=i)
+				continue
+			result = generate_epub(meta, dry_run=not do_apply)
+			results.append(result)
+			progress.update(task_id, completed=i)
 
 	_print_epubgen_summary(results, skipped_not_ok, skipped_has_epub)
 
@@ -657,9 +870,171 @@ def _print_epubgen_summary(results, skipped_not_ok: int, skipped_has_epub: int) 
 	console.print(t)
 
 
+@main.command()
+@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help="Library root")
+@click.option("--no-cache", is_flag=True, help="Disable SQLite cache")
+@click.option("--limit", type=int, default=None, help="Process only the first N books")
+@click.option("--needfix-dir", default=None, help="Folder for quarantined rogues (default: 'needfix')")
+@click.option("--apply", "do_apply", is_flag=True, help="Actually move rogues (default: dry-run)")
+@click.option("--threshold", "strong", type=float, default=0.8, help="Fuzzy title ratio at/above which a format AGREES (default 0.8)")
+@click.option("--weak-threshold", "weak", type=float, default=0.5, help="Fuzzy title ratio below which a format DISAGREES (default 0.5). Between weak and strong = UNCERTAIN (never moved).")
+def crosscheck(library: Path | None, no_cache: bool, limit: int | None, needfix_dir: str | None, do_apply: bool, strong: float, weak: float) -> None:
+	"""Check all formats in each book folder are the same book; quarantine rogues.
+
+	For every folder with >=2 ebook formats, each format's content is compared
+	against the folder's metadata (title/ISBN). Files whose content is a
+	different book are moved into their own isolated folder under
+	<needfix>/crosscheck/<Author> - <Title> (<id>) - <filename>/. Dry-run by
+	default; pass --apply to move. Metadata is the anchor; only text-mined
+	signals (ISBN/title from the actual page text) decide, never embedded
+	metadata (which Calibre may have overwritten).
+	"""
+	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
+
+	from .crosscheck import CROSSCHECK_SUBDIR, crosscheck_book
+	from .crosscheck import quarantine as quarantine_fn
+	from .mover import DEFAULT_NEEDFIX_DIR
+
+	cfg = Config.from_env()
+	if library is not None:
+		cfg.library = library
+	needfix = needfix_dir or DEFAULT_NEEDFIX_DIR
+
+	console.print(f"[bold]Cross-checking formats[/bold] on [cyan]{cfg.library}[/cyan] [{'WRITE' if do_apply else 'DRY-RUN'}]", highlight=False)
+	console.print(f"  rogues go to:  [cyan]{needfix}/{CROSSCHECK_SUBDIR}/<origin> - <file>/[/cyan]")
+
+	cache: Cache | None = None
+	if not no_cache:
+		cache = Cache(cfg.cache_db)
+	try:
+		# Reading metadata for the whole library is the slow, silent gap before
+		# cross-check — wrap it in a bar so it isn't a dead spot.
+		with Progress(
+			SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+			BarColumn(complete_style="bright_magenta", finished_style="bright_magenta", pulse_style="bright_magenta"), TextColumn("{task.completed}/{task.total}"),
+			TimeRemainingColumn(), console=console, transient=True,
+		) as progress:
+			task_id = progress.add_task("Reading library", total=None)
+
+			def _scan_cb(done: int, total: int) -> None:
+				if progress.tasks[0].total is None and total:
+					progress.update(task_id, total=total)
+				progress.update(task_id, completed=done)
+
+			books = scan_library(cfg.library, cache=cache, use_cache=not no_cache, progress_callback=_scan_cb)
+		if limit is not None:
+			books = books[:limit]
+
+		results: list = []
+		with Progress(
+			SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+			BarColumn(complete_style="bright_magenta", finished_style="bright_magenta", pulse_style="bright_magenta"), TextColumn("{task.completed}/{task.total}"),
+			TimeRemainingColumn(), console=console, transient=True,
+		) as progress:
+			task_id = progress.add_task("Cross-checking formats", total=len(books))
+			for meta in books:
+				try:
+					results.append(crosscheck_book(meta, strong=strong, weak=weak))
+				except Exception as e:  # noqa: BLE001
+					log.warning("crosscheck failed for %s: %s", meta.path, e)
+				progress.update(task_id, advance=1)
+
+		# Quarantine rogues (second progress bar, sized by the rogue-file count).
+		to_quarantine = [r for r in results if r.decision == "quarantine"]
+		move_results: list = []
+		if to_quarantine:
+			rogue_count = sum(len(r.rogues) for r in to_quarantine)
+			with Progress(
+				SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+				BarColumn(complete_style="bright_magenta", finished_style="bright_magenta", pulse_style="bright_magenta"), TextColumn("{task.completed}/{task.total}"),
+				TimeRemainingColumn(), console=console, transient=True,
+			) as progress:
+				qtask = progress.add_task("Quarantining rogues", total=rogue_count)
+
+				def _cb(done: int, total: int) -> None:
+					progress.update(qtask, completed=done)
+
+				move_results = quarantine_fn(
+					to_quarantine, cfg.library,
+					needfix_dir=needfix, dry_run=not do_apply, cache=cache,
+					progress_callback=_cb,
+				)
+	finally:
+		if cache is not None:
+			cache.close()
+
+	_print_crosscheck_summary(results, move_results, do_apply)
+
+
+def _print_crosscheck_summary(results, move_results, do_apply: bool) -> None:  # noqa: ANN001
+	from collections import Counter
+
+	console.print()
+	t = Table(title="Crosscheck summary", show_header=True, header_style="bold cyan")
+	t.add_column("Decision", style="bold")
+	t.add_column("Count", justify="right")
+	decisions: Counter[str] = Counter(r.decision for r in results)
+	checked = len(results) - decisions.get("skipped", 0)
+	t.add_row("checked (≥2 formats)", str(checked), style="dim")
+	t.add_row("clean", str(decisions.get("clean", 0)))
+	t.add_row("quarantine", str(decisions.get("quarantine", 0)), style="yellow")
+	t.add_row("ambiguous", str(decisions.get("ambiguous", 0)), style="magenta")
+	t.add_row("skipped (<2 formats)", str(decisions.get("skipped", 0)), style="dim")
+	console.print(t)
+
+	# Rogues sample (book × rogue-file), capped. Only 'quarantine' decisions
+	# carry rogues (the files that will move); 'ambiguous' books are reported
+	# separately below.
+	rogues = [(r, rv) for r in results for rv in r.rogues]
+	if rogues:
+		console.print()
+		t = Table(title=f"Rogues ({len(rogues)} file{'s' if len(rogues) != 1 else ''})", show_header=True, header_style="bold cyan")
+		t.add_column("ID", justify="right", style="cyan")
+		t.add_column("Book folder")
+		t.add_column("File")
+		t.add_column("Reason", style="dim")
+		for r, rv in rogues[:25]:
+			t.add_row(
+				str(r.book_id or "?"),
+				Path(r.path).name[:45],
+				Path(rv.file).name[:35],
+				rv.reason[:55],
+			)
+		if len(rogues) > 25:
+			t.add_row("…", f"({len(rogues) - 25} more)", "", "")
+		console.print(t)
+
+	# Ambiguous books: formats disagree with metadata but nothing corroborates
+	# the metadata, so nothing was moved. Surface them so a human can inspect.
+	ambiguous = [r for r in results if r.decision == "ambiguous"]
+	if ambiguous:
+		console.print()
+		console.print(f"[magenta]{len(ambiguous)} ambiguous book(s)[/magenta] — formats disagree with metadata but no format corroborates it; not moved (review manually).")
+		t = Table(title="Ambiguous (not moved)", show_header=True, header_style="bold cyan")
+		t.add_column("ID", justify="right", style="cyan")
+		t.add_column("Book folder")
+		t.add_column("Disagreeing files", style="dim")
+		for r in ambiguous[:25]:
+			bad = ", ".join(Path(rv.file).name for rv in r.verdicts if rv.verdict == "DISAGREES")
+			t.add_row(str(r.book_id or "?"), Path(r.path).name[:45], bad[:60])
+		console.print(t)
+
+	if move_results:
+		rc: Counter[str] = Counter(mr.action for mr in move_results)
+		console.print()
+		t = Table(title=f"Move results ({'WRITE' if do_apply else 'DRY-RUN'})", show_header=True, header_style="bold cyan")
+		t.add_column("Action")
+		t.add_column("Count", justify="right")
+		for action, n in rc.most_common():
+			t.add_row(action, str(n))
+		console.print(t)
+		if not do_apply:
+			console.print("[dim]Dry-run: nothing moved. Re-run with --apply to quarantine the rogues.[/dim]")
+
+
 # Required imports for the new commands
-# (Enricher is imported lazily inside report() to avoid loading requests
-#  when the user only runs scan/detect.)
+# (Enricher is imported lazily inside analyze() to avoid loading requests
+#  when the user only runs scan/report.)
 
 
 def _print_scan_summary(books) -> None:  # noqa: ANN001
@@ -711,33 +1086,40 @@ def _print_scan_summary(books) -> None:  # noqa: ANN001
 
 
 def _print_detect_summary(results, category_filter: str | None, samples: int) -> None:  # noqa: ANN001
-	"""Print detector results: category counts + sample books per category."""
+	"""Print detector results: category counts + sample books per category.
+
+	A book with several diagnoses appears once per matching category (counts
+	do not sum to the book total) — this surfaces every problem rather than only
+	the highest-priority one.
+	"""
 	from collections import defaultdict
 
-	# Aggregate by category
+	from .detectors import all_diagnoses
+
+	# Aggregate by category — a book lands in every category it matches.
 	by_cat: dict[str, list] = defaultdict(list)
 	for meta, diag in results:
-		by_cat[diag.category].append((meta, diag))
+		for d in all_diagnoses(diag):
+			by_cat[d.category].append((meta, d))
 
 	# Sort: corruption categories first, then OK, then MISSING_*
-	cat_order = ["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "OK", "MISSING_ISBN", "MISSING_YEAR"]
+	cat_order = ["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C12", "C11", "MISSING_COVER", "OK", "MISSING_ISBN", "MISSING_YEAR"]
 	all_cats = sorted(by_cat.keys(), key=lambda c: cat_order.index(c) if c in cat_order else 999)
 
 	total = len(results)
 	console.print()
-	console.print(f"[bold green]Detected {total} books[/bold green]")
+	console.print(f"[bold green]Detected {total} books[/bold green]  [dim](a book may appear in multiple categories)[/dim]")
 
 	# Summary table
 	t = Table(title="Detection summary", show_header=True, header_style="bold cyan")
 	t.add_column("Category", style="bold")
 	t.add_column("Count", justify="right")
-	t.add_column("%", justify="right")
 	t.add_column("Verdict", style="magenta")
 	for cat in all_cats:
 		n = len(by_cat[cat])
 		# Pick a representative verdict (the first one in the bucket)
 		verdict = by_cat[cat][0][1].verdict.value
-		t.add_row(cat, str(n), f"{n / total * 100:.1f}%", verdict)
+		t.add_row(cat, str(n), verdict)
 	console.print(t)
 
 	# Samples per category (filtered if --category given)
@@ -822,7 +1204,7 @@ def install_completion(shell: str, output: Path | None) -> None:
 		elif shell == "zsh":
 			console.print(f"[dim]Run: source {output} (or add to your ~/.zshrc)[/dim]")
 		elif shell == "fish":
-			console.print(f"[dim]Fish loads it automatically from ~/.config/fish/completions/[/dim]")
+			console.print("[dim]Fish loads it automatically from ~/.config/fish/completions/[/dim]")
 	else:
 		# Print raw script to stdout (not via rich) so 'eval "$(bmf ...)"' works.
 		click.echo(script)

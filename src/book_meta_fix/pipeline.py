@@ -22,14 +22,24 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
+from .classify import is_acceptable_missing
+from .detectors import all_diagnoses
 from .detectors import detect as detect_fn
-from .enrichers import Enricher
-from .extractors import ExtractedMeta, extract
+from .enrichers import EnrichedMeta, Enricher
+from .extractors import ExtractedMeta
 from .library import Cache, scan_library
 from .models import BookMeta, Confidence, Diagnosis, Verdict
-from .review import build_review, parse_review
-from .verifier import verify
+from .review import _COVER_CATEGORIES, build_review, parse_review, prune_review
+from .verifier import (
+	IdentityResult,
+	acquire_identity,
+	confirm_identity,
+	has_usable_text,
+	safe_extract,
+	verify,
+)
 from .writers import write_book_meta
 
 log = logging.getLogger(__name__)
@@ -49,11 +59,13 @@ def run_pipeline(
 	progress_callback: Any = None,
 	only_needs_review: bool = True,
 	review_writer: Any = None,
+	skip_uuids: set[str] | None = None,
 	verify_ok: bool = False,
 	strict_verify: bool = True,
 	llm_loop: bool = True,
+	accept_missing_if_identified: bool = True,
 	stats: dict | None = None,
-) -> list[tuple[BookMeta, "Diagnosis", "Verification | None", "EnrichedMeta | None"]]:  # noqa: F821
+) -> list[tuple[BookMeta, Diagnosis, Verification | None, EnrichedMeta | None]]:  # noqa: F821
 	"""Run the full pipeline over the whole library.
 
 	Returns a list of (meta, diagnosis, verification, enriched) tuples.
@@ -93,6 +105,11 @@ def run_pipeline(
 	*review_writer* (optional): if a ReviewWriter is supplied, each processed
 	result is also streamed to review.yaml via ``review_writer.submit()`` as it
 	completes (Unix-pipe style), instead of writing the whole file at the end.
+
+	*skip_uuids* (optional): a set of book uuids to skip entirely (no detect /
+	extract / verify / enrich / LLM). Used by ``analyze`` to freeze books the
+	user marked ``action: keep`` — their existing review.yaml entry is carried
+	over verbatim by ReviewWriter.finish() instead of being regenerated.
 	"""
 	all_books = scan_library(library, cache=cache)
 	# Apply the detector cheaply to filter out already-OK books (incremental).
@@ -112,6 +129,17 @@ def run_pipeline(
 				"pipeline: %d total books, verify-ok mode (OK books kept for content check)",
 				len(all_books),
 			)
+	# Skip books the user already decided to ``keep``: their review.yaml entry
+	# is retained verbatim (ReviewWriter.finish() carry-over) and analyze must
+	# not re-detect/extract/enrich them. The set is built by the caller from the
+	# prior review.yaml (ReviewWriter.keep_uuids), so a kept book stays frozen
+	# until the user flips its action back to null. Applied after the detector
+	# filter so it also drops keep-decided books that are now OK.
+	if skip_uuids:
+		before = len(books)
+		books = [b for b in books if b.uuid not in skip_uuids]
+		if before != len(books):
+			log.info("pipeline: skipping %d keep-decided book(s)", before - len(books))
 	if limit is not None:
 		books = books[:limit]
 	total = len(books)
@@ -148,6 +176,7 @@ def run_pipeline(
 			meta, enricher=enricher, skip_enrich=skip_enrich, skip_verify=skip_verify,
 			llm_provider=llm_provider, llm_categories=llm_categories, stats=stats_ref,
 			verify_ok=verify_ok, strict_verify=strict_verify, llm_loop=llm_loop,
+			accept_missing_if_identified=accept_missing_if_identified,
 		)
 
 	def _process_safe(meta: BookMeta):
@@ -258,7 +287,8 @@ def _process_book(
 	verify_ok: bool = False,
 	strict_verify: bool = True,
 	llm_loop: bool = True,
-) -> tuple[BookMeta, "Diagnosis", "Verification | None", "EnrichedMeta | None"]:  # noqa: F821
+	accept_missing_if_identified: bool = True,
+) -> tuple[BookMeta, Diagnosis, Verification | None, EnrichedMeta | None]:  # noqa: F821
 	"""Process one book end-to-end. Thread-safe (no shared mutable state except *stats*).
 
 	*verify_ok*: when True, OK books (detectors found nothing wrong) are still
@@ -269,11 +299,15 @@ def _process_book(
 	diag = detect_fn(meta)
 	verification = None
 	enriched = None
-	# Count cover-specific diagnoses for the pipeline summary.
-	if diag.category == "C11":
-		stats["covers_generated"] += 1
-	elif diag.category == "MISSING_COVER":
-		stats["covers_missing"] += 1
+	# Count cover-specific diagnoses for the pipeline summary. Iterate all
+	# diagnoses (primary + additional) so a book whose primary issue is, say,
+	# C2 but that also has a generated cover is still counted here — matching
+	# what apply will actually do.
+	for d in all_diagnoses(diag):
+		if d.category == "C11":
+			stats["covers_generated"] += 1
+		elif d.category == "MISSING_COVER":
+			stats["covers_missing"] += 1
 	# Carries an already-extracted ExtractedMeta into the fix path, so a book
 	# that was verified (and reclassified) doesn't get extracted a second time.
 	preextracted: ExtractedMeta | None = None
@@ -291,13 +325,17 @@ def _process_book(
 				if mismatch or uncertain:
 					# Reclassify OK -> NEEDS_REVIEW so the fix path below runs.
 					# Keep the extracted content from verify() to reuse it.
+					# Preserve additional diagnoses (e.g. a generated cover found
+					# by detect) so they're still reported alongside the mismatch.
 					preextracted = verification.extracted
+					saved_additional = list(diag.additional)
 					diag = Diagnosis(
 						category="CONTENT_MISMATCH",
 						reason=f"metadata neodpovídají obsahu ({verification.result}: {verification.reason})",
 						confidence=Confidence.HIGH,
 						verdict=Verdict.NEEDS_REVIEW,
 					)
+					diag.additional = saved_additional
 					stats["content_mismatch"] += 1
 				else:
 					# VERIFIED / NO_CONTENT / non-strict UNCERTAIN -> stays OK.
@@ -319,7 +357,7 @@ def _process_book(
 		# Extract content once (reused by both deterministic fixes and LLM).
 		# Prefer content already extracted during verify() to avoid a second
 		# read of the book file.
-		extracted = preextracted if preextracted is not None else _safe_extract(meta)
+		extracted = preextracted if preextracted is not None else safe_extract(meta)
 
 		# Step 2a-2c: deterministic fixes from extracted content + online lookup
 		if extracted is not None:
@@ -354,160 +392,185 @@ def _process_book(
 			# This is the #1 cost saver — books with empty/CSS-only content
 			# would waste an API call for nothing.
 			first_page = extracted.first_page_text if extracted is not None else None
-			if not _has_usable_text(first_page):
+			if not has_usable_text(first_page):
 				stats["llm_skipped_no_text"] += 1
 			else:
+				def _llm_attempt(ev):
+					"""One reconcile_loop attempt. Returns (enriched, llm_src) or (None, None)."""
+					reconciled, src = _llm_reconcile_with_loop(llm_provider, ev, extracted, loop=llm_loop)
+					if reconciled is None or not _reconciled_is_useful(reconciled, meta):
+						return None, None
+					em = _reconciled_to_enriched(reconciled, source=src)
+					# The LLM result passed verify_proposal inside the loop;
+					# confirm_identity is the matching positive gate that sets
+					# identity_confirmed (a verified identity change auto-accepts).
+					em.identity_confirmed = confirm_identity(em, extracted)
+					return em, src
+
+				def _bucket(src):
+					if src in ("llm:flash", "llm:loop"):
+						stats["llm_flash_fixed"] += 1
+					elif src == "llm:high":
+						stats["llm_final_fixed"] += 1
+					elif src == "llm:low":
+						stats["llm_low_confidence"] += 1
+					else:
+						stats["llm_fixed"] += 1
+
 				try:
 					evidence = _build_llm_evidence(meta, diag, extracted)
-					# reconcile_loop tries the free Flash model first (with
-					# verify_proposal feedback between attempts), then the paid
-					# final model. Falls back to plain reconcile() for mock
-					# providers that don't implement the loop (back-compat).
-					reconciled, llm_src = _llm_reconcile_with_loop(llm_provider, evidence, extracted, loop=llm_loop)
-					if reconciled is not None and _reconciled_is_useful(reconciled, meta):
-						enriched = _reconciled_to_enriched(reconciled, source=llm_src)
-						# Bucket the result by how it was obtained.
-						if llm_src in ("llm:flash", "llm:loop"):
-							stats["llm_flash_fixed"] += 1
-						elif llm_src == "llm:high":
-							stats["llm_final_fixed"] += 1
-						elif llm_src == "llm:low":
-							stats["llm_low_confidence"] += 1
-						else:
-							stats["llm_fixed"] += 1
+					# Attempt 1: first-page text.
+					enriched, llm_src = _llm_attempt(evidence)
+					# Attempt 2 (only if the first page wasn't enough): retry with a
+					# broader text window (title/author aren't always on page 1).
+					if enriched is None and extracted is not None:
+						broader = getattr(extracted, "broader_text", None)
+						first = extracted.first_page_text
+						if broader and has_usable_text(broader) and (not first or len(broader) > len(first)):
+							enriched, llm_src = _llm_attempt({**evidence, "first_page_text": broader})
+							if enriched is not None:
+								stats["llm_broader_fixed"] = stats.get("llm_broader_fixed", 0) + 1
+					if enriched is not None:
+						_bucket(llm_src)
 					else:
 						stats["llm_no_result"] += 1
 				except Exception as e:  # noqa: BLE001
 					log.debug("LLM reconcile failed for %s: %s", meta.path, e)
 					stats["llm_error"] += 1
 
+		# Identity-confirmed MISSING_* book, nothing recoverable: stamp a minimal
+		# EnrichedMeta(identity_confirmed=True) so review_writer pre-fills
+		# action: accept (its identity_confirmed-no-proposal branch) and
+		# `bmf apply` prunes it. No fields are set on the EnrichedMeta on purpose
+		# — proposed must stay empty so the entry reads "accept as-is" (no fake
+		# change) and _apply_action is a clean no-op. Fires ONLY when enriched is
+		# None: if any enricher/text_meta found something, enriched is already set
+		# and those fields are proposed + applied normally.
+		if (
+			accept_missing_if_identified
+			and enriched is None
+			and is_acceptable_missing(diag)
+			and acquire_identity(meta, extracted) is not None
+		):
+			enriched = EnrichedMeta(identity_confirmed=True, source="content")
+			stats["accepted_missing"] = stats.get("accepted_missing", 0) + 1
 		if enriched is None:
 			stats["unfixed"] += 1
 
 	return (meta, diag, verification, enriched)
 
 
-def _safe_extract(meta: BookMeta) -> ExtractedMeta | None:
-	"""Extract content metadata from the primary book file.
-
-	We use only the primary file (highest-priority format present) rather than
-	trying all formats, because empirical testing showed multi-format extraction
-	is 6.5x slower and produces a higher-scored result in 0% of cases — calibre
-	writes identical metadata to all formats on import.
-	"""
-	if not meta.primary_file:
-		return None
-	try:
-		return extract(meta.primary_file)
-	except Exception as e:  # noqa: BLE001
-		log.debug("extract failed for %s: %s", meta.path, e)
-		return None
-
-
-# Categories that 'ALL' deliberately excludes: a known-good state where sending
-# the book to the LLM would risk inventing a wrong author rather than fixing one.
-_LLM_ALL_EXCLUDE = frozenset({"C9"})
+# Categories that 'ALL' deliberately excludes from the LLM. Currently EMPTY.
+#
+# C9 (anonym) used to live here on the theory that the LLM would invent a wrong
+# author for a genuine anonymous work. That reasoning does not hold: genuine
+# anonymous works (Bible, Koran, Edda, …) are whitelisted to verdict=OK inside
+# rule_c9_anonym, so they never reach this NEEDS_REVIEW/LLM path. Every C9 that
+# DOES reach here is a corrupted record (lost author) that genuinely benefits
+# from LLM recovery — and the result still passes verify_proposal / confirm_identity,
+# so an invented author cannot auto-apply unless the book's own content confirms it.
+# Keeping the set (and this hook) so a future category can be opted out cleanly.
+_LLM_ALL_EXCLUDE: frozenset[str] = frozenset()
 
 
 def _llm_wants(category: str, llm_categories: tuple[str, ...]) -> bool:
 	"""Should a book in *category* be sent to the LLM?
 
 	- Explicit category list (e.g. ('C1','C2')): category must be in the tuple.
-	- 'ALL': every category EXCEPT those in _LLM_ALL_EXCLUDE (currently C9 —
-	  legitimate anonyms like the Bible/Koran; an LLM there would fabricate an
-	  author). 'ALL' may be combined with explicit inclusions/exclusions.
+	- 'ALL': every category EXCEPT those in _LLM_ALL_EXCLUDE (currently empty —
+	  see the note on C9 above). 'ALL' may be combined with explicit
+	  inclusions/exclusions.
 	"""
 	if "ALL" in llm_categories:
 		return category not in _LLM_ALL_EXCLUDE
 	return category in llm_categories
 
 
-def _has_usable_text(text: str | None) -> bool:
-	"""Does *text* contain enough readable content for the LLM to work with?
-
-	Rejects:
-	  - None / empty
-	  - Pure CSS (e.g. 'Cover @page {padding: 0pt; ...}')
-	  - Pure HTML tags / boilerplate with no prose
-	  - Very short snippets (< 80 chars of actual prose)
-
-	The check is heuristic and fast — it strips obvious non-prose and measures
-	the remaining length. This is the #1 LLM cost saver.
-	"""
-	if not text or len(text) < 80:
-		return False
-	# Strip CSS blocks (common in EPUB cover pages)
-	import re
-
-	clean = re.sub(r"@page\s*\{[^}]*\}", " ", text)
-	clean = re.sub(r"[{};]", " ", clean)
-	# Count word-like tokens (sequences of 3+ letters)
-	words = re.findall(r"[A-Za-zÁ-ž]{3,}", clean)
-	return len(words) >= 8
-
-
 def _try_deterministic_fix(
 	meta: BookMeta,
-	diag: "Diagnosis",  # noqa: F821
+	diag: Diagnosis,  # noqa: F821
 	extracted: ExtractedMeta,
 	enricher: Enricher | None,
 	skip_enrich: bool,
-) -> "EnrichedMeta | None":  # noqa: F821
-	"""Try cheap fixes before falling back to the LLM. Cheap-first order:
+) -> EnrichedMeta | None:  # noqa: F821
+	"""Resolve a content-verified identity, then fill metadata online.
 
-	  A. Offline metadata mined from the book's page text (text_meta) — no I/O.
-	  B. Online lookup by ISBN (text-scan ISBN > embedded ISBN > DB ISBN).
-	  C. Online lookup by title + author (text-mined > embedded > DB).
-	  D. Embedded-OPF compare (only if cleaner than DB; calibre may have
-	     corrupted it, so this is the weakest signal and runs last).
+	Online sources no longer guess identity. We first acquire an identity from
+	the book itself (ISBN or title+author), confirmed against its content, then
+	anchor the online lookup to that identity. The result is identity_confirmed
+	(safe to auto-accept even if it changes title/author — we know the book).
 
-	Returns an EnrichedMeta if we found something better than the current
-	(broken) metadata, else None (caller falls back to the LLM).
+	Returns None if no identity could be verified against content (→ LLM, or
+	review when there is no content to reason over).
 	"""
+	identity = acquire_identity(meta, extracted)
+	if identity is None:
+		return None
+
+	# Online fill, anchored to the verified identity (ISBN exact, or title+
+	# author with an author-match filter).
+	online = _online_fill(identity, enricher, skip_enrich)
+	if online is not None:
+		online.identity_confirmed = True
+		return online
+
+	# No online data — fall back to a content-grounded proposal (offline fix
+	# from text_meta + embedded OPF, only fields that improve on the meta).
+	return _content_proposal(meta, extracted)
+
+
+def _online_matches_identity(online: EnrichedMeta, identity: IdentityResult) -> bool:  # noqa: F821
+	"""For title-based online lookups: does the record's author match the
+	verified identity? (The title was already gated by the source's search.)
+	Different author ⇒ different book ⇒ reject (false-positive prevention)."""
+	from rapidfuzz import fuzz
+
+	if online.authors and identity.authors:
+		return fuzz.token_sort_ratio(online.authors[0].lower(), identity.authors[0].lower()) >= 80
+	return True  # no author to compare — trust the title search
+
+
+def _online_fill(identity: IdentityResult, enricher: Enricher | None, skip_enrich: bool) -> EnrichedMeta | None:  # noqa: F821
+	"""Fill metadata online, anchored to the verified identity: exact by ISBN,
+	or title+author with an author-match filter. Returns None if nothing found
+	or the result doesn't match the identity."""
+	if enricher is None or skip_enrich:
+		return None
+	if identity.has_isbn:
+		online = enricher.lookup(isbn=identity.isbn)
+	elif identity.has_title_author:
+		# Pass the identity's year so the databazeknih title search can
+		# disambiguate editions (prefer the matching publication year).
+		online = enricher.lookup(title=identity.title, author=identity.authors[0], year=identity.year)
+	else:
+		return None
+	if online is None:
+		return None
+	# ISBN lookups are exact; title lookups need an author-match filter.
+	if identity.has_title_author and not _online_matches_identity(online, identity):
+		log.debug("online result rejected (author mismatch) for identity %r", identity.title)
+		return None
+	return online
+
+
+def _content_proposal(meta: BookMeta, extracted: ExtractedMeta) -> EnrichedMeta | None:  # noqa: F821
+	"""Build an offline proposal from content-grounded fields (text_meta +
+	embedded OPF), only fields that improve on the current meta. Used when the
+	online lookup found nothing — the identity is still content-confirmed, so
+	the proposal carries identity_confirmed=True."""
 	from .enrichers import EnrichedMeta
 
-	# Best available ISBN independent of the (possibly calibre-corrupted) DB:
-	# prefer the one scanned from the page text, then the embedded-OPF one.
 	content_isbn = extracted.isbn_from_text or extracted.isbn
-
-	# Best available title/author for an online title-search: prefer text-mined
-	# (independent of OPF), then embedded, then DB.
-	best_title = extracted.title_from_text or extracted.title or meta.title
-	best_authors = extracted.authors_from_text or extracted.authors or meta.authors
-	best_author = best_authors[0] if best_authors else None
-
-	# --- Phase B: online lookup by ISBN (cached, ~1s) ---
-	# databazeknih is title-only, so this hits OpenLibrary / Google Books.
-	if content_isbn and enricher is not None and not skip_enrich:
-		online = enricher.lookup(isbn=content_isbn)
-		if online is not None and _online_is_useful(online, meta):
-			return online
-
-	# --- Phase C: online lookup by title + author ---
-	# This is the path that reaches databazeknih.cz (the strongest CZ/SK
-	# source) as well as OpenLibrary's title search. Skipped when we have no
-	# title to search on.
-	if best_title and enricher is not None and not skip_enrich:
-		online = enricher.lookup(title=best_title, author=best_author)
-		if online is not None and _online_is_useful(online, meta):
-			return online
-
-	# --- Phase A: offline metadata mined from the book's page text ---
-	# Build a proposal from the text-mined fields when they are cleaner than
-	# the DB. These come from extractors.ExtractedMeta.*_from_text, populated
-	# by text_meta.extract_metadata_from_text over first_page_text.
 	proposal_title = extracted.title_from_text if _is_better(extracted.title_from_text, meta.title) else None
-	proposal_authors = [a for a in extracted.authors_from_text if _is_better(a, meta.authors[0] if meta.authors else None)] or None
+	proposal_authors = [a for a in (extracted.authors_from_text or []) if _is_better(a, meta.authors[0] if meta.authors else None)] or None
 	proposal_isbn = content_isbn if (content_isbn and content_isbn != meta.isbn and _is_better(content_isbn, meta.isbn)) else None
 	proposal_publisher = extracted.publisher_from_text if _is_better(extracted.publisher_from_text, meta.publisher) else None
 	proposal_year = extracted.year_from_text if _is_better(extracted.year_from_text, meta.year) else None
-
-	# --- Phase D: embedded-OPF compare (weakest; calibre may have corrupted it) ---
-	# Only fill fields that Phase A did not already fill.
+	# Embedded-OPF fallback (weakest; calibre may have corrupted it).
 	if proposal_title is None:
 		proposal_title = extracted.title if _is_better(extracted.title, meta.title) else None
 	if proposal_authors is None:
-		embedded_authors = extracted.authors if any(_is_better(a, m) for a, m in zip(extracted.authors, meta.authors)) else None
+		embedded_authors = extracted.authors if any(_is_better(a, m) for a, m in zip(extracted.authors, meta.authors, strict=False)) else None
 		if embedded_authors:
 			proposal_authors = [a for a in embedded_authors if a and a != "Neznamy" and "_" not in a] or None
 
@@ -519,24 +582,9 @@ def _try_deterministic_fix(
 			publisher=proposal_publisher,
 			year=proposal_year,
 			source="content",
+			identity_confirmed=True,
 		)
 	return None
-
-
-def _online_is_useful(online: "EnrichedMeta", meta: BookMeta) -> bool:  # noqa: F821
-	"""Does an online result bring something the DB doesn't already have?
-
-	Accepts the online record if ANY of its fields is better than the DB's
-	(title/author/isbn/year/publisher/genres), OR it has a cover_url (the one
-	field that may be useful even when all text metadata already matches —
-	the book's cover may be a generated placeholder that needs replacement).
-	This is the gate that keeps us from overwriting good metadata with a
-	no-op online hit.
-	"""
-	return any(
-		_is_better(getattr(online, f, None), getattr(meta, f, None))
-		for f in ("title", "isbn", "year", "publisher")
-	) or bool(getattr(online, "genres", None)) or bool(getattr(online, "cover_url", None))
 
 
 def _is_better(candidate: object | None, current: object | None) -> bool:
@@ -622,7 +670,7 @@ def _looks_broken(s: str | object) -> bool:
 		return True
 	if "_" in s:
 		return True
-	if any(ext in s.lower() for ext in (".epub", ".pdb", ".pdf", ".doc", ".mobi")):
+	if any(ext in s.lower() for ext in (".epub", ".pdb", ".pdf", ".doc", ".mobi", ".azw", ".azw3", ".prc")):
 		return True
 	# Mojibake / control chars
 	if any(ord(c) > 0x2000 and c not in "„“”‘’–—…" for c in s):
@@ -645,9 +693,10 @@ def _strip_diacritics(s: str) -> str:
 	return s.translate(repl)
 
 
-def _build_llm_evidence(meta: BookMeta, diag: "Diagnosis", extracted: ExtractedMeta | None) -> dict:  # noqa: F821
+def _build_llm_evidence(meta: BookMeta, diag: Diagnosis, extracted: ExtractedMeta | None) -> dict:  # noqa: F821
 	"""Assemble the evidence dict passed to the LLM provider."""
 	first_page = extracted.first_page_text if extracted is not None else None
+	series_name, series_index = meta.series_pair()
 	return {
 		"category": diag.category,
 		"current": {
@@ -656,6 +705,10 @@ def _build_llm_evidence(meta: BookMeta, diag: "Diagnosis", extracted: ExtractedM
 			"isbn": meta.isbn,
 			"year": meta.year,
 			"publisher": meta.publisher,
+			"language": meta.language,
+			# Series as {name, index} mirrors the LLM's output schema, so it
+			# can correct a wrong name or fill in a missing index.
+			"series": {"name": series_name, "index": series_index} if series_name else None,
 		},
 		"first_page_text": first_page,
 		"file_name": meta.primary_file,
@@ -685,7 +738,7 @@ def _reconciled_is_useful(r, meta: BookMeta) -> bool:  # noqa: ANN001
 	return False
 
 
-def _reconciled_to_enriched(r, *, source: str | None = None) -> "EnrichedMeta":  # noqa: F821
+def _reconciled_to_enriched(r, *, source: str | None = None) -> EnrichedMeta:  # noqa: F821
 	"""Convert a ReconciledMeta into the EnrichedMeta shape used by review.py.
 
 	*source* overrides the default ``llm:<confidence>`` tag — used when the
@@ -723,121 +776,6 @@ def _llm_reconcile_with_loop(provider: Any, evidence: dict, extracted: Any, *, l
 		return provider.reconcile_loop(evidence, extracted)
 	result = provider.reconcile(evidence)
 	return result, ("llm:medium" if result is not None else "")
-
-
-def auto_apply_results(
-	results: list,
-	*,
-	library_root: Path,
-	threshold: str = "high",
-	dry_run: bool = True,
-) -> dict:
-	"""Auto-apply LLM proposals at or above *threshold* confidence.
-
-	Writes metadata.json + metadata.opf directly (with .bak backup) for books
-	where the enriched proposal has source like 'llm:high' (or higher).
-	Returns a summary dict and the list of remaining (non-applied) results
-	for the caller to put into review.yaml.
-
-	Confidence order: high > medium > low. With threshold='high' (default),
-	only high-confidence proposals are auto-applied; medium/low go to review.
-	"""
-	confidence_rank = {"high": 3, "medium": 2, "low": 1}
-	min_rank = confidence_rank.get(threshold, 3)
-
-	applied = 0
-	skipped_low_conf = 0
-	skipped_no_proposal = 0
-	skipped_user_decided = 0
-	remaining: list = []
-
-	# Load existing review.yaml to respect user's prior decisions (action set).
-	prior_actions: dict[int | str, str | None] = {}
-	# (best-effort: caller passes results, not the review path, so we skip
-	#  prior-action checking here — it's handled in generate_review for the
-	#  remaining books.)
-
-	for item in results:
-		meta, diag, verification, enriched = item[0], item[1], item[2], item[3]
-		# Only consider NEEDS_REVIEW books with a proposal
-		if diag.verdict.value not in ("NEEDS_REVIEW", "UNFIXABLE"):
-			if not (verification and verification.result == "MISMATCH"):
-				continue
-		if enriched is None:
-			skipped_no_proposal += 1
-			remaining.append(item)
-			continue
-		# Check confidence
-		conf = "low"
-		if enriched.source.startswith("llm:"):
-			conf = enriched.source.split(":", 1)[1] if ":" in enriched.source else "low"
-		elif enriched.source.startswith("embedded"):
-			# Deterministic fixes are trustworthy — treat as high.
-			conf = "high"
-		if confidence_rank.get(conf, 0) < min_rank:
-			skipped_low_conf += 1
-			remaining.append(item)
-			continue
-		# Apply: build a BookMeta with the proposed values and write it.
-		updated = _apply_enriched_to_meta(meta, enriched)
-		if not dry_run:
-			try:
-				from .writers import write_book_meta
-
-				write_book_meta(updated, dry_run=False, backup=True)
-			except Exception as e:  # noqa: BLE001
-				log.warning("auto-apply write failed for %s: %s", meta.path, e)
-				remaining.append(item)
-				continue
-		applied += 1
-
-	summary = {
-		"applied": applied,
-		"skipped_low_conf": skipped_low_conf,
-		"skipped_no_proposal": skipped_no_proposal,
-		"dry_run": dry_run,
-		"threshold": threshold,
-		"remaining": remaining,
-	}
-	log.info(
-		"auto_apply: %d applied (%s), %d low-conf, %d no-proposal -> %d remaining for review",
-		applied, "dry-run" if dry_run else "WRITTEN", skipped_low_conf, skipped_no_proposal, len(remaining),
-	)
-	return summary
-
-
-def _apply_enriched_to_meta(meta: BookMeta, enriched) -> BookMeta:  # noqa: ANN001
-	"""Return a copy of *meta* with the enriched proposal applied.
-
-	Used by auto_apply_results to build the BookMeta that will be written.
-	"""
-	import copy
-
-	updated = copy.deepcopy(meta)
-	if enriched.title:
-		updated.title = enriched.title
-	if enriched.authors:
-		# Drop placeholder authors, keep real ones
-		real = [a for a in enriched.authors if a and a not in ("Neznamy", "Unknown", "Neznámý", "anonym", "Anonymous")]
-		if real:
-			updated.authors = real
-	if enriched.isbn:
-		updated.isbn = enriched.isbn
-	if enriched.year:
-		updated.year = enriched.year
-	if enriched.publisher:
-		updated.publisher = enriched.publisher
-	if enriched.language:
-		updated.language = enriched.language
-	if enriched.series:
-		# Add/replace series metadata
-		series_entry = {"name": enriched.series}
-		if enriched.series_index:
-			series_entry["index"] = enriched.series_index
-		updated.series = [series_entry]
-	if enriched.genres:
-		updated.genres = enriched.genres
-	return updated
 
 
 def generate_review(
@@ -976,31 +914,46 @@ def _yaml_safe_load(path: Path):
 	return entries if entries else None
 
 
-def apply_review(review_path: Path, library: Path, *, dry_run: bool = True) -> dict:
+def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cache: Cache | None = None, progress_callback=None) -> dict:
 	"""Parse a review.yaml and apply approved changes to the library.
 
-	Returns a summary dict: {applied, rejected, deleted, snapshot, errors}.
+	Returns a summary dict: {applied, rejected, deleted, pruned, remaining,
+	snapshot, errors, dry_run}.
 
 	``action: delete`` removes the whole book folder. Because that is not
 	reversible via the per-file ``.bak`` that ``write_book_meta`` keeps, the
 	folders slated for deletion are first bundled into a single
 	``deletion_snapshot_<stamp>.tar.gz`` (in dry-run mode nothing is archived
 	and nothing is removed).
+
+	After a successful WRITE run, successfully-applied entries (accept/swap/
+	edit/delete without error) are pruned from review.yaml so the file reflects
+	only remaining work; pending (action: null), rejected, and errored entries
+	are kept. ``action: keep`` is the exception: it applies the proposal like
+	accept but is NOT pruned — the entry is retained and skipped on the next
+	analyze. Dry-run never prunes.
 	"""
-	from .models import Diagnosis  # local to avoid cycle
 
 	items = parse_review(review_path)
-	summary = {"applied": 0, "rejected": 0, "deleted": 0, "snapshot": None, "errors": [], "dry_run": dry_run}
-	deleted_paths: list[Path] = []
+	summary = {"applied": 0, "rejected": 0, "deleted": 0, "kept": 0, "pruned": 0, "remaining": None, "snapshot": None, "errors": [], "dry_run": dry_run}
+	succeeded_uuids: set = set()  # uuids of entries committed this run → pruned
+	# delete collects (folder, uuid) so removal success can be tracked per entry.
+	deletions: list[tuple[Path, str | None]] = []
+	total = len(items)
 
-	for item in items:
+	for i, item in enumerate(items):
+		# Report progress at the start of each item (covers every path, including
+		# the `continue`s below): "i items done, now on item i+1". A final
+		# callback(total, total) fires after the loop.
+		if progress_callback is not None:
+			progress_callback(i, total)
 		if item.action is None:
 			# Not yet reviewed — skip silently
 			continue
 		if item.action == "reject":
 			summary["rejected"] += 1
 			continue
-		if item.action not in ("accept", "swap", "edit", "delete"):
+		if item.action not in ("accept", "swap", "edit", "delete", "keep"):
 			summary["errors"].append(f"id={item.id}: unknown action {item.action!r}")
 			continue
 
@@ -1015,7 +968,7 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True) -> d
 		# delete: just collect — actual removal happens after a single tar.gz
 		# snapshot is taken, so the whole batch can be rolled back together.
 		if item.action == "delete":
-			deleted_paths.append(folder)
+			deletions.append((folder, item.uuid))
 			continue
 
 		# Build the desired metadata
@@ -1023,29 +976,70 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True) -> d
 
 		meta = read_book_folder(folder)
 		_apply_action(meta, item)
+		# Lazy mint: a book read straight from disk may still lack a uuid (e.g.
+		# a first apply before any scan minted one). write_book_meta persists it;
+		# here we only set it in-memory so we never stamp uuid: null onto disk.
+		if meta.uuid is None:
+			meta.uuid = str(uuid4())
 
 		try:
 			result = write_book_meta(meta, dry_run=dry_run)
 			if result.get("error"):
 				summary["errors"].append(f"id={item.id}: {result['error']}")
 			else:
-				summary["applied"] += 1
+				# ``keep`` writes metadata like accept/swap/edit but is NOT pruned
+				# from review.yaml — the entry is retained and skipped on the next
+				# analyze (see run_pipeline's skip_uuids). Count it separately so
+				# the summary distinguishes "written and done" from "written and
+				# kept"; only non-keep actions enter the prune set.
+				if item.action == "keep":
+					summary["kept"] += 1
+				else:
+					summary["applied"] += 1
+				if not dry_run:
+					if item.uuid is not None and item.action != "keep":
+						succeeded_uuids.add(item.uuid)
+					# The folder's metadata just changed on disk; drop its cached
+					# BookMeta so the next scan re-parses it. Especially matters
+					# on NFS, where the attribute cache can mask the new mtime.
+					if cache is not None:
+						cache.invalidate(folder)
 		except Exception as e:  # noqa: BLE001
 			summary["errors"].append(f"id={item.id}: write failed: {e}")
 
+	# All items processed.
+	if progress_callback is not None:
+		progress_callback(total, total)
+
 	# Deletion pass: snapshot then remove. Dry-run reports without touching disk.
-	if deleted_paths:
+	if deletions:
+		deleted_paths = [p for p, _ in deletions]
 		summary["deleted"] = len(deleted_paths)
 		if not dry_run:
 			snap = _snapshot_deletions(deleted_paths, library)
 			summary["snapshot"] = str(snap) if snap else None
-			for folder in deleted_paths:
-				try:
-					import shutil
+			for folder, did in deletions:
+					try:
+						import shutil
 
-					shutil.rmtree(folder)
-				except OSError as e:
-					summary["errors"].append(f"delete failed for {folder}: {e}")
+						shutil.rmtree(folder)
+						if did is not None:
+							succeeded_uuids.add(did)
+						# Folder is gone — drop its cache entry too.
+						if cache is not None:
+							cache.invalidate(folder)
+					except OSError as e:
+						summary["errors"].append(f"delete failed for {folder}: {e}")
+
+	# Pruning: drop successfully-applied entries from review.yaml. Only in WRITE
+	# mode — dry-run must leave the file untouched.
+	if not dry_run and succeeded_uuids:
+		summary["remaining"] = prune_review(review_path, succeeded_uuids)
+		summary["pruned"] = len(succeeded_uuids)
+
+	# Commit any cache invalidations from this run (writes + deletes).
+	if cache is not None and not dry_run:
+		cache.commit()
 
 	return summary
 
@@ -1082,35 +1076,67 @@ def _apply_action(meta: BookMeta, item) -> None:  # noqa: ANN001
 	they involve a network fetch — the caller (apply_review) wraps this in a
 	try/except and reports download failures via the summary dict.
 	"""
-	if item.action == "accept" and item.proposed:
-		# Apply all proposed fields
-		if "title" in item.proposed:
-			meta.title = item.proposed["title"]
-		if "author" in item.proposed:
-			meta.authors = [item.proposed["author"]] + (meta.authors[1:] if len(meta.authors) > 1 else [])
-		if "isbn" in item.proposed:
-			meta.isbn = item.proposed["isbn"]
-		if "year" in item.proposed:
-			meta.year = item.proposed["year"]
-		if "publisher" in item.proposed:
-			meta.publisher = item.proposed["publisher"]
-		if "language" in item.proposed:
-			meta.language = item.proposed["language"]
-		if "genres" in item.proposed:
-			genres = item.proposed["genres"]
-			meta.genres = genres if isinstance(genres, list) else [genres]
-		# Cover replacement: download cover_url to cover.jpg. This is a network
-		# I/O side effect inside the metadata-mutation function, but it's the
-		# cleanest place — _apply_action is the single point where proposed
-		# values are committed to the book. write_book_meta (called next) will
-		# then emit the OPF <guide> cover reference automatically.
-		if "cover_url" in item.proposed:
-			from .covers import download_cover
+	if item.action in ("accept", "keep"):
+		# Apply proposed fields. *proposed* may be empty — e.g. an identity-
+		# confirmed MISSING_COVER auto-accept proposes nothing — so the field
+		# application is optional but the cover recovery below still runs.
+		if item.proposed:
+			if "title" in item.proposed:
+				meta.title = item.proposed["title"]
+			if "author" in item.proposed:
+				meta.authors = [item.proposed["author"]] + (meta.authors[1:] if len(meta.authors) > 1 else [])
+			if "isbn" in item.proposed:
+				meta.isbn = item.proposed["isbn"]
+			if "year" in item.proposed:
+				meta.year = item.proposed["year"]
+			if "publisher" in item.proposed:
+				meta.publisher = item.proposed["publisher"]
+			if "language" in item.proposed:
+				meta.language = item.proposed["language"]
+			if "genres" in item.proposed:
+				genres = item.proposed["genres"]
+				meta.genres = genres if isinstance(genres, list) else [genres]
+			if "description" in item.proposed:
+				meta.description = item.proposed["description"]
+			# Series arrives as flat strings; BookMeta stores the ABS shape
+			# [{"name", "index"}]. A proposal may carry either half — keep the
+			# current value for the missing one (an enricher that doesn't know
+			# the index must not wipe it).
+			if "series" in item.proposed or "series_index" in item.proposed:
+				cur_name, cur_idx = meta.series_pair()
+				name = item.proposed.get("series", cur_name)
+				idx = item.proposed.get("series_index", cur_idx)
+				meta.series = [{"name": name, "index": str(idx) if idx is not None else ""}]
+		# Cover recovery: runs whenever the book has a cover diagnosis (C11
+		# placeholder / MISSING_COVER) among ANY of its diagnoses — not just the
+		# primary — and regardless of whether *proposed* is empty. Try the
+		# enricher cover_url first; if there is none (or the download fails),
+		# fall back to extracting the cover from the book's own file. The
+		# extractor rejects generated placeholders, so a C11 book can't pull
+		# Calibre's own junk back out. cover_url rides along on every enriched
+		# book's proposed block in older review.yaml files, so the category gate
+		# also neutralises those legacy entries. Idempotent: a re-run skips a
+		# cover that's already been fixed.
+		diag_dicts = item.diagnoses or ([item.diagnosis] if item.diagnosis else [])
+		cats = {d.get("category") for d in diag_dicts}
+		if cats & set(_COVER_CATEGORIES):
+			from .covers import analyze_cover, download_cover, recover_cover_from_book
 
 			cover_path = Path(meta.path) / "cover.jpg"
-			ok = download_cover(item.proposed["cover_url"], cover_path)
-			if not ok:
-				log.warning("cover download failed for id=%s url=%s", item.id, item.proposed["cover_url"])
+			if "C11" in cats and cover_path.is_file() and not analyze_cover(cover_path).is_generated:
+				# Placeholder already replaced with a real cover.
+				log.info("cover already replaced, skipping id=%s", item.id)
+			elif "MISSING_COVER" in cats and cover_path.is_file():
+				# Missing cover already filled.
+				log.info("cover already present, skipping id=%s", item.id)
+			else:
+				ok = False
+				if item.proposed and "cover_url" in item.proposed:
+					ok = download_cover(item.proposed["cover_url"], cover_path)
+				if not ok and meta.primary_file:
+					ok = recover_cover_from_book(meta.primary_file, cover_path)
+				if not ok:
+					log.warning("cover recovery failed for id=%s", item.id)
 	elif item.action == "swap":
 		# Swap author <-> title
 		old_title = meta.title
@@ -1135,3 +1161,13 @@ def _apply_action(meta: BookMeta, item) -> None:  # noqa: ANN001
 			meta.language = item.edited["language"]
 		if "genres" in item.edited:
 			meta.genres = item.edited["genres"] if isinstance(item.edited["genres"], list) else [item.edited["genres"]]
+		if "description" in item.edited:
+			# Empty string clears the description (the GUI sends "" when
+			# the user empties a ticked field).
+			meta.description = item.edited["description"] or None
+		if "series" in item.edited or "series_index" in item.edited:
+			cur_name, cur_idx = meta.series_pair()
+			name = str(item.edited.get("series", cur_name) or "")
+			idx = item.edited.get("series_index", cur_idx)
+			# An explicitly emptied name clears the series entirely.
+			meta.series = [{"name": name, "index": str(idx) if idx else ""}] if name else []

@@ -21,7 +21,6 @@ The dispatch function `extract()` picks the right extractor by file extension.
 from __future__ import annotations
 
 import logging
-import os
 import re
 import shutil
 import subprocess
@@ -67,6 +66,10 @@ class ExtractedMeta:
 	isbn_from_text: str | None = None
 	# First-page text sample (for fuzzy title/author matching in verifier)
 	first_page_text: str | None = None
+	# A larger text window (first ~15 pages / ~30k chars) used only when the
+	# first-page LLM attempt fails — gives the model more context (title/author
+	# not always on page 1). None for formats that can't cheaply provide more.
+	broader_text: str | None = None
 	# Metadata mined from first_page_text by text_meta (independent of the
 	# embedded OPF block, which calibre may have overwritten).
 	title_from_text: str | None = None
@@ -164,7 +167,17 @@ def extract_epub(path: str | Path) -> ExtractedMeta:
 			#    back — the text-scan is independent and can flag the mismatch.
 			result.first_page_text = _epub_first_page_text(zf, opf_path)
 			if result.first_page_text:
-				result.isbn_from_text = extract_isbn(result.first_page_text[:3000])
+				# Scan first + last spine items for ISBN (copyright/colophon page
+				# is often at the end of the spine, not in the first 3000 chars).
+				result.isbn_from_text = extract_isbn(_epub_isbn_scan_text(zf, opf_path))
+				# Broader window (first ~15 spine items) for the LLM retry path.
+				try:
+					b_hrefs = _epub_spine_hrefs(zf, opf_path)[:15]
+					broader = _epub_text_from_hrefs(zf, b_hrefs)
+					if broader and len(broader) > len(result.first_page_text):
+						result.broader_text = broader[:30000]
+				except Exception:  # noqa: BLE001
+					pass
 				# Mine title/authors/publisher/year from the page text. These are
 				# independent of the OPF block above and feed the pipeline's
 				# deterministic fix stage.
@@ -186,49 +199,66 @@ def extract_epub(path: str | Path) -> ExtractedMeta:
 	return result
 
 
-def _epub_first_page_text(zf: zipfile.ZipFile, opf_path: str) -> str | None:
-	"""Extract text from the first few reading-order chapters of an EPUB.
+def _epub_spine_hrefs(zf: zipfile.ZipFile, opf_path: str) -> list[str]:
+	"""Ordered list of EPUB spine item hrefs (manifest-resolved, zip-internal)."""
+	opf_dir = opf_path.rsplit("/", 1)[0] + "/" if "/" in opf_path else ""
+	opf = etree.fromstring(zf.read(opf_path))
+	manifest: dict[str, str] = {}
+	for item in opf.iter("{http://www.idpf.org/2007/opf}item"):
+		item_id = item.get("id")
+		href = item.get("href")
+		if item_id and href:
+			manifest[item_id] = href
+	hrefs: list[str] = []
+	for itemref in opf.iter("{http://www.idpf.org/2007/opf}itemref"):
+		idref = itemref.get("idref")
+		if not idref or idref not in manifest:
+			continue
+		href = manifest[idref]
+		hrefs.append(opf_dir + href if not href.startswith("/") else href[1:])
+	return hrefs
 
-	We follow the OPF spine and concatenate the text of the first ~8 items
-	(cover, title page, copyright page, dedication, first chapter...).
-	Returns up to ~8000 chars. This is necessary because many EPUBs have the
-	cover as an image-only HTML page (CSS only), so the *real* title appears
-	only on the 2nd or 3rd spine item.
+
+def _epub_text_from_hrefs(zf: zipfile.ZipFile, hrefs: list[str]) -> str | None:
+	"""Concatenate the stripped text of the given spine hrefs (>5 chars each)."""
+	chunks: list[str] = []
+	for full in hrefs:
+		try:
+			raw = zf.read(full)
+		except KeyError:
+			continue
+		text = _strip_html(raw)
+		if text and len(text.strip()) > 5:
+			chunks.append(text)
+	return " | ".join(chunks) if chunks else None
+
+
+def _epub_first_page_text(zf: zipfile.ZipFile, opf_path: str) -> str | None:
+	"""Text of the first ~8 reading-order spine items (≤8000 chars).
+
+	Many EPUBs have an image-only cover page, so the real title/author appear
+	only on the 2nd/3rd spine item — hence several items, not just the first.
 	"""
 	try:
-		opf_dir = opf_path.rsplit("/", 1)[0] + "/" if "/" in opf_path else ""
-		opf = etree.fromstring(zf.read(opf_path))
-		manifest: dict[str, str] = {}
-		for item in opf.iter("{http://www.idpf.org/2007/opf}item"):
-			item_id = item.get("id")
-			href = item.get("href")
-			if item_id and href:
-				manifest[item_id] = href
-		# Spine order: collect text from up to 8 items
-		chunks: list[str] = []
-		seen = 0
-		for itemref in opf.iter("{http://www.idpf.org/2007/opf}itemref"):
-			if seen >= 8:
-				break
-			idref = itemref.get("idref")
-			if not idref or idref not in manifest:
-				continue
-			href = manifest[idref]
-			full = opf_dir + href if not href.startswith("/") else href[1:]
-			try:
-				raw = zf.read(full)
-			except KeyError:
-				continue
-			text = _strip_html(raw)
-			if text and len(text.strip()) > 5:
-				chunks.append(text)
-				seen += 1
-		if not chunks:
-			return None
-		combined = " | ".join(chunks)
-		return combined[:8000]
+		hrefs = _epub_spine_hrefs(zf, opf_path)
+		text = _epub_text_from_hrefs(zf, hrefs[:8])
+		return text[:8000] if text else None
 	except Exception:  # noqa: BLE001
 		return None
+
+
+def _epub_isbn_scan_text(zf: zipfile.ZipFile, opf_path: str) -> str:
+	"""Text of the first 5 + last 5 spine items, for ISBN scanning.
+
+	The ISBN (and publisher/year) often lives on the copyright/colophon page,
+	which can be at the very END of the spine — not reached by first_page_text.
+	"""
+	try:
+		hrefs = _epub_spine_hrefs(zf, opf_path)
+		picked = hrefs if len(hrefs) <= 10 else hrefs[:5] + hrefs[-5:]
+		return _epub_text_from_hrefs(zf, picked) or ""
+	except Exception:  # noqa: BLE001
+		return ""
 
 
 def _strip_html(raw: bytes) -> str:
@@ -277,6 +307,108 @@ def _strip_html(raw: bytes) -> str:
 
 
 # ---------------------------------------------------------------------------
+# OCR fallback (tesseract) for image-only books — scanned PDFs and comics.
+# Each helper is a graceful no-op when its binary is missing (shutil.which),
+# matching the pdftotext/catdoc pattern.
+# ---------------------------------------------------------------------------
+
+
+def _ocr_image_bytes(img_bytes: bytes, lang: str = "ces+eng") -> str | None:
+	"""OCR image bytes via tesseract. Returns the recognised text or None.
+
+	Tries *lang* (ces+eng for CZ/SK covers) and falls back to eng if the ces
+	training data isn't installed. None when tesseract is missing or fails.
+	"""
+	tesseract = shutil.which("tesseract")
+	if not tesseract or not img_bytes:
+		return None
+	import tempfile
+
+	with tempfile.TemporaryDirectory(prefix="bmf-ocr-") as tmp:
+		img_path = Path(tmp) / "page.png"
+		try:
+			img_path.write_bytes(img_bytes)
+		except OSError:
+			return None
+		for l in (lang, "eng"):
+			try:
+				proc = subprocess.run(
+					[tesseract, str(img_path), "-", "-l", l],
+					capture_output=True, encoding="utf-8", errors="replace", timeout=30,
+				)
+				if proc.returncode == 0 and proc.stdout and proc.stdout.strip():
+					return proc.stdout.strip()
+			except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+				pass
+	return None
+
+
+def _render_pdf_page_png(path: str | Path, page: int = 1, dpi: int = 150) -> bytes | None:
+	"""Render one PDF page to PNG bytes via pdftoppm (poppler). None on failure."""
+	pdftoppm = shutil.which("pdftoppm")
+	if not pdftoppm:
+		return None
+	import tempfile
+
+	with tempfile.TemporaryDirectory(prefix="bmf-ppm-") as tmp:
+		out_base = str(Path(tmp) / "p")
+		try:
+			subprocess.run(
+				[pdftoppm, "-png", "-r", str(dpi), "-f", str(page), "-l", str(page), str(path), out_base],
+				capture_output=True, timeout=30,
+			)
+		except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+			return None
+		candidates = sorted(Path(tmp).glob("p*.png"))
+		if candidates:
+			try:
+				return candidates[0].read_bytes()
+			except OSError:
+				return None
+	return None
+
+
+def _comic_first_image(path: str | Path) -> bytes | None:
+	"""Return the first page image of a comic archive (.cbz/.cbr/.cb7)."""
+	p = Path(path)
+	IMG = (".jpg", ".jpeg", ".png", ".webp")
+	if p.suffix.lower() == ".cbz":
+		try:
+			with zipfile.ZipFile(p) as zf:
+				names = sorted(n for n in zf.namelist() if n.lower().endswith(IMG))
+				if names:
+					return zf.read(names[0])
+		except Exception:  # noqa: BLE001
+			return None
+		return None
+	# .cbr (RAR) / .cb7 (7z) — extract the first image via 7z, fallback unar.
+	import tempfile
+
+	for tool in ("7z", "unar"):
+		binary = shutil.which(tool)
+		if not binary:
+			continue
+		with tempfile.TemporaryDirectory(prefix="bmf-comic-img-") as tmp:
+			try:
+				if tool == "7z":
+					subprocess.run([binary, "e", "-y", "-bso0", "-bsp0", f"-o{tmp}", str(p)],
+					               capture_output=True, timeout=60)
+				else:
+					subprocess.run([binary, "-f", "-q", "-o", tmp, str(p)],
+					               capture_output=True, timeout=60)
+			except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+				continue
+			candidates = sorted(Path(tmp).iterdir(), key=lambda e: e.name.lower())
+			candidates = [c for c in candidates if c.suffix.lower() in IMG]
+			if candidates:
+				try:
+					return candidates[0].read_bytes()
+				except OSError:
+					continue
+	return None
+
+
+# ---------------------------------------------------------------------------
 # PDF extractor
 # ---------------------------------------------------------------------------
 
@@ -285,13 +417,14 @@ def extract_pdf(path: str | Path) -> ExtractedMeta:
 	"""Extract metadata from PDF via pdfinfo + ISBN from first pages via pdftotext."""
 	result = ExtractedMeta(source_format="pdf")
 	path = str(path)
+	pages: int | None = None
 
 	# 1. pdfinfo for embedded metadata (Title/Author/Subject)
 	pdfinfo = shutil.which("pdfinfo")
 	if pdfinfo:
 		try:
 			proc = subprocess.run(
-				[pdfinfo, path], capture_output=True, text=True, timeout=10
+				[pdfinfo, path], capture_output=True, encoding="utf-8", errors="replace", timeout=10
 			)
 			if proc.returncode == 0:
 				for line in proc.stdout.splitlines():
@@ -311,20 +444,25 @@ def extract_pdf(path: str | Path) -> ExtractedMeta:
 						canon = _canonicalize_or_none(val)
 						if canon:
 							result.isbn = canon
+					elif k == "pages" and val.isdigit():
+						pages = int(val)
 		except (subprocess.TimeoutExpired, FileNotFoundError) as e:
 			log.debug("pdfinfo failed for %s: %s", path, e)
 
-	# 2. pdftotext for first 3 pages (ISBN on copyright page + title verification)
+	# 2. pdftotext for the first ~15 pages (one call serves two windows).
 	pdftotext = shutil.which("pdftotext")
 	if pdftotext:
 		try:
 			proc = subprocess.run(
-				[pdftotext, "-f", "1", "-l", "3", path, "-"],
-				capture_output=True, text=True, timeout=15,
+				[pdftotext, "-f", "1", "-l", "15", path, "-"],
+				capture_output=True, encoding="utf-8", errors="replace", timeout=15,
 			)
 			if proc.returncode == 0 and proc.stdout:
-				text = proc.stdout[:5000]
+				full = proc.stdout
+				text = full[:5000]
 				result.first_page_text = text
+				if len(full) > 5000:
+					result.broader_text = full[:30000]
 				# Always scan the text for an ISBN (independent of pdfinfo's
 				# embedded value) and mine the other text-based fields.
 				result.isbn_from_text = extract_isbn(text)
@@ -339,6 +477,32 @@ def extract_pdf(path: str | Path) -> ExtractedMeta:
 					result.isbn_from_text = tm.isbn
 		except (subprocess.TimeoutExpired, FileNotFoundError) as e:
 			log.debug("pdftotext failed for %s: %s", path, e)
+
+		# 3. If no ISBN yet, scan the LAST few pages — the colophon/back cover
+		# often carries the ISBN even when the front matter doesn't.
+		if not result.isbn_from_text and pages and pages > 3:
+			last_start = max(1, pages - 4)
+			try:
+				proc = subprocess.run(
+					[pdftotext, "-f", str(last_start), "-l", str(pages), path, "-"],
+					capture_output=True, encoding="utf-8", errors="replace", timeout=15,
+				)
+				if proc.returncode == 0 and proc.stdout:
+					result.isbn_from_text = extract_isbn(proc.stdout)
+			except (subprocess.TimeoutExpired, FileNotFoundError) as e:  # noqa: BLE001
+				log.debug("pdftotext (end pages) failed for %s: %s", path, e)
+
+	# 4. No text layer at all (scanned/image-only PDF) — OCR the first page.
+	#    pdftoppm renders it to PNG, tesseract reads it. Graceful no-op when
+	#    either tool is missing.
+	if not result.first_page_text:
+		img = _render_pdf_page_png(path, page=1)
+		if img:
+			ocr = _ocr_image_bytes(img)
+			if ocr:
+				result.first_page_text = ocr[:5000]
+				if not result.isbn_from_text:
+					result.isbn_from_text = extract_isbn(ocr)
 
 	if not result.title and not result.authors and not result.isbn and not result.first_page_text:
 		result.error = result.error or "no metadata extracted"
@@ -367,7 +531,7 @@ def extract_via_ebook_meta(path: str | Path) -> ExtractedMeta:
 		return result
 	try:
 		proc = subprocess.run(
-			[ebook_meta, str(path)], capture_output=True, text=True, timeout=15
+			[ebook_meta, str(path)], capture_output=True, encoding="utf-8", errors="replace", timeout=15
 		)
 		if proc.returncode != 0:
 			result.error = f"ebook-meta exited {proc.returncode}"
@@ -410,7 +574,13 @@ def extract_via_ebook_meta(path: str | Path) -> ExtractedMeta:
 	page_text = _ebook_convert_to_text(path)
 	if page_text:
 		result.first_page_text = page_text[:8000]
-		result.isbn_from_text = extract_isbn(result.first_page_text[:3000])
+		# Broader window for the LLM retry path — free (text already rendered).
+		if len(page_text) > 8000:
+			result.broader_text = page_text[:30000]
+		# Scan the FULL rendered text for ISBN (not just the first 3000 chars):
+		# the copyright/colophon page with the ISBN is often well past the first
+		# chunk, and extract_isbn is a cheap regex even over the whole book.
+		result.isbn_from_text = extract_isbn(page_text)
 		from .text_meta import extract_metadata_from_text
 
 		tm = extract_metadata_from_text(result.first_page_text)
@@ -449,7 +619,7 @@ def _ebook_convert_to_text(path: str | Path) -> str | None:
 		try:
 			proc = subprocess.run(
 				[ebook_convert, str(p), str(out)],
-				capture_output=True, text=True, timeout=30,
+				capture_output=True, encoding="utf-8", errors="replace", timeout=30,
 			)
 			if proc.returncode != 0 or not out.is_file():
 				return None
@@ -472,9 +642,11 @@ def _catdoc_to_text(path: str | Path) -> str | None:
 		return None
 	try:
 		# -s disables garbled-char warnings on stderr; -d utf-8 forces UTF-8 out.
+		# errors="replace" because catdoc occasionally emits a byte it can't map
+		# even with -d utf-8, which would otherwise crash the whole extraction.
 		proc = subprocess.run(
 			[catdoc, "-d", "utf-8", str(path)],
-			capture_output=True, text=True, timeout=15,
+			capture_output=True, encoding="utf-8", errors="replace", timeout=15,
 		)
 		if proc.returncode != 0:
 			return None
@@ -494,7 +666,7 @@ def extract_txt(path: str | Path) -> ExtractedMeta:
 	result = ExtractedMeta(source_format="txt")
 	try:
 		# Try utf-8, then cp1250/iso-8859-2 for CZ content
-		raw = Path(path).read_bytes()[:8000]
+		raw = Path(path).read_bytes()[:15000]
 		text = None
 		for enc in ("utf-8", "cp1250", "iso-8859-2"):
 			try:
@@ -505,7 +677,27 @@ def extract_txt(path: str | Path) -> ExtractedMeta:
 		if text is None:
 			text = raw.decode("utf-8", errors="replace")
 		result.first_page_text = text[:5000]
+		if len(text) > 5000:
+			result.broader_text = text[:15000]
 		result.isbn_from_text = extract_isbn(text[:5000])
+		# If no ISBN in the head, scan the tail too (colophon at the end).
+		if not result.isbn_from_text:
+			try:
+				size = Path(path).stat().st_size
+				if size > 8000:
+					tail = Path(path).read_bytes()[size - 5000:]
+					tail_text = None
+					for enc in ("utf-8", "cp1250", "iso-8859-2"):
+						try:
+							tail_text = tail.decode(enc)
+							break
+						except UnicodeDecodeError:
+							continue
+					if tail_text is None:
+						tail_text = tail.decode("utf-8", errors="replace")
+					result.isbn_from_text = extract_isbn(tail_text)
+			except OSError:
+				pass
 	except OSError as e:
 		result.error = f"txt read error: {e}"
 	return result
@@ -529,6 +721,195 @@ def _canonicalize_or_none(raw: str | None) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Comic archive extractor (.cbz / .cbr / .cb7)
+# ---------------------------------------------------------------------------
+
+
+def _read_comicinfo_xml(path: str | Path) -> bytes | None:
+	"""Return the ComicInfo.xml bytes from a comic archive, or None.
+
+	.cbz is a ZIP (pure-Python); .cbr is RAR and .cb7 is 7z — extracted via
+	`7z` (handles both) with `unar` as a fallback. Comics carry no text layer,
+	so ComicInfo.xml is the only non-vision metadata source.
+	"""
+	p = Path(path)
+	if p.suffix.lower() == ".cbz":
+		try:
+			with zipfile.ZipFile(p) as zf:
+				for name in zf.namelist():
+					if name.lower().rsplit("/", 1)[-1] == "comicinfo.xml":
+						return zf.read(name)
+		except Exception:  # noqa: BLE001
+			return None
+		return None
+	# .cbr (RAR) / .cb7 (7z) — extract ComicInfo.xml via 7z, fallback unar.
+	import tempfile
+
+	commands: list = []
+	if shutil.which("7z"):
+		sevenz = shutil.which("7z")
+		commands.append(lambda tmp: [sevenz, "e", "-y", "-bso0", "-bsp0", f"-o{tmp}", str(p), "ComicInfo.xml"])
+	if shutil.which("unar"):
+		unar = shutil.which("unar")
+		commands.append(lambda tmp: [unar, "-f", "-q", "-o", tmp, str(p), "ComicInfo.xml"])
+	for build in commands:
+		with tempfile.TemporaryDirectory(prefix="bmf-comic-") as tmp:
+			try:
+				subprocess.run(build(tmp), capture_output=True, timeout=30)
+			except Exception:  # noqa: BLE001
+				continue
+			f = Path(tmp) / "ComicInfo.xml"
+			if f.is_file():
+				try:
+					return f.read_bytes()
+				except OSError:
+					continue
+	return None
+
+
+def extract_comic(path: str | Path) -> ExtractedMeta:
+	"""Extract metadata from a comic archive's ComicInfo.xml.
+
+	Comics (.cbz/.cbr/.cb7) are image-only — there is no text layer to mine,
+	so identity cannot be text-verified from content. ComicInfo.xml (when
+	present) is the file's own metadata declaration (like an EPUB's OPF) and
+	provides title/authors/publisher/year/ISBN. When ComicInfo.xml is absent
+	or empty, the cover image is OCR'd via tesseract (pdftoppm/7z + tesseract)
+	to recover at least title/author/ISBN text for the identity pipeline.
+	"""
+	result = ExtractedMeta(source_format=Path(path).suffix.lower().lstrip("."))
+	xml = _read_comicinfo_xml(path)
+	if xml:
+		try:
+			root = etree.fromstring(xml)
+
+			def _text(tag: str) -> str | None:
+				el = root.find(tag)
+				return el.text.strip() if el is not None and el.text and el.text.strip() else None
+
+			title = _text("Title")
+			series = _text("Series")
+			number = _text("Number")
+			if not title and series:  # fall back to "Series #Number"
+				title = f"{series} #{number}" if number else series
+			result.title = title
+			creator = _text("Writer") or _text("Penciller")
+			if creator:
+				result.authors = [a.strip() for a in re.split(r"[;,]", creator) if a.strip()]
+			result.publisher = _text("Publisher")
+			year = _text("Year")
+			if year and year.isdigit():
+				result.year_from_text = int(year)
+			result.language = _text("LanguageISO")
+			isbn = _text("ISBN")
+			if isbn:
+				canon = _canonicalize_or_none(isbn)
+				if canon:
+					result.isbn = canon
+			if not (result.title or result.authors or result.isbn):
+				result.error = "ComicInfo.xml has no usable fields"
+		except Exception as e:  # noqa: BLE001
+			result.error = f"ComicInfo.xml parse: {e}"
+	else:
+		result.error = "no ComicInfo.xml"
+
+	# No usable metadata (no ComicInfo, empty, or unparseable) — OCR the cover
+	# image so the identity pipeline has SOME text to work with. Graceful no-op
+	# when tesseract is missing (the comic just stays image-only → review).
+	if result.error and not result.first_page_text:
+		img = _comic_first_image(path)
+		if img:
+			ocr = _ocr_image_bytes(img)
+			if ocr:
+				result.first_page_text = ocr[:5000]
+				result.isbn_from_text = extract_isbn(ocr)
+				result.error = None  # we got cover text, however partial
+	return result
+
+
+# Mobipocket annotations sidecar (.mbp) — bookmarks/reading position, not a
+# book. Layout observed on the real library: NUL-padded docname header, then
+# length-prefixed records under BPAR/DATA structures with 4-char tags; the
+# AUTH/TITL payloads are UTF-16LE strings written by the Mobipocket Reader
+# device/app at READING time. Unlike calibre-written OPF/PDF-Info (which
+# mirrors the possibly-corrupt DB back), the .mbp was never touched by
+# calibre — in folders where the book file itself was lost it is the only
+# identity evidence left.
+_MBP_MAX_RECORD = 4096
+
+
+def _mbp_utf16(payload: bytes) -> str | None:
+	"""Decode a record payload as UTF-16, BE or LE — whichever looks sane.
+
+	Mobipocket descends from PalmOS and writes UTF-16 **big-endian**; feeding
+	BE bytes to an LE decode yields printable-but-CJK garbage ("䄀搀愀洀猀"
+	for "Adams"), which sails through any isprintable filter. So both
+	variants are decoded strictly and scored by Latin-share (CZ/SK letters
+	all live under U+0250); the winner must actually look Latin. Returns
+	None when neither decodes or neither looks like text.
+	"""
+	best, best_score = None, -1.0
+	for enc in ("utf-16-be", "utf-16-le"):
+		try:
+			text = payload.decode(enc)
+		except UnicodeDecodeError:
+			continue
+		score = sum(1 for c in text if ord(c) < 0x0250) / max(len(text), 1)
+		if score > best_score:
+			best, best_score = text, score
+	if best is None or best_score < 0.75:
+		return None
+	return best.strip("\x00").strip()
+
+
+def _mbp_records(data: bytes) -> dict[str, str]:
+	"""Pull AUTH/TITL UTF-16 records out of Mobipocket .mbp bytes.
+
+	A blunt magic scan rather than a full BPAR/DATA tree walk: the files are
+	tiny (a few hundred bytes), each record is a 4-ASCII-char tag + uint32
+	BIG-endian length + payload, and false hits are filtered by the length
+	sanity check plus _mbp_utf16's strict-decode + Latin-score gate.
+	"""
+	out: dict[str, str] = {}
+	for tag in (b"AUTH", b"TITL"):
+		pos = data.find(tag)
+		if pos < 0 or pos + 8 > len(data):
+			continue
+		length = int.from_bytes(data[pos + 4 : pos + 8], "big")
+		if not 0 < length <= _MBP_MAX_RECORD or pos + 8 + length > len(data):
+			continue
+		text = _mbp_utf16(data[pos + 8 : pos + 8 + length])
+		if text:
+			out[tag.decode()] = text
+	return out
+
+
+def extract_mbp(path: str | Path) -> ExtractedMeta:
+	"""Extract author/title from a Mobipocket annotations sidecar (.mbp).
+
+	The .mbp is NOT an e-book: no page text, no cover, nothing to convert —
+	so it fills only the embedded title/author fields. It exists next to
+	(or, after a book-file loss, INSTEAD of) the real format file. The
+	author string is kept WHOLE ("Vyhídka, Petr" is one person, not two) —
+	Mobipocket stores a single display name, unlike ComicInfo's ";" lists.
+	"""
+	result = ExtractedMeta(source_format="mbp")
+	try:
+		data = Path(path).read_bytes()
+	except OSError as e:
+		result.error = f"read: {e}"
+		return result
+	recs = _mbp_records(data)
+	if recs.get("TITL"):
+		result.title = recs["TITL"]
+	if recs.get("AUTH"):
+		result.authors = [recs["AUTH"]]
+	if not (result.title or result.authors):
+		result.error = "no AUTH/TITL records"
+	return result
+
+
+# ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
@@ -541,10 +922,18 @@ _EXTRACTORS = {
 	".pdb": extract_via_ebook_meta,
 	".mobi": extract_via_ebook_meta,
 	".azw": extract_via_ebook_meta,
+	".azw3": extract_via_ebook_meta,
+	".prc": extract_via_ebook_meta,
 	".doc": extract_via_ebook_meta,
 	".rtf": extract_via_ebook_meta,
 	".lit": extract_via_ebook_meta,
 	".djvu": extract_via_ebook_meta,
+	# Comics — image archives with optional ComicInfo.xml metadata
+	".cbz": extract_comic,
+	".cbr": extract_comic,
+	".cb7": extract_comic,
+	# Mobipocket annotations sidecar (see extract_mbp)
+	".mbp": extract_mbp,
 }
 
 

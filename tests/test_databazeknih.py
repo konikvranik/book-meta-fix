@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from book_meta_fix import enrichers
-from book_meta_fix.enrichers import Enricher, EnrichedMeta, lookup_databazeknih
+from book_meta_fix.enrichers import EnrichedMeta, Enricher, lookup_databazeknih, lookup_databazeknih_isbn
 
 FIX = Path(__file__).parent / "fixtures" / "databazeknih"
 
@@ -74,6 +74,44 @@ class TestSearchDatabazeknih:
 		path = _search_databazeknih("1984", None)
 		assert path == "/prehled-knihy/1984-283"
 
+	def _editions_html(self) -> str:
+		"""Two same-titled editions of one work, different years (2003, 2010)."""
+		return (
+			"<html><body>"
+			"<p class='new'>"
+			"<a class='new' type='book' href='/prehled-knihy/1984-v1-1'>1984</a>"
+			"<br /><span class='pozn'>2003, George Orwell (p)</span></p>"
+			"<p class='new'>"
+			"<a class='new' type='book' href='/prehled-knihy/1984-v2-2'>1984</a>"
+			"<br /><span class='pozn'>2010, George Orwell (p)</span></p>"
+			"</body></html>"
+		)
+
+	def test_year_prefers_matching_edition(self, monkeypatch):
+		"""With a target year, the edition published that year (±1) is chosen."""
+		from book_meta_fix.enrichers import _search_databazeknih
+
+		monkeypatch.setattr(enrichers, "_http_get_html", lambda url, **kw: self._editions_html())
+		assert _search_databazeknih("1984", "George Orwell", year=2010) == "/prehled-knihy/1984-v2-2"
+		assert _search_databazeknih("1984", "George Orwell", year=2003) == "/prehled-knihy/1984-v1-1"
+
+	def test_year_no_match_falls_back_to_best_fuzzy(self, monkeypatch):
+		"""No edition matches the target year → fall back to best fuzzy (same
+		work, other edition) rather than rejecting — maximise autodetection."""
+		from book_meta_fix.enrichers import _search_databazeknih
+
+		monkeypatch.setattr(enrichers, "_http_get_html", lambda url, **kw: self._editions_html())
+		path = _search_databazeknih("1984", "George Orwell", year=1990)
+		# Both editions match the title equally; either is acceptable (no reject).
+		assert path in ("/prehled-knihy/1984-v1-1", "/prehled-knihy/1984-v2-2")
+
+	def test_no_year_picks_best_fuzzy(self, monkeypatch):
+		from book_meta_fix.enrichers import _search_databazeknih
+
+		monkeypatch.setattr(enrichers, "_http_get_html", lambda url, **kw: self._editions_html())
+		path = _search_databazeknih("1984", "George Orwell")
+		assert path in ("/prehled-knihy/1984-v1-1", "/prehled-knihy/1984-v2-2")
+
 
 class TestLookupDatabazeknih:
 	def test_full_lookup_returns_enriched_meta(self, monkeypatch):
@@ -124,6 +162,30 @@ class TestLookupDatabazeknih:
 		assert lookup_databazeknih(title="1984", author="George Orwell") is None
 
 
+class TestDatabazeknihIsbnLookup:
+	def test_isbn_returns_direct_profile(self, monkeypatch):
+		"""ISBN search returns the book's detail page directly → parsed in one
+		HTTP call (no fuzzy title scoring needed)."""
+		def fake_get(url, **kw):
+			# ISBN search lands on the detail page directly.
+			return _load("detail_1984.html")
+
+		monkeypatch.setattr(enrichers, "_http_get_html", fake_get)
+		em = lookup_databazeknih_isbn("9788073099993")
+		assert em is not None
+		assert em.source == "databazeknih"
+		assert em.title == "1984"
+
+	def test_isbn_no_results_returns_none(self, monkeypatch):
+		"""A 'no results' page has no book JSON-LD → None."""
+		monkeypatch.setattr(enrichers, "_http_get_html", lambda url, **kw: "<html>nenalezeno žádný výsledek</html>")
+		assert lookup_databazeknih_isbn("0000000000") is None
+
+	def test_isbn_network_failure_returns_none(self, monkeypatch):
+		monkeypatch.setattr(enrichers, "_http_get_html", lambda url, **kw: None)
+		assert lookup_databazeknih_isbn("9788073099993") is None
+
+
 class TestEnricherLookupOrder:
 	def test_databazeknih_disabled_by_default(self):
 		e = Enricher()
@@ -137,7 +199,11 @@ class TestEnricherLookupOrder:
 		"""When enabled, databazeknih should be consulted before OpenLibrary."""
 		calls: list[str] = []
 
-		def fake_dk(*, title, author=None):
+		def fake_dk_isbn(isbn):
+			calls.append("databazeknih_isbn")
+			return None  # ISBN miss → fall through to title lookup
+
+		def fake_dk(*, title, author=None, year=None):
 			calls.append("databazeknih")
 			return EnrichedMeta(title=title, source="databazeknih", genres=["Romány"])
 
@@ -145,6 +211,7 @@ class TestEnricherLookupOrder:
 			calls.append("openlibrary_isbn")
 			return None
 
+		monkeypatch.setattr(enrichers, "lookup_databazeknih_isbn", fake_dk_isbn)
 		monkeypatch.setattr(enrichers, "lookup_databazeknih", fake_dk)
 		monkeypatch.setattr(enrichers, "lookup_openlibrary_isbn", fake_ol_isbn)
 
@@ -152,12 +219,13 @@ class TestEnricherLookupOrder:
 		em = e.lookup(title="1984", author="George Orwell", isbn="9788073099993")
 		assert em is not None
 		assert em.source == "databazeknih"
-		assert calls == ["databazeknih"]  # OpenLibrary never called (DK hit first)
+		# ISBN lookup tried first (miss), then title lookup hits; OL never called.
+		assert calls == ["databazeknih_isbn", "databazeknih"]
 
 	def test_lookup_skips_databazeknih_when_disabled(self, monkeypatch):
 		calls: list[str] = []
 
-		def fake_dk(*, title, author=None):
+		def fake_dk(*, title, author=None, year=None):
 			calls.append("databazeknih")
 			return EnrichedMeta(title=title, source="databazeknih")
 
@@ -172,7 +240,7 @@ class TestEnricherLookupOrder:
 		"""Genres must survive a cache round-trip (cache payload includes them)."""
 		call_count = [0]
 
-		def fake_dk(*, title, author=None):
+		def fake_dk(*, title, author=None, year=None):
 			call_count[0] += 1
 			return EnrichedMeta(title=title, source="databazeknih", genres=["Sci-fi", "antiutopie"])
 
@@ -218,3 +286,83 @@ class TestEnricherLookupOrder:
 		assert em2 != "__NOT_FOUND__"
 		# The source was not re-queried (cached negative short-circuits).
 		assert call_count[0] == 1
+
+	def test_negative_expires_after_ttl(self, tmp_path, monkeypatch):
+		"""A cached __NOT_FOUND__ older than negative_ttl_sec is re-queried, so a
+		transient miss (or a pre-fix identity) gets a second chance instead of
+		being pinned forever."""
+		class _Clock:
+			def __init__(self) -> None:
+				self.t = 1_000_000.0
+
+			def time(self) -> float:
+				return self.t
+
+		clock = _Clock()
+		monkeypatch.setattr(enrichers, "time", clock)
+
+		call_count = [0]
+
+		def fake_ol_isbn(isbn):
+			call_count[0] += 1
+			return None
+
+		monkeypatch.setattr(enrichers, "lookup_openlibrary_isbn", fake_ol_isbn)
+		monkeypatch.setattr(enrichers, "lookup_google_books_isbn", lambda isbn: None)
+
+		cache = tmp_path / "cache.db"
+		kwargs = dict(openlibrary_enabled=True, google_books_enabled=True, databazeknih_enabled=False, negative_ttl_sec=100)
+
+		# First lookup at t: miss, caches __NOT_FOUND__ (cached_at = t).
+		e1 = Enricher(cache_db=cache, **kwargs)
+		assert e1.lookup(isbn="9788073099992") is None
+		assert call_count[0] == 1
+		e1.close()
+
+		# Within TTL: served from cache, no re-query.
+		clock.t += 50
+		e2 = Enricher(cache_db=cache, **kwargs)
+		assert e2.lookup(isbn="9788073099992") is None
+		assert call_count[0] == 1
+		e2.close()
+
+		# Past TTL: treated as a miss -> re-query -> re-cached.
+		clock.t += 200
+		e3 = Enricher(cache_db=cache, **kwargs)
+		assert e3.lookup(isbn="9788073099992") is None
+		assert call_count[0] == 2
+		e3.close()
+
+	def test_negative_never_expires_when_ttl_zero(self, tmp_path, monkeypatch):
+		"""negative_ttl_sec <= 0 keeps the old forever-unchanging behaviour."""
+		class _Clock:
+			def __init__(self) -> None:
+				self.t = 1_000_000.0
+
+			def time(self) -> float:
+				return self.t
+
+		clock = _Clock()
+		monkeypatch.setattr(enrichers, "time", clock)
+
+		call_count = [0]
+
+		def fake_ol_isbn(isbn):
+			call_count[0] += 1
+			return None
+
+		monkeypatch.setattr(enrichers, "lookup_openlibrary_isbn", fake_ol_isbn)
+		monkeypatch.setattr(enrichers, "lookup_google_books_isbn", lambda isbn: None)
+
+		cache = tmp_path / "cache.db"
+		kwargs = dict(openlibrary_enabled=True, google_books_enabled=True, databazeknih_enabled=False, negative_ttl_sec=0)
+
+		e1 = Enricher(cache_db=cache, **kwargs)
+		assert e1.lookup(isbn="9788073099992") is None
+		e1.close()
+
+		clock.t += 10_000_000  # far in the future
+		e2 = Enricher(cache_db=cache, **kwargs)
+		assert e2.lookup(isbn="9788073099992") is None  # still cached
+		assert call_count[0] == 1  # never re-queried
+		e2.close()

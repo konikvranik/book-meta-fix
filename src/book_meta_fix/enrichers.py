@@ -31,7 +31,7 @@ from .isbn import canonicalize
 
 log = logging.getLogger(__name__)
 
-USER_AGENT = "book-meta-fix/0.1 (https://github.com/pvranik/book-meta-fix)"
+USER_AGENT = "book-meta-fix/0.1 (https://github.com/konikvranik/book-meta-fix)"
 
 
 @dataclass
@@ -50,6 +50,11 @@ class EnrichedMeta:
 	series_index: str | None = None  # position within series
 	genres: list[str] = field(default_factory=list)  # genre tags (databazeknih / LLM)
 	source: str = ""  # 'openlibrary' | 'google_books' | 'databazeknih' | 'llm:high'
+	# True when the book's identity was confirmed against its own content
+	# (ISBN agreement or title+author in the page text), independent of the
+	# online match. When set, the proposal is high-confidence and safe to
+	# auto-accept even if it changes title/author — we know which book it is.
+	identity_confirmed: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +220,45 @@ _RESULT_RE = _re.compile(
 	r'''<a\s+class=["']new["'][^>]*?type=["']book["'][^>]*?href=["'](/prehled-knihy/[^"']+)["'][^>]*>([^<]+)</a>''',
 	_re.IGNORECASE,
 )
+# A whole search-result row: <p class='new'> ... anchor + pozn note ... </p>.
+# Used to associate each result's title with its trailing year/author note.
+_RESULT_BLOCK_RE = _re.compile(
+	r"<p[^>]*class=['\"]new['\"][^>]*>(.*?)</p>",
+	_re.DOTALL | _re.IGNORECASE,
+)
+# Leading 4-digit year inside <span class='pozn'>YEAR, Author</span>.
+_POZN_YEAR_RE = _re.compile(r"<span[^>]*class=['\"]pozn['\"][^>]*>\s*(\d{4})")
+
+
+def _parse_search_results(html: str) -> list[tuple[str, str, int | None]]:
+	"""Parse search results into (path, title, year) tuples.
+
+	The year comes from the trailing <span class='pozn'>YEAR, Author</span> note
+	in each result's <p> block; None when the note lacks a leading year.
+	"""
+	results: list[tuple[str, str, int | None]] = []
+	seen: set[str] = set()
+	for block_m in _RESULT_BLOCK_RE.finditer(html):
+		block = block_m.group(1)
+		am = _RESULT_RE.search(block)
+		if am is None:
+			continue
+		path = am.group(1)
+		rtitle = am.group(2).strip()
+		if path in seen or not rtitle:
+			continue
+		seen.add(path)
+		year: int | None = None
+		pm = _POZN_YEAR_RE.search(block)
+		if pm:
+			try:
+				year = int(pm.group(1))
+			except ValueError:  # noqa: BLE001
+				year = None
+		results.append((path, rtitle, year))
+		if len(results) >= 10:
+			break
+	return results
 # JSON-LD <script type="application/ld+json"> { ... } </script>
 _JSONLD_RE = _re.compile(
 	r'<script type="application/ld\+json">\s*(\{.*?\})\s*</script>',
@@ -259,13 +303,16 @@ def _http_get_html(url: str, *, timeout: float = 15.0, rate: float = 1.0) -> str
 		return None
 
 
-def _search_databazeknih(title: str, author: str | None) -> str | None:
+def _search_databazeknih(title: str, author: str | None, year: int | None = None) -> str | None:
 	"""Search databazeknih.cz, return the best-matching detail path
 	('/prehled-knihy/<slug>-<id>') or None.
 
-	Strategy: query with title (+ author if given). Take the first result and
-	validate it with a fuzzy title match so we don't pull genres for the wrong
-	book (search is title-keyword based and returns many near-misses).
+	Strategy: query with title (+ author surname). Among results that fuzzy-
+	match the title (>= 70), prefer one whose publication year matches *year*
+	(±1) so the right edition is chosen among same-titled results. Falls back
+	to the best fuzzy match when no year is known or none matches (same work,
+	different edition) — this maximises autodetection without rejecting same-
+	work editions.
 	"""
 	from urllib.parse import quote_plus
 
@@ -281,38 +328,32 @@ def _search_databazeknih(title: str, author: str | None) -> str | None:
 	if html is None:
 		return None
 
-	# Each search result renders as:
-	#   <a class='new' type='book' href='/prehled-knihy/<slug>-<id>'>Title</a>
-	# Parse these directly — the href and visible title live in the same anchor,
-	# which is far more reliable than correlating the cover-link to its title.
-	pairs: list[tuple[str, str]] = []
-	seen: set[str] = set()
-	for m in _RESULT_RE.finditer(html):
-		path = m.group(1)
-		result_title = m.group(2).strip()
-		if path in seen or not result_title:
-			continue
-		seen.add(path)
-		pairs.append((path, result_title))
-		if len(pairs) >= 10:
-			break
-
-	if not pairs:
+	results = _parse_search_results(html)
+	if not results:
 		return None
 
-	# Pick the best fuzzy title match (not necessarily the first result).
-	best_path: str | None = None
-	best_score = -1.0
-	for path, result_title in pairs:
-		score = fuzz.token_sort_ratio(title.lower(), result_title.lower())
-		if score > best_score:
-			best_score = score
-			best_path = path
-	# Require a reasonable match — otherwise we'd attach genres from a wrong book.
-	if best_path is None or best_score < 70:
-		log.debug("databazeknih search '%s' best match score %.0f < 70, skipping", title, best_score)
+	# Keep candidates with a reasonable fuzzy title match (>= 70) so we don't
+	# attach genres from a wrong book (search is keyword-based, many near-misses).
+	candidates = [
+		(fuzz.token_sort_ratio(title.lower(), rtitle.lower()), path, ryear)
+		for path, rtitle, ryear in results
+	]
+	candidates = [c for c in candidates if c[0] >= 70]
+	if not candidates:
+		log.debug("databazeknih search '%s' best match score < 70, skipping", title)
 		return None
-	return best_path
+
+	# Prefer an edition whose year matches the target (±1) among the candidates;
+	# this disambiguates editions of the same work. If none matches, keep all
+	# (same work, other edition) rather than rejecting.
+	if year is not None:
+		year_matches = [c for c in candidates if c[2] is not None and abs(c[2] - year) <= 1]
+		if year_matches:
+			candidates = year_matches
+
+	# Best fuzzy title among the (optionally year-filtered) candidates.
+	candidates.sort(key=lambda c: c[0], reverse=True)
+	return candidates[0][1]
 
 
 def _parse_jsonld(html: str) -> dict | None:
@@ -328,29 +369,13 @@ def _parse_jsonld(html: str) -> dict | None:
 		return None
 
 
-def lookup_databazeknih(*, title: str, author: str | None = None) -> EnrichedMeta | None:
-	"""Scrape databazeknih.cz for a book's metadata + genres.
+def _parse_databazeknih_detail(html: str) -> EnrichedMeta | None:
+	"""Parse a databazeknih book-detail page (JSON-LD + Štítky) into EnrichedMeta.
 
-	Two HTTP calls: (1) search by title to find the detail page, (2) fetch the
-	detail page and parse its JSON-LD (schema.org Book) plus the user 'Štítky'.
-
-	Returns None if the book can't be confidently matched. Genres are the union
-	of JSON-LD `genre` (broad categories) and user tags (richer, e.g.
-	'antiutopie'); broad categories come first.
+	Returns None if the page carries no usable title/isbn (e.g. a 'no results'
+	search page). Shared by the title-search and ISBN-search lookups.
 	"""
-	from urllib.parse import urljoin
-
-	path = _search_databazeknih(title, author)
-	if path is None:
-		return None
-
-	detail_url = urljoin("https://www.databazeknih.cz/", path)
-	html = _http_get_html(detail_url)
-	if html is None:
-		return None
-
 	ld = _parse_jsonld(html) or {}
-
 	em = EnrichedMeta(source="databazeknih")
 
 	# --- JSON-LD metadata (authoritative-ish) ---
@@ -398,6 +423,178 @@ def lookup_databazeknih(*, title: str, author: str | None = None) -> EnrichedMet
 	return em
 
 
+def lookup_databazeknih(*, title: str, author: str | None = None, year: int | None = None) -> EnrichedMeta | None:
+	"""Scrape databazeknih.cz for a book's metadata + genres (by title search).
+
+	Two HTTP calls: (1) search by title to find the detail page, (2) fetch the
+	detail page and parse its JSON-LD (schema.org Book) plus the user 'Štítky'.
+	When *year* is given, the search prefers an edition published in that year
+	(±1) among the title-matching candidates.
+
+	Returns None if the book can't be confidently matched (fuzzy title < 70).
+	"""
+	from urllib.parse import urljoin
+
+	path = _search_databazeknih(title, author, year=year)
+	if path is None:
+		return None
+
+	detail_url = urljoin("https://www.databazeknih.cz/", path)
+	html = _http_get_html(detail_url)
+	if html is None:
+		return None
+	return _parse_databazeknih_detail(html)
+
+
+def lookup_databazeknih_isbn(isbn: str) -> EnrichedMeta | None:
+	"""Look up a book on databazeknih.cz by ISBN (exact match, no fuzzy score).
+
+	ISBN search returns the book's detail page directly for a hit (one HTTP
+	call), or a 'no results' page for a miss. For CZ/SK books this is the most
+	reliable entry point — it resolves the correct record even when the library
+	metadata title is corrupt (filename-as-title). If the search unexpectedly
+	returns a list, the first result is fetched as a fallback.
+	"""
+	from urllib.parse import quote_plus, urljoin
+
+	url = f"https://www.databazeknih.cz/search?q={quote_plus(isbn)}&in=books"
+	html = _http_get_html(url)
+	if html is None:
+		return None
+	# Direct profile hit (the usual case): the page is the book detail.
+	em = _parse_databazeknih_detail(html)
+	if em is not None:
+		return em
+	# Fallback: a search-results list — take the first result's detail page.
+	for m in _RESULT_RE.finditer(html):
+		path = m.group(1)
+		detail_html = _http_get_html(urljoin("https://www.databazeknih.cz/", path))
+		if detail_html is not None:
+			return _parse_databazeknih_detail(detail_html)
+		break
+	return None
+
+
+# ---------------------------------------------------------------------------
+# legie.info (scraping — CZ/SK fantasy/sci-fi database)
+# ---------------------------------------------------------------------------
+#
+# Complementary to databazeknih: legie.info is the strongest CZ/SK source for
+# speculative fiction (sci-fi / fantasy / horror) — short stories ("povídky"),
+# series and the "world" (universe) a work belongs to. databazeknih's book
+# search does NOT index short stories at all (verified: a story like Asimov's
+# "Ženská intuice" exists on databazeknih under /povidky/ but is unreachable
+# via the /search?in=books endpoint), so for a sci-fi-heavy library legie.info
+# is often the only source that can confirm a work's identity. It does NOT
+# carry CZ-edition ISBN/Year/Publisher (only the original publication date), so
+# it is consulted AFTER databazeknih (which is richer when it hits).
+
+# Detail-page title. Povídky use id="nazev_povidky", books id="nazev_knihy".
+_LEGIE_TITLE_RE = _re.compile(
+	r'<h2[^>]*id="nazev_(?:povidky|knihy)"[^>]*>([^<]+)</h2>', _re.IGNORECASE
+)
+# Author: <h3><a href="autor/292-isaac-asimov">Isaac Asimov</a></h3> (relative href)
+_LEGIE_AUTHOR_RE = _re.compile(
+	r'<h3>\s*<a[^>]*href="autor/[^"]+"[^>]*>([^<]+)</a>\s*</h3>', _re.IGNORECASE
+)
+# Universe/world a povídka belongs to: "Povídka patří do světa: <a href="svet/42-nadace">"
+_LEGIE_SVET_RE = _re.compile(
+	r'pat[řr][íi]\s+do\s+sv[ěe]ta:\s*<a[^>]*href="svet/[^"]+"[^>]*>([^<]+)</a>',
+	_re.IGNORECASE,
+)
+# Original (foreign) title + first-published date, inside <p id="jine_nazvy">.
+_LEGIE_ORIG_RE = _re.compile(
+	r"origin[áa]ln[íi]\s+n[áa]zev:\s*([^<\r\n]+)", _re.IGNORECASE
+)
+# A result row on a search-list page uses a RELATIVE href (no leading slash):
+#   <a href="kniha/3377-vladimir-...-neodvratna-zkaza">Neodvratná zkáza</a>
+_LEGIE_RESULT_RE = _re.compile(
+	r'<a[^>]*href="((?:povidka|kniha)/[^"]+)"[^>]*>([^<]{1,120})</a>', _re.IGNORECASE
+)
+
+
+def _collapse_ws(s: str) -> str:
+	"""Collapse internal whitespace and strip — HTML titles often wrap/spread."""
+	return _re.sub(r"\s+", " ", s).strip()
+
+
+def _parse_legie_detail(html: str) -> EnrichedMeta | None:
+	"""Parse a legie.info work-detail page into EnrichedMeta.
+
+	Returns None when the page has no parseable title (e.g. a bare search form
+	or a 'no results' page). ISBN/Year/Publisher are not available on legie.info.
+	"""
+	m = _LEGIE_TITLE_RE.search(html)
+	if m is None:
+		return None
+	em = EnrichedMeta(source="legie")
+	em.title = _collapse_ws(m.group(1))
+	# Authors: there may be several <h3> author lines (co-authors); de-dup in order.
+	authors = [_collapse_ws(a) for a in _LEGIE_AUTHOR_RE.findall(html) if _collapse_ws(a)]
+	em.authors = list(dict.fromkeys(authors))
+	svet = _LEGIE_SVET_RE.search(html)
+	if svet:
+		em.series = _collapse_ws(svet.group(1))
+	orig = _LEGIE_ORIG_RE.search(html)
+	if orig:
+		# Stash the original title in description — useful for LLM/cross-check;
+		# there is no dedicated field on EnrichedMeta.
+		em.description = f"originál: {_collapse_ws(orig.group(1))}"
+	if not em.title:
+		return None
+	return em
+
+
+def _legie_pick_from_list(html: str, title: str, *, floor: int = 70) -> str | None:
+	"""From a search-results page, return the best-matching relative href
+	('kniha/<slug>-<id>' / 'povidka/...') by fuzzy title, or None when nothing
+	reaches *floor*. The visible anchor text is the work's title."""
+	from rapidfuzz import fuzz
+
+	best: str | None = None
+	best_score = 0
+	for href, rtitle in _LEGIE_RESULT_RE.findall(html):
+		score = fuzz.token_sort_ratio(title.lower(), _collapse_ws(rtitle).lower())
+		if score >= floor and score > best_score:
+			best, best_score = href, score
+	return best
+
+
+def lookup_legie(*, title: str, author: str | None = None) -> EnrichedMeta | None:
+	"""Scrape legie.info for a work's identity (title + author + universe).
+
+	Two HTTP paths, mirroring lookup_databazeknih_isbn:
+	  1. A strong/unique match returns the work's detail page directly from the
+	     search endpoint → parse in one call.
+	  2. Otherwise the search returns a results list → pick the best fuzzy title
+	     match (>= 70) and fetch its detail page.
+
+	*author* is accepted for API symmetry but not added to the query: legie.info
+	searches a single text field and the title is the reliable key (adding an
+	author surname hurt recall during calibration, same as on databazeknih).
+
+	Returns None if no work can be confidently matched.
+	"""
+	from urllib.parse import quote_plus, urljoin
+
+	url = f"https://www.legie.info/index.php?search_text={quote_plus(title)}"
+	html = _http_get_html(url)
+	if html is None:
+		return None
+	# Direct hit: the search page IS the work's detail page.
+	em = _parse_legie_detail(html)
+	if em is not None:
+		return em
+	# Results list: fetch the best match's detail page.
+	href = _legie_pick_from_list(html, title)
+	if href is None:
+		return None
+	detail = _http_get_html(urljoin("https://www.legie.info/", href))
+	if detail is None:
+		return None
+	return _parse_legie_detail(detail)
+
+
 # ---------------------------------------------------------------------------
 # Top-level lookup with caching
 # ---------------------------------------------------------------------------
@@ -412,13 +609,19 @@ class Enricher:
 		rate_sec: float = 1.0,
 		*,
 		databazeknih_enabled: bool = False,
+		legie_enabled: bool = False,
 		openlibrary_enabled: bool = True,
 		google_books_enabled: bool = True,
+		negative_ttl_sec: float = 7 * 24 * 3600,
 	) -> None:
 		self.rate_sec = rate_sec
 		self.databazeknih_enabled = databazeknih_enabled
+		self.legie_enabled = legie_enabled
 		self.openlibrary_enabled = openlibrary_enabled
 		self.google_books_enabled = google_books_enabled
+		# A cached negative ("__NOT_FOUND__") older than this is treated as a
+		# miss and re-queried. <= 0 keeps negatives forever (old behaviour).
+		self._negative_ttl = negative_ttl_sec
 		self._cache_conn: sqlite3.Connection | None = None
 		self._cache_lock = __import__("threading").Lock()
 		if cache_db is not None:
@@ -436,19 +639,22 @@ class Enricher:
 			)
 			self._cache_conn.commit()
 
-	def lookup(self, *, isbn: str | None = None, title: str | None = None, author: str | None = None) -> EnrichedMeta | None:
+	def lookup(self, *, isbn: str | None = None, title: str | None = None, author: str | None = None, year: int | None = None) -> EnrichedMeta | None:
 		"""Try sources in order. Returns first hit or None.
 
 		Order (gated by *_enabled flags):
-		  1. databazeknih.cz by title (best for CZ/SK genres; opt-in)
-		  2. OpenLibrary by ISBN
-		  3. Google Books by ISBN
-		  4. OpenLibrary by title
+		  1. databazeknih.cz by ISBN (exact; best for CZ/SK + genres)
+		  2. databazeknih.cz by title (fuzzy >= 70; prefers year-matching edition)
+		  3. OpenLibrary by ISBN
+		  4. Google Books by ISBN
+		  5. OpenLibrary by title
 
-		databazeknih goes first because it's the strongest source for this
-		library's CZ/SK content and the only one returning genres.
+		*year* is used only by the databazeknih title search to disambiguate
+		editions; ISBN lookups are exact. databazeknih by ISBN goes first: it's
+		an exact match and the only way to reach the strongest CZ/SK source when
+		the library title is corrupt.
 		"""
-		cache_key = self._cache_key(isbn=isbn, title=title, author=author)
+		cache_key = self._cache_key(isbn=isbn, title=title, author=author, year=year)
 		cached = self._cache_get(cache_key)
 		if cached is not None:
 			# _cache_get returns one of:
@@ -461,9 +667,19 @@ class Enricher:
 			return cached
 
 		result: EnrichedMeta | None = None
-		# databazeknih: by title (search). Goes first — best CZ/SK source + genres.
+		# databazeknih by ISBN (exact match) — the strongest CZ/SK source, and
+		# the only way to reach it for a book whose title is corrupt but that
+		# has an ISBN. Goes first when an ISBN is available.
+		if result is None and self.databazeknih_enabled and isbn:
+			result = lookup_databazeknih_isbn(isbn)
+		# databazeknih by title (search). Best CZ/SK source + genres.
 		if result is None and self.databazeknih_enabled and title:
-			result = lookup_databazeknih(title=title, author=author)
+			result = lookup_databazeknih(title=title, author=author, year=year)
+		# legie.info by title — catches CZ/SK sci-fi/fantasy short stories and
+		# series that databazeknih's book search does not index. No ISBN/Year here,
+		# so it only helps identity (title/author), not CZ-edition metadata.
+		if result is None and self.legie_enabled and title:
+			result = lookup_legie(title=title, author=author)
 		# ISBN-based lookups (authoritative when available).
 		if result is None and isbn:
 			if self.openlibrary_enabled:
@@ -483,20 +699,27 @@ class Enricher:
 			self._cache_conn.close()
 			self._cache_conn = None
 
-	def _cache_key(self, *, isbn: str | None, title: str | None, author: str | None) -> str:
+	def _cache_key(self, *, isbn: str | None, title: str | None, author: str | None, year: int | None = None) -> str:
 		isbn_c = canonicalize(isbn) if isbn else None
-		return json.dumps({"isbn": isbn_c, "title": (title or "").lower()[:80], "author": (author or "").lower()[:50]}, sort_keys=True)
+		return json.dumps({"isbn": isbn_c, "title": (title or "").lower()[:80], "author": (author or "").lower()[:50], "year": year}, sort_keys=True)
 
 	def _cache_get(self, key: str) -> EnrichedMeta | None | str:
-		"""Returns: EnrichedMeta on hit, None on miss, '__NOT_FOUND__' on cached negative."""
+		"""Returns: EnrichedMeta on hit, None on miss, '__NOT_FOUND__' on cached negative.
+
+		A cached negative older than the configured TTL is treated as a miss so
+		transient online failures (and pre-fix identities) get retried instead
+		of being pinned forever.
+		"""
 		if self._cache_conn is None:
 			return None
 		with self._cache_lock:
-			row = self._cache_conn.execute("SELECT payload FROM enrich_cache WHERE key = ?", (key,)).fetchone()
+			row = self._cache_conn.execute("SELECT payload, cached_at FROM enrich_cache WHERE key = ?", (key,)).fetchone()
 		if row is None:
 			return None  # miss
-		payload = row[0]
+		payload, cached_at = row
 		if payload == "__NOT_FOUND__":
+			if self._negative_ttl > 0 and (time.time() - cached_at) > self._negative_ttl:
+				return None  # expired negative -> re-query and re-cache
 			return "__NOT_FOUND__"
 		try:
 			d = json.loads(payload)

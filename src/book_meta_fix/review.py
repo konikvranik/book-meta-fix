@@ -2,7 +2,7 @@
 
 The review.yaml is the primary human-in-the-loop mechanism. It lists books
 flagged as NEEDS_REVIEW with their current metadata, our proposed fix, and an
-`action` field the human fills in (accept/reject/swap/edit).
+`action` field the human fills in (accept/reject/swap/edit/delete/keep).
 
 Format: a multi-document YAML stream. Each book is its own top-level document
 prefixed by `---`, which lets ReviewWriter append entries one-at-a-time (Unix
@@ -17,29 +17,34 @@ Parser: parse_review() reads a (possibly human-edited) YAML back into a list
 from __future__ import annotations
 
 import logging
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
 
+from .detectors import all_diagnoses
 from .extractors import ExtractedMeta
 from .models import BookMeta, Diagnosis
 
 log = logging.getLogger(__name__)
 
-Action = Literal["accept", "reject", "swap", "edit", "delete"]
+Action = Literal["accept", "reject", "swap", "edit", "delete", "keep"]
 
 
 @dataclass
 class ReviewItem:
 	"""One book entry in the review file."""
 
-	id: int | None
+	id: int | None  # calibre_id (informational, parsed from folder name)
+	uuid: str | None  # bmf identity — the carry-over/prune key
 	path: str  # relative to library root, for human readability
 	diagnosis: dict[str, Any]
 	current: dict[str, Any]
+	# All diagnoses (primary first). Absent in older review.yaml files; parse_review
+	# falls back to [diagnosis] so callers can always read item.diagnoses.
+	diagnoses: list[dict[str, Any]] = field(default_factory=list)
 	proposed: dict[str, Any] | None = None
 	# Human-edited fields:
 	action: Action | None = None
@@ -58,6 +63,7 @@ def _header(count: int) -> str:
 		f"#   swap    - swap author <-> title (for C1 cases)\n"
 		f"#   edit    - apply fields under `edited` (uncomment and modify)\n"
 		f"#   delete  - remove the book folder (C6 ~$ Word lock-file; tar.gz-backed)\n"
+		f"#   keep    - like accept, but retained (not pruned); skipped on next analyze\n"
 		f"# Then run: bmf apply review.yaml\n"
 		f"\n"
 	)
@@ -75,6 +81,7 @@ def _relative_path(meta: BookMeta, library_root: Path | None) -> str:
 
 def _build_current(meta: BookMeta) -> dict[str, Any]:
 	"""Build the `current` block for a review entry, dropping None values."""
+	series_name, series_index = meta.series_pair()
 	current = {
 		"author": meta.authors[0] if meta.authors else None,
 		"authors": meta.authors if len(meta.authors) > 1 else None,
@@ -83,6 +90,8 @@ def _build_current(meta: BookMeta) -> dict[str, Any]:
 		"year": meta.year,
 		"publisher": meta.publisher,
 		"language": meta.language,
+		"series": series_name or None,
+		"series_index": series_index or None,
 	}
 	return {k: v for k, v in current.items() if v is not None}
 
@@ -95,7 +104,7 @@ def _entry_dict(meta: BookMeta, diag: Diagnosis, extracted: Any, enriched: Any, 
 	C6 Word lock-file -> {"action": "delete"}); it is pre-filled so the user
 	only has to confirm, unless a prior decision overrides it.
 	"""
-	proposed = _build_proposed(meta, extracted, enriched)
+	proposed = _build_proposed(meta, extracted, enriched, diag)
 	diag_proposed = getattr(diag, "proposed", None) or {}
 	action = diag_proposed.get("action") if diag.verdict.value == "AUTO_FIXABLE" else None
 	if diag_proposed and diag.verdict.value == "AUTO_FIXABLE":
@@ -104,6 +113,7 @@ def _entry_dict(meta: BookMeta, diag: Diagnosis, extracted: Any, enriched: Any, 
 			proposed = {**(proposed or {}), **extra}
 	entry: dict[str, Any] = {
 		"id": meta.calibre_id,
+		"uuid": meta.uuid,
 		"path": _relative_path(meta, library_root),
 		"diagnosis": {
 			"category": diag.category,
@@ -114,6 +124,15 @@ def _entry_dict(meta: BookMeta, diag: Diagnosis, extracted: Any, enriched: Any, 
 		"proposed": proposed,
 		"action": action,
 	}
+	# When the book has more than one diagnosis, expose the full list so apply
+	# and the human reviewer see every problem (e.g. C2 + C11). Single-issue
+	# books keep the legacy shape (just `diagnosis`); parse_review synthesises
+	# the list when absent.
+	if diag.additional:
+		entry["diagnoses"] = [
+			{"category": d.category, "reason": d.reason, "confidence": d.confidence.value}
+			for d in all_diagnoses(diag)
+		]
 	if prior is not None:
 		if prior.get("action") is not None:
 			entry["action"] = prior["action"]
@@ -166,13 +185,25 @@ def build_review(
 	return header + body
 
 
+# Categories whose diagnosis is specifically about a cover problem. A
+# cover_url from an enricher is only acted upon (proposed + downloaded) for
+# these — every enriched book carries a cover_url, but we must not download
+# covers for books whose diagnosis is about metadata, not the cover.
+_COVER_CATEGORIES = ("C11", "MISSING_COVER")
+
+
 def _build_proposed(
-	meta: BookMeta, extracted: ExtractedMeta | None, enriched: Any
+	meta: BookMeta, extracted: ExtractedMeta | None, enriched: Any, diag: Any = None
 ) -> dict[str, Any] | None:
 	"""Build a proposed-fix dict from extracted content + online enrichment.
 
 	Preference: extracted (book content) > enriched (online) > None.
 	Returns None if we have no better suggestion than current.
+
+	*diag* (the Diagnosis) gates the ``cover_url`` proposal: it is emitted only
+	for C11 (generated placeholder) / MISSING_COVER books, since cover_url
+	otherwise rides along on every enriched book and would mislead the user
+	into thinking a cover change is part of a metadata fix.
 	"""
 	proposed: dict[str, Any] = {}
 	source_parts: list[str] = []
@@ -199,7 +230,10 @@ def _build_proposed(
 		# (score >= 70) before returning it, so a title it returns IS the title
 		# of the matched book — even if the DB title (a filename-as-title C2
 		# case) does not look "broken" to _looks_better.
-		trust_blindly = enriched.source.startswith("llm:") or enriched.source == "databazeknih"
+		# identity_confirmed (verified against the book's content) is trusted
+		# like databazeknih/llm:high: we know which book it is, so its title/
+		# author are proposed even if the current metadata doesn't look broken.
+		trust_blindly = enriched.source.startswith("llm:") or enriched.source == "databazeknih" or getattr(enriched, "identity_confirmed", False)
 		if enriched.title and "title" not in proposed and (trust_blindly or _looks_better(enriched.title, meta.title)):
 			proposed["title"] = enriched.title
 			source_parts.append(enriched.source)
@@ -221,7 +255,31 @@ def _build_proposed(
 		if enriched.publisher and (not meta.publisher or enriched.publisher != meta.publisher):
 			proposed["publisher"] = enriched.publisher
 			source_parts.append(enriched.source)
-		if enriched.cover_url:
+		# Language: fetched by Google Books / OpenLibrary / databazeknih / LLM,
+		# but historically never proposed — the apply branch existed with
+		# nothing feeding it. Same pattern as publisher: propose on difference.
+		if enriched.language and (not meta.language or enriched.language != meta.language):
+			proposed["language"] = enriched.language
+			source_parts.append(enriched.source)
+		# Description (annotation) — only from sources that return a REAL
+		# annotation. legie.info stashes the original title in the field (a
+		# cross-check aid, not a description) and for LLM sources the field
+		# carries the model's reasoning (proposed separately as "reasoning"
+		# below); neither may be written into the book.
+		if (
+			enriched.description
+			and enriched.source != "legie"
+			and not enriched.source.startswith("llm")
+			and (not meta.description or enriched.description != meta.description)
+		):
+			proposed["description"] = enriched.description
+			source_parts.append(enriched.source)
+		# cover_url only when the book has a cover diagnosis among ANY of its
+		# diagnoses (primary or additional) — every enriched book carries a
+		# cover_url, but downloading is reserved for C11 / MISSING_COVER. A book
+		# whose primary issue is C2 but that also has a generated cover (C11 in
+		# diag.additional) should still get its cover proposed.
+		if enriched.cover_url and any(d.category in _COVER_CATEGORIES for d in all_diagnoses(diag)):
 			proposed["cover_url"] = enriched.cover_url
 			source_parts.append(enriched.source)
 		# Series (mostly from LLM / obalkyknih — DB usually lacks it)
@@ -255,27 +313,22 @@ def _looks_better(candidate: str | None, current: str | None) -> bool:
 	if not current:
 		return True
 	# Current is suspect if it has filename/encoding artifacts
-	current_bad = ("_" in current or ".epub" in current.lower() or ".pdb" in current.lower() or any(ord(c) > 0x2000 and c not in "„“”‘’–—" for c in current))
+	current_bad = ("_" in current or ".epub" in current.lower() or ".pdb" in current.lower() or ".mobi" in current.lower() or ".azw" in current.lower() or ".azw3" in current.lower() or ".prc" in current.lower() or ".pdf" in current.lower() or any(ord(c) > 0x2000 and c not in "„“”‘’–—" for c in current))
 	candidate_bad = ("_" in candidate or any(ord(c) > 0x2000 and c not in "„“”‘’–—" for c in candidate))
 	return current_bad and not candidate_bad
 
 
-def parse_review(path: str | Path) -> list[ReviewItem]:
-	"""Parse a (possibly human-edited) review.yaml back into ReviewItems.
+def _load_raw_entries(path: str | Path) -> list[dict[str, Any]]:
+	"""Read all entry dicts from a review file (multi-doc or legacy list form).
 
-	Accepts both:
-	  - multi-document YAML stream (current format: each book prefixed by `---`)
-	  - legacy single-list form (one YAML list of dicts)
-
-	`safe_load_all` handles both: a single-list file yields one document (the
+	``safe_load_all`` handles both: a single-list file yields one document (the
 	list), which we flatten; a multi-doc stream yields one dict per document.
+	Non-dict/non-list documents raise ValueError, matching parse_review.
 	"""
 	text = Path(path).read_text(encoding="utf-8")
 	docs = list(yaml.safe_load_all(text))
 	if not docs:
 		return []
-	# Flatten: a single-list document (one list) becomes its items; individual
-	# dict documents (multi-doc stream) are collected directly.
 	raw_entries: list[Any] = []
 	for doc in docs:
 		if doc is None:
@@ -286,20 +339,51 @@ def parse_review(path: str | Path) -> list[ReviewItem]:
 			raw_entries.append(doc)
 		else:
 			raise ValueError(f"review file must contain YAML dicts/lists, got {type(doc).__name__}")
-	items: list[ReviewItem] = []
-	for entry in raw_entries:
-		if not isinstance(entry, dict):
-			continue
-		items.append(
-			ReviewItem(
-				id=entry.get("id"),
-				path=entry.get("path", ""),
-				diagnosis=entry.get("diagnosis") or {},
-				current=entry.get("current") or {},
-				proposed=entry.get("proposed"),
-				action=entry.get("action"),
-				edited=entry.get("edited"),
-				notes=entry.get("notes"),
-			)
+	return [e for e in raw_entries if isinstance(e, dict)]
+
+
+def parse_review(path: str | Path) -> list[ReviewItem]:
+	"""Parse a (possibly human-edited) review.yaml back into ReviewItems.
+
+	Accepts both:
+	  - multi-document YAML stream (current format: each book prefixed by `---`)
+	  - legacy single-list form (one YAML list of dicts)
+	"""
+	return [
+		ReviewItem(
+			id=entry.get("id"),
+			uuid=entry.get("uuid"),
+			path=entry.get("path", ""),
+			diagnosis=entry.get("diagnosis") or {},
+			# diagnoses falls back to the single primary diagnosis for older
+			# entries that only carry `diagnosis`.
+			diagnoses=entry.get("diagnoses") or ([entry.get("diagnosis")] if entry.get("diagnosis") else []),
+			current=entry.get("current") or {},
+			proposed=entry.get("proposed"),
+			action=entry.get("action"),
+			edited=entry.get("edited"),
+			notes=entry.get("notes"),
 		)
-	return items
+		for entry in _load_raw_entries(path)
+	]
+
+
+def prune_review(path: str | Path, drop_uuids: set) -> int:
+	"""Rewrite review.yaml in place, dropping entries whose ``uuid`` is in
+	*drop_uuids*. Returns the number of entries kept.
+
+	Used by apply_review to remove successfully-applied entries so the file
+	reflects only remaining work (and subsequent apply runs don't re-process
+	already-committed books). Entries without a ``uuid`` (e.g. leftover legacy
+	entries from before uuid keying) are always kept — they cannot be matched
+	safely. Re-rendered via the standard renderer, so inline comments are not
+	preserved (the file is otherwise machine-generated).
+	"""
+	entries = _load_raw_entries(path)
+	kept = [e for e in entries if e.get("uuid") is None or e.get("uuid") not in drop_uuids]
+	header = _header(len(kept))
+	body = "\n".join(_render_entry(e) for e in kept)
+	if body:
+		body += "\n"
+	Path(path).write_text(header + body, encoding="utf-8")
+	return len(kept)
