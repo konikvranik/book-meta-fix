@@ -52,8 +52,8 @@ spec:
   accessModes: ["ReadWriteMany"]
   storageClassName: nfs
   nfs:
-    server: store.home
-    path: /nfs/Public/Books
+    server: nfs.example.com
+    path: /export/books
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -75,8 +75,8 @@ instead (requires the NFS CSI driver / mounter on the nodes):
       volumes:
         - name: library
           nfs:
-            server: store.home
-            path: /nfs/Public/Books
+            server: nfs.example.com
+            path: /export/books
             readOnly: false
 ```
 
@@ -92,7 +92,7 @@ cache live on faster local storage:
 # In every bmf Job spec.template.spec:
       containers:
         - name: bmf
-          image: ghcr.io/pvranik/book-meta-fix:latest
+          image: ghcr.io/konikvranik/book-meta-fix:latest
           args: ["analyze", "--library", "/library", "--output", "/review/review.yaml", "--llm"]
           env:
             - name: BMF_REVIEW          # default for `apply` and `gui`
@@ -133,6 +133,37 @@ Notes:
   `hostPath`/PVC instead if you want consecutive Jobs to reuse it; then keep
   the Jobs strictly sequential.
 
+## One-liners: `scripts/k8s-bmf.sh`
+
+The Job manifests above are the explicit version. For day-to-day use there
+is a wrapper — `scripts/k8s-bmf.sh` — that spawns a one-shot pod via
+`kubectl run --rm -i`, streams the output, **deletes the pod when the
+command finishes** and propagates its exit code. The whole review loop:
+
+```bash
+# 1. analyze: detectors + enrichment + LLM -> /review/review.yaml on the PVC
+./scripts/k8s-bmf.sh analyze --llm
+
+# 2. edit review.yaml (your workstation mount of the same share, or bmf gui)
+
+# 3. apply the approved fixes
+./scripts/k8s-bmf.sh apply --apply
+
+# 4. reorganize the library
+./scripts/k8s-bmf.sh organize --apply
+
+# 5. quarantine rogue format files
+./scripts/k8s-bmf.sh crosscheck --apply
+```
+
+Any extra flags pass straight through to `bmf` (`./scripts/k8s-bmf.sh
+organize --pattern "{author_sort}/{title} ({id})" --apply`). The wrapper
+reads its defaults from the environment — image, NFS server/path
+(`BMF_K8S_NFS_SRV=""` switches to the `books` PVC), secret name, and the
+`BMF_REVIEW`/`BMF_CACHE` locations — see the header of the script. It
+expects the `bmf-review` PVC from the section below; the cache lives on an
+`emptyDir`, so nothing persists except `review.yaml` (+ `.bak`).
+
 ## analyze (generate review.yaml)
 
 ```yaml
@@ -147,7 +178,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: bmf
-          image: ghcr.io/pvranik/book-meta-fix:latest   # multi-arch; node arch is irrelevant
+          image: ghcr.io/konikvranik/book-meta-fix:latest   # multi-arch; node arch is irrelevant
           args: ["analyze", "--library", "/library", "--llm"]
           envFrom:
             - secretRef:
@@ -187,7 +218,7 @@ spec:
     spec:
       containers:
         - name: bmf
-          image: ghcr.io/pvranik/book-meta-fix:latest
+          image: ghcr.io/konikvranik/book-meta-fix:latest
           args: ["organize", "--library", "/library"]          # dry-run
           # args: ["organize", "--library", "/library", "--apply"]
 ```
@@ -210,7 +241,7 @@ spec:
     spec:
       containers:
         - name: bmf
-          image: ghcr.io/pvranik/book-meta-fix:latest
+          image: ghcr.io/konikvranik/book-meta-fix:latest
           args: ["crosscheck", "--library", "/library"]         # dry-run
           # args: ["crosscheck", "--library", "/library", "--apply"]
 ```
