@@ -59,28 +59,28 @@ def _make_epub(path: Path) -> Path:
 
 
 class TestComposeEdited:
-	def test_only_included_fields_returned(self):
-		sel = {"author": (True, "X"), "title": (False, "Y"), "isbn": (True, "80-1-2")}
+	def test_filled_fields_returned_empty_skipped(self):
+		sel = {"author": "X", "title": "", "isbn": "80-1-2"}
 		assert compose_edited(sel) == {"author": "X", "isbn": "80-1-2"}
 
 	def test_year_coerced_to_int(self):
-		assert compose_edited({"year": (True, "1989")}) == {"year": 1989}
+		assert compose_edited({"year": "1989"}) == {"year": 1989}
 
 	def test_year_non_numeric_kept_as_string(self):
-		assert compose_edited({"year": (True, "cca 1989")}) == {"year": "cca 1989"}
+		assert compose_edited({"year": "cca 1989"}) == {"year": "cca 1989"}
 
 	def test_list_fields_split_on_comma(self):
-		assert compose_edited({"authors": (True, " A , B ,C ")}) == {"authors": ["A", "B", "C"]}
-		assert compose_edited({"genres": (True, "sci-fi, fantasy")}) == {"genres": ["sci-fi", "fantasy"]}
+		assert compose_edited({"authors": " A , B ,C "}) == {"authors": ["A", "B", "C"]}
+		assert compose_edited({"genres": "sci-fi, fantasy"}) == {"genres": ["sci-fi", "fantasy"]}
 
-	def test_none_when_nothing_included(self):
-		assert compose_edited({"author": (False, "X")}) is None
+	def test_none_when_nothing_filled(self):
+		assert compose_edited({"author": "", "title": "   "}) is None
 		assert compose_edited({}) is None
 
 	def test_series_fields_pass_through_as_strings(self):
 		"""Série / Pořadí are plain string fields (no comma split, no int
 		coercion) — apply packs them into meta.series as {"name","index"}."""
-		sel = {"series": (True, "Nadace"), "series_index": (True, "3"), "title": (False, "X")}
+		sel = {"series": "Nadace", "series_index": "3", "title": ""}
 		assert compose_edited(sel) == {"series": "Nadace", "series_index": "3"}
 
 	def test_field_specs_cover_all_apply_fields(self):

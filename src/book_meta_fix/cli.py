@@ -535,10 +535,10 @@ def _print_fix_source_summary(stats: dict) -> None:
 
 
 @main.command()
-@click.argument("review_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("review_file", required=False, type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help=_("Library root"))
 @click.option("--apply", "do_apply", is_flag=True, help=_("Actually write changes (default: dry-run)"))
-def apply(review_file: Path, library: Path | None, do_apply: bool) -> None:
+def apply(review_file: Path | None, library: Path | None, do_apply: bool) -> None:
 	"""Apply approved changes from a (human-edited) review.yaml."""
 	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 
@@ -547,6 +547,10 @@ def apply(review_file: Path, library: Path | None, do_apply: bool) -> None:
 	cfg = Config.from_env()
 	if library is not None:
 		cfg.library = library
+	if review_file is None:
+		# No positional review file: fall back to $BMF_REVIEW / .env, else the
+		# CWD default — same resolution as `analyze` and `gui`.
+		review_file = cfg.review_file
 
 	console.print(f"[bold]{_('Applying')}[/bold] {review_file} ({'WRITE' if do_apply else 'DRY-RUN'})", highlight=False)
 	# Open the books cache (if one exists) so we can invalidate the folders we

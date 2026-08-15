@@ -142,23 +142,26 @@ def list_format_files(folder: Path | str) -> list[Path]:
 	return found
 
 
-def compose_edited(selection: dict[str, tuple[bool, str]]) -> dict | None:
-	"""Build the ``edited`` dict from per-field ``(include, value)`` selections.
+def compose_edited(values: dict[str, str]) -> dict | None:
+	"""Build the ``edited`` dict from per-field Entry values.
 
-	List fields are split on commas; ``year`` is coerced to int when numeric.
-	Returns ``None`` when nothing is included (so the key is omitted on save).
+	What is in the field is saved; an EMPTY field means "leave as is"
+	(skipped) so a book without a proposal cannot accidentally blank
+	existing data. List fields are split on commas; ``year`` is coerced
+	to int when numeric. Returns ``None`` when every field is empty (so
+	the key is omitted on save).
 	"""
 	edited: dict = {}
-	for field, (include, value) in selection.items():
-		if not include:
+	for field, value in values.items():
+		v = str(value).strip()
+		if not v:
 			continue
 		if field in LIST_FIELDS:
-			edited[field] = [p.strip() for p in str(value).split(",") if p.strip()]
+			edited[field] = [p.strip() for p in v.split(",") if p.strip()]
 		elif field == "year":
-			v = str(value).strip()
-			edited[field] = int(v) if v.isdigit() else (v or None)
+			edited[field] = int(v) if v.isdigit() else v
 		else:
-			edited[field] = str(value)
+			edited[field] = v
 	return edited or None
 
 
@@ -959,25 +962,39 @@ class ReviewEditorApp:
 	def _build_fields_section(self) -> None:
 		box = ttk.LabelFrame(self._scroll_inner, text=_("Fields"))
 		box.pack(fill="x", padx=8, pady=4)
+		# RO column source toggle: the sunken labels show either the book's
+		# current (on-disk) values or the analyze-time proposals; the ➡ copies
+		# whichever set is displayed into the editable Entry. Default is the
+		# ORIGINAL set — the proposal is already prefilled in the Entries, so
+		# the proposed view is only a fallback to restore an accidental edit.
+		ro = ttk.Frame(box)
+		ro.pack(fill="x", padx=6, pady=(4, 0))
+		self._ro_mode = tk.StringVar(value="current")
+		ttk.Label(ro, text=_("Read-only column:")).pack(side="left")
+		ttk.Radiobutton(ro, text=_("Original"), value="current", variable=self._ro_mode,
+			command=self._apply_ro_mode).pack(side="left", padx=8)
+		ttk.Radiobutton(ro, text=_("Proposed"), value="proposed", variable=self._ro_mode,
+			command=self._apply_ro_mode).pack(side="left")
 		fields = ttk.Frame(box)
 		fields.pack(fill="x", padx=6, pady=6)
 		fields.columnconfigure(3, weight=1)
 		for row, (role, label) in enumerate(FIELD_SPECS):
-			incl = tk.BooleanVar(value=False)
 			current = tk.StringVar(value="")
 			value = tk.StringVar(value="")
 
 			def _on_focus(_e, r=role):
 				self._last_field_role = r
 
-			chk = ttk.Checkbutton(fields, text=label, variable=incl)
+			# Static field caption — used to live on the include checkbox;
+			# the checkbox is gone, the label stays (space is plentiful).
+			cap = ttk.Label(fields, text=label, anchor="w")
 			lbl = ttk.Label(fields, textvariable=current, relief="sunken", anchor="w", width=32)
-			# Arrow points RO -> edit (copy the current value into the target).
+			# Arrow points RO -> edit (copy the displayed value into the target).
 			copy_btn = ttk.Button(fields, text="➡", width=2, command=lambda r=role: self._copy_current(r))
 			entry = ttk.Entry(fields, textvariable=value)
 			entry.bind("<FocusIn>", _on_focus)
 			self._bind_select_all(entry)
-			chk.grid(row=row, column=0, padx=(0, 4), pady=1, sticky="w")
+			cap.grid(row=row, column=0, padx=(0, 4), pady=1, sticky="w")
 			lbl.grid(row=row, column=1, padx=2, pady=1, sticky="we")
 			copy_btn.grid(row=row, column=2, padx=2, pady=1)
 			entry.grid(row=row, column=3, padx=(2, 0), pady=1, sticky="we")
@@ -987,17 +1004,14 @@ class ReviewEditorApp:
 				swap_btn = ttk.Button(fields, text="⇄", width=3, command=self.swap_fields)
 				swap_btn.grid(row=row, column=4, padx=(4, 0), pady=1, sticky="w")
 				_Tooltip(swap_btn, _("Swap author and title  (Ctrl+W)"))
-			self._fields[role] = {"incl": incl, "current": current, "value": value, "entry": entry}
+			self._fields[role] = {
+				"current": current, "value": value, "entry": entry,
+				"cur_disp": "", "prop_disp": "",  # both RO sets, mode picks one
+			}
 			self._field_entries.append(entry)
-			# Trace value/include → dirty (but not during programmatic load).
+			# Trace value -> dirty (but not during programmatic load).
 			value.trace_add("write", lambda *_: self._mark_dirty())
-			incl.trace_add("write", lambda *_: self._mark_dirty())
 		box.columnconfigure(0, weight=1)
-
-		# Read-only proposed block.
-		ttk.Label(box, text=_("Proposed changes (for accept/keep):")).pack(anchor="w", padx=6)
-		self._proposed_txt = self._style_text(tk.Text(box, height=7, wrap="word", state="disabled"))
-		self._proposed_txt.pack(fill="x", padx=6, pady=2)
 
 		# Action radios + notes + nav.
 		bottom = ttk.Frame(box)
@@ -1397,8 +1411,7 @@ class ReviewEditorApp:
 			"return": self.act_accept, "r": self.act_reject, "w": self.swap_fields,
 			"e": self.act_edit, "d": self.act_delete, "k": self.act_keep,
 			"0": self.act_clear, "s": self.save, "q": self.quit_app,
-			"f": self.focus_search, "l": self.copy_current_to_focused,
-			"space": self.toggle_include_focused, "n": self.cover_new,
+			"f": self.copy_current_to_focused, "n": self.cover_new,
 			"b": self.cover_restore_bak, "p": self.cover_keep, "m": self.cover_delete_checked,
 			"t": self.content_toggle_view, "g": self.content_recode_toggle,
 		}
@@ -1655,8 +1668,7 @@ class ReviewEditorApp:
 		e = self.entries[self._cur]
 		action = self._action_var.get()
 		e["action"] = action if action != "pending" else None
-		selection = {r: (f["incl"].get(), f["value"].get()) for r, f in self._fields.items()}
-		e["edited"] = compose_edited(selection)
+		e["edited"] = compose_edited({r: f["value"].get() for r, f in self._fields.items()})
 		notes = self._notes_var.get().strip()
 		e["notes"] = notes or None
 
@@ -1678,12 +1690,14 @@ class ReviewEditorApp:
 					conf=diag.get("confidence", "—"), extra=extra),
 			)
 			self._path_link.configure(text=path or _("(no path)"))
-			# Fields.
+			# Fields. Entries prefill edited > proposed > current; the RO column
+			# holds both sets and shows the one picked by the mode toggle.
 			cur = e.get("current") or {}
 			prop = e.get("proposed") or {}
 			edited = e.get("edited") or {}
 			for role, f in self._fields.items():
-				f["current"].set(self._display_value(cur.get(role)))
+				f["cur_disp"] = self._display_value(cur.get(role))
+				f["prop_disp"] = self._display_value(prop.get(role)) or f["cur_disp"]
 				if role in edited:
 					target = edited[role]
 				elif role in prop:
@@ -1691,9 +1705,7 @@ class ReviewEditorApp:
 				else:
 					target = cur.get(role)
 				f["value"].set(self._display_value(target))
-				f["incl"].set(role in edited)
-			# Proposed RO block.
-			self._set_proposed(prop)
+			self._apply_ro_mode()
 			# Action / notes.
 			self._action_var.set(e.get("action") or "pending")
 			self._notes_var.set(e.get("notes") or "")
@@ -1716,17 +1728,11 @@ class ReviewEditorApp:
 			return ", ".join(str(x) for x in v)
 		return str(v)
 
-	def _set_proposed(self, prop: dict) -> None:
-		self._proposed_txt.configure(state="normal")
-		self._proposed_txt.delete("1.0", "end")
-		if not prop:
-			self._proposed_txt.insert("end", _("(no proposal)"))
-		else:
-			for k, v in prop.items():
-				if isinstance(v, list):
-					v = ", ".join(str(x) for x in v)
-				self._proposed_txt.insert("end", f"{k}: {v}\n")
-		self._proposed_txt.configure(state="disabled")
+	def _apply_ro_mode(self) -> None:
+		"""Show the picked RO set (original vs proposed) in the sunken labels."""
+		key = "cur_disp" if self._ro_mode.get() == "current" else "prop_disp"
+		for f in self._fields.values():
+			f["current"].set(f[key])
 
 	# ------------------------------------------------------------------
 	# Focus / scroll helpers
@@ -1802,27 +1808,17 @@ class ReviewEditorApp:
 		a, t = av.get(), tv.get()
 		av.set(t)
 		tv.set(a)
-		self._fields["author"]["incl"].set(True)
-		self._fields["title"]["incl"].set(True)
 		self.set_action("swap")
 
 	def _copy_current(self, role: str) -> None:
-		f = self._fields[role]
-		f["value"].set(f["current"].get())
-		f["incl"].set(True)
+		# Copies whatever the RO label currently DISPLAYS (mode-dependent).
+		self._fields[role]["value"].set(self._fields[role]["current"].get())
 
 	def copy_current_to_focused(self) -> None:
 		w = self.focus_get_safe()
 		for role, f in self._fields.items():
 			if f["entry"] is w:
 				self._copy_current(role)
-				return
-
-	def toggle_include_focused(self) -> None:
-		w = self.focus_get_safe()
-		for f in self._fields.values():
-			if f["entry"] is w:
-				f["incl"].set(not f["incl"].get())
 				return
 
 	# ------------------------------------------------------------------
@@ -2350,8 +2346,7 @@ class ReviewEditorApp:
 			("Ctrl+S", _("save")),
 			("Ctrl+Q", _("quit")),
 			("Ctrl+F", _("focus search")),
-			("Ctrl+L", _("current → target (focused field)")),
-			("Ctrl+Space", _("☑ include focused field")),
+			("Ctrl+L", _("RO column → target (focused field)")),
 			("Ctrl+N", _("cover: apply new")),
 			("Ctrl+B", _("cover: restore .bak")),
 			("Ctrl+P", _("cover: keep")),
