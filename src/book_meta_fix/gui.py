@@ -766,7 +766,7 @@ class ReviewEditorApp:
 		# Per-field widgets (checkbutton / RO label / copy btn / target Entry).
 		self._fields: dict[str, dict] = {}
 		self._field_entries: list = []  # target Entries in Tab-traversal order
-		self._editable_widgets: list = []  # field entries + notes (Tab cycle)
+		self._editable_widgets: list = []  # field entries (the Tab cycle)
 
 		# Cover state.
 		self._del_cover = tk.BooleanVar(value=False)
@@ -1032,8 +1032,8 @@ class ReviewEditorApp:
 		ttk.Button(nav, text=_("Save (Ctrl+S)"), command=self.save).pack(side="left", padx=20)
 		ttk.Button(nav, text=_("Next (PgDn) ▶"), command=self.next_book).pack(side="right")
 
-		# Tab cycle = the target fields + the notes entry (nothing else).
-		self._editable_widgets = list(self._field_entries) + [self._notes_entry]
+		# Tab cycle = ONLY the field entries (notes stays outside the trap).
+		self._editable_widgets = list(self._field_entries)
 
 	def _cover_cell(self, parent, title: str, var=None, tip: str | None = None,
 	                check_enabled: bool = True):
@@ -1398,7 +1398,12 @@ class ReviewEditorApp:
 		except Exception:  # noqa: BLE001
 			pass
 
-	def _on_tab(self, event) -> str:
+	def _on_tab(self, event) -> str | None:
+		# Only the field entries are trapped; from any other widget (notes,
+		# buttons, the list) Tab falls through to Tk's default traversal.
+		w = self.focus_get_safe()
+		if w not in self._editable_widgets:
+			return None
 		shift = bool(event.state & 0x1)
 		self._cycle_editable(forward=not shift)
 		return "break"
