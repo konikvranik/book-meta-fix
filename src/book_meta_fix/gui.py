@@ -76,8 +76,8 @@ except ImportError:  # pragma: no cover
 # list-valued (stored comma-separated in the Entry, split on save). ``series`` /
 # ``series_index`` are written into meta.series as {"name", "index"} at apply.
 FIELD_SPECS: list[tuple[str, str]] = [
-	("author", _("Author")),
 	("title", _("Title")),
+	("author", _("Author")),
 	("isbn", "ISBN"),
 	("year", _("Year")),
 	("publisher", _("Publisher")),
