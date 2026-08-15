@@ -156,9 +156,14 @@ replace-decode (shown as `�`) don't block the repair — they stay marked at
 their position. Two-layer chains (a wild sample: cp1250 text mis-read as
 cp1251, re-saved utf-8, mis-read as cp1250 again) are repaired
 automatically and named in the hint. The result is always rendered as
-UTF-8. Drag the grip under the content preview to resize it vertically
-(double-click resets). The whole detail column scrolls; hovering a thumbnail
-in the list pops up a larger cover.
+UTF-8 — but the `↻ Překódovat` toggle itself is NEVER auto-checked:
+detecting the corruption only presets the codec pair and the hint, seeing
+the repaired text is your call (tick it / press `Ctrl+G`). Drag the grip
+under the content preview to resize it vertically (double-click resets).
+The whole detail column scrolls; hovering a thumbnail in the list pops up
+a larger cover. The list itself is canvas-rendered — the label always
+sits left, the cover thumbnail flush against the right edge of the row
+(ttk's Treeview can only show per-row images in its leftmost column).
 
 **Everything is bound to `Ctrl+letter`** (bare letters keep typing into the
 fields): `PgUp`/`PgDn` move between books, `Tab` cycles only the editable
@@ -400,7 +405,7 @@ Settings resolve from (highest precedence first):
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `BMF_LIBRARY` | `/mnt/share_nfs/Shared eBooks` | Library root |
+| `BMF_LIBRARY` | `~/Books` | Library root |
 | `BMF_CACHE` | `bmf_cache.db` | SQLite cache path |
 | `BMF_REVIEW` | `review.yaml` | Default review file path |
 | `ZAI_API_KEY` | — | Z.AI API key (LLM, optional — phase 7) |

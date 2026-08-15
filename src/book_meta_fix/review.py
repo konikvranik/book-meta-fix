@@ -81,6 +81,7 @@ def _relative_path(meta: BookMeta, library_root: Path | None) -> str:
 
 def _build_current(meta: BookMeta) -> dict[str, Any]:
 	"""Build the `current` block for a review entry, dropping None values."""
+	series_name, series_index = meta.series_pair()
 	current = {
 		"author": meta.authors[0] if meta.authors else None,
 		"authors": meta.authors if len(meta.authors) > 1 else None,
@@ -89,6 +90,8 @@ def _build_current(meta: BookMeta) -> dict[str, Any]:
 		"year": meta.year,
 		"publisher": meta.publisher,
 		"language": meta.language,
+		"series": series_name or None,
+		"series_index": series_index or None,
 	}
 	return {k: v for k, v in current.items() if v is not None}
 
@@ -251,6 +254,25 @@ def _build_proposed(
 			source_parts.append(enriched.source)
 		if enriched.publisher and (not meta.publisher or enriched.publisher != meta.publisher):
 			proposed["publisher"] = enriched.publisher
+			source_parts.append(enriched.source)
+		# Language: fetched by Google Books / OpenLibrary / databazeknih / LLM,
+		# but historically never proposed — the apply branch existed with
+		# nothing feeding it. Same pattern as publisher: propose on difference.
+		if enriched.language and (not meta.language or enriched.language != meta.language):
+			proposed["language"] = enriched.language
+			source_parts.append(enriched.source)
+		# Description (annotation) — only from sources that return a REAL
+		# annotation. legie.info stashes the original title in the field (a
+		# cross-check aid, not a description) and for LLM sources the field
+		# carries the model's reasoning (proposed separately as "reasoning"
+		# below); neither may be written into the book.
+		if (
+			enriched.description
+			and enriched.source != "legie"
+			and not enriched.source.startswith("llm")
+			and (not meta.description or enriched.description != meta.description)
+		):
+			proposed["description"] = enriched.description
 			source_parts.append(enriched.source)
 		# cover_url only when the book has a cover diagnosis among ANY of its
 		# diagnoses (primary or additional) — every enriched book carries a

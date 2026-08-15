@@ -94,13 +94,9 @@ def compute_target_path(meta: BookMeta, pattern: str, library: Path) -> Path:
 	author_sort = _author_sort(author)
 	title = meta.title or "Untitled"
 	title_sort = _title_sort(title)
-	series = ""
-	series_index = ""
-	if meta.series and isinstance(meta.series, list) and meta.series:
-		s0 = meta.series[0]
-		if isinstance(s0, dict):
-			series = s0.get("name", "") or ""
-			series_index = str(s0.get("index", "") or "")
+	# One accessor for every wild series shape (plain string / {name, index} /
+	# {name, sequence}) — see BookMeta.series_pair.
+	series, series_index = meta.series_pair()
 
 	fields = {
 		"author": sanitize_segment(author),

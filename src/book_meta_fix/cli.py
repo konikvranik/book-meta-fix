@@ -54,7 +54,7 @@ def main(verbose: bool) -> None:
 
 
 @main.command()
-@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help="Library root (default: $BMF_LIBRARY or /mnt/share_nfs/Shared eBooks)")
+@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help="Library root (default: $BMF_LIBRARY or ~/Books)")
 @click.option("--no-cache", is_flag=True, help="Disable SQLite cache (force full re-parse)")
 @click.option("--limit", type=int, default=None, help="Process only the first N books (for testing)")
 def scan(library: Path | None, no_cache: bool, limit: int | None) -> None:

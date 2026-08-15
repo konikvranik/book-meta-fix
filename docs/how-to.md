@@ -62,6 +62,14 @@ C1), `edit` (apply only the fields under `edited:`), `keep` (apply proposed
 but retain the entry — `analyze` skips it next time; set back to `pending` to
 re-decide).
 
+Every fetched field reaches the book: title/author(s), ISBN, year, publisher,
+language, series + series index (stored as the ABS `[{"name", "index"}]` list,
+mirrored to `metadata.opf` as `calibre:series`/`calibre:series_index`), genres
+(and tags — both as OPF `<dc:subject>`), and the description/annotation from
+databazeknih / Google Books / OpenLibrary. A proposal that carries only half
+of the series keeps the current other half; `action: edit` with an emptied
+series name clears it.
+
 ### 3b. Edit via the GUI (optional)
 
 Instead of hand-editing the YAML, use the keyboard-driven editor:
@@ -83,11 +91,16 @@ through, "skutečně je" the real one, and `⇄` swaps them; a failing pair is
 explained in the hint, which offers the reversed direction as a click;
 bytes lost to an earlier replace-decode (`�`) don't block the repair and
 stay marked; two-layer chains are repaired automatically and named in the
-hint; always rendered as UTF-8). Drag the grip under the content preview to
-resize it vertically (double-click resets). The
+hint; always rendered as UTF-8 — the toggle is never auto-checked, seeing
+the repaired text is your decision: tick it or press `Ctrl+G`). Drag the
+grip under the content preview to resize it vertically (double-click
+resets). The
 detail column scrolls; every action has a `Ctrl+letter` shortcut (`F1` lists
 them); `PgUp`/`PgDn` move between books and `Tab` cycles only the editable
-fields (`Ctrl+A` selects all in a field). Requires the Tk bindings
+fields — author, title, ISBN, year, publisher, language, série, pořadí v
+sérii, autoři, žánry (`Ctrl+A` selects all in a field). The list shows the label on the
+left and the cover thumbnail flush right on every row. Requires the Tk
+bindings
 (`sudo apt install python3-tk` on Debian/Ubuntu). Edits are written back to
 `review.yaml` — commit them with `bmf apply` as above.
 

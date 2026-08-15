@@ -570,3 +570,91 @@ class TestKeepAction:
 			summary = apply_review(review, library, dry_run=False)
 		assert summary["kept"] == 1
 		dl.assert_called_once()  # cover_url was attempted, exactly like accept
+
+
+class TestSeriesAndFieldCoverage:
+	"""The historic gap: series/series_index/language/description were proposed
+	(or fetched) but silently dropped by _apply_action — nothing reached disk.
+	These pin the full proposal → metadata.json/metadata.opf path."""
+
+	def _seed_book(self, library: Path, manifest: str = "{}\n") -> Path:
+		folder = library / "a1" / "b1"
+		folder.mkdir(parents=True)
+		(folder / "metadata.json").write_text(manifest, encoding="utf-8")
+		(folder / "b1.epub").write_text("x", encoding="utf-8")
+		return folder
+
+	def _apply(self, tmp_path, entry: dict) -> tuple[Path, dict]:
+		import json as _json
+
+		library = tmp_path / "lib"
+		folder = self._seed_book(library)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [entry])
+		summary = apply_review(review, library, dry_run=False)
+		assert summary["errors"] == []
+		data = _json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
+		return folder, data
+
+	def test_accept_applies_series_and_index_to_disk(self, tmp_path):
+		folder, data = self._apply(tmp_path, {
+			"id": 1, "uuid": "u1", "path": "a1/b1", "current": {},
+			"proposed": {"series": "Zaklínač", "series_index": "8"}, "action": "accept",
+		})
+		assert data["series"] == [{"name": "Zaklínač", "index": "8"}]
+		opf = (folder / "metadata.opf").read_text(encoding="utf-8")
+		assert 'name="calibre:series"' in opf and 'content="Zaklínač"' in opf
+		assert 'name="calibre:series_index"' in opf and 'content="8"' in opf
+
+	def test_series_without_index_keeps_current_index(self, tmp_path):
+		import json as _json
+
+		library = tmp_path / "lib"
+		folder = library / "a1" / "b1"
+		folder.mkdir(parents=True)
+		(folder / "metadata.json").write_text(
+			_json.dumps({"series": [{"name": "Old", "index": "3"}]}, ensure_ascii=False), encoding="utf-8")
+		(folder / "b1.epub").write_text("x", encoding="utf-8")
+		review = tmp_path / "review.yaml"
+		_write_review(review, [{
+			"id": 1, "uuid": "u1", "path": "a1/b1", "current": {},
+			"proposed": {"series": "New Name"}, "action": "accept",
+		}])
+		apply_review(review, library, dry_run=False)
+		data = _json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
+		# The enricher didn't know the index — the current one survives.
+		assert data["series"] == [{"name": "New Name", "index": "3"}]
+
+	def test_edit_applies_series_and_index(self, tmp_path):
+		_, data = self._apply(tmp_path, {
+			"id": 1, "uuid": "u1", "path": "a1/b1", "current": {"series": "Old"},
+			"edited": {"series": "Nadace", "series_index": "2"}, "action": "edit",
+		})
+		assert data["series"] == [{"name": "Nadace", "index": "2"}]
+
+	def test_edit_empty_series_name_clears_series(self, tmp_path):
+		_, data = self._apply(tmp_path, {
+			"id": 1, "uuid": "u1", "path": "a1/b1", "current": {"series": "Old"},
+			"edited": {"series": ""}, "action": "edit",
+		})
+		assert data["series"] == []
+
+	def test_accept_applies_language_and_description(self, tmp_path):
+		folder, data = self._apply(tmp_path, {
+			"id": 1, "uuid": "u1", "path": "a1/b1", "current": {},
+			"proposed": {"language": "cs", "description": "Anotace knihy."}, "action": "accept",
+		})
+		assert data["language"] == "cs"
+		assert data["description"] == "Anotace knihy."
+		opf = (folder / "metadata.opf").read_text(encoding="utf-8")
+		assert "<dc:language>cs</dc:language>" in opf
+		assert "Anotace knihy." in opf
+
+	def test_accept_applies_genres_as_subjects(self, tmp_path):
+		folder, data = self._apply(tmp_path, {
+			"id": 1, "uuid": "u1", "path": "a1/b1", "current": {},
+			"proposed": {"genres": ["sci-fi", "fantasy"]}, "action": "accept",
+		})
+		assert data["genres"] == ["sci-fi", "fantasy"]
+		opf = (folder / "metadata.opf").read_text(encoding="utf-8")
+		assert opf.count("<dc:subject>") == 2
