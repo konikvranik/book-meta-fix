@@ -229,7 +229,7 @@ were measured on a sample of hard CZ/SK books (`scripts/llm_experiment.py`):
 
 | Variant | ok% | in tok | out tok | reasoning | wall s | Cost ($/1M in/out) |
 |---|---|---|---|---|---|---|
-| **glm-5.2 reasoning_effort=low (default)** | 100% | 1529 | 346 | yes | 6.7 | 1.40 / 4.40 |
+| **glm-5.2 reasoning_effort=low (measured; glm-5.3 is now the default)** | 100% | 1529 | 346 | yes | 6.7 | 1.40 / 4.40 |
 | glm-4.6 thinking=disabled | 100% | 1522 | 139 | no | 3.0 | 0.60 / 2.20 |
 | glm-4.5-air thinking=disabled | 100% | 1522 | 122 | no | 6.5 | 0.20 / 1.10 |
 | glm-4.5-flash | 100% | 1527 | 96 | no | 7.6 | free |
@@ -237,9 +237,11 @@ were measured on a sample of hard CZ/SK books (`scripts/llm_experiment.py`):
 
 Non-reasoning models use 3–4× fewer output tokens, but on CZ/SK series they
 hallucinate more (returning the title of a different book by the same author,
-dropping diacritics, inventing authors). **GLM-5.2 with `reasoning_effort=low`
-is the default** — it keeps quality while cutting ~60% of reasoning tokens vs
-the model default. Switch when you know what you are doing:
+dropping diacritics, inventing authors). **GLM-5.3 with `reasoning_effort=low`
+is the fallback default** (the loop-off single-call default too) — it keeps
+quality while cutting ~60% of reasoning tokens vs the model default. The loop's
+first attempt defaults to the free `glm-4.7-flash`. Switch when you know what
+you are doing:
 
 ```bash
 # Cheapest, accepts lower CZ/SK quality (good when the LLM is a rare fallback)
@@ -254,9 +256,14 @@ bmf analyze --llm --llm-reasoning-effort max
 
 | Knob | CLI | Env | Applies to |
 |---|---|---|---|
-| Model | `--llm-model` | `ZAI_MODEL` | all |
+| Loop model | `--llm-model` | `BMF_LLM_MODEL` | loop first attempt (`glm-4.7-flash` default; the fallback model when the loop is off) |
+| Fallback model | `--llm-fallback-model` | `BMF_LLM_FALLBACK_MODEL` | `glm-5.3` default; also the loop-off single-call default |
 | Reasoning effort | `--llm-reasoning-effort` | `ZAI_REASONING_EFFORT` | GLM-5.x (`low` default) |
 | Thinking toggle | `--llm-thinking` | `ZAI_THINKING` | GLM-4.x (`disabled` default) |
+
+Legacy `ZAI_MODEL` / `ZAI_FLASH_MODEL` / `ZAI_FINAL_MODEL` are still read
+(mapped to the fallback / loop model / fallback respectively) but log a
+deprecation warning — migrate to the `BMF_LLM_LOOP_*` names.
 
 Re-run the experiment yourself as Z.AI's lineup evolves:
 
@@ -325,8 +332,8 @@ Toggles:
 | Knob | CLI | Env | Default |
 |---|---|---|---|
 | Loop on/off | `--no-llm-loop` | `BMF_LLM_LOOP=0` | on |
-| Flash model | `--llm-flash-model` | `ZAI_FLASH_MODEL` | `glm-4.7-flash` |
-| Final model | `--llm-final-model` | `ZAI_FINAL_MODEL` | `glm-5.2` |
+| Flash model | `--llm-model` | `BMF_LLM_MODEL` | `glm-4.7-flash` |
+| Fallback model | `--llm-fallback-model` | `BMF_LLM_FALLBACK_MODEL` | `glm-5.3` |
 | Steady call interval (s) | `--llm-min-interval` | `BMF_LLM_MIN_INTERVAL` | `2.0` |
 | Burst capacity | `--llm-burst` | `BMF_LLM_BURST` | `1` (even drip) |
 | Base 429 cooldown (s) | `--llm-rate-limit-base` | `BMF_LLM_RATE_LIMIT_BASE` | `5` |
@@ -411,7 +418,8 @@ Settings resolve from (highest precedence first):
 | `BMF_LANGUAGE` | *(auto)* | Interface language — `cs` or `en`. Auto-detected from the user's locale (`cs*` → Czech, anything else → English). Can also be set per-run: `bmf --lang cs report` |
 | `ZAI_API_KEY` | — | Z.AI API key (LLM, optional — phase 7) |
 | `ZAI_BASE_URL` | `https://api.z.ai/api/paas/v4/` | Z.AI base URL |
-| `ZAI_MODEL` | `glm-5.2` | Z.AI model |
+| `BMF_LLM_MODEL` | `glm-4.7-flash` | LLM loop first-attempt model (fallback model when the loop is off) |
+| `BMF_LLM_FALLBACK_MODEL` | `glm-5.3` | LLM paid fallback model |
 
 ### Localization (cs / en)
 

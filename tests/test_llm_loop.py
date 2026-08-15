@@ -32,8 +32,8 @@ class TestReconcileLoop:
 		paid-fallback return. *calls* accumulates (model, had_feedback) tuples.
 		"""
 		p = ZaiProvider("k", min_interval=0.0, burst=10.0)
-		p.flash_model = "flash"
-		p.final_model = "final"
+		p.model = "flash"
+		p.fallback_model = "final"
 		state = {"flash_i": 0}
 
 		def fake_call(model, evidence, *, max_retries=3):

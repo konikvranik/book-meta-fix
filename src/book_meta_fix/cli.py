@@ -212,16 +212,15 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--llm-categories", default="ALL", help=_("Comma-separated categories to send to LLM, or 'ALL' (default). ALL = every category except C9 (legitimate anonyms like the Bible, where an LLM-invented author would be wrong). Each book is one LLM request that returns all fields at once, so the cost is per-book, not per-category."))
 @click.option("--workers", "-w", type=int, default=10, help=_("Parallel workers for I/O (extract/LLM/enrich). Default 10."))
 @click.option("--llm-min-interval", "llm_min_interval", type=float, default=None, help=_("Minimum seconds between LLM requests (RPM throttle, default 2.0 = ~30 RPM). Decoupled from --workers: cheap I/O still runs at full worker count. Lower (e.g. 1.0 = 60 RPM) on a higher Z.AI tier; raise (e.g. 4.0 = 15 RPM) if you still hit 429."))
-@click.option("--llm-model", "llm_model", default=None, help=_("Z.AI model for LLM fallback (default glm-5.2). Alternatives: glm-4.6, glm-4.5-air, glm-4.5-flash, glm-4.7-flash. See README 'LLM model choice' for the token/quality tradeoffs measured by scripts/llm_experiment.py."))
+@click.option("--llm-model", "llm_model", default=None, help=_("Primary model for the LLM loop (default glm-4.7-flash, the free first attempt; with --no-llm-loop the fallback-quality model instead). Alternatives: glm-4.6, glm-4.5-air, glm-4.5-flash. See README 'LLM model choice' for the token/quality tradeoffs measured by scripts/llm_experiment.py."))
 @click.option("--llm-reasoning-effort", "llm_reasoning_effort", default=None, help=_("reasoning_effort for GLM-5.x models: low (default) | medium | max. Lower cuts reasoning tokens ~60%% vs max. Ignored by GLM-4.x (use --llm-thinking)."))
 @click.option("--llm-thinking", "llm_thinking", default=None, help=_("thinking toggle for GLM-4.x models: disabled (default) | enabled. 'disabled' turns off chain-of-thought (3-4x fewer output tokens). Ignored by GLM-5.x (use --llm-reasoning-effort)."))
-@click.option("--no-llm-loop", "no_llm_loop", is_flag=True, help=_("Disable the self-correction loop. Default: loop on — try the free Flash model first (with verify feedback), then the paid final model as fallback. With this flag, a single LLM call (the configured --llm-model) is used as before."))
-@click.option("--llm-flash-model", "llm_flash_model", default=None, help=_("Free first-attempt model for the loop (default glm-4.7-flash — best CZ/SK quality among free models). Alternatives: glm-4.5-flash, glm-4.5-air."))
-@click.option("--llm-final-model", "llm_final_model", default=None, help=_("Paid high-quality fallback for the loop (default glm-5.2). Used when Flash fails verify or is rate-limited."))
+@click.option("--no-llm-loop", "no_llm_loop", is_flag=True, help=_("Disable the self-correction loop. Default: loop on — try the free loop model first (with verify feedback), then the paid fallback model. With this flag, a single LLM call is used instead (the --llm-model, default the fallback-quality one)."))
+@click.option("--llm-fallback-model", "llm_fallback_model", default=None, help=_("Paid high-quality fallback model (default glm-5.3). Used when the loop model fails verify or is rate-limited; also the default single-call model when the loop is off."))
 @click.option("--llm-burst", "llm_burst", type=float, default=None, help=_("Leaky-bucket burst capacity: how many LLM calls may start inside one interval (default 1 = pure even drip, no bunching — one call every --llm-min-interval seconds). This is a count-per-time limiter, not a concurrency cap. Raise only with confirmed rate headroom; a burst >1 fires multiple calls in the same second and trips Z.AI's dynamic RPM limit (429)."))
 @click.option("--llm-rate-limit-base", "llm_rate_limit_base", type=float, default=None, help=_("Base seconds of the global cooldown applied when a 429 is seen (default 5). When ANY worker hits a 429, ALL workers pause this long; the cooldown escalates 5/10/20/... with consecutive 429s, honours the server Retry-After when longer, and is capped by --llm-rate-limit-max. Higher = safer but slower; lower = more 429 risk."))
 @click.option("--llm-rate-limit-max", "llm_rate_limit_max", type=float, default=None, help=_("Cap (seconds) on the escalating 429 cooldown (default 60). Prevents a sustained outage from parking workers indefinitely."))
-def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, use_legie: bool, skip_verify: bool, verify_ok: bool, no_strict_verify: bool, accept_missing: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int, llm_min_interval: float | None, llm_model: str | None, llm_reasoning_effort: str | None, llm_thinking: str | None, no_llm_loop: bool, llm_flash_model: str | None, llm_final_model: str | None, llm_burst: float | None, llm_rate_limit_base: float | None, llm_rate_limit_max: float | None) -> None:
+def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, use_legie: bool, skip_verify: bool, verify_ok: bool, no_strict_verify: bool, accept_missing: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int, llm_min_interval: float | None, llm_model: str | None, llm_reasoning_effort: str | None, llm_thinking: str | None, no_llm_loop: bool, llm_fallback_model: str | None, llm_burst: float | None, llm_rate_limit_base: float | None, llm_rate_limit_max: float | None) -> None:
 	"""Run full pipeline and generate a review.yaml for NEEDS_REVIEW books."""
 	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 
@@ -274,17 +273,15 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 		if llm_min_interval is not None:
 			cfg.llm_min_interval = llm_min_interval
 		if llm_model is not None:
-			cfg.zai_model = llm_model
+			cfg.llm_model = llm_model
 		if llm_reasoning_effort is not None:
 			cfg.zai_reasoning_effort = llm_reasoning_effort
 		if llm_thinking is not None:
 			cfg.zai_thinking = llm_thinking
 		if no_llm_loop:
 			cfg.llm_loop = False
-		if llm_flash_model is not None:
-			cfg.zai_flash_model = llm_flash_model
-		if llm_final_model is not None:
-			cfg.zai_final_model = llm_final_model
+		if llm_fallback_model is not None:
+			cfg.llm_loop_fallback_model = llm_fallback_model
 		if llm_burst is not None:
 			cfg.llm_burst = llm_burst
 		if llm_rate_limit_base is not None:
@@ -298,18 +295,18 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 			cats = tuple(c.strip() for c in llm_categories.split(",") if c.strip())
 			rpm = round(60.0 / cfg.llm_min_interval) if cfg.llm_min_interval > 0 else float("inf")
 			if cfg.llm_loop:
-				# Loop mode (default): free Flash first, paid final as fallback.
+				# Loop mode (default): free loop model first, paid fallback second.
 				console.print(
 					f"  LLM: [cyan]{llm_provider.name}[/cyan] "
-					f"primary={cfg.zai_flash_model} → fallback={cfg.zai_final_model} "
+					f"primary={llm_provider.model} → fallback={llm_provider.fallback_model} "
 					f"(reasoning_effort={cfg.zai_reasoning_effort}) "
 					f"for categories {cats} (≤{rpm} RPM, min {cfg.llm_min_interval}s between calls)"
 				)
 			else:
 				# Single-call mode (--no-llm-loop): one model, no fallback.
-				is_glm5 = cfg.zai_model.lower().startswith("glm-5")
+				is_glm5 = llm_provider.model.lower().startswith("glm-5")
 				reason = f"reasoning_effort={cfg.zai_reasoning_effort}" if is_glm5 else f"thinking={cfg.zai_thinking}"
-				console.print(f"  LLM: [cyan]{llm_provider.name}[/cyan] model={cfg.zai_model} ({reason}) for categories {cats} (≤{rpm} RPM, min {cfg.llm_min_interval}s between calls)")
+				console.print(f"  LLM: [cyan]{llm_provider.name}[/cyan] model={llm_provider.model} ({reason}) for categories {cats} (≤{rpm} RPM, min {cfg.llm_min_interval}s between calls)")
 
 	# Streaming review writer: appends each processed book to review.yaml as it
 	# completes (Unix-pipe style). The original is moved to .bak on

@@ -10,9 +10,16 @@ Resolution order for every setting (highest precedence first):
 """
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+
+log = logging.getLogger(__name__)
+
+
+def _deprecated(old: str, new: str) -> None:
+	log.warning("Env var %s is deprecated; use %s instead (read anyway).", old, new)
 
 # Neutral fallback — every real setup overrides this via $BMF_LIBRARY or
 # --library; the built-in default only needs to exist, not point anywhere real.
@@ -55,13 +62,13 @@ class Config:
 	# Override via ZAI_BASE_URL if you have a PaaS key.
 	zai_api_key: str | None = field(default=None)
 	zai_base_url: str = "https://api.z.ai/api/coding/paas/v4/"
-	# Default fallback model. GLM-5.2 with reasoning_effort=low was the most
-	# consistent on CZ/SK metadata extraction in the model experiment (see
-	# scripts/llm_experiment.py + README). Non-reasoning alternatives
-	# (glm-4.6/glm-4.5-air/glm-4.5-flash/glm-4.7-flash with thinking disabled)
-	# use ~3-4x fewer output tokens but hallucinate more on CZ/SK series and
-	# diacritics. Override via ZAI_MODEL.
-	zai_model: str = "glm-5.2"
+	# Primary LLM model: first attempt of the self-correction loop, and the
+	# single-call model when the loop is off. None = resolved at provider
+	# construction: glm-4.7-flash (free) when the loop is on, the fallback
+	# model when off (a single call should go straight to the quality model).
+	# Override via BMF_LLM_MODEL (legacy: ZAI_MODEL for the loop-off case,
+	# ZAI_FLASH_MODEL for the loop-on case — deprecated).
+	llm_model: str | None = None
 	# Reasoning effort for GLM-5.x models (low|medium|max). Ignored by GLM-4.x
 	# (use zai_thinking for those). 'low' keeps quality while cutting ~60% of
 	# reasoning tokens vs the default. Override via ZAI_REASONING_EFFORT.
@@ -71,14 +78,13 @@ class Config:
 	# 'disabled' turns off chain-of-thought, drastically cutting output tokens.
 	# Override via ZAI_THINKING.
 	zai_thinking: str = "disabled"
-	# Self-correction loop: try the free Flash model first (with verify feedback),
-	# then the paid final model as fallback. Override via BMF_LLM_LOOP=0.
+	# Self-correction loop: try the (free flash) model first (with verify
+	# feedback), then the fallback model. Override via BMF_LLM_LOOP=0.
 	llm_loop: bool = True
-	# Flash (first-attempt, free) and final (paid fallback) models for the loop.
-	# Override via ZAI_FLASH_MODEL / ZAI_FINAL_MODEL. The single-call path uses
-	# zai_model when the loop is disabled.
-	zai_flash_model: str = "glm-4.7-flash"
-	zai_final_model: str = "glm-5.2"
+	# Paid high-quality fallback model (and the loop-off single-call default).
+	# Override via BMF_LLM_FALLBACK_MODEL (legacy: ZAI_FINAL_MODEL /
+	# ZAI_MODEL — deprecated).
+	llm_fallback_model: str = "glm-5.3"
 	# Leaky-bucket burst capacity: how many LLM calls may start inside one
 	# interval. Default 1 = pure even drip (one call every interval seconds,
 	# no bunching) — this is the count-per-time semantics Z.AI's sliding-window
@@ -149,16 +155,31 @@ class Config:
 			cfg.zai_api_key = v
 		if v := os.environ.get("ZAI_BASE_URL"):
 			cfg.zai_base_url = v
+		if v := os.environ.get("BMF_LLM_MODEL"):
+			cfg.llm_model = v.strip()
+		if v := os.environ.get("BMF_LLM_FALLBACK_MODEL"):
+			cfg.llm_fallback_model = v.strip()
+		# Legacy aliases (deprecated): ZAI_FLASH_MODEL was the loop's first
+		# attempt, ZAI_FINAL_MODEL the loop fallback, ZAI_MODEL the loop-off
+		# single-call model (and the loop fallback's default). New names win.
+		if v := os.environ.get("ZAI_FLASH_MODEL"):
+			cfg.llm_model = cfg.llm_model or v.strip()
+			_deprecated("ZAI_FLASH_MODEL", "BMF_LLM_MODEL")
+		if v := os.environ.get("ZAI_FINAL_MODEL"):
+			if not os.environ.get("BMF_LLM_FALLBACK_MODEL"):
+				cfg.llm_fallback_model = v.strip()
+			_deprecated("ZAI_FINAL_MODEL", "BMF_LLM_FALLBACK_MODEL")
 		if v := os.environ.get("ZAI_MODEL"):
-			cfg.zai_model = v
+			# Historically the loop-off single-call model AND the implicit
+			# default of the loop fallback — map it to the fallback, so both
+			# loop-off and the loop's paid stage keep honouring it.
+			if not os.environ.get("BMF_LLM_FALLBACK_MODEL") and not os.environ.get("ZAI_FINAL_MODEL"):
+				cfg.llm_fallback_model = v.strip()
+			_deprecated("ZAI_MODEL", "BMF_LLM_FALLBACK_MODEL")
 		if v := os.environ.get("ZAI_REASONING_EFFORT"):
 			cfg.zai_reasoning_effort = v.strip().lower()
 		if v := os.environ.get("ZAI_THINKING"):
 			cfg.zai_thinking = v.strip().lower()
-		if v := os.environ.get("ZAI_FLASH_MODEL"):
-			cfg.zai_flash_model = v.strip()
-		if v := os.environ.get("ZAI_FINAL_MODEL"):
-			cfg.zai_final_model = v.strip()
 		if (v := os.environ.get("BMF_LLM_LOOP")) is not None:
 			cfg.llm_loop = v.strip().lower() in ("1", "true", "yes", "on")
 		if (v := os.environ.get("BMF_LLM_BURST")) is not None:

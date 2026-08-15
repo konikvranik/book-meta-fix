@@ -381,9 +381,25 @@ class _BookList:
 	ROW_H = 54
 	THUMB_W = 32
 	THUMB_H = 48
-	ACTION_W = 64
+	# Just the width of one coloured action glyph — the full word is no
+	# longer drawn (the symbol frees the space for title/author).
+	ACTION_W = 20
 	PAD = 6
 	HEADER_H = 24
+
+	# Action → (glyph, colour): Tango palette, matching the selection blue.
+	# Plain Unicode signs only — emoji (🗑, 📌) render as tofu/monochrome in
+	# Tk's default DejaVu on this box.
+	ACTION_GLYPHS = {
+		"": ("·", "#888a85"),
+		"accept": ("✔", "#4e9a06"),
+		"reject": ("✘", "#cc0000"),
+		"swap": ("⇄", "#f57900"),
+		"edit": ("✎", "#3465a4"),
+		"delete": ("⌫", "#a40000"),
+		"keep": ("◆", "#06989a"),
+	}
+	AUTHOR_INDENT = 12
 
 	def __init__(self, parent, style) -> None:
 		self._rows: list[dict] = []
@@ -392,7 +408,7 @@ class _BookList:
 		self._select_cb = None
 		self._draw_pending = False
 		self._pending_top: float | None = None
-		self._font, self._bold = self._resolve_fonts(style)
+		self._font, self._bold, self._italic = self._resolve_fonts(style)
 		self._bg, self._fg, self._sel_bg, self._sel_fg, self._border = self._resolve_colors(style)
 		self.canvas = tk.Canvas(
 			parent, highlightthickness=0, background=self._bg, yscrollincrement=1,
@@ -411,12 +427,15 @@ class _BookList:
 			font = tkfont.nametofont(name) if name else tkfont.nametofont("TkDefaultFont")
 		except Exception:  # noqa: BLE001
 			font = tkfont.nametofont("TkDefaultFont")
+		bold = italic = font
 		try:
 			bold = font.copy()
 			bold.configure(weight="bold")
+			italic = font.copy()
+			italic.configure(slant="italic")
 		except Exception:  # noqa: BLE001
-			bold = font
-		return font, bold
+			pass
+		return font, bold, italic
 
 	@staticmethod
 	def _resolve_colors(style):
@@ -443,9 +462,13 @@ class _BookList:
 	# -- Treeview-like API --------------------------------------------------
 
 	def insert(self, _parent, _index, *, iid=None, text="", values=(), image=None):
+		# Two-line row: *text* is the TITLE (bold, first line); values are
+		# (action, author) — the author renders italic + indented below.
 		row = {
-			"iid": str(iid), "text": text,
-			"action": values[0] if values else "", "image": image,
+			"iid": str(iid), "title": text,
+			"action": values[0] if values else "",
+			"author": values[1] if len(values) > 1 else "",
+			"image": image,
 		}
 		self._rows.append(row)
 		self._by_iid[row["iid"]] = row
@@ -589,14 +612,15 @@ class _BookList:
 		self._draw()
 		return "break"
 
-	def _elide(self, text: str, avail: int) -> str:
+	def _elide(self, text: str, avail: int, font=None) -> str:
 		"""Trim *text* to *avail* px with an ellipsis (bisection)."""
-		if avail <= 4 or self._font.measure(text) <= avail:
+		font = font or self._font
+		if avail <= 4 or font.measure(text) <= avail:
 			return text
 		lo, hi = 0, len(text)
 		while lo < hi:
 			mid = (lo + hi) // 2
-			if self._font.measure(text[:mid] + "…") <= avail:
+			if font.measure(text[:mid] + "…") <= avail:
 				lo = mid + 1
 			else:
 				hi = mid
@@ -608,13 +632,12 @@ class _BookList:
 		w = c.winfo_width()
 		if w < 10:  # not laid out yet
 			return
-		ax = w - self.PAD - self.THUMB_W - 12 - self.ACTION_W  # action column x
+		ax = w - self.PAD - self.THUMB_W - 12 - self.ACTION_W  # action glyph x
 		thumb_x = w - self.PAD - self.THUMB_W
+		text_w = ax - 12 - self.PAD  # shared title/author width budget
 		# Header (matches the old Treeview headings).
 		c.create_text(self.PAD, self.HEADER_H // 2, anchor="w",
-		              text=_("Author – Title"), font=self._bold, fill=self._fg)
-		c.create_text(ax, self.HEADER_H // 2, anchor="w", text=_("Action"),
-		              font=self._bold, fill=self._fg)
+		              text=_("Title"), font=self._bold, fill=self._fg)
 		c.create_line(0, self.HEADER_H, w, self.HEADER_H, fill=self._border)
 		# Visible slice only — the virtualized part.
 		first = max(0, int((c.canvasy(0) - self.HEADER_H) // self.ROW_H))
@@ -628,13 +651,25 @@ class _BookList:
 			if sel:
 				c.create_rectangle(0, y, w, y + self.ROW_H,
 				                   fill=self._sel_bg, outline="")
-			c.create_text(self.PAD, cy, anchor="w",
-			              text=self._elide(row["text"], ax - 12 - self.PAD),
-			              font=self._font, fill=self._sel_fg if sel else self._fg)
-			if row["action"]:
-				c.create_text(ax, cy, anchor="w", text=row["action"],
-				              font=self._font,
-				              fill=self._sel_fg if sel else self._fg)
+			fg = self._sel_fg if sel else self._fg
+			# Line 1: title, bold, from the left edge. Line 2: author,
+			# italic, indented — the thumbnail already fixes the row height,
+			# so two lines fit at no cost.
+			c.create_text(self.PAD, y + 6, anchor="nw",
+			              text=self._elide(row["title"], text_w, self._bold),
+			              font=self._bold, fill=fg)
+			c.create_text(self.PAD + self.AUTHOR_INDENT, y + self.ROW_H - 6,
+			              anchor="sw",
+			              text=self._elide(row["author"] or "—",
+			                               text_w - self.AUTHOR_INDENT, self._italic),
+			              font=self._italic, fill=fg)
+			# Action: coloured glyph (colour stays even when selected — it
+			# is the orientation cue, and the Tango colours read fine on
+			# the selection blue).
+			glyph, colour = self.ACTION_GLYPHS.get(row["action"],
+			                                      self.ACTION_GLYPHS[""])
+			c.create_text(ax, cy, anchor="w", text=glyph,
+			              font=self._bold, fill=colour)
 			if row["image"] is not None:
 				c.create_image(thumb_x, y + (self.ROW_H - self.THUMB_H) // 2,
 				               anchor="nw", image=row["image"])
@@ -1426,7 +1461,8 @@ class ReviewEditorApp:
 			# NB: ``image`` MUST be omitted (not passed as None) — passing
 			# image=None corrupts ttk's option parsing and the next option's
 			# value (here the ``values`` list) is misread as an option name.
-			kw = dict(iid=str(i), text=self._entry_label(e), values=(self._action_label(e),))
+			kw = dict(iid=str(i), text=self._entry_title(e),
+			          values=(self._action_label(e), self._entry_author(e)))
 			img = self._thumb_photo_for(uuid)
 			if img is not None:
 				kw["image"] = img
@@ -1463,15 +1499,19 @@ class ReviewEditorApp:
 		return out
 
 	@staticmethod
-	def _entry_label(e: dict) -> str:
+	def _entry_title(e: dict) -> str:
 		cur = e.get("current") or {}
-		author = cur.get("author") or "—"
-		title = cur.get("title") or "—"
-		return f"{author} – {title}"
+		return cur.get("title") or "—"
+
+	@staticmethod
+	def _entry_author(e: dict) -> str:
+		cur = e.get("current") or {}
+		return cur.get("author") or ""
 
 	@staticmethod
 	def _action_label(e: dict) -> str:
-		return e.get("action") or "·"
+		# Raw action name — _BookList maps it to a coloured glyph.
+		return e.get("action") or ""
 
 	def _on_tree_select(self) -> None:
 		iid = self.tree.focus()

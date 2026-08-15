@@ -244,10 +244,9 @@ class ZaiProvider(LLMProvider):
 	# which is the safest match for the documented dynamic RPM cap.
 	DEFAULT_MIN_INTERVAL = 2.0
 
-	def __init__(self, api_key: str, base_url: str = "https://api.z.ai/api/paas/v4/", model: str = "glm-5.2", *, min_interval: float | None = None, reasoning_effort: str | None = None, thinking: str | None = None, burst: float = 1.0, rate_limit_base: float = 5.0, rate_limit_max: float = 60.0, flash_model: str | None = None, final_model: str | None = None) -> None:
+	def __init__(self, api_key: str, base_url: str = "https://api.z.ai/api/paas/v4/", *, model: str = "glm-4.7-flash", fallback_model: str = "glm-5.3", min_interval: float | None = None, reasoning_effort: str | None = None, thinking: str | None = None, burst: float = 1.0, rate_limit_base: float = 5.0, rate_limit_max: float = 60.0) -> None:
 		self.api_key = api_key
 		self.base_url = base_url
-		self.model = model
 		self._client = None
 		# Per-model reasoning controls. GLM-5.x exposes reasoning_effort
 		# (low|medium|max); GLM-4.x exposes a binary thinking toggle
@@ -284,12 +283,15 @@ class ZaiProvider(LLMProvider):
 		self._cooldown_until = 0.0  # monotonic timestamp; callers block until past it
 		self._consecutive_429 = 0
 		self._cooldown_lock = threading.Lock()
-		# Models used by reconcile_loop. flash_model is the free first-attempt
-		# model (default glm-4.7-flash — best CZ/SK quality among free models
-		# per scripts/llm_experiment.py); final_model is the paid high-quality
-		# fallback (default: self.model, i.e. glm-5.2 low).
-		self.flash_model = flash_model or "glm-4.7-flash"
-		self.final_model = final_model or model
+		# Models used by reconcile_loop: self.model is the (free) first-attempt
+		# model — glm-4.7-flash, best CZ/SK quality among free models per
+		# scripts/llm_experiment.py; fallback_model is the paid high-quality
+		# model (glm-5.3 low). Both are resolved by resolve_models() in
+		# get_provider, which knows the loop on/off default split. With the
+		# loop disabled, self.model IS the single-call model (resolved to the
+		# fallback-quality one).
+		self.model = model
+		self.fallback_model = fallback_model
 
 	def _extra_body_for(self, model: str) -> dict[str, Any]:
 		"""Pick the right reasoning/thinking knobs for *model*."""
@@ -474,61 +476,65 @@ class ZaiProvider(LLMProvider):
 		return None, last_error
 
 	def reconcile(self, evidence: dict[str, Any]) -> ReconciledMeta | None:
-		"""Single LLM call to self.model (back-comat for callers not using the loop)."""
+		"""Single LLM call to self.model (back-compat for callers not using the loop).
+
+		With the loop disabled, get_provider resolves self.model to the
+		(fallback-quality) model, so this is the loop-off single-call path.
+		"""
 		result, error = self._call(self.model, evidence)
 		if error and result is None:
 			log.warning("Z.AI reconcile gave up: %s", error)
 		return result
 
 	def reconcile_loop(self, evidence: dict[str, Any], extracted: Any = None, *, max_flash: int = 2, verifier: Any = None) -> tuple[ReconciledMeta | None, str]:
-		"""Self-correction loop: cheap Flash first, paid GLM-5.2 as the final fallback.
+		"""Self-correction loop: cheap loop model first, paid fallback second.
 
 		Flow (each LLM call goes through the shared leaky-bucket, so the
 		aggregate request rate stays constant regardless of loop depth):
 
-		  1. Flash (free, thinking off) up to *max_flash* times. After the
-		     first attempt, the verifier's feedback is injected into the
-		     evidence so the model can correct itself.
-		  2. If Flash is rate-limited (429 cascade) or still fails verify after
-		     *max_flash* attempts, the paid final_model (default glm-5.2 low)
-		     is tried once.
-		  3. If the final model also fails verify (or there is no text to
+		  1. The (free flash) loop model up to *max_flash* times.
+		     After the first attempt, the verifier's feedback is injected
+		     into the evidence so the model can correct itself.
+		  2. If the loop model is rate-limited (429 cascade) or still fails
+		     verify after *max_flash* attempts, the paid fallback_model
+		     (default glm-5.3 low) is tried once.
+		  3. If the fallback model also fails verify (or there is no text to
 		     verify against), the last non-empty proposal is returned with
 		     confidence="low" so the human reviewer still sees something.
 
 		Returns (result, source) where source is one of:
-		  'llm:flash'   — Flash passed verify
-		  'llm:loop'    — Flash passed verify after feedback
-		  'llm:high'    — final model passed verify
+		  'llm:flash'   — loop model passed verify
+		  'llm:loop'    — loop model passed verify after feedback
+		  'llm:high'    — fallback model passed verify
 		  'llm:low'     — nothing passed verify; last proposal returned as-is
 		  ''            — every call returned None (nothing to show)
 		"""
 		verifier_fn = verifier or _default_verifier
 		last_result: ReconciledMeta | None = None
-		# Try the free Flash model up to max_flash times, carrying feedback.
+		# Try the free loop model up to max_flash times, carrying feedback.
 		fb = ""
 		for attempt in range(max_flash):
 			attempt_ev = dict(evidence)
 			if fb:
 				attempt_ev["feedback"] = fb
-			result, error = self._call(self.flash_model, attempt_ev)
+			result, error = self._call(self.model, attempt_ev)
 			if result is not None:
 				last_result = result
 				if extracted is None:
-					# Nothing to verify against — accept the Flash result.
+					# Nothing to verify against — accept the loop model's result.
 					return result, "llm:flash" if attempt == 0 else "llm:loop"
 				passed, new_fb = verifier_fn(result, extracted)
 				if passed:
 					return result, "llm:flash" if attempt == 0 else "llm:loop"
 				fb = new_fb
-				log.debug("Flash attempt %d failed verify: %s", attempt + 1, new_fb[:120])
+				log.debug("Loop model attempt %d failed verify: %s", attempt + 1, new_fb[:120])
 			elif error and "rate" in (error or "").lower():
 				# Free-tier cascade: bail to the paid model immediately rather
-				# than burning more Flash attempts that will also 429.
-				log.info("Flash rate-limited (%s); falling back to %s", error, self.final_model)
+				# than burning more loop attempts that will also 429.
+				log.info("Loop model rate-limited (%s); falling back to %s", error, self.fallback_model)
 				break
 		# Final fallback: the paid high-quality model, one attempt.
-		result, error = self._call(self.final_model, evidence)
+		result, error = self._call(self.fallback_model, evidence)
 		if result is not None:
 			if extracted is None:
 				return result, "llm:high"
@@ -590,6 +596,21 @@ class MockProvider(LLMProvider):
 # ---------------------------------------------------------------------------
 
 
+def resolve_models(config: Any) -> tuple[str, str]:  # noqa: ANN001
+	"""Resolve (model, fallback_model) from the config.
+
+	llm_model is the model the loop (or the loop-off single call) tries
+	first; None = default, which depends on the loop setting: the free flash
+	model when the loop is on, the fallback-quality model when off (a single
+	call should not waste money on a second-rate model NOR start cheap).
+	"""
+	fallback = getattr(config, "llm_fallback_model", None) or "glm-5.3"
+	model = getattr(config, "llm_model", None)
+	if not model:
+		model = "glm-4.7-flash" if getattr(config, "llm_loop", True) else fallback
+	return model, fallback
+
+
 def get_provider(config: Any) -> LLMProvider | None:  # noqa: ANN001
 	"""Construct the configured LLM provider, or None if disabled/unavailable.
 
@@ -604,18 +625,18 @@ def get_provider(config: Any) -> LLMProvider | None:  # noqa: ANN001
 		# class default (~30 RPM) if unset. Lower (e.g. 1.0 = 60 RPM) only on a
 		# higher Z.AI tier; raise (e.g. 4.0 = 15 RPM) if you still hit 429s.
 		min_interval = getattr(config, "llm_min_interval", None)
+		model, fallback_model = resolve_models(config)
 		return ZaiProvider(
 			api_key=api_key,
 			base_url=getattr(config, "zai_base_url", "https://api.z.ai/api/paas/v4/"),
-			model=getattr(config, "zai_model", "glm-5.2"),
+			model=model,
+			fallback_model=fallback_model,
 			min_interval=min_interval,
 			reasoning_effort=getattr(config, "zai_reasoning_effort", None),
 			thinking=getattr(config, "zai_thinking", None),
 			burst=getattr(config, "llm_burst", 1.0),
 			rate_limit_base=getattr(config, "llm_rate_limit_base", 5.0),
 			rate_limit_max=getattr(config, "llm_rate_limit_max", 60.0),
-			flash_model=getattr(config, "zai_flash_model", None),
-			final_model=getattr(config, "zai_final_model", None),
 		)
 	if os.environ.get("BMF_LLM_MOCK"):
 		return MockProvider()
