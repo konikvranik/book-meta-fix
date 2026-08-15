@@ -103,6 +103,11 @@ class Config:
 	llm_rate_limit_base: float = 5.0
 	llm_rate_limit_max: float = 60.0
 
+	# Interface language for CLI/GUI messages ('cs' | 'en'). Empty string =
+	# auto-detect from the user's locale (LC_ALL/LC_MESSAGES/LANG; cs* → Czech,
+	# anything else → English). Override via BMF_LANGUAGE or --lang.
+	language: str = ""
+
 	# Verification thresholds
 	verify_fuzzy_strong: float = 0.8  # >= -> VERIFIED
 	verify_fuzzy_weak: float = 0.5  # >= -> NEEDS_REVIEW (uncertain)
@@ -130,6 +135,9 @@ class Config:
 			cfg.openlibrary_enabled = v.strip().lower() in ("1", "true", "yes", "on")
 		if (v := os.environ.get("BMF_GOOGLE_BOOKS")) is not None:
 			cfg.google_books_enabled = v.strip().lower() in ("1", "true", "yes", "on")
+		# Interface language (cs|en; empty = auto-detect from locale)
+		if v := os.environ.get("BMF_LANGUAGE"):
+			cfg.language = v.strip().lower()
 		# Enricher negative-cache TTL (seconds)
 		if (v := os.environ.get("BMF_ENRICH_NEGATIVE_TTL")) is not None:
 			try:

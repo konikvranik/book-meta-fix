@@ -31,6 +31,7 @@ dev = [
 	"pytest>=7.0",
 	"pytest-cov>=4.0",
 	"ruff>=0.1",
+	"Babel>=2.12",
 ]
 
 [project.scripts]
@@ -38,6 +39,11 @@ bmf = "book_meta_fix.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# Translation catalogs (compiled .mo files are committed so installs/tests
+# don't need pybabel; regenerate with `make i18n-compile`).
+[tool.setuptools.package-data]
+book_meta_fix = ["locales/*/LC_MESSAGES/*.po", "locales/*/LC_MESSAGES/*.mo"]
 
 [tool.ruff]
 line-length = 120

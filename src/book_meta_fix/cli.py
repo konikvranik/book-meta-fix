@@ -24,10 +24,24 @@ from rich.table import Table
 
 from . import __version__
 from .config import Config
+from .i18n import SUPPORTED_LANGUAGES, _, init_language
 from .library import Cache, scan_library
 
 console = Console()
 log = logging.getLogger(__name__)
+
+# Initialize the translation catalog from the environment BEFORE the click
+# decorators below run: their `help=` texts are evaluated at import time, so
+# BMF_LANGUAGE / the user's locale must already be known here. A later
+# `--lang` flag (see main) re-initializes for runtime messages; help texts
+# keep the import-time language (documented limitation).
+init_language()
+
+
+def _set_language(ctx: click.Context, param: click.Parameter, value: str | None) -> None:
+	"""--lang callback: re-init the catalog early (before the subcommand runs)."""
+	if value:
+		init_language(value)
 
 
 def _setup_logging(verbose: bool) -> None:
@@ -47,16 +61,21 @@ def _setup_logging(verbose: bool) -> None:
 
 @click.group()
 @click.version_option(__version__, prog_name="bmf")
-@click.option("-v", "--verbose", is_flag=True, help="Enable debug logging")
+@click.option("-v", "--verbose", is_flag=True, help=_("Enable debug logging"))
+@click.option(
+	"--lang", "-l", "language", type=click.Choice(SUPPORTED_LANGUAGES), default=None,
+	is_eager=True, expose_value=False, callback=_set_language,
+	help=_("Interface language (default: auto-detect from your locale; also BMF_LANGUAGE)"),
+)
 def main(verbose: bool) -> None:
 	"""book-meta-fix: detect and fix metadata of ebooks."""
 	_setup_logging(verbose)
 
 
 @main.command()
-@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help="Library root (default: $BMF_LIBRARY or ~/Books)")
-@click.option("--no-cache", is_flag=True, help="Disable SQLite cache (force full re-parse)")
-@click.option("--limit", type=int, default=None, help="Process only the first N books (for testing)")
+@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help=_("Library root (default: $BMF_LIBRARY or ~/Books)"))
+@click.option("--no-cache", is_flag=True, help=_("Disable SQLite cache (force full re-parse)"))
+@click.option("--limit", type=int, default=None, help=_("Process only the first N books (for testing)"))
 def scan(library: Path | None, no_cache: bool, limit: int | None) -> None:
 	"""Scan the library and print summary statistics."""
 	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
@@ -79,7 +98,7 @@ def scan(library: Path | None, no_cache: bool, limit: int | None) -> None:
 		BarColumn(complete_style="cyan", finished_style="cyan", pulse_style="cyan"), TextColumn("{task.completed}/{task.total}"),
 		TimeRemainingColumn(), console=console, transient=True,
 	) as progress:
-		task_id = progress.add_task("Scanning", total=None)
+		task_id = progress.add_task(_("Scanning"), total=None)
 
 		def _cb(done: int, total: int) -> None:
 			if progress.tasks[0].total is None and total:
@@ -92,7 +111,7 @@ def scan(library: Path | None, no_cache: bool, limit: int | None) -> None:
 		books = books[:limit]
 
 	if not books:
-		console.print("[red]No books found.[/red]")
+		console.print("[red]" + _("No books found.") + "[/red]")
 		sys.exit(1)
 
 	_print_scan_summary(books)
@@ -102,14 +121,14 @@ def scan(library: Path | None, no_cache: bool, limit: int | None) -> None:
 
 
 @main.command()
-@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help="Library root")
-@click.option("--no-cache", is_flag=True, help="Disable SQLite cache (force full re-parse)")
-@click.option("--limit", type=int, default=None, help="Process only the first N books (for testing)")
-@click.option("--category", default=None, help="Show only books in this category (C1..C10, MISSING_ISBN, ...)")
-@click.option("--samples", type=int, default=3, help="Number of sample books to show per category")
-@click.option("--accept-missing/--no-accept-missing", "accept_missing", default=True, help="Apply the identity gate: a MISSING_ISBN/YEAR/COVER book whose author+title are confirmed against its content counts as OK (not broken). Default on, consistent with organize/analyze. --no-accept-missing keeps the pure detector verdict (no content reads; the historic fast report).")
-@click.option("--verify-ok", "verify_ok", is_flag=True, help="Audit: also verify books the detectors marked OK against their content. Reads every OK book's file (slower). A MISMATCH (or UNCERTAIN, see --no-strict-verify) is then counted as broken.")
-@click.option("--no-strict-verify", "no_strict_verify", is_flag=True, help="With --verify-ok: only treat a clear MISMATCH as broken. By default UNCERTAIN is too.")
+@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help=_("Library root"))
+@click.option("--no-cache", is_flag=True, help=_("Disable SQLite cache (force full re-parse)"))
+@click.option("--limit", type=int, default=None, help=_("Process only the first N books (for testing)"))
+@click.option("--category", default=None, help=_("Show only books in this category (C1..C10, MISSING_ISBN, ...)"))
+@click.option("--samples", type=int, default=3, help=_("Number of sample books to show per category"))
+@click.option("--accept-missing/--no-accept-missing", "accept_missing", default=True, help=_("Apply the identity gate: a MISSING_ISBN/YEAR/COVER book whose author+title are confirmed against its content counts as OK (not broken). Default on, consistent with organize/analyze. --no-accept-missing keeps the pure detector verdict (no content reads; the historic fast report)."))
+@click.option("--verify-ok", "verify_ok", is_flag=True, help=_("Audit: also verify books the detectors marked OK against their content. Reads every OK book's file (slower). A MISMATCH (or UNCERTAIN, see --no-strict-verify) is then counted as broken."))
+@click.option("--no-strict-verify", "no_strict_verify", is_flag=True, help=_("With --verify-ok: only treat a clear MISMATCH as broken. By default UNCERTAIN is too."))
 def report(library: Path | None, no_cache: bool, limit: int | None, category: str | None, samples: int, accept_missing: bool, verify_ok: bool, no_strict_verify: bool) -> None:
 	"""Run detector rules and print category counts + samples.
 
@@ -136,7 +155,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 		BarColumn(complete_style="magenta", finished_style="magenta", pulse_style="magenta"), TextColumn("{task.completed}/{task.total}"),
 		TimeRemainingColumn(), console=console, transient=True,
 	) as progress:
-		task_id = progress.add_task("Reading library", total=None)
+		task_id = progress.add_task(_("Reading library"), total=None)
 
 		def _scan_cb(done: int, total: int) -> None:
 			if progress.tasks[0].total is None and total:
@@ -147,7 +166,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 	if limit is not None:
 		books = books[:limit]
 	if not books:
-		console.print("[red]No books found.[/red]")
+		console.print("[red]" + _("No books found.") + "[/red]")
 		sys.exit(1)
 
 	# Classify each book via the shared classifier (same rules as organize/analyze).
@@ -158,7 +177,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 		BarColumn(complete_style="magenta", finished_style="magenta", pulse_style="magenta"), TextColumn("{task.completed}/{task.total}"),
 		TimeRemainingColumn(), console=console, transient=True,
 	) as progress:
-		task_id = progress.add_task("Classifying", total=len(books))
+		task_id = progress.add_task(_("Classifying"), total=len(books))
 		for i, b in enumerate(books, start=1):
 			c = classify_fn(b, accept_missing=accept_missing, verify_ok=verify_ok, strict_verify=not no_strict_verify)
 			if c.identified:
@@ -170,37 +189,38 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 
 	_print_detect_summary(results, category, samples)
 	if accept_missing and identified:
-		console.print(
-			f"[dim]  {identified} book(s) identified (accepted): MISSING_* with author+title "
-			"confirmed against content — these route to OK, not needfix.[/dim]"
-		)
+		identified_note = _(
+			"{identified} book(s) identified (accepted): MISSING_* with author+title "
+			"confirmed against content — these route to OK, not needfix."
+		).format(identified=identified)
+		console.print(f"[dim]  {identified_note}[/dim]")
 
 
 @main.command()
-@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help="Library root")
-@click.option("--no-cache", is_flag=True, help="Disable SQLite cache (force full re-parse)")
-@click.option("--limit", type=int, default=None, help="Process only the first N books (for testing)")
-@click.option("--skip-enrich", is_flag=True, default=True, help="Skip online enrichment (offline mode)")
-@click.option("--databazeknih", "use_databazeknih", is_flag=True, help="Enable databazeknih.cz lookup (CZ/SK genres + metadata). Implies --no-skip-enrich.")
-@click.option("--legie", "use_legie", is_flag=True, help="Enable legie.info lookup (CZ/SK sci-fi/fantasy — short stories & series databazeknih misses). Implies --no-skip-enrich.")
-@click.option("--skip-verify", is_flag=True, help="Skip content verification")
-@click.option("--verify-ok", "verify_ok", is_flag=True, help="Audit: also verify books the detectors marked OK against their content. Reads every OK book's file (slower). A MISMATCH reclassifies it to NEEDS_REVIEW and seeks a fix (enrichment + LLM). Use periodically to catch corruption the structural detectors miss.")
-@click.option("--no-strict-verify", "no_strict_verify", is_flag=True, help="With --verify-ok: only reclassify a clear MISMATCH (fuzzy title < 0.5). By default (without this flag) UNCERTAIN (0.5–0.8) is also reclassified.")
-@click.option("--accept-missing/--no-accept-missing", "accept_missing", default=True, help="Auto-accept MISSING_ISBN/YEAR/COVER books whose author+title were confirmed against the book's content (pre-filled action: accept in review.yaml; pruned by `bmf apply`, safe no-op). Default on. Use --no-accept-missing to keep them for manual review.")
-@click.option("--output", "-o", type=click.Path(path_type=Path), default=None, help="Output review file (default: review.yaml)")
-@click.option("--llm", "use_llm", is_flag=True, help="Enable LLM reconciliation (needs ZAI_API_KEY or BMF_LLM_MOCK=1)")
-@click.option("--llm-categories", default="ALL", help="Comma-separated categories to send to LLM, or 'ALL' (default). ALL = every category except C9 (legitimate anonyms like the Bible, where an LLM-invented author would be wrong). Each book is one LLM request that returns all fields at once, so the cost is per-book, not per-category.")
-@click.option("--workers", "-w", type=int, default=10, help="Parallel workers for I/O (extract/LLM/enrich). Default 10.")
-@click.option("--llm-min-interval", "llm_min_interval", type=float, default=None, help="Minimum seconds between LLM requests (RPM throttle, default 2.0 = ~30 RPM). Decoupled from --workers: cheap I/O still runs at full worker count. Lower (e.g. 1.0 = 60 RPM) on a higher Z.AI tier; raise (e.g. 4.0 = 15 RPM) if you still hit 429.")
-@click.option("--llm-model", "llm_model", default=None, help="Z.AI model for LLM fallback (default glm-5.2). Alternatives: glm-4.6, glm-4.5-air, glm-4.5-flash, glm-4.7-flash. See README 'LLM model choice' for the token/quality tradeoffs measured by scripts/llm_experiment.py.")
-@click.option("--llm-reasoning-effort", "llm_reasoning_effort", default=None, help="reasoning_effort for GLM-5.x models: low (default) | medium | max. Lower cuts reasoning tokens ~60%% vs max. Ignored by GLM-4.x (use --llm-thinking).")
-@click.option("--llm-thinking", "llm_thinking", default=None, help="thinking toggle for GLM-4.x models: disabled (default) | enabled. 'disabled' turns off chain-of-thought (3-4x fewer output tokens). Ignored by GLM-5.x (use --llm-reasoning-effort).")
-@click.option("--no-llm-loop", "no_llm_loop", is_flag=True, help="Disable the self-correction loop. Default: loop on — try the free Flash model first (with verify feedback), then the paid final model as fallback. With this flag, a single LLM call (the configured --llm-model) is used as before.")
-@click.option("--llm-flash-model", "llm_flash_model", default=None, help="Free first-attempt model for the loop (default glm-4.7-flash — best CZ/SK quality among free models). Alternatives: glm-4.5-flash, glm-4.5-air.")
-@click.option("--llm-final-model", "llm_final_model", default=None, help="Paid high-quality fallback for the loop (default glm-5.2). Used when Flash fails verify or is rate-limited.")
-@click.option("--llm-burst", "llm_burst", type=float, default=None, help="Leaky-bucket burst capacity: how many LLM calls may start inside one interval (default 1 = pure even drip, no bunching — one call every --llm-min-interval seconds). This is a count-per-time limiter, not a concurrency cap. Raise only with confirmed rate headroom; a burst >1 fires multiple calls in the same second and trips Z.AI's dynamic RPM limit (429).")
-@click.option("--llm-rate-limit-base", "llm_rate_limit_base", type=float, default=None, help="Base seconds of the global cooldown applied when a 429 is seen (default 5). When ANY worker hits a 429, ALL workers pause this long; the cooldown escalates 5/10/20/... with consecutive 429s, honours the server Retry-After when longer, and is capped by --llm-rate-limit-max. Higher = safer but slower; lower = more 429 risk.")
-@click.option("--llm-rate-limit-max", "llm_rate_limit_max", type=float, default=None, help="Cap (seconds) on the escalating 429 cooldown (default 60). Prevents a sustained outage from parking workers indefinitely.")
+@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help=_("Library root"))
+@click.option("--no-cache", is_flag=True, help=_("Disable SQLite cache (force full re-parse)"))
+@click.option("--limit", type=int, default=None, help=_("Process only the first N books (for testing)"))
+@click.option("--skip-enrich", is_flag=True, default=True, help=_("Skip online enrichment (offline mode)"))
+@click.option("--databazeknih", "use_databazeknih", is_flag=True, help=_("Enable databazeknih.cz lookup (CZ/SK genres + metadata). Implies --no-skip-enrich."))
+@click.option("--legie", "use_legie", is_flag=True, help=_("Enable legie.info lookup (CZ/SK sci-fi/fantasy — short stories & series databazeknih misses). Implies --no-skip-enrich."))
+@click.option("--skip-verify", is_flag=True, help=_("Skip content verification"))
+@click.option("--verify-ok", "verify_ok", is_flag=True, help=_("Audit: also verify books the detectors marked OK against their content. Reads every OK book's file (slower). A MISMATCH reclassifies it to NEEDS_REVIEW and seeks a fix (enrichment + LLM). Use periodically to catch corruption the structural detectors miss."))
+@click.option("--no-strict-verify", "no_strict_verify", is_flag=True, help=_("With --verify-ok: only reclassify a clear MISMATCH (fuzzy title < 0.5). By default (without this flag) UNCERTAIN (0.5–0.8) is also reclassified."))
+@click.option("--accept-missing/--no-accept-missing", "accept_missing", default=True, help=_("Auto-accept MISSING_ISBN/YEAR/COVER books whose author+title were confirmed against the book's content (pre-filled action: accept in review.yaml; pruned by `bmf apply`, safe no-op). Default on. Use --no-accept-missing to keep them for manual review."))
+@click.option("--output", "-o", type=click.Path(path_type=Path), default=None, help=_("Output review file (default: review.yaml)"))
+@click.option("--llm", "use_llm", is_flag=True, help=_("Enable LLM reconciliation (needs ZAI_API_KEY or BMF_LLM_MOCK=1)"))
+@click.option("--llm-categories", default="ALL", help=_("Comma-separated categories to send to LLM, or 'ALL' (default). ALL = every category except C9 (legitimate anonyms like the Bible, where an LLM-invented author would be wrong). Each book is one LLM request that returns all fields at once, so the cost is per-book, not per-category."))
+@click.option("--workers", "-w", type=int, default=10, help=_("Parallel workers for I/O (extract/LLM/enrich). Default 10."))
+@click.option("--llm-min-interval", "llm_min_interval", type=float, default=None, help=_("Minimum seconds between LLM requests (RPM throttle, default 2.0 = ~30 RPM). Decoupled from --workers: cheap I/O still runs at full worker count. Lower (e.g. 1.0 = 60 RPM) on a higher Z.AI tier; raise (e.g. 4.0 = 15 RPM) if you still hit 429."))
+@click.option("--llm-model", "llm_model", default=None, help=_("Z.AI model for LLM fallback (default glm-5.2). Alternatives: glm-4.6, glm-4.5-air, glm-4.5-flash, glm-4.7-flash. See README 'LLM model choice' for the token/quality tradeoffs measured by scripts/llm_experiment.py."))
+@click.option("--llm-reasoning-effort", "llm_reasoning_effort", default=None, help=_("reasoning_effort for GLM-5.x models: low (default) | medium | max. Lower cuts reasoning tokens ~60%% vs max. Ignored by GLM-4.x (use --llm-thinking)."))
+@click.option("--llm-thinking", "llm_thinking", default=None, help=_("thinking toggle for GLM-4.x models: disabled (default) | enabled. 'disabled' turns off chain-of-thought (3-4x fewer output tokens). Ignored by GLM-5.x (use --llm-reasoning-effort)."))
+@click.option("--no-llm-loop", "no_llm_loop", is_flag=True, help=_("Disable the self-correction loop. Default: loop on — try the free Flash model first (with verify feedback), then the paid final model as fallback. With this flag, a single LLM call (the configured --llm-model) is used as before."))
+@click.option("--llm-flash-model", "llm_flash_model", default=None, help=_("Free first-attempt model for the loop (default glm-4.7-flash — best CZ/SK quality among free models). Alternatives: glm-4.5-flash, glm-4.5-air."))
+@click.option("--llm-final-model", "llm_final_model", default=None, help=_("Paid high-quality fallback for the loop (default glm-5.2). Used when Flash fails verify or is rate-limited."))
+@click.option("--llm-burst", "llm_burst", type=float, default=None, help=_("Leaky-bucket burst capacity: how many LLM calls may start inside one interval (default 1 = pure even drip, no bunching — one call every --llm-min-interval seconds). This is a count-per-time limiter, not a concurrency cap. Raise only with confirmed rate headroom; a burst >1 fires multiple calls in the same second and trips Z.AI's dynamic RPM limit (429)."))
+@click.option("--llm-rate-limit-base", "llm_rate_limit_base", type=float, default=None, help=_("Base seconds of the global cooldown applied when a 429 is seen (default 5). When ANY worker hits a 429, ALL workers pause this long; the cooldown escalates 5/10/20/... with consecutive 429s, honours the server Retry-After when longer, and is capped by --llm-rate-limit-max. Higher = safer but slower; lower = more 429 risk."))
+@click.option("--llm-rate-limit-max", "llm_rate_limit_max", type=float, default=None, help=_("Cap (seconds) on the escalating 429 cooldown (default 60). Prevents a sustained outage from parking workers indefinitely."))
 def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, use_legie: bool, skip_verify: bool, verify_ok: bool, no_strict_verify: bool, accept_missing: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int, llm_min_interval: float | None, llm_model: str | None, llm_reasoning_effort: str | None, llm_thinking: str | None, no_llm_loop: bool, llm_flash_model: str | None, llm_final_model: str | None, llm_burst: float | None, llm_rate_limit_base: float | None, llm_rate_limit_max: float | None) -> None:
 	"""Run full pipeline and generate a review.yaml for NEEDS_REVIEW books."""
 	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
@@ -223,15 +243,15 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 		skip_enrich = False
 		cfg.legie_enabled = True
 
-	console.print(f"[bold]Running pipeline[/bold] on [cyan]{cfg.library}[/cyan] ({workers} workers)", highlight=False)
+	console.print(f"[bold]{_('Running pipeline')}[/bold] {cfg.library} ({_('workers')}: {workers})", highlight=False)
 	if cfg.databazeknih_enabled:
-		console.print("  [cyan]databazeknih.cz[/cyan] lookup enabled (genres + metadata)")
-		console.print("  [cyan]cover replacement[/cyan] enabled (C11 generated / MISSING_COVER → databazeknih cover_url)")
+		console.print("  [cyan]databazeknih.cz[/cyan] " + _("lookup enabled (genres + metadata)"))
+		console.print("  [cyan]" + _("cover replacement") + "[/cyan] " + _("enabled (C11 generated / MISSING_COVER → databazeknih cover_url)"))
 	if cfg.legie_enabled:
-		console.print("  [cyan]legie.info[/cyan] lookup enabled (sci-fi/fantasy — short stories & series)")
+		console.print("  [cyan]legie.info[/cyan] " + _("lookup enabled (sci-fi/fantasy — short stories & series)"))
 	if verify_ok:
 		strict = not no_strict_verify
-		console.print(f"  [cyan]--verify-ok[/cyan] audit: OK books checked against content (strict={strict})")
+		console.print(f"  [cyan]--verify-ok[/cyan] {_('--verify-ok audit: OK books checked against content (strict={strict})').format(strict=strict)}")
 
 	cache: Cache | None = None
 	if not no_cache:
@@ -273,7 +293,7 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 			cfg.llm_rate_limit_max = llm_rate_limit_max
 		llm_provider = get_provider(cfg)
 		if llm_provider is None:
-			console.print("[yellow]--llm given but no provider available (set ZAI_API_KEY or BMF_LLM_MOCK=1)[/yellow]")
+			console.print("[yellow]" + _("--llm given but no provider available (set ZAI_API_KEY or BMF_LLM_MOCK=1)") + "[/yellow]")
 		else:
 			cats = tuple(c.strip() for c in llm_categories.split(",") if c.strip())
 			rpm = round(60.0 / cfg.llm_min_interval) if cfg.llm_min_interval > 0 else float("inf")
@@ -309,7 +329,7 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 		console=console,
 		transient=True,
 	)
-	task_id = progress.add_task("processing", total=None)
+	task_id = progress.add_task(_("processing"), total=None)
 	progress.start()
 	results: list = []
 	interrupted = False
@@ -344,7 +364,7 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 		# The streaming writer has already flushed everything up to the point of
 		# interruption; finish() below carries over prior unprocessed entries.
 		interrupted = True
-		console.print("\n[yellow]Interrupted (Ctrl-C). Finalizing review file with partial results…[/yellow]")
+		console.print("\n[yellow]" + _("Interrupted (Ctrl-C). Finalizing review file with partial results…") + "[/yellow]")
 	finally:
 		progress.stop()
 		if cache is not None:
@@ -357,16 +377,16 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 		try:
 			summary = review_writer.finish(keep_backup=interrupted)
 		except Exception as e:  # noqa: BLE001
-			console.print(f"[red]review writer finalize failed: {e}[/red]")
+			console.print(f"[red]{_('review writer finalize failed: {error}').format(error=e)}[/red]")
 			summary = {"written": 0, "skipped_user_decided": 0, "remaining_count": 0, "backup_path": None, "action_accept": 0, "action_null": 0, "action_other": 0}
 
 	# Print pipeline summary (action breakdown leads; results list still drives stats).
 	_print_pipeline_summary(results, pipe_stats, review_summary=summary)
 	if summary.get("backup_path"):
-		console.print(f"[yellow]Backup kept at {summary['backup_path']} (run did not finish cleanly)[/yellow]", highlight=False)
+		console.print(f"[yellow]{_('Backup kept at {path} (run did not finish cleanly)').format(path=summary['backup_path'])}[/yellow]", highlight=False)
 	console.print()
-	console.print(f"[bold green]Wrote {summary['written']} review entries to {out}[/bold green]", highlight=False)
-	console.print(f"Edit the file, set `action` for each entry, then run: [bold]bmf apply {out}[/bold]", highlight=False)
+	console.print(f"[bold green]{_('Wrote {count} review entries to {file}').format(count=summary['written'], file=out)}[/bold green]", highlight=False)
+	console.print(_('Edit the file, set `action` for each entry, then run:') + f" [bold]bmf apply {out}[/bold]", highlight=False)
 
 
 def _print_pipeline_summary(results, stats: dict | None = None, review_summary: dict | None = None) -> None:  # noqa: ANN001
@@ -409,24 +429,24 @@ def _print_pipeline_summary(results, stats: dict | None = None, review_summary: 
 	written = (review_summary or {}).get("written", 0)
 
 	console.print()
-	t = Table(title="Pipeline summary", show_header=True, header_style="bold cyan")
-	t.add_column("Bucket", style="bold")
-	t.add_column("Count", justify="right")
-	t.add_row("OK (already correct — nothing to do)", str(ok), style="green")
-	t.add_row("Auto-fix (action: accept → `bmf apply`)", str(acc), style="bold green")
-	t.add_row("Manual review (action: null)", str(nul), style="yellow")
+	t = Table(title=_("Pipeline summary"), show_header=True, header_style="bold cyan")
+	t.add_column(_("Bucket"), style="bold")
+	t.add_column(_("Count"), justify="right")
+	t.add_row(_("OK (already correct — nothing to do)"), str(ok), style="green")
+	t.add_row(_("Auto-fix (action: accept → `bmf apply`)"), str(acc), style="bold green")
+	t.add_row(_("Manual review (action: null)"), str(nul), style="yellow")
 	if oth:
-		t.add_row("Other action (swap/edit/delete)", str(oth))
+		t.add_row(_("Other action (swap/edit/delete)"), str(oth))
 	if skipped:
-		t.add_row("Skipped (already decided earlier)", str(skipped), style="dim")
+		t.add_row(_("Skipped (already decided earlier)"), str(skipped), style="dim")
 	t.add_section()
-	t.add_row("Written to review.yaml", str(written))
-	t.add_row("Total books", str(total), style="bold")
+	t.add_row(_("Written to review.yaml"), str(written))
+	t.add_row(_("Total books"), str(total), style="bold")
 	console.print(t)
 
-	t = Table(title="Verification results", show_header=True, header_style="bold cyan")
-	t.add_column("Result")
-	t.add_column("Count", justify="right")
+	t = Table(title=_("Verification results"), show_header=True, header_style="bold cyan")
+	t.add_column(_("Result"))
+	t.add_column(_("Count"), justify="right")
 	for r, n in verify_counter.most_common():
 		t.add_row(r, str(n))
 	console.print(t)
@@ -449,18 +469,18 @@ def _print_fix_source_summary(stats: dict) -> None:
 	llm_total = stats.get("llm_flash_fixed", 0) + stats.get("llm_final_fixed", 0) + stats.get("llm_low_confidence", 0)
 
 	ordered: list[tuple[str, int, bool]] = [
-		("Offline fixes", offline_total, False),
-		("  └ text-mined (content)", stats.get("offline_content", 0), True),
-		("  └ embedded OPF", stats.get("offline_embedded", 0), True),
-		("Online fixes", online_total, False),
-		("  └ databazeknih.cz", stats.get("online_databazeknih", 0), True),
-		("  └ legie.info", stats.get("online_legie", 0), True),
-		("  └ openlibrary.org", stats.get("online_openlibrary", 0), True),
-		("  └ Google Books", stats.get("online_google_books", 0), True),
-		("LLM fixes", llm_total, False),
-		("  └ fast model (flash)", stats.get("llm_flash_fixed", 0), True),
-		("  └ fallback model", stats.get("llm_final_fixed", 0), True),
-		("  └ low confidence", stats.get("llm_low_confidence", 0), True),
+		(_("Offline fixes"), offline_total, False),
+		(_("  └ text-mined (content)"), stats.get("offline_content", 0), True),
+		(_("  └ embedded OPF"), stats.get("offline_embedded", 0), True),
+		(_("Online fixes"), online_total, False),
+		(_("  └ databazeknih.cz"), stats.get("online_databazeknih", 0), True),
+		(_("  └ legie.info"), stats.get("online_legie", 0), True),
+		(_("  └ openlibrary.org"), stats.get("online_openlibrary", 0), True),
+		(_("  └ Google Books"), stats.get("online_google_books", 0), True),
+		(_("LLM fixes"), llm_total, False),
+		(_("  └ fast model (flash)"), stats.get("llm_flash_fixed", 0), True),
+		(_("  └ fallback model"), stats.get("llm_final_fixed", 0), True),
+		(_("  └ low confidence"), stats.get("llm_low_confidence", 0), True),
 	]
 	# Drop all-zero sub-rows to keep the table tight, but always show parents.
 	ordered = [
@@ -475,15 +495,15 @@ def _print_fix_source_summary(stats: dict) -> None:
 	proposed_total = offline_total + online_total + llm_total
 
 	console.print()
-	t = Table(title="Fix sources (how NEEDS_REVIEW books were resolved)", show_header=True, header_style="bold cyan")
-	t.add_column("Source", style="bold")
-	t.add_column("Count", justify="right")
+	t = Table(title=_("Fix sources (how NEEDS_REVIEW books were resolved)"), show_header=True, header_style="bold cyan")
+	t.add_column(_("Source"), style="bold")
+	t.add_column(_("Count"), justify="right")
 	for label, n, _sub in ordered:
 		t.add_row(label, str(n))
 	t.add_section()
-	t.add_row("Proposed (any source)", str(proposed_total), style="bold")
-	t.add_row("Unfixed (no proposal found)", str(unfixed), style="yellow")
-	t.add_row("Accepted (identity OK, field missing)", str(stats.get("accepted_missing", 0)), style="green")
+	t.add_row(_("Proposed (any source)"), str(proposed_total), style="bold")
+	t.add_row(_("Unfixed (no proposal found)"), str(unfixed), style="yellow")
+	t.add_row(_("Accepted (identity OK, field missing)"), str(stats.get("accepted_missing", 0)), style="green")
 	console.print(t)
 
 	# LLM cost detail: how many books the LLM was asked about vs. how many it
@@ -491,14 +511,14 @@ def _print_fix_source_summary(stats: dict) -> None:
 	if any(stats.get(k) for k in ("llm_flash_fixed", "llm_final_fixed", "llm_low_confidence", "llm_skipped_no_text", "llm_no_result", "llm_error")):
 		llm_asked = llm_total + llm_no_result + llm_error
 		console.print()
-		t = Table(title="LLM usage", show_header=True, header_style="bold cyan")
-		t.add_column("Metric", style="bold")
-		t.add_column("Count", justify="right")
-		t.add_row("LLM calls made", str(llm_asked))
-		t.add_row("Skipped (no usable text)", str(llm_skipped))
-		t.add_row("No useful result", str(llm_no_result))
+		t = Table(title=_("LLM usage"), show_header=True, header_style="bold cyan")
+		t.add_column(_("Metric"), style="bold")
+		t.add_column(_("Count"), justify="right")
+		t.add_row(_("LLM calls made"), str(llm_asked))
+		t.add_row(_("Skipped (no usable text)"), str(llm_skipped))
+		t.add_row(_("No useful result"), str(llm_no_result))
 		if llm_error:
-			t.add_row("LLM errors", str(llm_error), style="red")
+			t.add_row(_("LLM errors"), str(llm_error), style="red")
 		console.print(t)
 
 	# Covers: only show when cover detection ran (counts > 0).
@@ -506,21 +526,21 @@ def _print_fix_source_summary(stats: dict) -> None:
 	covers_missing = stats.get("covers_missing", 0)
 	if covers_gen or covers_missing:
 		console.print()
-		t = Table(title="Covers", show_header=True, header_style="bold cyan")
-		t.add_column("Category", style="bold")
-		t.add_column("Count", justify="right")
-		t.add_row("Generated (calibre placeholder)", str(covers_gen), style="yellow")
-		t.add_row("Missing cover", str(covers_missing))
+		t = Table(title=_("Covers"), show_header=True, header_style="bold cyan")
+		t.add_column(_("Category"), style="bold")
+		t.add_column(_("Count"), justify="right")
+		t.add_row(_("Generated (calibre placeholder)"), str(covers_gen), style="yellow")
+		t.add_row(_("Missing cover"), str(covers_missing))
 		console.print(t)
 
 	if stats.get("errors"):
-		console.print(f"\n[red]Processing errors: {stats['errors']}[/red]")
+		console.print(f"\n[red]{_('Processing errors: {count}').format(count=stats['errors'])}[/red]")
 
 
 @main.command()
 @click.argument("review_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
-@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help="Library root")
-@click.option("--apply", "do_apply", is_flag=True, help="Actually write changes (default: dry-run)")
+@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help=_("Library root"))
+@click.option("--apply", "do_apply", is_flag=True, help=_("Actually write changes (default: dry-run)"))
 def apply(review_file: Path, library: Path | None, do_apply: bool) -> None:
 	"""Apply approved changes from a (human-edited) review.yaml."""
 	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
@@ -531,7 +551,7 @@ def apply(review_file: Path, library: Path | None, do_apply: bool) -> None:
 	if library is not None:
 		cfg.library = library
 
-	console.print(f"[bold]Applying[/bold] {review_file} ({'WRITE' if do_apply else 'DRY-RUN'})", highlight=False)
+	console.print(f"[bold]{_('Applying')}[/bold] {review_file} ({'WRITE' if do_apply else 'DRY-RUN'})", highlight=False)
 	# Open the books cache (if one exists) so we can invalidate the folders we
 	# rewrite — otherwise the next run may serve the pre-apply BookMeta, most
 	# painfully on NFS where the attribute cache masks the new mtime.
@@ -541,7 +561,7 @@ def apply(review_file: Path, library: Path | None, do_apply: bool) -> None:
 		BarColumn(complete_style="green", finished_style="green", pulse_style="green"), TextColumn("{task.completed}/{task.total}"),
 		TimeRemainingColumn(), console=console, transient=True,
 	)
-	task_id = progress.add_task("Applying", total=None)
+	task_id = progress.add_task(_("Applying"), total=None)
 	progress.start()
 	try:
 		def _cb(done: int, total: int) -> None:
@@ -555,31 +575,31 @@ def apply(review_file: Path, library: Path | None, do_apply: bool) -> None:
 		if cache is not None:
 			cache.close()
 	console.print()
-	t = Table(title="Apply summary", show_header=True, header_style="bold cyan")
-	t.add_column("Metric", style="bold")
-	t.add_column("Count", justify="right")
-	t.add_row("Mode", "WRITE" if do_apply else "DRY-RUN")
-	t.add_row("Applied", str(summary["applied"]))
-	t.add_row("Kept", str(summary.get("kept", 0)))
-	t.add_row("Rejected", str(summary["rejected"]))
-	t.add_row("Deleted", str(summary.get("deleted", 0)))
+	t = Table(title=_("Apply summary"), show_header=True, header_style="bold cyan")
+	t.add_column(_("Metric"), style="bold")
+	t.add_column(_("Count"), justify="right")
+	t.add_row(_("Mode"), "WRITE" if do_apply else "DRY-RUN")
+	t.add_row(_("Applied"), str(summary["applied"]))
+	t.add_row(_("Kept"), str(summary.get("kept", 0)))
+	t.add_row(_("Rejected"), str(summary["rejected"]))
+	t.add_row(_("Deleted"), str(summary.get("deleted", 0)))
 	if summary.get("snapshot"):
-		t.add_row("Deletion snapshot", summary["snapshot"])
+		t.add_row(_("Deletion snapshot"), summary["snapshot"])
 	if summary.get("pruned"):
-		t.add_row("Pruned from review", str(summary["pruned"]))
-		t.add_row("Remaining in review", str(summary["remaining"]))
-	t.add_row("Errors", str(len(summary["errors"])))
+		t.add_row(_("Pruned from review"), str(summary["pruned"]))
+		t.add_row(_("Remaining in review"), str(summary["remaining"]))
+	t.add_row(_("Errors"), str(len(summary["errors"])))
 	console.print(t)
 	if summary["errors"]:
 		console.print()
-		console.print("[red]Errors:[/red]")
+		console.print("[red]" + _("Errors:") + "[/red]")
 		for e in summary["errors"][:20]:
 			console.print(f"  {e}")
 
 
 @main.command()
-@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help="Library root")
-@click.option("--review", "review_file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help="review.yaml to edit (default: $BMF_REVIEW or review.yaml)")
+@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help=_("Library root"))
+@click.option("--review", "review_file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help=_("review.yaml to edit (default: $BMF_REVIEW or review.yaml)"))
 def gui(library: Path | None, review_file: Path | None) -> None:
 	"""Launch the interactive Tkinter editor for review.yaml.
 
@@ -595,19 +615,22 @@ def gui(library: Path | None, review_file: Path | None) -> None:
 		cfg.library = library
 	if review_file is not None:
 		cfg.review_file = review_file
+	# GUI strings are built lazily (widgets created after this call), so the
+	# config/env language applies fully here — unlike the CLI help texts.
+	init_language(cfg.language or None)
 	run_gui(cfg)
 
 
 @main.command()
-@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help="Library root")
-@click.option("--no-cache", is_flag=True, help="Disable SQLite cache")
-@click.option("--limit", type=int, default=None, help="Process only the first N books")
-@click.option("--pattern", default=None, help="Path pattern for OK books (default: '{author}/{title} ({id})')")
-@click.option("--needfix-dir", default=None, help="Folder for broken books (default: 'needfix')")
-@click.option("--apply", "do_apply", is_flag=True, help="Actually move (default: dry-run)")
-@click.option("--accept-missing/--no-accept-missing", "accept_missing", default=True, help="Apply the identity gate (same as analyze/report): a MISSING_ISBN/YEAR/COVER book whose author+title are confirmed against its content routes to the OK path, not needfix. Default on. --no-accept-missing routes them to needfix (the historic behaviour) and skips the content read.")
-@click.option("--verify-ok", "verify_ok", is_flag=True, help="Audit: also verify books the detectors marked OK against their content. Off by default (consistent with report/analyze). A MISMATCH (or UNCERTAIN, see --no-strict-verify) routes to needfix.")
-@click.option("--no-strict-verify", "no_strict_verify", is_flag=True, help="With --verify-ok: only a clear MISMATCH routes to needfix. By default UNCERTAIN does too.")
+@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help=_("Library root"))
+@click.option("--no-cache", is_flag=True, help=_("Disable SQLite cache"))
+@click.option("--limit", type=int, default=None, help=_("Process only the first N books"))
+@click.option("--pattern", default=None, help=_("Path pattern for OK books (default: '{author}/{title} ({id})')"))
+@click.option("--needfix-dir", default=None, help=_("Folder for broken books (default: 'needfix')"))
+@click.option("--apply", "do_apply", is_flag=True, help=_("Actually move (default: dry-run)"))
+@click.option("--accept-missing/--no-accept-missing", "accept_missing", default=True, help=_("Apply the identity gate (same as analyze/report): a MISSING_ISBN/YEAR/COVER book whose author+title are confirmed against its content routes to the OK path, not needfix. Default on. --no-accept-missing routes them to needfix (the historic behaviour) and skips the content read."))
+@click.option("--verify-ok", "verify_ok", is_flag=True, help=_("Audit: also verify books the detectors marked OK against their content. Off by default (consistent with report/analyze). A MISMATCH (or UNCERTAIN, see --no-strict-verify) routes to needfix."))
+@click.option("--no-strict-verify", "no_strict_verify", is_flag=True, help=_("With --verify-ok: only a clear MISMATCH routes to needfix. By default UNCERTAIN does too."))
 def organize(library: Path | None, no_cache: bool, limit: int | None, pattern: str | None, needfix_dir: str | None, do_apply: bool, accept_missing: bool, verify_ok: bool, no_strict_verify: bool) -> None:
 	"""Move OK books to a clean path pattern and broken books to needfix/.
 
@@ -625,10 +648,10 @@ def organize(library: Path | None, no_cache: bool, limit: int | None, pattern: s
 	pat = pattern or DEFAULT_PATH_PATTERN
 	needfix = needfix_dir or DEFAULT_NEEDFIX_DIR
 
-	console.print(f"[bold]Organizing[/bold] [cyan]{cfg.library}[/cyan]", highlight=False)
-	console.print(f"  OK pattern:    [cyan]{pat}[/cyan]")
-	console.print(f"  needfix dir:   [cyan]{needfix}[/cyan]")
-	console.print(f"  mode:          [{'WRITE' if do_apply else 'DRY-RUN'}]")
+	console.print(f"[bold]{_('Organizing')}[/bold] [cyan]{cfg.library}[/cyan]", highlight=False)
+	console.print(f"  {_('OK pattern')}:    [cyan]{pat}[/cyan]")
+	console.print(f"  {_('needfix dir')}:   [cyan]{needfix}[/cyan]")
+	console.print(f"  {_('mode')}:          [{'WRITE' if do_apply else 'DRY-RUN'}]")
 
 	cache: Cache | None = None
 	if not no_cache:
@@ -643,7 +666,7 @@ def organize(library: Path | None, no_cache: bool, limit: int | None, pattern: s
 			BarColumn(complete_style="yellow", finished_style="yellow", pulse_style="yellow"), TextColumn("{task.completed}/{task.total}"),
 			TimeRemainingColumn(), console=console, transient=True,
 		) as progress:
-			task_id = progress.add_task("Reading library", total=None)
+			task_id = progress.add_task(_("Reading library"), total=None)
 
 			def _scan_cb(done: int, total: int) -> None:
 				if progress.tasks[0].total is None and total:
@@ -665,7 +688,7 @@ def organize(library: Path | None, no_cache: bool, limit: int | None, pattern: s
 			BarColumn(complete_style="yellow", finished_style="yellow", pulse_style="yellow"), TextColumn("{task.completed}/{task.total}"),
 			TimeRemainingColumn(), console=console, transient=True,
 		) as progress:
-			task_id = progress.add_task("Classifying", total=len(books))
+			task_id = progress.add_task(_("Classifying"), total=len(books))
 			for meta in books:
 				c = classify_fn(meta, accept_missing=accept_missing, verify_ok=verify_ok, strict_verify=not no_strict_verify)
 				classifications.append(c)
@@ -679,7 +702,7 @@ def organize(library: Path | None, no_cache: bool, limit: int | None, pattern: s
 			BarColumn(complete_style="yellow", finished_style="yellow", pulse_style="yellow"), TextColumn("{task.completed}/{task.total}"),
 			TimeRemainingColumn(), console=console, transient=True,
 		) as progress:
-			move_task = progress.add_task("Moving books", total=len(verdicts))
+			move_task = progress.add_task(_("Moving books"), total=len(verdicts))
 
 			def _move_cb(done: int, total: int) -> None:
 				progress.update(move_task, completed=done)
@@ -708,28 +731,29 @@ def _print_organize_summary(results, classifications) -> None:  # noqa: ANN001
 		if c.identified:
 			identified += 1
 	console.print()
-	t = Table(title="Classification", show_header=True, header_style="bold cyan")
-	t.add_column("Verdict")
-	t.add_column("Count", justify="right")
-	t.add_column("Destination", style="dim")
+	t = Table(title=_("Classification"), show_header=True, header_style="bold cyan")
+	t.add_column(_("Verdict"))
+	t.add_column(_("Count"), justify="right")
+	t.add_column(_("Destination"), style="dim")
 	for v, n in vc.most_common():
 		dest = "OK path" if v in ("OK", "VERIFIED") else "needfix/"
 		t.add_row(v, str(n), dest)
 	console.print(t)
 	if identified:
-		console.print(
-			f"[dim]  {identified} identified (accepted): MISSING_* with author+title confirmed "
-			"against content — routed to OK, not needfix.[/dim]"
-		)
+		identified_note = _(
+			"{count} identified (accepted): MISSING_* with author+title confirmed "
+			"against content — routed to OK, not needfix."
+		).format(count=identified)
+		console.print(f"[dim]  {identified_note}[/dim]")
 
 	# Move results
 	rc: Counter[str] = Counter()
 	for r in results:
 		rc[r.action] += 1
 	console.print()
-	t = Table(title="Move results", show_header=True, header_style="bold cyan")
-	t.add_column("Action")
-	t.add_column("Count", justify="right")
+	t = Table(title=_("Move results"), show_header=True, header_style="bold cyan")
+	t.add_column(_("Action"))
+	t.add_column(_("Count"), justify="right")
 	for a, n in rc.most_common():
 		t.add_row(a, str(n))
 	console.print(t)
@@ -742,9 +766,9 @@ def _print_organize_summary(results, classifications) -> None:  # noqa: ANN001
 	if merges:
 		console.print()
 		t = Table(title=f"Merges ({len(merges)} folder{'s' if len(merges) != 1 else ''} merged away)", show_header=True, header_style="bold cyan")
-		t.add_column("Loser (merged in)")
-		t.add_column("→ Winner")
-		t.add_column("Formats moved", style="dim")
+		t.add_column(_("Loser (merged in)"))
+		t.add_column(_("→ Winner"))
+		t.add_column(_("Formats moved"), style="dim")
 		for r in merges[:25]:
 			moved = r.details or []
 			n_moved = sum(1 for _, out in moved if not out.startswith("<skipped"))
@@ -755,13 +779,13 @@ def _print_organize_summary(results, classifications) -> None:  # noqa: ANN001
 
 
 @main.command()
-@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help="Library root")
-@click.option("--no-cache", is_flag=True, help="Disable SQLite cache")
-@click.option("--limit", type=int, default=None, help="Process only the first N books")
-@click.option("--apply", "do_apply", is_flag=True, help="Actually generate EPUBs (default: dry-run)")
-@click.option("--accept-missing/--no-accept-missing", "accept_missing", default=True, help="Apply the identity gate (same as organize/report): an identified MISSING_* book (author+title confirmed against content) is treated as OK and gets an EPUB. Default on.")
-@click.option("--verify-ok", "verify_ok", is_flag=True, help="Audit: verify OK books against their content before generating. Off by default (consistent with organize/report). A MISMATCH (or UNCERTAIN, see --no-strict-verify) skips generation.")
-@click.option("--no-strict-verify", "no_strict_verify", is_flag=True, help="With --verify-ok: only a clear MISMATCH skips generation. By default UNCERTAIN does too.")
+@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help=_("Library root"))
+@click.option("--no-cache", is_flag=True, help=_("Disable SQLite cache"))
+@click.option("--limit", type=int, default=None, help=_("Process only the first N books"))
+@click.option("--apply", "do_apply", is_flag=True, help=_("Actually generate EPUBs (default: dry-run)"))
+@click.option("--accept-missing/--no-accept-missing", "accept_missing", default=True, help=_("Apply the identity gate (same as organize/report): an identified MISSING_* book (author+title confirmed against content) is treated as OK and gets an EPUB. Default on."))
+@click.option("--verify-ok", "verify_ok", is_flag=True, help=_("Audit: verify OK books against their content before generating. Off by default (consistent with organize/report). A MISMATCH (or UNCERTAIN, see --no-strict-verify) skips generation."))
+@click.option("--no-strict-verify", "no_strict_verify", is_flag=True, help=_("With --verify-ok: only a clear MISMATCH skips generation. By default UNCERTAIN does too."))
 def epubgen(library: Path | None, no_cache: bool, limit: int | None, do_apply: bool, accept_missing: bool, verify_ok: bool, no_strict_verify: bool) -> None:
 	"""Generate EPUBs for OK books that lack one, from the best source format.
 
@@ -776,7 +800,7 @@ def epubgen(library: Path | None, no_cache: bool, limit: int | None, do_apply: b
 	if library is not None:
 		cfg.library = library
 
-	console.print(f"[bold]Generating EPUBs[/bold] for [cyan]{cfg.library}[/cyan] [{'WRITE' if do_apply else 'DRY-RUN'}]", highlight=False)
+	console.print(f"[bold]{_('Generating EPUBs')}[/bold] {cfg.library} [{'WRITE' if do_apply else 'DRY-RUN'}]", highlight=False)
 
 	cache: Cache | None = None
 	if not no_cache:
@@ -790,7 +814,7 @@ def epubgen(library: Path | None, no_cache: bool, limit: int | None, do_apply: b
 		BarColumn(complete_style="bright_cyan", finished_style="bright_cyan", pulse_style="bright_cyan"), TextColumn("{task.completed}/{task.total}"),
 		TimeRemainingColumn(), console=console, transient=True,
 	) as progress:
-		task_id = progress.add_task("Reading library", total=None)
+		task_id = progress.add_task(_("Reading library"), total=None)
 
 		def _scan_cb(done: int, total: int) -> None:
 			if progress.tasks[0].total is None and total:
@@ -812,7 +836,7 @@ def epubgen(library: Path | None, no_cache: bool, limit: int | None, do_apply: b
 		BarColumn(complete_style="bright_cyan", finished_style="bright_cyan", pulse_style="bright_cyan"), TextColumn("{task.completed}/{task.total}"),
 		TimeRemainingColumn(), console=console, transient=True,
 	) as progress:
-		task_id = progress.add_task("Generating EPUBs", total=len(books))
+		task_id = progress.add_task(_("Generating EPUBs"), total=len(books))
 		for i, meta in enumerate(books, start=1):
 			# Only OK books (verified clean) — identified MISSING_* route as OK too.
 			c = classify_fn(meta, accept_missing=accept_missing, verify_ok=verify_ok, strict_verify=not no_strict_verify)
@@ -836,12 +860,12 @@ def _print_epubgen_summary(results, skipped_not_ok: int, skipped_has_epub: int) 
 	from collections import Counter
 
 	console.print()
-	t = Table(title="EPUB generation summary", show_header=True, header_style="bold cyan")
-	t.add_column("Metric", style="bold")
-	t.add_column("Count", justify="right")
-	t.add_row("Skipped (not OK)", str(skipped_not_ok))
-	t.add_row("Skipped (already has epub)", str(skipped_has_epub))
-	t.add_row("To generate", str(len(results)))
+	t = Table(title=_("EPUB generation summary"), show_header=True, header_style="bold cyan")
+	t.add_column(_("Metric"), style="bold")
+	t.add_column(_("Count"), justify="right")
+	t.add_row(_("Skipped (not OK)"), str(skipped_not_ok))
+	t.add_row(_("Skipped (already has epub)"), str(skipped_has_epub))
+	t.add_row(_("To generate"), str(len(results)))
 	console.print(t)
 
 	if not results:
@@ -850,20 +874,20 @@ def _print_epubgen_summary(results, skipped_not_ok: int, skipped_has_epub: int) 
 	# Source format breakdown
 	src: Counter[str] = Counter(r.source_format for r in results)
 	console.print()
-	t = Table(title="By source format", show_header=True, header_style="bold cyan")
-	t.add_column("Format")
-	t.add_column("Count", justify="right")
+	t = Table(title=_("By source format"), show_header=True, header_style="bold cyan")
+	t.add_column(_("Format"))
+	t.add_column(_("Count"), justify="right")
 	for fmt, n in src.most_common():
 		t.add_row(fmt, str(n))
 	console.print(t)
 
 	# Show sample (first 10)
 	console.print()
-	t = Table(title="Sample (first 10)", show_header=True, header_style="bold cyan")
-	t.add_column("ID", justify="right", style="cyan")
-	t.add_column("Source file")
-	t.add_column("Tool")
-	t.add_column("Output / Error", style="dim")
+	t = Table(title=_("Sample (first 10)"), show_header=True, header_style="bold cyan")
+	t.add_column(_("ID"), justify="right", style="cyan")
+	t.add_column(_("Source file"))
+	t.add_column(_("Tool"))
+	t.add_column(_("Output / Error"), style="dim")
 	for r in results[:10]:
 		out = r.output_file or r.error or ""
 		t.add_row(str(r.book_id or "?"), Path(r.source_file).name[:40], r.tool, out[:50])
@@ -871,13 +895,13 @@ def _print_epubgen_summary(results, skipped_not_ok: int, skipped_has_epub: int) 
 
 
 @main.command()
-@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help="Library root")
-@click.option("--no-cache", is_flag=True, help="Disable SQLite cache")
-@click.option("--limit", type=int, default=None, help="Process only the first N books")
-@click.option("--needfix-dir", default=None, help="Folder for quarantined rogues (default: 'needfix')")
-@click.option("--apply", "do_apply", is_flag=True, help="Actually move rogues (default: dry-run)")
-@click.option("--threshold", "strong", type=float, default=0.8, help="Fuzzy title ratio at/above which a format AGREES (default 0.8)")
-@click.option("--weak-threshold", "weak", type=float, default=0.5, help="Fuzzy title ratio below which a format DISAGREES (default 0.5). Between weak and strong = UNCERTAIN (never moved).")
+@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help=_("Library root"))
+@click.option("--no-cache", is_flag=True, help=_("Disable SQLite cache"))
+@click.option("--limit", type=int, default=None, help=_("Process only the first N books"))
+@click.option("--needfix-dir", default=None, help=_("Folder for quarantined rogues (default: 'needfix')"))
+@click.option("--apply", "do_apply", is_flag=True, help=_("Actually move rogues (default: dry-run)"))
+@click.option("--threshold", "strong", type=float, default=0.8, help=_("Fuzzy title ratio at/above which a format AGREES (default 0.8)"))
+@click.option("--weak-threshold", "weak", type=float, default=0.5, help=_("Fuzzy title ratio below which a format DISAGREES (default 0.5). Between weak and strong = UNCERTAIN (never moved)."))
 def crosscheck(library: Path | None, no_cache: bool, limit: int | None, needfix_dir: str | None, do_apply: bool, strong: float, weak: float) -> None:
 	"""Check all formats in each book folder are the same book; quarantine rogues.
 
@@ -900,8 +924,8 @@ def crosscheck(library: Path | None, no_cache: bool, limit: int | None, needfix_
 		cfg.library = library
 	needfix = needfix_dir or DEFAULT_NEEDFIX_DIR
 
-	console.print(f"[bold]Cross-checking formats[/bold] on [cyan]{cfg.library}[/cyan] [{'WRITE' if do_apply else 'DRY-RUN'}]", highlight=False)
-	console.print(f"  rogues go to:  [cyan]{needfix}/{CROSSCHECK_SUBDIR}/<origin> - <file>/[/cyan]")
+	console.print(f"[bold]{_('Cross-checking formats')}[/bold] [cyan]{cfg.library}[/cyan] [{'WRITE' if do_apply else 'DRY-RUN'}]", highlight=False)
+	console.print(f"  {_('rogues go to')}:  [cyan]{needfix}/{CROSSCHECK_SUBDIR}/<origin> - <file>/[/cyan]")
 
 	cache: Cache | None = None
 	if not no_cache:
@@ -914,7 +938,7 @@ def crosscheck(library: Path | None, no_cache: bool, limit: int | None, needfix_
 			BarColumn(complete_style="bright_magenta", finished_style="bright_magenta", pulse_style="bright_magenta"), TextColumn("{task.completed}/{task.total}"),
 			TimeRemainingColumn(), console=console, transient=True,
 		) as progress:
-			task_id = progress.add_task("Reading library", total=None)
+			task_id = progress.add_task(_("Reading library"), total=None)
 
 			def _scan_cb(done: int, total: int) -> None:
 				if progress.tasks[0].total is None and total:
@@ -931,7 +955,7 @@ def crosscheck(library: Path | None, no_cache: bool, limit: int | None, needfix_
 			BarColumn(complete_style="bright_magenta", finished_style="bright_magenta", pulse_style="bright_magenta"), TextColumn("{task.completed}/{task.total}"),
 			TimeRemainingColumn(), console=console, transient=True,
 		) as progress:
-			task_id = progress.add_task("Cross-checking formats", total=len(books))
+			task_id = progress.add_task(_("Cross-checking formats"), total=len(books))
 			for meta in books:
 				try:
 					results.append(crosscheck_book(meta, strong=strong, weak=weak))
@@ -949,7 +973,7 @@ def crosscheck(library: Path | None, no_cache: bool, limit: int | None, needfix_
 				BarColumn(complete_style="bright_magenta", finished_style="bright_magenta", pulse_style="bright_magenta"), TextColumn("{task.completed}/{task.total}"),
 				TimeRemainingColumn(), console=console, transient=True,
 			) as progress:
-				qtask = progress.add_task("Quarantining rogues", total=rogue_count)
+				qtask = progress.add_task(_("Quarantining rogues"), total=rogue_count)
 
 				def _cb(done: int, total: int) -> None:
 					progress.update(qtask, completed=done)
@@ -970,16 +994,16 @@ def _print_crosscheck_summary(results, move_results, do_apply: bool) -> None:  #
 	from collections import Counter
 
 	console.print()
-	t = Table(title="Crosscheck summary", show_header=True, header_style="bold cyan")
-	t.add_column("Decision", style="bold")
-	t.add_column("Count", justify="right")
+	t = Table(title=_("Crosscheck summary"), show_header=True, header_style="bold cyan")
+	t.add_column(_("Decision"), style="bold")
+	t.add_column(_("Count"), justify="right")
 	decisions: Counter[str] = Counter(r.decision for r in results)
 	checked = len(results) - decisions.get("skipped", 0)
-	t.add_row("checked (≥2 formats)", str(checked), style="dim")
-	t.add_row("clean", str(decisions.get("clean", 0)))
-	t.add_row("quarantine", str(decisions.get("quarantine", 0)), style="yellow")
-	t.add_row("ambiguous", str(decisions.get("ambiguous", 0)), style="magenta")
-	t.add_row("skipped (<2 formats)", str(decisions.get("skipped", 0)), style="dim")
+	t.add_row(_("checked (≥2 formats)"), str(checked), style="dim")
+	t.add_row(_("clean"), str(decisions.get("clean", 0)))
+	t.add_row(_("quarantine"), str(decisions.get("quarantine", 0)), style="yellow")
+	t.add_row(_("ambiguous"), str(decisions.get("ambiguous", 0)), style="magenta")
+	t.add_row(_("skipped (<2 formats)"), str(decisions.get("skipped", 0)), style="dim")
 	console.print(t)
 
 	# Rogues sample (book × rogue-file), capped. Only 'quarantine' decisions
@@ -989,10 +1013,10 @@ def _print_crosscheck_summary(results, move_results, do_apply: bool) -> None:  #
 	if rogues:
 		console.print()
 		t = Table(title=f"Rogues ({len(rogues)} file{'s' if len(rogues) != 1 else ''})", show_header=True, header_style="bold cyan")
-		t.add_column("ID", justify="right", style="cyan")
-		t.add_column("Book folder")
-		t.add_column("File")
-		t.add_column("Reason", style="dim")
+		t.add_column(_("ID"), justify="right", style="cyan")
+		t.add_column(_("Book folder"))
+		t.add_column(_("File"))
+		t.add_column(_("Reason"), style="dim")
 		for r, rv in rogues[:25]:
 			t.add_row(
 				str(r.book_id or "?"),
@@ -1009,11 +1033,11 @@ def _print_crosscheck_summary(results, move_results, do_apply: bool) -> None:  #
 	ambiguous = [r for r in results if r.decision == "ambiguous"]
 	if ambiguous:
 		console.print()
-		console.print(f"[magenta]{len(ambiguous)} ambiguous book(s)[/magenta] — formats disagree with metadata but no format corroborates it; not moved (review manually).")
-		t = Table(title="Ambiguous (not moved)", show_header=True, header_style="bold cyan")
-		t.add_column("ID", justify="right", style="cyan")
-		t.add_column("Book folder")
-		t.add_column("Disagreeing files", style="dim")
+		console.print(f"[magenta]{_('{count} ambiguous book(s)').format(count=len(ambiguous))}[/magenta] " + _("— formats disagree with metadata but no format corroborates it; not moved (review manually)."))
+		t = Table(title=_("Ambiguous (not moved)"), show_header=True, header_style="bold cyan")
+		t.add_column(_("ID"), justify="right", style="cyan")
+		t.add_column(_("Book folder"))
+		t.add_column(_("Disagreeing files"), style="dim")
 		for r in ambiguous[:25]:
 			bad = ", ".join(Path(rv.file).name for rv in r.verdicts if rv.verdict == "DISAGREES")
 			t.add_row(str(r.book_id or "?"), Path(r.path).name[:45], bad[:60])
@@ -1023,13 +1047,13 @@ def _print_crosscheck_summary(results, move_results, do_apply: bool) -> None:  #
 		rc: Counter[str] = Counter(mr.action for mr in move_results)
 		console.print()
 		t = Table(title=f"Move results ({'WRITE' if do_apply else 'DRY-RUN'})", show_header=True, header_style="bold cyan")
-		t.add_column("Action")
-		t.add_column("Count", justify="right")
+		t.add_column(_("Action"))
+		t.add_column(_("Count"), justify="right")
 		for action, n in rc.most_common():
 			t.add_row(action, str(n))
 		console.print(t)
 		if not do_apply:
-			console.print("[dim]Dry-run: nothing moved. Re-run with --apply to quarantine the rogues.[/dim]")
+			console.print("[dim]" + _("Dry-run: nothing moved. Re-run with --apply to quarantine the rogues.") + "[/dim]")
 
 
 # Required imports for the new commands
@@ -1040,7 +1064,7 @@ def _print_crosscheck_summary(results, move_results, do_apply: bool) -> None:  #
 def _print_scan_summary(books) -> None:  # noqa: ANN001
 	"""Print a rich table of scan statistics."""
 	console.print()
-	console.print(f"[bold green]Found {len(books)} books[/bold green]")
+	console.print(f"[bold green]{_('Found {count} books').format(count=len(books))}[/bold green]")
 
 	# Source distribution
 	src = Counter(b.source for b in books)
@@ -1056,30 +1080,30 @@ def _print_scan_summary(books) -> None:  # noqa: ANN001
 	enc_repaired = sum(1 for b in books if b.encoding_repaired)
 	enc_unrepairable = sum(1 for b in books if b.encoding_unrepairable)
 
-	t = Table(title="Scan summary", show_header=True, header_style="bold cyan")
-	t.add_column("Metric", style="bold")
-	t.add_column("Count", justify="right")
-	t.add_column("%", justify="right")
-	t.add_row("Total books", str(len(books)), "100%")
-	t.add_row("With metadata.json", str(has_json), f"{has_json / len(books) * 100:.0f}%")
-	t.add_row("With ISBN (valid)", str(has_isbn), f"{has_isbn / len(books) * 100:.0f}%")
-	t.add_row("With publication year", str(has_year), f"{has_year / len(books) * 100:.0f}%")
-	t.add_row("Mojibake repaired", str(enc_repaired), f"{enc_repaired / len(books) * 100:.0f}%")
-	t.add_row("Mojibake unrepairable", str(enc_unrepairable), f"{enc_unrepairable / len(books) * 100:.0f}%")
+	t = Table(title=_("Scan summary"), show_header=True, header_style="bold cyan")
+	t.add_column(_("Metric"), style="bold")
+	t.add_column(_("Count"), justify="right")
+	t.add_column(_("%"), justify="right")
+	t.add_row(_("Total books"), str(len(books)), "100%")
+	t.add_row(_("With metadata.json"), str(has_json), f"{has_json / len(books) * 100:.0f}%")
+	t.add_row(_("With ISBN (valid)"), str(has_isbn), f"{has_isbn / len(books) * 100:.0f}%")
+	t.add_row(_("With publication year"), str(has_year), f"{has_year / len(books) * 100:.0f}%")
+	t.add_row(_("Mojibake repaired"), str(enc_repaired), f"{enc_repaired / len(books) * 100:.0f}%")
+	t.add_row(_("Mojibake unrepairable"), str(enc_unrepairable), f"{enc_unrepairable / len(books) * 100:.0f}%")
 	console.print(t)
 
 	# Source table
-	t = Table(title="Metadata source", show_header=True, header_style="bold cyan")
-	t.add_column("Source")
-	t.add_column("Count", justify="right")
+	t = Table(title=_("Metadata source"), show_header=True, header_style="bold cyan")
+	t.add_column(_("Source"))
+	t.add_column(_("Count"), justify="right")
 	for src_name, n in src.most_common():
 		t.add_row(src_name, str(n))
 	console.print(t)
 
 	# Format table
-	t = Table(title="File formats present", show_header=True, header_style="bold cyan")
-	t.add_column("Format")
-	t.add_column("Books", justify="right")
+	t = Table(title=_("File formats present"), show_header=True, header_style="bold cyan")
+	t.add_column(_("Format"))
+	t.add_column(_("Books"), justify="right")
 	for fmt, n in fmt_counter.most_common():
 		t.add_row(fmt, str(n))
 	console.print(t)
@@ -1108,13 +1132,13 @@ def _print_detect_summary(results, category_filter: str | None, samples: int) ->
 
 	total = len(results)
 	console.print()
-	console.print(f"[bold green]Detected {total} books[/bold green]  [dim](a book may appear in multiple categories)[/dim]")
+	console.print(f"[bold green]{_('Detected {count} books').format(count=total)}[/bold green]  [dim]{_('(a book may appear in multiple categories)')}[/dim]")
 
 	# Summary table
-	t = Table(title="Detection summary", show_header=True, header_style="bold cyan")
-	t.add_column("Category", style="bold")
-	t.add_column("Count", justify="right")
-	t.add_column("Verdict", style="magenta")
+	t = Table(title=_("Detection summary"), show_header=True, header_style="bold cyan")
+	t.add_column(_("Category"), style="bold")
+	t.add_column(_("Count"), justify="right")
+	t.add_column(_("Verdict"), style="magenta")
 	for cat in all_cats:
 		n = len(by_cat[cat])
 		# Pick a representative verdict (the first one in the bucket)
@@ -1126,15 +1150,15 @@ def _print_detect_summary(results, category_filter: str | None, samples: int) ->
 	cats_to_show = [category_filter] if category_filter else all_cats
 	for cat in cats_to_show:
 		if cat not in by_cat:
-			console.print(f"[yellow]No books in category {cat}.[/yellow]")
+			console.print(f"[yellow]{_('No books in category {cat}.').format(cat=cat)}[/yellow]")
 			continue
 		console.print()
-		console.print(f"[bold]Category {cat}[/bold] — {len(by_cat[cat])} books (showing {min(samples, len(by_cat[cat]))}):")
+		console.print(f"[bold]{_('Category {cat} — {count} books (showing {shown}):').format(cat=cat, count=len(by_cat[cat]), shown=min(samples, len(by_cat[cat])))}")
 		t = Table(show_header=True, header_style="bold", show_lines=False)
-		t.add_column("ID", justify="right", style="cyan")
-		t.add_column("Author folder")
-		t.add_column("Title")
-		t.add_column("Reason", style="dim")
+		t.add_column(_("ID"), justify="right", style="cyan")
+		t.add_column(_("Author folder"))
+		t.add_column(_("Title"))
+		t.add_column(_("Reason"), style="dim")
 		for meta, diag in by_cat[cat][:samples]:
 			reason = diag.reason if len(diag.reason) <= 70 else diag.reason[:67] + "..."
 			t.add_row(
@@ -1162,7 +1186,7 @@ _COMPLETE_VAR = f"_{_PROG.upper()}_COMPLETE"
 
 @main.command("install-completion")
 @click.argument("shell", type=click.Choice(["bash", "zsh", "fish"]))
-@click.option("--output", "-o", type=click.Path(path_type=Path), default=None, help="Write the script to a file instead of stdout.")
+@click.option("--output", "-o", type=click.Path(path_type=Path), default=None, help=_("Write the script to a file instead of stdout."))
 def install_completion(shell: str, output: Path | None) -> None:
 	"""Print a shell-completion script for tab-completion of bmf commands and options.
 
@@ -1197,14 +1221,14 @@ def install_completion(shell: str, output: Path | None) -> None:
 
 	if output is not None:
 		output.write_text(script, encoding="utf-8")
-		console.print(f"[green]Completion script written to[/green] {output}")
+		console.print(f"[green]{_('Completion script written to')}[/green] {output}")
 		# Shell-specific activation hint.
 		if shell == "bash":
-			console.print(f"[dim]Run: source {output}[/dim]")
+			console.print(f"[dim]{_('Run:')} source {output}[/dim]")
 		elif shell == "zsh":
-			console.print(f"[dim]Run: source {output} (or add to your ~/.zshrc)[/dim]")
+			console.print(f"[dim]{_('Run:')} source {output} {_('(or add to your ~/.zshrc)')}[/dim]")
 		elif shell == "fish":
-			console.print("[dim]Fish loads it automatically from ~/.config/fish/completions/[/dim]")
+			console.print("[dim]" + _("Fish loads it automatically from ~/.config/fish/completions/") + "[/dim]")
 	else:
 		# Print raw script to stdout (not via rich) so 'eval "$(bmf ...)"' works.
 		click.echo(script)

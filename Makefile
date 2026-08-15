@@ -1,4 +1,4 @@
-.PHONY: help venv install dev-install clean lint test scan report verify apply
+.PHONY: help venv install dev-install clean lint test scan report verify apply i18n-extract i18n-compile
 
 PY ?= python3
 VENV := .venv
@@ -24,6 +24,20 @@ lint:  ## Run ruff
 
 test:  ## Run tests
 	$(BIN)/pytest
+
+# --- i18n -------------------------------------------------------------------
+# Extract/update/compile the translation catalogs (gettext, English msgids,
+# cs catalog). The compiled .mo files are committed, so a plain install or
+# test run never needs pybabel — only these targets do.
+LOCALES_DIR := src/book_meta_fix/locales
+
+i18n-extract:  ## Update the .po catalogs from source strings (needs pybabel)
+	pybabel extract -F babel.cfg -k _ -o $(LOCALES_DIR)/bmf.pot src/book_meta_fix
+	@test -f $(LOCALES_DIR)/cs/LC_MESSAGES/bmf.po || pybabel init -i $(LOCALES_DIR)/bmf.pot -d $(LOCALES_DIR) -D bmf -l cs
+	pybabel update -i $(LOCALES_DIR)/bmf.pot -d $(LOCALES_DIR) -D bmf
+
+i18n-compile:  ## Compile .po -> .mo (needs pybabel or msgfmt)
+	pybabel compile -d $(LOCALES_DIR) -D bmf
 
 # BMF defaults; override via env: make scan LIBRARY=/other/path
 LIBRARY ?= $(HOME)/Books

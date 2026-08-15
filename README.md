@@ -408,9 +408,31 @@ Settings resolve from (highest precedence first):
 | `BMF_LIBRARY` | `~/Books` | Library root |
 | `BMF_CACHE` | `bmf_cache.db` | SQLite cache path |
 | `BMF_REVIEW` | `review.yaml` | Default review file path |
+| `BMF_LANGUAGE` | *(auto)* | Interface language — `cs` or `en`. Auto-detected from the user's locale (`cs*` → Czech, anything else → English). Can also be set per-run: `bmf --lang cs report` |
 | `ZAI_API_KEY` | — | Z.AI API key (LLM, optional — phase 7) |
 | `ZAI_BASE_URL` | `https://api.z.ai/api/paas/v4/` | Z.AI base URL |
 | `ZAI_MODEL` | `glm-5.2` | Z.AI model |
+
+### Localization (cs / en)
+
+CLI messages, option help, the `bmf gui` editor and the `review.yaml`
+header comment are localized via gettext. **Source strings (msgids) are
+English**; English is also the fallback when no translation exists. Czech
+lives in `src/book_meta_fix/locales/cs/LC_MESSAGES/bmf.po` (the compiled
+`.mo` is committed, so a plain install never needs pybabel).
+
+Language resolution (highest first): `--lang` CLI flag → `BMF_LANGUAGE`
+(env/`.env`) → locale auto-detection. Note: click help texts are built at
+import time, so `--lang` switches runtime messages only — use
+`BMF_LANGUAGE` to get fully Czech `--help` output.
+
+After changing translatable strings:
+
+```bash
+make i18n-extract   # update .po from source (needs pybabel)
+$EDITOR src/book_meta_fix/locales/cs/LC_MESSAGES/bmf.po
+make i18n-compile   # .po -> .mo
+```
 
 ## Corruption categories (C1–C10)
 

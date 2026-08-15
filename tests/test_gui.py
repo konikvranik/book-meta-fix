@@ -224,7 +224,7 @@ class TestOpenFolderInManager:
 	def test_missing_folder_reports_error(self, tmp_path):
 		err = open_folder_in_manager(tmp_path / "neexistuje")
 		assert err is not None
-		assert "neexistuje" in err
+		assert "does not exist" in err
 
 	def test_file_opens_its_parent(self, tmp_path, monkeypatch):
 		import sys
@@ -258,4 +258,4 @@ class TestOpenFolderInManager:
 		monkeypatch.setattr(gui, "shutil", types.SimpleNamespace(which=lambda n: f"/usr/bin/{n}"))
 		err = open_folder_in_manager(tmp_path)
 		assert err is not None
-		assert "selhalo" in err or "selhal" in err
+		assert "failed" in err

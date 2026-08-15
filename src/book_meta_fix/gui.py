@@ -49,6 +49,7 @@ from .covers import (
 )
 from .encoding import detect_double_decode, recode, recode_failure_reason, repair_chain
 from .extractors import extract
+from .i18n import _
 from .readers import EBOOK_EXTS
 from .review import _header, _load_raw_entries, _render_entry
 
@@ -75,16 +76,16 @@ except ImportError:  # pragma: no cover
 # list-valued (stored comma-separated in the Entry, split on save). ``series`` /
 # ``series_index`` are written into meta.series as {"name", "index"} at apply.
 FIELD_SPECS: list[tuple[str, str]] = [
-	("author", "Autor"),
-	("title", "Titul"),
+	("author", _("Author")),
+	("title", _("Title")),
 	("isbn", "ISBN"),
-	("year", "Rok"),
-	("publisher", "Vydavatel"),
-	("language", "Jazyk"),
-	("series", "Série"),
-	("series_index", "Pořadí v sérii"),
-	("authors", "Autoři (odděleni čárkou)"),
-	("genres", "Žánry (odděleny čárkou)"),
+	("year", _("Year")),
+	("publisher", _("Publisher")),
+	("language", _("Language")),
+	("series", _("Series")),
+	("series_index", _("Series order")),
+	("authors", _("Authors (comma-separated)")),
+	("genres", _("Genres (comma-separated)")),
 ]
 LIST_FIELDS = {"authors", "genres"}
 
@@ -240,21 +241,21 @@ def open_folder_in_manager(folder: Path | str) -> str | None:
 	Detached (``Popen`` — the GUI must never block on the manager). A path
 	pointing at a file opens its parent. The opener is platform-delegated:
 	``xdg-open`` on Linux/BSD, ``open`` on macOS, ``explorer`` on Windows.
-	Returns a short Czech error for the status line, or None when spawned.
+	Returns a short localized error for the status line, or None when spawned.
 	"""
 	folder = Path(folder)
 	try:
 		if folder.is_file():
 			folder = folder.parent
 		if not folder.is_dir():
-			return f"složka neexistuje: {folder}"
+			return _("folder does not exist: {folder}").format(folder=folder)
 		opener = {"darwin": "open", "win32": "explorer"}.get(sys.platform, "xdg-open")
 		if shutil.which(opener) is None:
-			return f"nenalezen nástroj '{opener}'"
+			return _("tool '{opener}' not found").format(opener=opener)
 		subprocess.Popen([opener, str(folder)])  # noqa: S603 - fixed argv, user-visible folder
 		return None
 	except OSError as exc:
-		return f"otevření selhalo: {exc}"
+		return _("opening failed: {exc}").format(exc=exc)
 
 
 def embedded_cover_thumb(book_path: Path | str, max_w: int = 240, max_h: int = 320):
@@ -611,8 +612,8 @@ class _BookList:
 		thumb_x = w - self.PAD - self.THUMB_W
 		# Header (matches the old Treeview headings).
 		c.create_text(self.PAD, self.HEADER_H // 2, anchor="w",
-		              text="Autor – Titul", font=self._bold, fill=self._fg)
-		c.create_text(ax, self.HEADER_H // 2, anchor="w", text="Akce",
+		              text=_("Author – Title"), font=self._bold, fill=self._fg)
+		c.create_text(ax, self.HEADER_H // 2, anchor="w", text=_("Action"),
 		              font=self._bold, fill=self._fg)
 		c.create_line(0, self.HEADER_H, w, self.HEADER_H, fill=self._border)
 		# Visible slice only — the virtualized part.
@@ -702,13 +703,13 @@ class ReviewEditorApp:
 		self.root.protocol("WM_DELETE_WINDOW", self.quit_app)
 
 		if not self.review_path.is_file():
-			messagebox.showerror("bmf gui", f"review file not found:\n{self.review_path}")
+			messagebox.showerror("bmf gui", _("review file not found:\n{path}").format(path=self.review_path))
 			self.root.destroy()
 			return
 		try:
 			self.entries = _load_raw_entries(self.review_path)
 		except Exception as e:  # noqa: BLE001
-			messagebox.showerror("bmf gui", f"failed to parse {self.review_path}:\n{e}")
+			messagebox.showerror("bmf gui", _("failed to parse {path}:\n{err}").format(path=self.review_path, err=e))
 			self.root.destroy()
 			return
 
@@ -812,24 +813,24 @@ class ReviewEditorApp:
 		self._build_status_bar()
 
 	def _build_left_panel(self, parent) -> None:
-		frame = ttk.LabelFrame(parent, text="Seznam")
+		frame = ttk.LabelFrame(parent, text=_("List"))
 		# Filters row.
 		filt = ttk.Frame(frame)
 		filt.pack(fill="x", padx=6, pady=4)
-		ttk.Label(filt, text="Akce:").pack(side="left")
+		ttk.Label(filt, text=_("Action:")).pack(side="left")
 		self._action_combo = ttk.Combobox(
 			filt, textvariable=self._filter_action, state="readonly", width=9,
 			values=["all", "pending", "accept", "reject", "swap", "edit", "delete", "keep"],
 		)
 		self._action_combo.pack(side="left", padx=(2, 8))
 		self._action_combo.bind("<<ComboboxSelected>>", lambda *_: self.refresh_list())
-		ttk.Label(filt, text="Kat:").pack(side="left")
+		ttk.Label(filt, text=_("Category:")).pack(side="left")
 		self._cat_combo = ttk.Combobox(
 			filt, textvariable=self._filter_category, state="readonly", width=10,
 		)
 		self._cat_combo.pack(side="left", padx=(2, 8))
 		self._cat_combo.bind("<<ComboboxSelected>>", lambda *_: self.refresh_list())
-		ttk.Label(filt, text="Hledat:").pack(side="left")
+		ttk.Label(filt, text=_("Search:")).pack(side="left")
 		self._search_entry = ttk.Entry(filt, textvariable=self._search, width=22)
 		self._search_entry.pack(side="left", fill="x", expand=True)
 		self._bind_select_all(self._search_entry)
@@ -886,7 +887,7 @@ class ReviewEditorApp:
 		)
 		self._path_link.pack(fill="x", padx=8, pady=(0, 2))
 		self._path_link.bind("<Button-1>", lambda _e: (self.open_current_folder(), "break")[1])
-		_Tooltip(self._path_link, "Otevřít složku knihy ve správci souborů")
+		_Tooltip(self._path_link, _("Open the book's folder in the file manager"))
 		try:
 			import tkinter.font as tkfont
 			# NB: keep a reference — tkinter's Font.__del__ DELETES the Tcl
@@ -921,7 +922,7 @@ class ReviewEditorApp:
 			pass
 
 	def _build_fields_section(self) -> None:
-		box = ttk.LabelFrame(self._scroll_inner, text="Pole")
+		box = ttk.LabelFrame(self._scroll_inner, text=_("Fields"))
 		box.pack(fill="x", padx=8, pady=4)
 		fields = ttk.Frame(box)
 		fields.pack(fill="x", padx=6, pady=6)
@@ -950,7 +951,7 @@ class ReviewEditorApp:
 				# cannot overlap the title row, the prior bug).
 				swap_btn = ttk.Button(fields, text="⇄", width=3, command=self.swap_fields)
 				swap_btn.grid(row=row, column=4, padx=(4, 0), pady=1, sticky="w")
-				_Tooltip(swap_btn, "Prohodit autora a titul  (Ctrl+W)")
+				_Tooltip(swap_btn, _("Swap author and title  (Ctrl+W)"))
 			self._fields[role] = {"incl": incl, "current": current, "value": value, "entry": entry}
 			self._field_entries.append(entry)
 			# Trace value/include → dirty (but not during programmatic load).
@@ -959,28 +960,28 @@ class ReviewEditorApp:
 		box.columnconfigure(0, weight=1)
 
 		# Read-only proposed block.
-		ttk.Label(box, text="Doporučený návrh (pro accept/keep):").pack(anchor="w", padx=6)
+		ttk.Label(box, text=_("Proposed changes (for accept/keep):")).pack(anchor="w", padx=6)
 		self._proposed_txt = self._style_text(tk.Text(box, height=7, wrap="word", state="disabled"))
 		self._proposed_txt.pack(fill="x", padx=6, pady=2)
 
 		# Action radios + notes + nav.
 		bottom = ttk.Frame(box)
 		bottom.pack(fill="x", padx=6, pady=6)
-		ttk.Label(bottom, text="Akce:").grid(row=0, column=0, sticky="w")
+		ttk.Label(bottom, text=_("Action:")).grid(row=0, column=0, sticky="w")
 		rad = ttk.Frame(bottom)
 		rad.grid(row=0, column=1, columnspan=6, sticky="w")
 		for i, a in enumerate(self.ACTIONS):
 			ttk.Radiobutton(rad, text=a, value=a, variable=self._action_var).grid(row=0, column=i, padx=2, sticky="w")
-		ttk.Label(bottom, text="Poznámka:").grid(row=1, column=0, sticky="w", pady=(4, 0))
+		ttk.Label(bottom, text=_("Note:")).grid(row=1, column=0, sticky="w", pady=(4, 0))
 		self._notes_entry = ttk.Entry(bottom, textvariable=self._notes_var)
 		self._notes_entry.grid(row=1, column=1, columnspan=6, sticky="we", pady=(4, 0))
 		self._bind_select_all(self._notes_entry)
 		bottom.columnconfigure(1, weight=1)
 		nav = ttk.Frame(box)
 		nav.pack(fill="x", padx=6, pady=(2, 8))
-		ttk.Button(nav, text="◀ Předchozí (PgUp)", command=self.prev_book).pack(side="left")
-		ttk.Button(nav, text="Uložit (Ctrl+S)", command=self.save).pack(side="left", padx=20)
-		ttk.Button(nav, text="Další (PgDn) ▶", command=self.next_book).pack(side="right")
+		ttk.Button(nav, text=_("◀ Previous (PgUp)"), command=self.prev_book).pack(side="left")
+		ttk.Button(nav, text=_("Save (Ctrl+S)"), command=self.save).pack(side="left", padx=20)
+		ttk.Button(nav, text=_("Next (PgDn) ▶"), command=self.next_book).pack(side="right")
 
 		# Tab cycle = the target fields + the notes entry (nothing else).
 		self._editable_widgets = list(self._field_entries) + [self._notes_entry]
@@ -1007,7 +1008,7 @@ class ReviewEditorApp:
 		)
 		slot.pack_propagate(False)
 		slot.pack()
-		lbl = ttk.Label(slot, text="(načítám…)", anchor="center")
+		lbl = ttk.Label(slot, text=_("(loading…)"), anchor="center")
 		lbl.pack(fill="both", expand=True)
 		if var is not None:
 			chk = ttk.Checkbutton(
@@ -1050,10 +1051,10 @@ class ReviewEditorApp:
 			pass
 
 	def _build_covers_section(self) -> None:
-		box = ttk.LabelFrame(self._scroll_inner, text="Obálky")
+		box = ttk.LabelFrame(self._scroll_inner, text=_("Covers"))
 		box.pack(fill="x", padx=8, pady=4)
 		# Selection checkboxes sit directly ON each cover (top-left overlay,
-		# the customary selection spot); "Smazat označené" then removes what
+		# the customary selection spot); "Delete checked" then removes what
 		# is checked. The recommended cover is a URL preview, not a file, so
 		# it gets no checkbox.
 		self._cover_row = ttk.Frame(box)
@@ -1061,9 +1062,9 @@ class ReviewEditorApp:
 		self._cover_imgs = []
 		self._cover_caps = []
 		for title, var, tip in (
-			("Aktuální", self._del_cover, "Smazat cover.jpg (při Smazat označené)"),
-			(".bak záloha", self._del_bak, "Smazat cover.jpg.bak (při Smazat označené)"),
-			("Doporučená", None, None),
+			(_("Current"), self._del_cover, _("Delete cover.jpg (on Delete checked)")),
+			(_(".bak backup"), self._del_bak, _("Delete cover.jpg.bak (on Delete checked)")),
+			(_("Recommended"), None, None),
 		):
 			lbl, cap = self._cover_cell(self._cover_row, title, var, tip)
 			self._cover_imgs.append(lbl)
@@ -1072,7 +1073,7 @@ class ReviewEditorApp:
 		# rebuilt per book in _apply_fmt_covers. Their checkbox strips the
 		# cover EMBEDDED in the file (the invalid calibre placeholder) while
 		# the ebook file itself stays; only EPUB supports that surgery.
-		ttk.Label(box, text="Vložené obálky ve formátech (☐ = odstranit z e-knihy):").pack(anchor="w", padx=6)
+		ttk.Label(box, text=_("Embedded covers per format (☐ = strip from the ebook):")).pack(anchor="w", padx=6)
 		self._fmt_cover_row = ttk.Frame(box)
 		self._fmt_cover_row.pack(fill="x", padx=6, pady=(2, 8))
 		# Keep the slot widths equal and fitted on every pane resize.
@@ -1080,43 +1081,43 @@ class ReviewEditorApp:
 		self._fmt_cover_row.bind("<Configure>", self._sync_cover_slots, add="+")
 		btns = ttk.Frame(box)
 		btns.pack(fill="x", padx=6, pady=4)
-		ttk.Button(btns, text="Ponechat (Ctrl+P)", command=self.cover_keep).pack(side="left", padx=2)
-		ttk.Button(btns, text="Obnovit .bak (Ctrl+B)", command=self.cover_restore_bak).pack(side="left", padx=2)
-		ttk.Button(btns, text="Aplikovat novou (Ctrl+N)", command=self.cover_new).pack(side="left", padx=2)
-		ttk.Button(btns, text="Smazat označené (Ctrl+M)", command=self.cover_delete_checked).pack(side="left", padx=10)
+		ttk.Button(btns, text=_("Keep (Ctrl+P)"), command=self.cover_keep).pack(side="left", padx=2)
+		ttk.Button(btns, text=_("Restore .bak (Ctrl+B)"), command=self.cover_restore_bak).pack(side="left", padx=2)
+		ttk.Button(btns, text=_("Apply new (Ctrl+N)"), command=self.cover_new).pack(side="left", padx=2)
+		ttk.Button(btns, text=_("Delete checked (Ctrl+M)"), command=self.cover_delete_checked).pack(side="left", padx=10)
 
 	def _build_content_section(self) -> None:
-		box = ttk.LabelFrame(self._scroll_inner, text="Obsah")
+		box = ttk.LabelFrame(self._scroll_inner, text=_("Content"))
 		box.pack(fill="both", expand=True, padx=8, pady=4)
 		top = ttk.Frame(box)
 		top.pack(fill="x", padx=6, pady=4)
-		ttk.Label(top, text="Formát:").pack(side="left")
+		ttk.Label(top, text=_("Format:")).pack(side="left")
 		self._format_holder = ttk.Frame(top)
 		self._format_holder.pack(side="left", fill="x", expand=True, padx=6)
 		view = ttk.Frame(box)
 		view.pack(fill="x", padx=6)
-		ttk.Label(view, text="Zobrazení:").pack(side="left")
-		ttk.Radiobutton(view, text="první strana", value="first", variable=self._view_var).pack(side="left", padx=4)
-		ttk.Radiobutton(view, text="širší text", value="broader", variable=self._view_var).pack(side="left", padx=4)
+		ttk.Label(view, text=_("View:")).pack(side="left")
+		ttk.Radiobutton(view, text=_("first page"), value="first", variable=self._view_var).pack(side="left", padx=4)
+		ttk.Radiobutton(view, text=_("broader text"), value="broader", variable=self._view_var).pack(side="left", padx=4)
 		self._view_var.trace_add("write", lambda *_: self._apply_content())
 		rec = ttk.Frame(box)
 		rec.pack(fill="x", padx=6, pady=(2, 4))
 		self._recode_chk = ttk.Checkbutton(
-			rec, text="↻ Překódovat (Ctrl+G)", variable=self._recode_var,
+			rec, text=_("↻ Recode (Ctrl+G)"), variable=self._recode_var,
 			command=self._apply_content_text, state="disabled",
 		)
 		self._recode_chk.pack(side="left")
-		# Manual codec experiment: „přečteno jako“ is the codec the text was
-		# WRONGLY read through (the encode side), „skutečně je“ is what the
+		# Manual codec experiment: „read as“ is the codec the text was
+		# WRONGLY read through (the encode side), „actually is“ is what the
 		# recovered bytes really are (nearly always utf-8); the preview
 		# re-renders live, always as UTF-8 text, whatever the pair.
-		ttk.Label(rec, text="  přečteno jako:").pack(side="left")
+		ttk.Label(rec, text=_("  read as:")).pack(side="left")
 		self._recode_from_box = ttk.Combobox(
 			rec, textvariable=self._recode_from, values=list(ENCODING_CHOICES),
 			width=13, state="readonly",
 		)
 		self._recode_from_box.pack(side="left", padx=(1, 4))
-		ttk.Label(rec, text="skutečně je:").pack(side="left")
+		ttk.Label(rec, text=_("actually is:")).pack(side="left")
 		self._recode_to_box = ttk.Combobox(
 			rec, textvariable=self._recode_to, values=list(ENCODING_CHOICES),
 			width=13, state="readonly",
@@ -1124,12 +1125,12 @@ class ReviewEditorApp:
 		self._recode_to_box.pack(side="left", padx=(1, 4))
 		swap_btn = ttk.Button(rec, text="⇄", width=3, command=self._swap_recode_codecs)
 		swap_btn.pack(side="left")
-		_recode_tip = (
-			"Oprava dvojitého kódování: „přečteno jako“ = kodek, kterým byl text "
-			"původně špatně přečten (typicky cp1250); „skutečně je“ = reálné "
-			"kódování bajtů (téměř vždy utf-8). Náhled je vždy UTF-8."
+		_recode_tip = _(
+			"Double-encoding repair: “read as” = the codec the text was originally "
+			"mis-read through (typically cp1250); “actually is” = the real encoding "
+			"of the bytes (almost always utf-8). The preview is always UTF-8."
 		)
-		_Tooltip(swap_btn, "Prohodit směr převodu (přečteno jako ↔ skutečně je)")
+		_Tooltip(swap_btn, _("Swap conversion direction (read as ↔ actually is)"))
 		_Tooltip(self._recode_from_box, _recode_tip)
 		_Tooltip(self._recode_to_box, _recode_tip)
 		self._recode_hint = ttk.Label(rec, text="", foreground="#a00")
@@ -1186,7 +1187,7 @@ class ReviewEditorApp:
 		)
 		self._grip_tip = _Tooltip(
 			self._content_grip,
-			"Tahem nahoru/dolů změníš výšku náhledu (dvojklik = výchozí výška)",
+			_("Drag up/down to change the preview height (double-click = default height)"),
 		)
 
 	def _set_preview_height(self, px: int) -> None:
@@ -1524,7 +1525,7 @@ class ReviewEditorApp:
 		path = e.get("path") or ""
 		folder = (self.library / path) if path else self.library
 		err = open_folder_in_manager(folder)
-		self._flash(err or f"otevřeno: {folder}")
+		self._flash(err or _("opened: {folder}").format(folder=folder))
 
 	def _on_tree_double(self, event) -> str:
 		"""Double-click a list row = open that book's folder."""
@@ -1628,13 +1629,15 @@ class ReviewEditorApp:
 			uuid = e.get("uuid") or "—"
 			path = e.get("path") or ""
 			all_d = e.get("diagnoses") or [diag]
-			extra = f"  (+{len(all_d) - 1} další)" if len(all_d) > 1 else ""
+			extra = _("  (+{n} more)").format(n=len(all_d) - 1) if len(all_d) > 1 else ""
 			self._header_lbl.configure(
-				text=f"Záznam {idx + 1}/{len(self.entries)}   uuid: {uuid}\n"
-				f"diagnóza: {diag.get('category', '—')} – {diag.get('reason', '')} "
-				f"[{diag.get('confidence', '—')}]{extra}",
+				text=_("Entry {i}/{n}   uuid: {uuid}\n"
+				       "diagnosis: {cat} – {reason} [{conf}]{extra}").format(
+					i=idx + 1, n=len(self.entries), uuid=uuid,
+					cat=diag.get("category", "—"), reason=diag.get("reason", ""),
+					conf=diag.get("confidence", "—"), extra=extra),
 			)
-			self._path_link.configure(text=path or "(bez cesty)")
+			self._path_link.configure(text=path or _("(no path)"))
 			# Fields.
 			cur = e.get("current") or {}
 			prop = e.get("proposed") or {}
@@ -1677,7 +1680,7 @@ class ReviewEditorApp:
 		self._proposed_txt.configure(state="normal")
 		self._proposed_txt.delete("1.0", "end")
 		if not prop:
-			self._proposed_txt.insert("end", "(žádný návrh)")
+			self._proposed_txt.insert("end", _("(no proposal)"))
 		else:
 			for k, v in prop.items():
 				if isinstance(v, list):
@@ -1822,7 +1825,7 @@ class ReviewEditorApp:
 		self._dirty = False
 		# Non-intrusive confirmation (the modal dialog interrupted the flow):
 		# the status line carries it for a few seconds, then reverts.
-		self._flash(f"uloženo → {self.review_path}", seconds=4)
+		self._flash(_("saved → {path}").format(path=self.review_path), seconds=4)
 
 	def _do_save(self) -> bool:
 		text = render_review_text(self.entries)
@@ -1834,13 +1837,13 @@ class ReviewEditorApp:
 				shutil.copy2(self.review_path, bak)
 			os.replace(tmp, self.review_path)
 		except OSError as e:
-			messagebox.showerror("bmf gui", f"uložení selhalo: {e}")
+			messagebox.showerror("bmf gui", _("save failed: {err}").format(err=e))
 			return False
 		return True
 
 	def quit_app(self) -> None:
 		if self._dirty:
-			choice = messagebox.askyesnocancel("bmf gui", "Uložit změny před ukončením?")
+			choice = messagebox.askyesnocancel("bmf gui", _("Save changes before quitting?"))
 			if choice is None:
 				return
 			if choice:
@@ -1910,9 +1913,9 @@ class ReviewEditorApp:
 		self._cover_photos.clear()
 		imgs = [cur, bak, rec]
 		caps = []
-		caps.append("generated" if (info and info.is_generated) else ("ok" if cur else "chybí"))
-		caps.append(".bak záloha")
-		caps.append("doporučená" if has_url else "bez URL")
+		caps.append(_("generated") if (info and info.is_generated) else (_("ok") if cur else _("missing")))
+		caps.append(_(".bak backup"))
+		caps.append(_("recommended") if has_url else _("no URL"))
 		for lbl, _cap, pil in zip(self._cover_imgs, self._cover_caps, imgs, strict=False):
 			if pil is not None:
 				photo = self._fit_photo(pil, lbl)
@@ -1920,7 +1923,7 @@ class ReviewEditorApp:
 					self._cover_photos[id(pil)] = photo
 					lbl.configure(image=photo, text="")
 					continue
-			lbl.configure(image="", text="(žádný náhled)")
+			lbl.configure(image="", text=_("(no preview)"))
 		for _cap_lbl, text in zip(self._cover_caps, caps, strict=False):
 			_cap_lbl.configure(text=text)
 
@@ -1932,7 +1935,7 @@ class ReviewEditorApp:
 			child.destroy()
 		self._del_formats = {}
 		if not fmt_covers:
-			ttk.Label(self._fmt_cover_row, text="(žádné / calibre nedostupné)").pack(side="left")
+			ttk.Label(self._fmt_cover_row, text=_("(none / calibre unavailable)")).pack(side="left")
 			return
 		for path, pil in fmt_covers:
 			var = tk.BooleanVar(value=False)
@@ -1940,10 +1943,10 @@ class ReviewEditorApp:
 			lbl, _cap = self._cover_cell(
 				self._fmt_cover_row, path.name, var,
 				(
-					f"Odstranit vloženou obálku z {path.name} (e-kniha zůstane)"
+					_("Strip the embedded cover from {name} (the ebook file stays)").format(name=path.name)
 					if is_epub else
-					f"Vloženou obálku nelze odstranit z {path.suffix or 'souboru'}"
-					" — umíme jen EPUB"
+					_("The embedded cover cannot be stripped from {ext} — EPUB only").format(
+						ext=path.suffix or _("file"))
 				),
 				check_enabled=is_epub,
 			)
@@ -1962,26 +1965,26 @@ class ReviewEditorApp:
 		e = self.entries[self._cur]
 		url = (e.get("proposed") or {}).get("cover_url")
 		if not url:
-			self._flash("žádná doporučená obálka (cover_url)")
+			self._flash(_("no recommended cover (cover_url)"))
 			return
-		cover_path, _ = cover_paths(self.library, e.get("path", ""))
+		cover_path, _bak_path = cover_paths(self.library, e.get("path", ""))
 		if download_cover(url, cover_path):
-			self._flash("obálka aplikována")
+			self._flash(_("cover applied"))
 		else:
-			self._flash("stažení obálky selhalo")
+			self._flash(_("cover download failed"))
 		self._refresh_covers()
 
 	def cover_restore_bak(self) -> None:
 		e = self.entries[self._cur]
 		cover_path, bak_path = cover_paths(self.library, e.get("path", ""))
 		if restore_bak_cover(cover_path, bak_path):
-			self._flash("obnoveno z .bak")
+			self._flash(_("restored from .bak"))
 		else:
-			self._flash(".bak neexistuje")
+			self._flash(_(".bak does not exist"))
 		self._refresh_covers()
 
 	def cover_keep(self) -> None:
-		self._flash("ponecháno")
+		self._flash(_("kept"))
 
 	def cover_delete_checked(self) -> None:
 		e = self.entries[self._cur]
@@ -1995,15 +1998,15 @@ class ReviewEditorApp:
 		# — the file itself stays (cleaning calibre placeholders, not books).
 		fmt_paths = [Path(p) for p, v in self._del_formats.items() if v.get()]
 		if not paths and not fmt_paths:
-			self._flash("nic neoznačeno")
+			self._flash(_("nothing checked"))
 			return
 		# The strip rewrites the ebook in place (sidecar covers are plain
 		# deletions, recoverable via .bak/enrichers) — confirm first.
 		if fmt_paths and not messagebox.askyesno(
 			"bmf gui",
-			"Odstranit vloženou obálku z těchto e-knih?\n"
-			"(samotné soubory e-knih zůstávají)\n\n"
-			+ "\n".join(f"  • {p.name}" for p in fmt_paths),
+			_("Strip the embedded cover from these ebooks?\n"
+			  "(the ebook files themselves stay)\n\n{files}").format(
+				files="\n".join(f"  • {p.name}" for p in fmt_paths)),
 		):
 			return
 		n = delete_covers(paths)
@@ -2012,11 +2015,11 @@ class ReviewEditorApp:
 		self._del_bak.set(False)
 		for v in self._del_formats.values():
 			v.set(False)
-		msg = f"smazáno {n}" if paths else ""
+		msg = _("deleted {n}").format(n=n) if paths else ""
 		if fmt_paths:
-			part = f"obálky odstraněny {stripped}/{len(fmt_paths)}"
+			part = _("covers stripped {stripped}/{total}").format(stripped=stripped, total=len(fmt_paths))
 			if stripped < len(fmt_paths):
-				part += " (jen EPUB)"
+				part += _(" (EPUB only)")
 			msg = f"{msg}; {part}" if msg else part
 		self._flash(msg)
 		self._refresh_covers()
@@ -2035,7 +2038,7 @@ class ReviewEditorApp:
 		files = list_format_files(folder)
 		self._format_files = files
 		if not files:
-			ttk.Label(self._format_holder, text="(žádné formáty / složka nenalezena)").pack(side="left")
+			ttk.Label(self._format_holder, text=_("(no formats / folder not found)")).pack(side="left")
 			self._content_raw = ""
 			self._content_repaired = None
 			self._recode_var.set(False)
@@ -2054,7 +2057,7 @@ class ReviewEditorApp:
 		self._load_content(first)
 
 	def _load_content(self, file_path: str) -> None:
-		self._set_content_text("(načítám…)")
+		self._set_content_text(_("(loading…)"))
 
 		def work():
 			meta = self._content_cache.get(file_path)
@@ -2079,9 +2082,9 @@ class ReviewEditorApp:
 		view = self._view_var.get()
 		raw = (meta.broader_text if view == "broader" else meta.first_page_text) or ""
 		if not raw and meta.error:
-			raw = f"(extrakce selhala: {meta.error})"
+			raw = _("(extraction failed: {err})").format(err=meta.error)
 		elif not raw:
-			raw = "(žádný text)"
+			raw = _("(no text)")
 		self._content_raw = raw
 		# Detect double-encoding (utf-8 mis-decoded twice): default the z/do
 		# selectors to the usual CZ suspect. A clean book keeps the user's
@@ -2091,7 +2094,7 @@ class ReviewEditorApp:
 		# auto-ticking it kept flipping the preview as books were paged
 		# through, which read as the preview "looping" on its own.
 		if detect_double_decode(raw):
-			self._recode_hint.configure(text="⚠ detekováno dvojí kódování")
+			self._recode_hint.configure(text=_("⚠ double encoding detected"))
 			self._recode_from.set("cp1250")
 			self._recode_to.set("utf-8")
 		self._recompute_recode()
@@ -2108,7 +2111,7 @@ class ReviewEditorApp:
 			if repaired != (self._content_repaired or ""):
 				self._content_repaired = repaired
 				self._recode_chk.configure(state="normal")
-				self._recode_hint.configure(text=f"⚠ vícenásobné překódování ({desc})")
+				self._recode_hint.configure(text=_("⚠ multiple recoding layers ({desc})").format(desc=desc))
 		self._apply_content_text()
 
 	def _recompute_recode(self) -> None:
@@ -2129,12 +2132,12 @@ class ReviewEditorApp:
 			self._recode_chk.configure(state="disabled")
 			self._recode_var.set(False)
 			if self._content_raw:
-				reason = recode_failure_reason(self._content_raw, frm, to) or "neznámý důvod"
-				msg = f"⚠ {frm} → {to} selhal: {reason}"
+				reason = recode_failure_reason(self._content_raw, frm, to) or _("unknown reason")
+				msg = _("⚠ {frm} → {to} failed: {reason}").format(frm=frm, to=to, reason=reason)
 				if frm != to:
 					swapped = recode(self._content_raw, to, frm)
 					if swapped is not None and swapped != self._content_raw:
-						msg += f" — obráceně ({to} → {frm}) funguje, klikni sem"
+						msg += _(" — the reverse ({to} → {frm}) works, click here").format(to=to, frm=frm)
 						self._recode_hint.configure(cursor="hand2")
 				self._recode_hint.configure(text=msg)
 		elif self._content_repaired == self._content_raw:
@@ -2168,7 +2171,7 @@ class ReviewEditorApp:
 		self._recompute_recode()
 		if self._content_repaired is not None and self._content_repaired != self._content_raw:
 			self._recode_hint.configure(
-				text=f"z {self._recode_from.get()} → {self._recode_to.get()} ✓")
+				text=_("{frm} → {to} ✓").format(frm=self._recode_from.get(), to=self._recode_to.get()))
 		self._apply_content_text()
 		try:
 			self._content_txt.yview_moveto(0.0)  # first-page preview
@@ -2185,7 +2188,7 @@ class ReviewEditorApp:
 
 	def content_recode_toggle(self) -> None:
 		if not self._content_repaired:
-			self._flash("žádné dvojí kódování k opravě")
+			self._flash(_("no double encoding to repair"))
 			return
 		self._recode_var.set(not self._recode_var.get())
 		self._apply_content_text()
@@ -2279,9 +2282,9 @@ class ReviewEditorApp:
 		elif 0 <= self._cur < total:
 			base = f"–/{len(idxs)}"  # current book filtered out of the view
 		else:
-			base = f"{len(idxs)} záznamů"
+			base = _("{n} entries").format(n=len(idxs))
 		if len(idxs) != total:
-			base += f" (z {total})"
+			base += _(" (of {total})").format(total=total)
 		dirty = " *" if self._dirty else ""
 		base += dirty
 		if extra:
@@ -2290,33 +2293,33 @@ class ReviewEditorApp:
 
 	def _help_overlay(self) -> None:
 		win = tk.Toplevel(self.root)
-		win.title("Klávesové zkratky (F1)")
+		win.title(_("Keyboard shortcuts (F1)"))
 		txt = tk.Text(win, width=54, height=30, wrap="word")
 		txt.pack(fill="both", expand=True)
 		shortcuts = [
-			("PgDn / PgUp", "další / předchozí kniha"),
-			("Tab / Shift+Tab", "další / předchozí editační pole (jen pole)"),
-			("Ctrl+A", "označit vše v poli"),
+			("PgDn / PgUp", _("next / previous book")),
+			("Tab / Shift+Tab", _("next / previous edit field (fields only)")),
+			("Ctrl+A", _("select all in the field")),
 			("Ctrl+Enter", "accept"),
 			("Ctrl+R", "reject"),
-			("Ctrl+W", "prohodit autora↔titul (+akce swap)"),
+			("Ctrl+W", _("swap author↔title (+action swap)")),
 			("Ctrl+E", "edit"),
 			("Ctrl+D", "delete"),
-			("Ctrl+K", "keep (aplikuje a ponechá; analyze přeskočí)"),
-			("Ctrl+0", "vyčistit → pending"),
-			("Ctrl+S", "uložit"),
-			("Ctrl+Q", "konec"),
-			("Ctrl+F", "focus hledání"),
-			("Ctrl+L", "current → cíl (fokus pole)"),
-			("Ctrl+Space", "☑ include fokus pole"),
-			("Ctrl+N", "obálka: aplikovat novou"),
-			("Ctrl+B", "obálka: obnovit .bak"),
-			("Ctrl+P", "obálka: ponechat"),
-			("Ctrl+M", "obálka: smazat označené cover/.bak, odstranit vložené obálky"),
-			("Ctrl+T", "obsah: první strana / širší text"),
-			("Ctrl+G", "obsah: překódovat („přečteno jako“ = špatné čtení, „skutečně je“ = reál. kódování; výsledek vždy UTF-8)"),
-			("", "(klik na obálku = ☑; klik na path / dvojklik v seznamu = otevřít složku)"),
-			("", "(kolečko: prvek pod myší, na jeho hraně formulář; obálka v seznamu → hover popup)"),
+			("Ctrl+K", _("keep (applies and retains; analyze skips it)")),
+			("Ctrl+0", _("clear → pending")),
+			("Ctrl+S", _("save")),
+			("Ctrl+Q", _("quit")),
+			("Ctrl+F", _("focus search")),
+			("Ctrl+L", _("current → target (focused field)")),
+			("Ctrl+Space", _("☑ include focused field")),
+			("Ctrl+N", _("cover: apply new")),
+			("Ctrl+B", _("cover: restore .bak")),
+			("Ctrl+P", _("cover: keep")),
+			("Ctrl+M", _("cover: delete checked cover/.bak, strip embedded covers")),
+			("Ctrl+T", _("content: first page / broader text")),
+			("Ctrl+G", _("content: recode (“read as” = the wrong read, “actually is” = the real encoding; result always UTF-8)")),
+			("", _("(click on a cover = ☑; click on path / double-click in the list = open folder)")),
+			("", _("(wheel: widget under the mouse, at its edge the form; cover in the list → hover popup)")),
 		]
 		for k, d in shortcuts:
 			txt.insert("end", f"{k:<18} {d}\n")

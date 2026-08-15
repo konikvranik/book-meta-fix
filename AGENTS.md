@@ -42,6 +42,21 @@ are updated atomically. Every change is gated by a human-in-the-loop
   verifier, and the JSON salvage — the reasoning is load-bearing.
 - **No network in tests.** Online sources, the LLM, and HTTP are stubbed or
   mocked. Tests are per-module: `tests/test_<module>.py`.
+- **Localization** (`i18n.py`, gettext): user-facing strings (CLI messages,
+  option help, GUI labels, the review.yaml header comment) go through
+  `_()` from `book_meta_fix.i18n`. **msgids are English** — English is also
+  the fallback (no en catalog exists). Czech lives in
+  `src/book_meta_fix/locales/cs/LC_MESSAGES/bmf.po`; the compiled `.mo` is
+  committed so installs/tests don't need pybabel. Language resolution:
+  `--lang` flag > `BMF_LANGUAGE` (env/.env) > locale autodetect (`cs*` → cs,
+  else en). After adding/changing `_("...")` strings run `make i18n-extract`
+  (needs pybabel), fill in Czech translations in the .po, then
+  `make i18n-compile` and commit both .po and .mo. Known limitation: click
+  help texts are evaluated at import time, so `--lang` affects runtime
+  messages only, not already-built help texts (BMF_LANGUAGE does, because
+  cli.py calls `init_language()` at import). Tests assert English msgids;
+  `tests/conftest.py` pins `BMF_LANGUAGE=en` for the whole suite — only
+  `tests/test_i18n.py` manages the catalog itself.
 
 ## Module layout
 
@@ -49,6 +64,7 @@ are updated atomically. Every change is gated by a human-in-the-loop
 src/book_meta_fix/
   models.py        core dataclasses + Verdict/Confidence enums (shared vocab)
   config.py        Config dataclass + .env walk-up loader
+  i18n.py          gettext wrapper: _() with English msgids, cs catalog, locale detect
   readers.py       parse metadata.json (primary) / metadata.opf (fallback) / path
   library.py       traverse library tree + SQLite cache
   detectors.py     rules C1–C11 → Diagnosis
