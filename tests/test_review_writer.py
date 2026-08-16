@@ -396,7 +396,7 @@ class TestAutoFixable:
 		"""If the user already set action on a C6 book in a prior run, that
 		decision wins over the pre-filled delete."""
 		out = tmp_path / "review.yaml"
-		seed = "---\nid: 1\nuuid: u1\ncurrent: {title: A}\naction: reject\n"
+		seed = "---\nid: 1\nuuid: u1\ncurrent: {title: A}\naction: accept\n"
 		out.write_text(seed, encoding="utf-8")
 		w = ReviewWriter(out)
 		meta = _meta(1, title="~$doc")
@@ -408,7 +408,7 @@ class TestAutoFixable:
 		summary = _submit_all_and_finish(w, [(meta, diag, None, None)])
 		assert summary["skipped_user_decided"] == 1
 		parsed = parse_review(out)
-		assert parsed[0].action == "reject"  # user decision preserved
+		assert parsed[0].action == "accept"  # user decision preserved
 
 
 class TestLegacyPriorLoading:

@@ -54,7 +54,8 @@ pick up the fix on rescan. Every change is gated by a human-in-the-loop
         │   review_writer.py    │  stream proposals → review.yaml
         │   (one `---` doc/blk) │  (tail -f live; .bak carry-over)
         └───────────┬───────────┘
-                    ▼  human sets action: accept/reject/swap/edit
+                    ▼  human sets action: accept/delete/keep
+                    (edits the proposed values; null = field delete)
         ┌───────────────────────┐
         │   review.py (parse) → │  bmf apply
         │   writers.py          │  atomic write metadata.json + .opf (.bak)

@@ -6,8 +6,9 @@ whole run and dumping it at the end. This gives:
 
   * live visibility (tail -f the file as the run progresses),
   * crash/Ctrl-C safety (no result older than the last flush is lost),
-  * preservation of prior user decisions (action/edited/notes) via an in-memory
-    merge against the .bak taken at start.
+  * preservation of prior user decisions (action/notes; a decided entry's
+    `proposed` is carried verbatim) via an in-memory merge against the .bak
+    taken at start.
 
 Lifecycle
 ---------
@@ -32,7 +33,15 @@ from typing import Any
 
 from .detectors import all_diagnoses
 from .models import Verdict
-from .review import _COVER_CATEGORIES, _build_current, _build_proposed, _header, _relative_path, _render_entry
+from .review import (
+	_COVER_CATEGORIES,
+	_build_current,
+	_build_proposed,
+	_header,
+	_migrate_entry,
+	_relative_path,
+	_render_entry,
+)
 
 log = logging.getLogger(__name__)
 
@@ -308,8 +317,10 @@ class ReviewWriter:
 				for d in all_diagnoses(diag)
 			]
 		if prior_entry is not None:
-			if prior_entry.get("edited"):
-				entry["edited"] = prior_entry["edited"]
+			# Undecided prior: only notes carry over — `proposed` is rebuilt
+			# fresh (an undecided book may get a better proposal this run);
+			# decided priors never reach here, they are carried verbatim
+			# above (see _handle).
 			if prior_entry.get("notes"):
 				entry["notes"] = prior_entry["notes"]
 		return entry
@@ -448,5 +459,5 @@ class ReviewWriter:
 				continue
 			for entry in items:
 				if isinstance(entry, dict) and entry.get("uuid") is not None:
-					prior[entry["uuid"]] = entry
+					prior[entry["uuid"]] = _migrate_entry(entry)
 		return prior

@@ -18,11 +18,12 @@ so we rebind it).
 Persistence model (deliberately no new writer): the editor loads the file's
 **raw entry dicts** via :func:`review._load_raw_entries` and writes them back
 with the same primitives the streaming writer already uses
-(:func:`review._header` + :func:`review._render_entry`). Mutations touch only
-``action`` / ``edited`` / ``notes``; every other key is preserved verbatim, so
-the round-trip is byte-compatible with ``analyze`` output. Cover and content
-operations are immediate, reversible file reads (``.bak`` backed); the actual
-metadata write still happens via ``bmf apply``.
+(:func:`review._header` + :func:`review._render_entry`). Mutations touch
+``action`` / ``proposed`` (the field values; ``null`` = field delete) /
+``notes``; every other key is preserved verbatim, so the round-trip is
+byte-compatible with ``analyze`` output. Cover and content operations are
+immediate, reversible file reads (``.bak`` backed); the actual metadata write
+still happens via ``bmf apply``.
 
 Tkinter is optional: the top-level import is guarded so that importing this
 module (e.g. in tests, which exercise only the pure helpers below) does not
@@ -178,27 +179,41 @@ def collect_vocab_values(library: Path | str) -> tuple[list[str], list[str]]:
 	return sorted(authors), sorted(series)
 
 
-def compose_edited(values: dict[str, str]) -> dict | None:
-	"""Build the ``edited`` dict from per-field Entry values.
+def compose_overlay(values: dict[str, str], cleared=frozenset()) -> dict | None:
+	"""Build the field overlay the editor merges into ``proposed`` on save.
 
 	What is in the field is saved; an EMPTY field means "leave as is"
 	(skipped) so a book without a proposal cannot accidentally blank
 	existing data. List fields are split on commas; ``year`` is coerced
-	to int when numeric. Returns ``None`` when every field is empty (so
-	the key is omitted on save).
+	to int when numeric. A role in *cleared* is the editor's "delete this
+	field" mark (the proposal is wrong, the correct value unknown): it is
+	stored as ``proposed[field]: null`` regardless of the Entry text, and
+	apply then CLEARS the stored value. Returns ``None`` when nothing was
+	filled and nothing cleared (nothing to merge).
 	"""
-	edited: dict = {}
+	overlay: dict = {}
 	for field, value in values.items():
+		if field in cleared:
+			continue
 		v = str(value).strip()
 		if not v:
 			continue
 		if field in LIST_FIELDS:
-			edited[field] = [p.strip() for p in v.split(",") if p.strip()]
+			overlay[field] = [p.strip() for p in v.split(",") if p.strip()]
 		elif field == "year":
-			edited[field] = int(v) if v.isdigit() else v
+			overlay[field] = int(v) if v.isdigit() else v
 		else:
-			edited[field] = v
-	return edited or None
+			overlay[field] = v
+	for field in cleared:
+		overlay[field] = None
+	return overlay or None
+
+
+def action_value(action: str) -> str | None:
+	"""Radio state → review.yaml value: "pending" (no decision yet) serialises
+	as ``action: null``. Shared by the immediate write (_on_action_changed) and
+	the switch/save collect (_collect_current) so the two cannot drift."""
+	return action if action != "pending" else None
 
 
 def render_review_text(entries: list[dict]) -> str:
@@ -565,9 +580,6 @@ class _BookList:
 	ACTION_GLYPHS = {
 		"": ("·", "#888a85"),
 		"accept": ("✔", "#4e9a06"),
-		"reject": ("✘", "#cc0000"),
-		"swap": ("⇄", "#f57900"),
-		"edit": ("✎", "#3465a4"),
 		"delete": ("⌫", "#a40000"),
 		"keep": ("◆", "#06989a"),
 	}
@@ -875,7 +887,7 @@ class ReviewEditorApp:
 	"""The review.yaml editor window and all its behaviour."""
 
 	# Action radio values; "pending" serialises to ``action: null``.
-	ACTIONS = ["pending", "accept", "reject", "swap", "edit", "delete", "keep"]
+	ACTIONS = ["pending", "accept", "delete", "keep"]
 
 	# Cover-preview slot (px): every preview cell in a row occupies the SAME
 	# box whether the image is present, smaller, or missing, so the cells stay
@@ -951,7 +963,7 @@ class ReviewEditorApp:
 		# Action / notes state.
 		self._action_var = tk.StringVar(value="pending")
 		self._notes_var = tk.StringVar()
-		self._action_var.trace_add("write", lambda *_: self._mark_dirty())
+		self._action_var.trace_add("write", lambda *_: self._on_action_changed())
 		self._notes_var.trace_add("write", lambda *_: self._mark_dirty())
 
 		# Per-field widgets (checkbutton / RO label / copy btn / target Entry).
@@ -1050,7 +1062,7 @@ class ReviewEditorApp:
 		ttk.Label(filt, text=_("Action:")).pack(side="left")
 		self._action_combo = ttk.Combobox(
 			filt, textvariable=self._filter_action, state="readonly", width=9,
-			values=["all", "pending", "accept", "reject", "swap", "edit", "delete", "keep"],
+			values=["all", "pending", "accept", "delete", "keep"],
 		)
 		self._action_combo.pack(side="left", padx=(2, 8))
 		self._action_combo.bind("<<ComboboxSelected>>", lambda *_: self.refresh_list())
@@ -1169,7 +1181,7 @@ class ReviewEditorApp:
 			command=self._apply_ro_mode).pack(side="left")
 		fields = ttk.Frame(box)
 		fields.pack(fill="x", padx=6, pady=6)
-		fields.columnconfigure(3, weight=1)
+		fields.columnconfigure(4, weight=1)
 		for row, (role, label) in enumerate(FIELD_SPECS):
 			current = tk.StringVar(value="")
 			value = tk.StringVar(value="")
@@ -1189,15 +1201,30 @@ class ReviewEditorApp:
 			cap.grid(row=row, column=0, padx=(0, 4), pady=1, sticky="w")
 			lbl.grid(row=row, column=1, padx=2, pady=1, sticky="we")
 			copy_btn.grid(row=row, column=2, padx=2, pady=1)
-			entry.grid(row=row, column=3, padx=(2, 0), pady=1, sticky="we")
+			# ∅ = "delete this field" toggle (wrong proposal, correct value
+			# unknown → applied as empty). Sits right next to the ➡: both
+			# act on the proposal — ➡ fills it from the RO set shown on the
+			# left (Original / Proposed), ∅ empties it.
+			del_btn = ttk.Button(
+				fields, text="∅", width=2,
+				command=lambda r=role: self.toggle_field_delete(r),
+			)
+			del_btn.grid(row=row, column=3, padx=(2, 0), pady=1)
+			_Tooltip(del_btn, _(
+				"∅ mark: the field is applied as EMPTY (a proposal that is wrong "
+				"while the correct value is unknown). Click again to restore editing."))
+			entry.grid(row=row, column=4, padx=(2, 0), pady=1, sticky="we")
 			if role == "title":
-				# Compact swap icon (full label lives in the tooltip so it
+				# Compact swap icon (full label lives in the tooltip so the
 				# cannot overlap the title row, the prior bug).
 				swap_btn = ttk.Button(fields, text="⇄", width=3, command=self.swap_fields)
-				swap_btn.grid(row=row, column=4, padx=(4, 0), pady=1, sticky="w")
+				swap_btn.grid(row=row, column=5, padx=(4, 0), pady=1, sticky="w")
 				_Tooltip(swap_btn, _("Swap author and title  (Ctrl+W)"))
 			self._fields[role] = {
 				"current": current, "value": value, "entry": entry,
+				"cap": cap, "del_btn": del_btn,
+				"cap_fg": cap.cget("foreground"),
+				"cleared": False, "pre_delete": "",
 				"cur_disp": "", "prop_disp": "",  # both RO sets, mode picks one
 			}
 			if role in ("author", "series"):
@@ -1510,6 +1537,13 @@ class ReviewEditorApp:
 		"""
 		self.root.bind_class(_TAB_TRAP_TAG, "<Tab>", self._on_tab)
 		self.root.bind_class(_TAB_TRAP_TAG, "<Shift-Tab>", self._on_tab)
+		# X11 delivers a REAL Shift+Tab press as keysym ISO_Left_Tab (not Tab
+		# with a Shift modifier) — the same reason tk.tcl adds it to the
+		# <<PrevWindow>> virtual event. Without this binding the trap silently
+		# misses the key on Linux and focus falls back to Tk's default
+		# traversal, which follows widget CREATION order (➡ of the row, then
+		# the previous row's ∅) instead of jumping to the previous field.
+		self.root.bind_class(_TAB_TRAP_TAG, "<ISO_Left_Tab>", self._on_tab)
 		self._trap_subtree(self.root)
 
 	def _trap_subtree(self, parent) -> None:
@@ -1609,7 +1643,9 @@ class ReviewEditorApp:
 		ac = self._acs.get(w)
 		if ac is not None and ac.is_open:
 			ac.accept()
-		shift = bool(event.state & 0x1)
+		# Direction: the Shift modifier (Windows/macOS <Shift-Tab>) or the X11
+		# keysym itself (ISO_Left_Tab arrives as its own keysym).
+		shift = bool(event.state & 0x1) or (event.keysym or "") == "ISO_Left_Tab"
 		self._cycle_editable(forward=not shift)
 		return "break"
 
@@ -1618,10 +1654,10 @@ class ReviewEditorApp:
 		if k in _PASSTHROUGH:
 			return None  # keep native copy/paste/cut/undo/select-all
 		dispatch = {
-			"return": self.act_accept, "r": self.act_reject, "w": self.swap_fields,
-			"e": self.act_edit, "d": self.act_delete, "k": self.act_keep,
+			"return": self.act_accept, "d": self.act_delete, "k": self.act_keep,
 			"0": self.act_clear, "s": self.save, "q": self.quit_app,
-			"f": self.copy_current_to_focused, "n": self.cover_new,
+			"w": self.swap_fields, "f": self.copy_current_to_focused,
+			"n": self.cover_new,
 			"b": self.cover_restore_bak, "p": self.cover_keep, "m": self.cover_delete_checked,
 			"t": self.content_toggle_view, "g": self.content_recode_toggle,
 		}
@@ -1631,8 +1667,14 @@ class ReviewEditorApp:
 			return "break"
 		return None
 
+	def _active_field_entries(self) -> list:
+		"""Field Entries editable right now (∅-marked ones are disabled)."""
+		return [f["entry"] for f in self._fields.values() if not f["cleared"]]
+
 	def _cycle_editable(self, *, forward: bool) -> None:
-		ws = self._editable_widgets
+		# ∅-marked fields are disabled and cannot take focus — Tab must skip
+		# them, not get stuck trying to focus one.
+		ws = self._active_field_entries()
 		if not ws:
 			return
 		w = self.focus_get_safe()
@@ -1889,9 +1931,15 @@ class ReviewEditorApp:
 		if not (0 <= self._cur < len(self.entries)):
 			return
 		e = self.entries[self._cur]
-		action = self._action_var.get()
-		e["action"] = action if action != "pending" else None
-		e["edited"] = compose_edited({r: f["value"].get() for r, f in self._fields.items()})
+		e["action"] = action_value(self._action_var.get())
+		# The user's field values are merged INTO the proposal (there is no
+		# separate edited block): typed values overwrite, ∅ marks become
+		# nulls, untouched/empty fields keep the existing proposal key.
+		cleared = {r for r, f in self._fields.items() if f["cleared"]}
+		overlay = compose_overlay(
+			{r: f["value"].get() for r, f in self._fields.items()}, cleared)
+		if overlay:
+			e["proposed"] = {**(e.get("proposed") or {}), **overlay}
 		# A newly typed author/series becomes part of the vocabulary — the
 		# very next book the user edits must be able to complete against it.
 		for r in ("author", "series"):
@@ -1928,21 +1976,28 @@ class ReviewEditorApp:
 					conf=diag.get("confidence", "—"), extra=extra),
 			)
 			self._path_link.configure(text=path or _("(no path)"))
-			# Fields. Entries prefill edited > proposed > current; the RO column
+			# Fields. Entries prefill proposed > current; the RO column
 			# holds both sets and shows the one picked by the mode toggle.
+			# (User edits live in `proposed` itself — collect merges them.)
 			cur = e.get("current") or {}
 			prop = e.get("proposed") or {}
-			edited = e.get("edited") or {}
 			for role, f in self._fields.items():
 				f["cur_disp"] = self._display_value(cur.get(role))
 				f["prop_disp"] = self._display_value(prop.get(role)) or f["cur_disp"]
-				if role in edited:
-					target = edited[role]
-				elif role in prop:
+				if role in prop:
 					target = prop[role]
 				else:
 					target = cur.get(role)
-				f["value"].set(self._display_value(target))
+				# proposed[field]: null is the saved ∅ mark — restore the
+				# deleted STATE (disabled entry, nothing to restore), not the
+				# null as a displayed value.
+				is_cleared = role in prop and prop[role] is None
+				self._field_cleared_ui(f, is_cleared)
+				if is_cleared:
+					f["value"].set("")
+					f["pre_delete"] = ""
+				else:
+					f["value"].set(self._display_value(target))
 			self._apply_ro_mode()
 			# Action / notes.
 			self._action_var.set(e.get("action") or "pending")
@@ -2001,18 +2056,20 @@ class ReviewEditorApp:
 			pass
 
 	def _focus_first_field(self) -> None:
-		if self._field_entries:
-			self._field_entries[0].focus_set()
-			self._see_widget(self._field_entries[0])
+		ws = self._active_field_entries()
+		if ws:
+			ws[0].focus_set()
+			self._see_widget(ws[0])
 
 	def _focus_restore(self) -> None:
 		role = self._last_field_role
-		if role and role in self._fields:
-			w = self._fields[role]["entry"]
+		f = self._fields.get(role)
+		if f and not f["cleared"]:
+			w = f["entry"]
 			w.focus_set()
 			self._see_widget(w)
 		else:
-			self._focus_first_field()
+			self._focus_first_field()  # cleared/unknown role → first editable
 
 	def focus_search(self) -> None:
 		self._search_entry.focus_set()
@@ -2028,25 +2085,82 @@ class ReviewEditorApp:
 			self._dirty = True
 			self._set_status()
 
+	def _on_action_changed(self, *_args) -> None:
+		"""The action radio / shortcut changed: push it into the entry NOW.
+
+		The list row's glyph and the action/search filters read the ENTRY dict,
+		not the radio var — deferring the write to _collect_current (book
+		switch / save) left the row showing its old action until some unrelated
+		refresh_list happened to run, which read as "the accept never landed".
+		Writing immediately + refreshing keeps the list in sync; refresh_list
+		also re-applies the action filter, so a book decided under e.g. a
+		"pending" filter drops out of the view at once (exactly the case
+		_step's not-in-filter fallback anticipates).
+		"""
+		if self._loading:
+			return
+		self._mark_dirty()
+		if not (0 <= self._cur < len(self.entries)):
+			return
+		self.entries[self._cur]["action"] = action_value(self._action_var.get())
+		self.refresh_list()
+
 	def set_action(self, a: str) -> None:
 		if 0 <= self._cur < len(self.entries):
 			self._action_var.set(a)
 
 	def act_accept(self): self.set_action("accept")
-	def act_reject(self): self.set_action("reject")
-	def act_edit(self): self.set_action("edit")
 	def act_delete(self): self.set_action("delete")
 	def act_keep(self): self.set_action("keep")
 	def act_clear(self): self.set_action("pending")
 
 	def swap_fields(self) -> None:
-		"""Swap author <-> title target values, and mark the action as swap."""
+		"""Swap the author/title TARGET values (a C1 helper — the analyzer
+		also proposes the swap itself; this is the manual nudge for when its
+		proposal needs correcting)."""
+		# A ∅-marked field is disabled and its text discarded at collect —
+		# restore both sides first so the swap has text to work with.
+		for r in ("author", "title"):
+			f = self._fields[r]
+			if f["cleared"]:
+				self._field_cleared_ui(f, False)
+				f["value"].set(f.get("pre_delete") or "")
 		av = self._fields["author"]["value"]
 		tv = self._fields["title"]["value"]
 		a, t = av.get(), tv.get()
 		av.set(t)
 		tv.set(a)
-		self.set_action("swap")
+
+	def _field_cleared_ui(self, f: dict, cleared: bool) -> None:
+		"""Paint/strip the ∅ state on one field row (no value handling)."""
+		f["cleared"] = cleared
+		f["entry"].configure(state="disabled" if cleared else "normal")
+		f["cap"].configure(foreground="#a40000" if cleared else f["cap_fg"])
+		f["del_btn"].configure(text="↺" if cleared else "∅")
+
+	def toggle_field_delete(self, role: str) -> None:
+		"""∅ button: mark the field to be applied as EMPTY at apply time.
+
+		For a proposal that is wrong while the correct value is unknown —
+		keeping the wrong value would be worse than having none. The mark is
+		stored as ``proposed[field]: null`` (compose_overlay merges it) and
+		``bmf apply`` clears the stored value (_apply_fields). The disabled
+		empty Entry is the visible reminder; ↺ restores the pre-delete text.
+		"""
+		f = self._fields.get(role)
+		if f is None:
+			return
+		if not f["cleared"]:
+			f["pre_delete"] = f["value"].get()
+			f["value"].set("")
+			self._field_cleared_ui(f, True)
+			# A ∅ mark is a decision ("this value goes, correct one unknown")
+			# — an undecided book would be skipped by apply entirely.
+			if self._action_var.get() == "pending":
+				self.set_action("accept")
+		else:
+			self._field_cleared_ui(f, False)
+			f["value"].set(f.get("pre_delete") or "")
 
 	def _copy_current(self, role: str) -> None:
 		# Copies whatever the RO label currently DISPLAYS (mode-dependent).
@@ -2247,6 +2361,7 @@ class ReviewEditorApp:
 		else:
 			self._flash(_("cover download failed"))
 		self._refresh_covers()
+		self._reload_list_thumb()
 
 	def cover_restore_bak(self) -> None:
 		e = self.entries[self._cur]
@@ -2256,6 +2371,7 @@ class ReviewEditorApp:
 		else:
 			self._flash(_(".bak does not exist"))
 		self._refresh_covers()
+		self._reload_list_thumb()
 
 	def cover_keep(self) -> None:
 		self._flash(_("kept"))
@@ -2298,6 +2414,7 @@ class ReviewEditorApp:
 		self._flash(msg)
 		self._refresh_covers()
 		self._refresh_formats()  # the format radios / content changed too
+		self._reload_list_thumb()  # a deleted/replaced cover.jpg must leave the list too
 
 	# ------------------------------------------------------------------
 	# Content / formats
@@ -2510,6 +2627,35 @@ class ReviewEditorApp:
 
 		threading.Thread(target=work, daemon=True).start()
 
+	def _reload_list_thumb(self) -> None:
+		"""Reload the CURRENT book's list thumbnail after a cover change.
+
+		The row thumbs are loaded once at startup (_start_thumb_loader) and
+		then served from the _thumbs_pil/_thumbs_photo caches forever — a
+		deleted/replaced cover.jpg would keep painting the stale image in the
+		list (the detail pane refreshes, the list did not). Drop every cache
+		entry for the book (small thumb, PhotoImage, hover big thumb) and load
+		the fresh one off-thread — the same discipline as the startup loader —
+		then refresh_list repaints the row (missing file → no thumbnail).
+		"""
+		if not (0 <= self._cur < len(self.entries)):
+			return
+		e = self.entries[self._cur]
+		uuid = e.get("uuid")
+		cp, _ = cover_paths(self.library, e.get("path", ""))
+
+		def work():
+			pil = load_thumb(cp, 32, 48) if cp.is_file() else None
+			if self._alive:
+				def apply():
+					self._thumbs_pil[uuid] = pil
+					self._thumbs_photo.pop(uuid, None)
+					self._big_thumbs.pop(uuid, None)
+					self.refresh_list()
+				self._after(apply)
+
+		threading.Thread(target=work, daemon=True).start()
+
 	def _thumb_photo_for(self, uuid):
 		if uuid in self._thumbs_photo:
 			return self._thumbs_photo[uuid]
@@ -2591,9 +2737,8 @@ class ReviewEditorApp:
 			("Tab / Shift+Tab", _("next / previous edit field (fields only)")),
 			("Ctrl+A", _("select all in the field")),
 			("Ctrl+Enter", "accept"),
-			("Ctrl+R", "reject"),
-			("Ctrl+W", _("swap author↔title (+action swap)")),
-			("Ctrl+E", "edit"),
+			("Ctrl+W", _("swap the author↔title field values (C1 helper)")),
+			("∅ / ↺", _("field button: apply the field as EMPTY (wrong proposal, correct value unknown)")),
 			("Ctrl+D", "delete"),
 			("Ctrl+K", _("keep (applies and retains; analyze skips it)")),
 			("Ctrl+0", _("clear → pending")),

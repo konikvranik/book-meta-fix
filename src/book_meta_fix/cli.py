@@ -433,7 +433,7 @@ def _print_pipeline_summary(results, stats: dict | None = None, review_summary: 
 	t.add_row(_("Auto-fix (action: accept → `bmf apply`)"), str(acc), style="bold green")
 	t.add_row(_("Manual review (action: null)"), str(nul), style="yellow")
 	if oth:
-		t.add_row(_("Other action (swap/edit/delete)"), str(oth))
+		t.add_row(_("Other action (delete/keep)"), str(oth))
 	if skipped:
 		t.add_row(_("Skipped (already decided earlier)"), str(skipped), style="dim")
 	t.add_section()
@@ -582,7 +582,6 @@ def apply(review_file: Path | None, library: Path | None, do_apply: bool) -> Non
 	t.add_row(_("Mode"), "WRITE" if do_apply else "DRY-RUN")
 	t.add_row(_("Applied"), str(summary["applied"]))
 	t.add_row(_("Kept"), str(summary.get("kept", 0)))
-	t.add_row(_("Rejected"), str(summary["rejected"]))
 	t.add_row(_("Deleted"), str(summary.get("deleted", 0)))
 	if summary.get("snapshot"):
 		t.add_row(_("Deletion snapshot"), summary["snapshot"])

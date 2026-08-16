@@ -325,7 +325,7 @@ class TestPruning:
 		# Both applied → both removed; file is now header-only.
 		assert parse_review(review) == []
 
-	def test_pending_and_rejected_kept(self, tmp_path):
+	def test_pending_and_keep_kept(self, tmp_path):
 		library = tmp_path / "lib"
 		self._seed_book(library, 1)
 		self._seed_book(library, 2)
@@ -334,13 +334,14 @@ class TestPruning:
 		_write_review(review, [
 			{"id": 1, "uuid": "u1", "path": "a1/b1", "current": {"title": "A"}, "proposed": {}, "action": "accept"},
 			{"id": 2, "uuid": "u2", "path": "a2/b2", "current": {"title": "B"}, "proposed": {}, "action": None},
-			{"id": 3, "uuid": "u3", "path": "a3/b3", "current": {"title": "C"}, "proposed": {}, "action": "reject"},
+			{"id": 3, "uuid": "u3", "path": "a3/b3", "current": {"title": "C"}, "proposed": {}, "action": "keep"},
 		])
 		summary = apply_review(review, library, dry_run=False)
 		assert summary["applied"] == 1
+		assert summary["kept"] == 1
 		assert summary["pruned"] == 1
 		remaining = {r.id for r in parse_review(review)}
-		assert remaining == {2, 3}  # pending + rejected kept
+		assert remaining == {2, 3}  # pending + kept (not pruned)
 
 	def test_errored_entries_kept(self, tmp_path):
 		"""An accept whose folder is missing errors out → not pruned, so the
@@ -487,10 +488,11 @@ class TestApplyProgressCallback:
 		library = tmp_path / "lib"
 		_seed_library(library, [1])
 		review = tmp_path / "review.yaml"
-		_write_review(review, [{"id": 1, "path": "author_1/book_1", "action": "reject"}])
+		_write_review(review, [{"id": 1, "path": "author_1/book_1", "action": None}])
 		# Must not raise when progress_callback is omitted.
 		summary = apply_review(review, library, dry_run=True)
-		assert summary["rejected"] == 1
+		assert summary["applied"] == 0
+		assert "rejected" not in summary  # the counter is gone with the action
 
 
 class TestKeepAction:
@@ -625,17 +627,19 @@ class TestSeriesAndFieldCoverage:
 		# The enricher didn't know the index — the current one survives.
 		assert data["series"] == [{"name": "New Name", "index": "3"}]
 
-	def test_edit_applies_series_and_index(self, tmp_path):
+	def test_accept_applies_series_and_index(self, tmp_path):
 		_, data = self._apply(tmp_path, {
 			"id": 1, "uuid": "u1", "path": "a1/b1", "current": {"series": "Old"},
-			"edited": {"series": "Nadace", "series_index": "2"}, "action": "edit",
+			"proposed": {"series": "Nadace", "series_index": "2", "title": "Kniha"},
+			"action": "accept",
 		})
 		assert data["series"] == [{"name": "Nadace", "index": "2"}]
+		assert data["title"] == "Kniha"
 
-	def test_edit_empty_series_name_clears_series(self, tmp_path):
+	def test_accept_null_series_clears_series(self, tmp_path):
 		_, data = self._apply(tmp_path, {
 			"id": 1, "uuid": "u1", "path": "a1/b1", "current": {"series": "Old"},
-			"edited": {"series": ""}, "action": "edit",
+			"proposed": {"series": None}, "action": "accept",
 		})
 		assert data["series"] == []
 
@@ -658,3 +662,105 @@ class TestSeriesAndFieldCoverage:
 		assert data["genres"] == ["sci-fi", "fantasy"]
 		opf = (folder / "metadata.opf").read_text(encoding="utf-8")
 		assert opf.count("<dc:subject>") == 2
+
+
+class TestAcceptNullDeletesField:
+	"""``proposed[field]: null`` is the editor's ∅ mark (a proposal that is
+	wrong while the correct value is unknown): apply must CLEAR the stored
+	value — the writers serialize that as absence (json null / OPF omission)
+	— never keep the wrong value, never write the string "None"."""
+
+	def _apply_manifest(self, tmp_path, manifest: dict, entry: dict) -> tuple[Path, dict]:
+		import json as _json
+
+		library = tmp_path / "lib"
+		folder = library / "a1" / "b1"
+		folder.mkdir(parents=True)
+		(folder / "metadata.json").write_text(
+			_json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+		(folder / "b1.epub").write_text("x", encoding="utf-8")
+		review = tmp_path / "review.yaml"
+		_write_review(review, [entry])
+		summary = apply_review(review, library, dry_run=False)
+		assert summary["errors"] == []
+		data = _json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
+		return folder, data
+
+	def test_null_clears_scalar_fields(self, tmp_path):
+		manifest = {"title": "Kniha", "authors": ["Překladatel"], "isbn": "8012345678",
+			"publisher": "Špatný nakladatel", "publishedYear": "1999", "language": "cs"}
+		folder, data = self._apply_manifest(tmp_path, manifest, {
+			"id": 1, "uuid": "u1", "path": "a1/b1", "current": {},
+			"proposed": {"author": None, "isbn": None, "publisher": None,
+				"year": None, "language": None, "title": "Kniha"}, "action": "accept",
+		})
+		assert data["authors"] == []
+		assert data["isbn"] is None
+		assert data["publisher"] is None
+		assert data["publishedYear"] is None
+		assert data["language"] is None
+		assert data["title"] == "Kniha"  # not nulled → applied normally
+		opf = (folder / "metadata.opf").read_text(encoding="utf-8")
+		assert "<dc:publisher>" not in opf
+		assert "<dc:language>" not in opf
+
+	def test_null_clears_series_and_genres(self, tmp_path):
+		manifest = {"series": [{"name": "Špatná série", "index": "5"}],
+			"genres": ["špatný žánr"]}
+		_, data = self._apply_manifest(tmp_path, manifest, {
+			"id": 1, "uuid": "u1", "path": "a1/b1", "current": {},
+			"proposed": {"series": None, "genres": None}, "action": "accept",
+		})
+		assert data["series"] == []
+		assert data["genres"] == []
+
+	def test_null_series_index_keeps_name(self, tmp_path):
+		manifest = {"series": [{"name": "Série", "index": "42"}]}
+		_, data = self._apply_manifest(tmp_path, manifest, {
+			"id": 1, "uuid": "u1", "path": "a1/b1", "current": {},
+			"proposed": {"series_index": None}, "action": "accept",
+		})
+		assert data["series"] == [{"name": "Série", "index": ""}]
+
+	def test_null_mixed_with_values_in_one_proposal(self, tmp_path):
+		"""A repair usually deletes some fields and fills others at once."""
+		manifest = {"publisher": "Špatný", "series": [{"name": "Taky špatná", "index": "1"}]}
+		_, data = self._apply_manifest(tmp_path, manifest, {
+			"id": 1, "uuid": "u1", "path": "a1/b1", "current": {},
+			"proposed": {"publisher": None, "year": 2001}, "action": "accept",
+		})
+		assert data["publisher"] is None
+		assert data["publishedYear"] == "2001"
+		assert data["series"] == [{"name": "Taky špatná", "index": "1"}]  # untouched
+
+	def test_legacy_edited_block_migrated_and_applied(self, tmp_path):
+		"""An old review.yaml (edited block + action: edit) still applies:
+		parse merges edited over proposed, edit becomes accept — the merged
+		proposal is what lands on disk."""
+		manifest = {"publisher": "Původní"}
+		_, data = self._apply_manifest(tmp_path, manifest, {
+			"id": 1, "uuid": "u1", "path": "a1/b1", "current": {},
+			"proposed": {"language": "en"},
+			"edited": {"publisher": "Nadace", "year": 2001}, "action": "edit",
+		})
+		assert data["publisher"] == "Nadace"  # edited (user) wins over proposed
+		assert data["language"] == "en"       # proposed key not in edited survives
+		assert data["publishedYear"] == "2001"
+
+	def test_legacy_rejected_entry_becomes_pending_noop(self, tmp_path):
+		manifest = {"title": "Kniha"}
+		library = tmp_path / "lib"
+		folder = library / "a1" / "b1"
+		folder.mkdir(parents=True)
+		import json as _json
+		(folder / "metadata.json").write_text(_json.dumps(manifest), encoding="utf-8")
+		(folder / "b1.epub").write_text("x", encoding="utf-8")
+		review = tmp_path / "review.yaml"
+		_write_review(review, [{
+			"id": 1, "uuid": "u1", "path": "a1/b1", "current": {},
+			"proposed": {"title": "Jiné"}, "action": "reject",
+		}])
+		summary = apply_review(review, library, dry_run=False)
+		assert summary["applied"] == 0  # migrated to pending → skipped
+		data = _json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
+		assert data["title"] == "Kniha"

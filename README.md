@@ -48,7 +48,7 @@ bmf analyze --skip-enrich -o review.yaml --limit 1000
 #    the proposed block.
 bmf analyze --databazeknih -o review.yaml --limit 1000
 
-# 3. Edit review.yaml — set `action: accept|reject|swap|edit|keep` per entry
+# 3. Edit review.yaml — set `action: accept|delete|keep` per entry
 $EDITOR review.yaml
 #    (or use the keyboard-driven GUI: `bmf gui --review review.yaml`)
 
@@ -169,9 +169,8 @@ sits left, the cover thumbnail flush against the right edge of the row
 fields): `PgUp`/`PgDn` move between books, `Tab` cycles only the editable
 fields (never buttons or read-only labels), `Ctrl+A` selects all in a field,
 focus stays on the same field when you change book. Actions: `Ctrl+Enter`
-accept, `Ctrl+R` reject, `Ctrl+E` edit, `Ctrl+D` delete, `Ctrl+K` keep,
-`Ctrl+G` recode content, `Ctrl+S` save. Press `F1` for the full shortcut
-overlay.
+accept, `Ctrl+D` delete, `Ctrl+K` keep, `Ctrl+G` recode content, `Ctrl+S`
+save. Press `F1` for the full shortcut overlay.
 
 **The `keep` action** applies the proposal like `accept`, but the entry is
 **retained** in `review.yaml` (not pruned) and `bmf analyze` **skips** the
@@ -484,15 +483,18 @@ catalog with real examples. Summary:
     year: 1920
     source: embedded+openlibrary
   action: accept          # ← you fill this in
-  # edited:               # uncomment for action: edit
-  #   title: R.U.R. (Rossum's Universal Robots)
 ```
 
 **Actions:**
-- `accept` — apply `proposed` as-is
-- `reject` — leave unchanged
-- `swap` — swap author ↔ title (for C1 cases)
-- `edit` — apply fields under `edited:` (these override everything)
+- `accept` — apply `proposed` (edit the values to override the analyzer; a
+  `null` value deletes that field at apply time)
+- `delete` — remove the book folder (C6 ~$ Word lock-file; tar.gz-backed)
+- `keep` — like `accept`, but the entry is retained (not pruned); skipped on
+  the next analyze
+
+Old review.yaml files with an `edited:` block or `action: edit|reject|swap`
+are migrated on load (`edited` merges over `proposed`, `edit` becomes
+`accept`, `reject`/`swap` reset to pending).
 
 ## How verification works
 

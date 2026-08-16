@@ -42,7 +42,7 @@ After detection + verification each book lands in one `Verdict`
 | `VERIFIED` | OK **and** confirmed by book content | eligible for `organize` |
 | `AUTO_FIXABLE` | high-confidence fix, safe to apply automatically | `review.yaml` with `action: accept` pre-set, or auto-applied (C5 delete, C6 lock-file, MISSING_ISBN/YEAR/COVER enrich) |
 | `NEEDS_REVIEW` | uncertain — a human must decide | `review.yaml`, you set the action |
-| `UNFIXABLE` | cannot be resolved without manual input | `review.yaml` (reject or hand-edit) |
+| `UNFIXABLE` | cannot be resolved without manual input | `review.yaml` (fix the `proposed` values by hand) |
 
 ## Corruption categories (C1–C11)
 
@@ -146,24 +146,21 @@ can `tail -f review.yaml` and watch proposals arrive.
   current:                  # what's in the DB now
     author: Karel Capek
     title: _apek_Karel-RURe_n_
-  proposed:                 # our suggested fix
+  proposed:                 # our suggested fix — edit to override, null deletes
     title: R.U.R.
     author: Karel Čapek
     isbn: '9788072451648'
     source: embedded+openlibrary
   action: accept            # ← you fill this in
-  # edited:                 # uncomment for action: edit
-  #   title: R.U.R. (Rossum's Universal Robots)
 ```
 
 **Actions** (per entry):
 
 | Action | Effect |
 |---|---|
-| `accept` | apply `proposed` as-is |
-| `reject` | leave unchanged |
-| `swap` | swap author ↔ title (for C1 cases) |
-| `edit` | apply only the fields under `edited:` (they override everything) |
+| `accept` | apply `proposed` (edit the values to override the analyzer; a `null` value deletes that field) |
+| `delete` | remove the book folder (C6 ~$ Word lock-file; tar.gz-backed) |
+| `keep` | like `accept`, but the entry is retained (not pruned); skipped on the next analyze |
 
 On start, the existing `review.yaml` is moved to `review.yaml.bak` (prior
 decisions preserved); on a clean finish the `.bak` is deleted; on interruption

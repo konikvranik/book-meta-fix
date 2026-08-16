@@ -106,7 +106,8 @@ class TestParseLegacySingleList:
 		parsed = parse_review(path)
 		assert len(parsed) == 2
 		assert parsed[0].id == 1
-		assert parsed[1].action == "reject"
+		# Legacy `reject` no longer exists — migrated to pending on load.
+		assert parsed[1].action is None
 
 	def test_empty_file_returns_empty_list(self, tmp_path):
 		path = tmp_path / "empty.yaml"
@@ -276,5 +277,67 @@ class TestHeaderDocumentsActions:
 		h = _header(3)
 		assert "keep" in h
 		# All canonical actions are documented.
-		for a in ("accept", "reject", "swap", "edit", "delete", "keep"):
+		for a in ("accept", "delete", "keep"):
 			assert a in h
+		# The header documents that `proposed` is the edit surface.
+		assert "proposed" in h
+
+
+class TestLegacyMigration:
+	"""Old review.yaml shapes (edited block, reject/swap/edit actions) are
+	migrated on load so apply/GUI only ever see the current format."""
+
+	def _write(self, tmp_path, body: str):
+		path = tmp_path / "review.yaml"
+		path.write_text(body, encoding="utf-8")
+		return path
+
+	def test_edited_merged_into_proposed(self, tmp_path):
+		path = self._write(tmp_path,
+			"---\nid: 1\nuuid: u1\npath: a\ncurrent: {title: A}\n"
+			"proposed: {series: Wrong, isbn: \"801\"}\n"
+			"edited: {series: Right, publisher: null}\naction: edit\n")
+		items = parse_review(path)
+		e = items[0]
+		assert e.action == "accept"  # edit → accept
+		assert e.proposed == {"series": "Right", "isbn": "801", "publisher": None}
+		assert not hasattr(e, "edited")
+
+	def test_reject_and_swap_reset_to_pending(self, tmp_path):
+		path = self._write(tmp_path,
+			"---\nid: 1\nuuid: u1\ncurrent: {title: A}\naction: swap\n"
+			"---\nid: 2\nuuid: u2\ncurrent: {title: B}\naction: reject\n")
+		items = parse_review(path)
+		assert [i.action for i in items] == [None, None]
+
+	def test_current_actions_pass_through_untouched(self, tmp_path):
+		path = self._write(tmp_path,
+			"---\nid: 1\nuuid: u1\ncurrent: {title: A}\naction: keep\n"
+			"---\nid: 2\nuuid: u2\ncurrent: {title: B}\naction: delete\n"
+			"---\nid: 3\nuuid: u3\ncurrent: {title: C}\naction: null\n")
+		assert [i.action for i in parse_review(path)] == ["keep", "delete", None]
+
+
+class TestC1SwapProposal:
+	"""C1 (author/title swapped): the analyzer proposes the swap itself when
+	nothing better was found — `swap` is a proposal now, not an action."""
+
+	def test_c1_without_other_sources_proposes_swap(self):
+		meta = _meta(1, title="Jan Drda", author="NŘm Barik da")
+		proposed = _build_proposed(meta, None, None, _diag("C1"))
+		assert proposed["title"] == "NŘm Barik da"  # current author
+		assert proposed["author"] == "Jan Drda"     # current title
+		assert "swap" in proposed["source"]
+
+	def test_better_source_beats_the_swap(self):
+		# A trusted enrichment (databazeknih) wins for the fields it knows;
+		# the swap only fills the gaps.
+		meta = _meta(1, title="Jan Drda", author="NŘm Barik da")
+		enriched = EnrichedMeta(title="NŘm barikáda", source="databazeknih")
+		proposed = _build_proposed(meta, None, enriched, _diag("C1"))
+		assert proposed["title"] == "NŘm barikáda"  # enrichment, not the swap
+		assert proposed["author"] == "Jan Drda"     # swap filled the gap
+
+	def test_non_c1_never_proposes_swap(self):
+		meta = _meta(1, title="Jan Drda", author="NŘm Barik da")
+		assert _build_proposed(meta, None, None, _diag("C2")) is None

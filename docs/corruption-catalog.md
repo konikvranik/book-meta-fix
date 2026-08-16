@@ -15,8 +15,10 @@ Often a series where the source listed `<author>=series, <title>=contributor`.
 | 111 | `Schindler v Seznam` | `Thomas Keneally` | Keneally wrote Schindler's Ark |
 | 4357 | `uzivatelska prirucka 31D30588` | `Peugeot 406 - uzivatelská příručka` | swap |
 
-**Verdict:** NEEDS_REVIEW (LLM or manual swap)
-**Fix action:** `swap` (author ↔ title) in review.yaml
+**Verdict:** NEEDS_REVIEW (LLM or manual fix)
+**Fix action:** `accept` — the analyzer proposes the swap itself into
+`proposed` (title ← author, author ← title) when no better source is found;
+adjust the values before accepting if needed
 
 ## C2 — Filename used as title (diacritics stripped)
 
@@ -32,7 +34,7 @@ Diacritics replaced with `_`. **Most common category (~47% of library).**
 | 2497 | `Cas prilivu` | epub | should be "Čas přílivu" |
 
 **Verdict:** NEEDS_REVIEW (need content/online to know the correct title)
-**Fix action:** `accept` (if proposed has the right title) or `edit`
+**Fix action:** `accept` (edit the `proposed` values if the proposal needs a fix)
 
 ## C3 — Series/library/publisher used as author
 

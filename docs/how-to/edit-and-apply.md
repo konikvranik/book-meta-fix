@@ -1,22 +1,32 @@
 # Edit + apply
 
 ```bash
-$EDITOR review.yaml               # set action: accept|reject|swap|edit|keep per entry
+$EDITOR review.yaml               # set action: accept|delete|keep per entry
 bmf apply review.yaml             # dry-run preview
 bmf apply --apply review.yaml     # actually write metadata.json + metadata.opf
 ```
 
-Actions: `accept` (apply proposed), `reject` (leave), `swap` (author↔title for
-C1), `edit` (apply only the fields under `edited:`), `keep` (apply proposed
-but retain the entry — `analyze` skips it next time; set back to `pending` to
-re-decide).
+Actions: `accept` (apply `proposed`), `delete` (remove the book folder,
+tar.gz-backed), `keep` (apply `proposed` but retain the entry — `analyze`
+skips it next time; set back to `pending` to re-decide).
+
+`proposed` is the edit surface: adjust the values directly to override the
+analyzer, and set a value to `null` to DELETE that field at apply time (a
+wrong value with the correct one unknown). A decided entry's `proposed`
+(including your adjustments) is carried verbatim through the next `analyze`;
+undecided entries get a fresh proposal.
 
 Every fetched field reaches the book: title/author(s), ISBN, year, publisher,
 language, series + series index (stored as the ABS `[{"name", "index"}]` list,
 mirrored to `metadata.opf` as `calibre:series`/`calibre:series_index`), genres
 (and tags — both as OPF `<dc:subject>`), and the description/annotation from
 databazeknih / Google Books / OpenLibrary. A proposal that carries only half
-of the series keeps the current other half; `action: edit` with an emptied
-series name clears it.
+of the series keeps the current other half; a `null`/emptied series name
+clears it. For C1 (author/title swapped) the analyzer proposes the swap
+itself — accept it or adjust the values.
+
+Old review.yaml files (an `edited:` block, `action: edit|reject|swap`) are
+migrated on load: `edited` is merged over `proposed`, `edit` becomes
+`accept`, and `reject`/`swap` reset to pending.
 
 Instead of hand-editing the YAML you can use the [GUI editor](gui.md).

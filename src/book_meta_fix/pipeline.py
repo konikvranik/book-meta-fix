@@ -31,7 +31,7 @@ from .enrichers import EnrichedMeta, Enricher
 from .extractors import ExtractedMeta
 from .library import Cache, scan_library
 from .models import BookMeta, Confidence, Diagnosis, Verdict
-from .review import _COVER_CATEGORIES, build_review, parse_review, prune_review
+from .review import _COVER_CATEGORIES, _migrate_entry, build_review, parse_review, prune_review
 from .verifier import (
 	IdentityResult,
 	acquire_identity,
@@ -785,7 +785,7 @@ def generate_review(
 	output: Path,
 ) -> int:
 	"""Write a review.yaml from pipeline results. Incremental: preserves
-	existing user edits (action, edited, notes) and prior `proposed` values
+	existing user decisions (action, notes) and prior `proposed` values
 	when the new run didn't produce a better proposal.
 
 	Returns the count of entries written.
@@ -795,6 +795,8 @@ def generate_review(
 	if output.is_file():
 		try:
 			prev = _yaml_safe_load(output)
+			for entry in prev or []:
+				_migrate_entry(entry)  # legacy edited/actions → current shape
 			for entry in prev or []:
 				eid = entry.get("id")
 				if eid is not None:
@@ -863,7 +865,7 @@ def _entry_from_prior(prior: dict, meta: BookMeta, diag, extracted) -> tuple:  #
 	"""Wrap a preserved prior entry as a 5-element tuple that build_review
 	can re-emit. The enriched value carries the prior proposed, and the 5th
 	element carries the full prior dict (so build_review can preserve action/
-	edited/notes).
+	notes).
 	"""
 	proposed = prior.get("proposed")
 	enriched = _proposed_to_enriched(proposed) if proposed else None
@@ -917,7 +919,7 @@ def _yaml_safe_load(path: Path):
 def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cache: Cache | None = None, progress_callback=None) -> dict:
 	"""Parse a review.yaml and apply approved changes to the library.
 
-	Returns a summary dict: {applied, rejected, deleted, pruned, remaining,
+	Returns a summary dict: {applied, deleted, pruned, remaining,
 	snapshot, errors, dry_run}.
 
 	``action: delete`` removes the whole book folder. Because that is not
@@ -926,16 +928,16 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cach
 	``deletion_snapshot_<stamp>.tar.gz`` (in dry-run mode nothing is archived
 	and nothing is removed).
 
-	After a successful WRITE run, successfully-applied entries (accept/swap/
-	edit/delete without error) are pruned from review.yaml so the file reflects
-	only remaining work; pending (action: null), rejected, and errored entries
+	After a successful WRITE run, successfully-applied entries (accept/delete
+	without error) are pruned from review.yaml so the file reflects
+	only remaining work; pending (action: null) and errored entries
 	are kept. ``action: keep`` is the exception: it applies the proposal like
 	accept but is NOT pruned — the entry is retained and skipped on the next
 	analyze. Dry-run never prunes.
 	"""
 
 	items = parse_review(review_path)
-	summary = {"applied": 0, "rejected": 0, "deleted": 0, "kept": 0, "pruned": 0, "remaining": None, "snapshot": None, "errors": [], "dry_run": dry_run}
+	summary = {"applied": 0, "deleted": 0, "kept": 0, "pruned": 0, "remaining": None, "snapshot": None, "errors": [], "dry_run": dry_run}
 	succeeded_uuids: set = set()  # uuids of entries committed this run → pruned
 	# delete collects (folder, uuid) so removal success can be tracked per entry.
 	deletions: list[tuple[Path, str | None]] = []
@@ -950,10 +952,7 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cach
 		if item.action is None:
 			# Not yet reviewed — skip silently
 			continue
-		if item.action == "reject":
-			summary["rejected"] += 1
-			continue
-		if item.action not in ("accept", "swap", "edit", "delete", "keep"):
+		if item.action not in ("accept", "delete", "keep"):
 			summary["errors"].append(f"id={item.id}: unknown action {item.action!r}")
 			continue
 
@@ -987,7 +986,7 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cach
 			if result.get("error"):
 				summary["errors"].append(f"id={item.id}: {result['error']}")
 			else:
-				# ``keep`` writes metadata like accept/swap/edit but is NOT pruned
+				# ``keep`` writes metadata like accept but is NOT pruned
 				# from review.yaml — the entry is retained and skipped on the next
 				# analyze (see run_pipeline's skip_uuids). Count it separately so
 				# the summary distinguishes "written and done" from "written and
@@ -1069,6 +1068,50 @@ def _snapshot_deletions(folders: list[Path], library: Path) -> Path | None:
 		return None
 
 
+def _apply_fields(meta: BookMeta, fields: dict) -> None:  # noqa: ANN001
+	"""Apply a ``proposed`` block onto *meta* (in place).
+
+	A None value is the "delete this field" mark (the analyzer's or the
+	user's ∅ in the editor — the value is wrong, the correct one unknown):
+	the stored value is CLEARED — the writers serialize that as absence
+	(json null / OPF omission). Unknown keys (cover_url, source, reasoning,
+	...) are ignored here.
+	"""
+	if "title" in fields:
+		meta.title = fields["title"] or ""
+	if "author" in fields:
+		v = fields["author"]
+		if v:
+			meta.authors = [v] + (meta.authors[1:] if len(meta.authors) > 1 else [])
+		else:
+			meta.authors = []
+	if "authors" in fields:
+		meta.authors = fields["authors"] or []
+	if "isbn" in fields:
+		meta.isbn = fields["isbn"] or None
+	if "year" in fields:
+		meta.year = fields["year"] or None
+	if "publisher" in fields:
+		meta.publisher = fields["publisher"] or None
+	if "language" in fields:
+		meta.language = fields["language"] or None
+	if "genres" in fields:
+		g = fields["genres"]
+		meta.genres = [] if not g else (g if isinstance(g, list) else [g])
+	if "description" in fields:
+		# Empty string clears the description (the GUI sends "" when
+		# the user empties a ticked field).
+		meta.description = fields["description"] or None
+	if "series" in fields or "series_index" in fields:
+		cur_name, cur_idx = meta.series_pair()
+		name = str(fields.get("series", cur_name) or "")
+		idx = fields.get("series_index", cur_idx)
+		# An explicitly emptied (null) name clears the series entirely; a
+		# missing half keeps the current one (an enricher that doesn't know
+		# the index must not wipe it).
+		meta.series = [{"name": name, "index": str(idx) if idx else ""}] if name else []
+
+
 def _apply_action(meta: BookMeta, item) -> None:  # noqa: ANN001
 	"""Mutate *meta* in place according to the review item's action.
 
@@ -1077,36 +1120,14 @@ def _apply_action(meta: BookMeta, item) -> None:  # noqa: ANN001
 	try/except and reports download failures via the summary dict.
 	"""
 	if item.action in ("accept", "keep"):
-		# Apply proposed fields. *proposed* may be empty — e.g. an identity-
+		# Apply the proposal. *proposed* may be empty — e.g. an identity-
 		# confirmed MISSING_COVER auto-accept proposes nothing — so the field
 		# application is optional but the cover recovery below still runs.
+		# The user's adjustments (the editor writes them into `proposed`
+		# directly; null = field delete) apply through the same path — there
+		# is no separate edit channel anymore.
 		if item.proposed:
-			if "title" in item.proposed:
-				meta.title = item.proposed["title"]
-			if "author" in item.proposed:
-				meta.authors = [item.proposed["author"]] + (meta.authors[1:] if len(meta.authors) > 1 else [])
-			if "isbn" in item.proposed:
-				meta.isbn = item.proposed["isbn"]
-			if "year" in item.proposed:
-				meta.year = item.proposed["year"]
-			if "publisher" in item.proposed:
-				meta.publisher = item.proposed["publisher"]
-			if "language" in item.proposed:
-				meta.language = item.proposed["language"]
-			if "genres" in item.proposed:
-				genres = item.proposed["genres"]
-				meta.genres = genres if isinstance(genres, list) else [genres]
-			if "description" in item.proposed:
-				meta.description = item.proposed["description"]
-			# Series arrives as flat strings; BookMeta stores the ABS shape
-			# [{"name", "index"}]. A proposal may carry either half — keep the
-			# current value for the missing one (an enricher that doesn't know
-			# the index must not wipe it).
-			if "series" in item.proposed or "series_index" in item.proposed:
-				cur_name, cur_idx = meta.series_pair()
-				name = item.proposed.get("series", cur_name)
-				idx = item.proposed.get("series_index", cur_idx)
-				meta.series = [{"name": name, "index": str(idx) if idx is not None else ""}]
+			_apply_fields(meta, item.proposed)
 		# Cover recovery: runs whenever the book has a cover diagnosis (C11
 		# placeholder / MISSING_COVER) among ANY of its diagnoses — not just the
 		# primary — and regardless of whether *proposed* is empty. Try the
@@ -1137,37 +1158,3 @@ def _apply_action(meta: BookMeta, item) -> None:  # noqa: ANN001
 					ok = recover_cover_from_book(meta.primary_file, cover_path)
 				if not ok:
 					log.warning("cover recovery failed for id=%s", item.id)
-	elif item.action == "swap":
-		# Swap author <-> title
-		old_title = meta.title
-		meta.title = meta.authors[0] if meta.authors else ""
-		if old_title:
-			meta.authors = [old_title] + (meta.authors[1:] if len(meta.authors) > 1 else [])
-	elif item.action == "edit" and item.edited:
-		# Apply human-edited fields (these override everything)
-		if "title" in item.edited:
-			meta.title = item.edited["title"]
-		if "author" in item.edited:
-			meta.authors = [item.edited["author"]] + (meta.authors[1:] if len(meta.authors) > 1 else [])
-		if "authors" in item.edited:
-			meta.authors = item.edited["authors"]
-		if "isbn" in item.edited:
-			meta.isbn = item.edited["isbn"]
-		if "year" in item.edited:
-			meta.year = item.edited["year"]
-		if "publisher" in item.edited:
-			meta.publisher = item.edited["publisher"]
-		if "language" in item.edited:
-			meta.language = item.edited["language"]
-		if "genres" in item.edited:
-			meta.genres = item.edited["genres"] if isinstance(item.edited["genres"], list) else [item.edited["genres"]]
-		if "description" in item.edited:
-			# Empty string clears the description (the GUI sends "" when
-			# the user empties a ticked field).
-			meta.description = item.edited["description"] or None
-		if "series" in item.edited or "series_index" in item.edited:
-			cur_name, cur_idx = meta.series_pair()
-			name = str(item.edited.get("series", cur_name) or "")
-			idx = item.edited.get("series_index", cur_idx)
-			# An explicitly emptied name clears the series entirely.
-			meta.series = [{"name": name, "index": str(idx) if idx else ""}] if name else []

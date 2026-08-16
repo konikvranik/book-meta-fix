@@ -167,6 +167,20 @@ src/book_meta_fix/
   matched by the book's **uuid** (NOT calibre_id) so a decision survives an
   `organize` folder move. `bmf apply` reads both the multi-doc and legacy
   single-list forms.
+- **The action model is `current` + `proposed` only** (`accept`/`delete`/
+  `keep`, plus `null` = pending). `proposed` is the single edit surface:
+  the GUI (and a human in a text editor) adjust the proposal's values
+  directly — `proposed[field]: null` DELETES the field at apply time
+  (`_apply_fields` in `pipeline.py`; writers serialize that as json null /
+  OPF omission). There is NO `edited` block and no `reject`/`swap`/`edit`
+  action anymore; legacy files are migrated on load (`review._migrate_entry`:
+  `edited` merges over `proposed`, `edit`→`accept`, `reject`/`swap`→pending)
+  in `_load_raw_entries`, `_load_prior` and `generate_review`. C1 swaps are
+  proposed by the analyzer itself (`_build_proposed`'s C1 fallback), and the
+  GUI's `Ctrl+W` merely swaps the two field values. A DECIDED entry's
+  `proposed` (user adjustments incl. nulls) is carried verbatim through the
+  next `analyze` (review_writer's prior path / `_entry_dict`); undecided
+  entries get a fresh proposal.
 - **The `keep` action is accept-but-retain.** `action: keep` applies the
   proposed fields + cover exactly like `accept` (reuses the `_apply_action`
   accept branch) but is **NOT pruned** from `review.yaml` after a WRITE apply
