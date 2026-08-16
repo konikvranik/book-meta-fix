@@ -1,5 +1,7 @@
 # Debugging a run
 
+**English** | [Čeština](../cs/how-to/debugging.md)
+
 - **Invalid JSON salvaged** — if you see `LLM JSON salvaged via json-repair
   (unescaped quotes/control chars fixed)`, the model returned slightly broken
   JSON and it was recovered. No action needed; this replaces the old 3-retry

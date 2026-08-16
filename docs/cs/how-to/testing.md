@@ -1,6 +1,6 @@
-# Running the tests
+[English](../../how-to/testing.md) | **Čeština**
 
-**English** | [Čeština](../cs/how-to/testing.md)
+# Spuštění testů
 
 ```bash
 make test                         # full suite
@@ -9,5 +9,5 @@ make test                         # full suite
 make lint                         # ruff check src tests
 ```
 
-Tests are per-module (`tests/test_<module>.py`) and use no network — online
-sources, the LLM, and HTTP are all stubbed/mocked.
+Testy jsou per modul (`tests/test_<module>.py`) a nepoužívají síť — online
+zdroje, LLM i HTTP jsou stubované/mockované.

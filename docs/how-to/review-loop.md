@@ -1,5 +1,7 @@
 # Generate a review file (the main loop)
 
+**English** | [Čeština](../cs/how-to/review-loop.md)
+
 ```bash
 # Offline, no network, no LLM — the safe default
 bmf analyze --skip-enrich -o review.yaml --limit 1000

@@ -1,5 +1,7 @@
 # Architecture
 
+**English** | [Čeština](cs/architecture.md)
+
 This document describes how `book-meta-fix` (`bmf`) is structured internally:
 the module map, the data flow for a single book, the concurrency model, and
 the key design decisions. For *what* the corruption categories mean see

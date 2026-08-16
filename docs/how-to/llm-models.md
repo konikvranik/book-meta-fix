@@ -1,5 +1,7 @@
 # Choosing an LLM model
 
+**English** | [Čeština](../cs/how-to/llm-models.md)
+
 Five settings were measured on hard CZ/SK books (`scripts/llm_experiment.py`):
 
 | Variant | ok% | out tok | reasoning | Cost |

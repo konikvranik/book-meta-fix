@@ -1,5 +1,7 @@
 # Running with the LLM fallback
 
+**English** | [Čeština](../cs/how-to/llm.md)
+
 ```bash
 bmf analyze --llm -o review.yaml                       # default loop: Flash→final
 bmf analyze --llm --llm-model glm-4.6                  # cheaper, weaker CZ

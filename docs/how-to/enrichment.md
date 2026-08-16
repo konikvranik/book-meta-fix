@@ -1,5 +1,7 @@
 # Enabling CZ/SK enrichment
 
+**English** | [Čeština](../cs/how-to/enrichment.md)
+
 ```bash
 bmf analyze --databazeknih -o review.yaml            # per-run flag
 # or persist it:

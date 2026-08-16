@@ -1,6 +1,6 @@
-# First look (no writes)
+[English](../../how-to/first-look.md) | **Čeština**
 
-**English** | [Čeština](../cs/how-to/first-look.md)
+# První pohled (bez zápisů)
 
 ```bash
 bmf report --limit 500            # detector breakdown C1–C11 + samples (statistics only)

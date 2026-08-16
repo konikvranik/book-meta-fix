@@ -1,6 +1,6 @@
-# Generate missing EPUBs
+[English](../../how-to/epubgen.md) | **Čeština**
 
-**English** | [Čeština](../cs/how-to/epubgen.md)
+# Generování chybějících EPUB
 
 ```bash
 bmf epubgen                        # dry-run

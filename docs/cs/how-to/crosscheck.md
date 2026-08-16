@@ -1,6 +1,6 @@
-# Cross-check multi-format folders
+[English](../../how-to/crosscheck.md) | **Čeština**
 
-**English** | [Čeština](../cs/how-to/crosscheck.md)
+# Křížová kontrola složek s více formáty
 
 ```bash
 bmf crosscheck                     # dry-run: find rogue format files (a different book)

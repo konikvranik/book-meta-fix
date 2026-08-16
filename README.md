@@ -1,5 +1,7 @@
 # book-meta-fix (bmf)
 
+**English** | [Čeština](README.cs.md)
+
 Detect and fix metadata of ebooks in a Calibre-style library.
 
 Designed for a ~5,000-book library where Calibre mis-classified many records

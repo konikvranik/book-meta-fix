@@ -1,5 +1,7 @@
 # Edit + apply
 
+**English** | [Čeština](../cs/how-to/edit-and-apply.md)
+
 ```bash
 $EDITOR review.yaml               # set action: accept|delete|keep per entry
 bmf apply review.yaml             # dry-run preview

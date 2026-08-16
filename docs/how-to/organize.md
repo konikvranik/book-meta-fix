@@ -1,5 +1,7 @@
 # Organize the library
 
+**English** | [Čeština](../cs/how-to/organize.md)
+
 ```bash
 bmf organize                       # dry-run: OK→clean path, broken→needfix/
 bmf organize --apply

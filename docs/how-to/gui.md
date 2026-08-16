@@ -1,5 +1,7 @@
 # Edit via the GUI (optional)
 
+**English** | [Čeština](../cs/how-to/gui.md)
+
 Instead of hand-editing the YAML, use the keyboard-driven editor:
 
 ```bash

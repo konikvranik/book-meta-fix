@@ -7,6 +7,12 @@ non-obvious gotchas that matter when changing this code. Companion docs:
 [docs/how-to/index.md](docs/how-to/index.md),
 [README.md](README.md).
 
+**Docs are bilingual**: English originals (`README.md`, `docs/`) have
+Czech mirrors (`README.cs.md`, `docs/cs/` — same tree structure). When
+you change a documented page, update BOTH language versions (including
+in-page/TOC anchors, which differ once headings are translated) and keep
+the `**English** | [Čeština](…)` switcher lines intact.
+
 ## What this project is
 
 `book-meta-fix` (`bmf`) detects and repairs corrupt metadata in a

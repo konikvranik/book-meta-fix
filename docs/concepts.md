@@ -1,5 +1,7 @@
 # Concepts
 
+**English** | [Čeština](cs/concepts.md)
+
 The mental model behind `book-meta-fix`. This complements
 [architecture.md](architecture.md) (how it's built) and
 [how-to/index.md](how-to/index.md) (how to run it). The per-category corruption reference

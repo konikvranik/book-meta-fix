@@ -1,5 +1,7 @@
 # Corruption Catalog (C1–C10)
 
+**English** | [Čeština](cs/corruption-catalog.md)
+
 Empirically derived from a ~5,440-book CZ/SK Calibre library. Each category
 has real examples (calibre_id, author_folder, title) found during the initial
 study.

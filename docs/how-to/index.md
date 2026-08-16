@@ -1,5 +1,7 @@
 # How-to
 
+**English** | [Čeština](../cs/how-to/index.md)
+
 Practical recipes. For *why* things work see [concepts.md](../concepts.md); for
 the module/data-flow detail see [architecture.md](../architecture.md); for the
 full command reference see the [README](../../README.md).

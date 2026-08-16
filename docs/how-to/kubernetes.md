@@ -1,5 +1,7 @@
 # Running bmf in a Kubernetes cluster
 
+**English** | [Čeština](../cs/how-to/kubernetes.md)
+
 The multi-arch Docker image (see the `Dockerfile` and the
 `docker` GitHub Actions workflow — `linux/amd64`, `linux/arm64`,
 `linux/arm/v7`) lets you run the batch commands on whatever cluster nodes

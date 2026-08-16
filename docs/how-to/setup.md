@@ -1,5 +1,7 @@
 # Setup
 
+**English** | [Čeština](../cs/how-to/setup.md)
+
 ```bash
 make dev-install                  # create .venv, install package + dev + pdf + llm extras
 cp .env.example .env              # then edit .env: set BMF_LIBRARY, ZAI_API_KEY, ...
