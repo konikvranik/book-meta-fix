@@ -514,7 +514,9 @@ potvrzená proti obsahu knihy A zároveň online zdrojem (databazeknih/legie/
 OpenLibrary/Google Books — odpověď LLM se nepočítá): taková kniha se opraví
 A zavře jedním apply, i když zůstávají benigní chybějící pole (ISBN/rok/
 obálka, které žádný zdroj nemá). Zbylý problém NEEDS_REVIEW předvyplnění
-blokuje, aby známý defekt zůstal viditelný. Odvolání: `bmf analyze --recheck-ok`.
+blokuje, aby známý defekt zůstal viditelný — chybějící obálka je benigní a
+může zůstat, podezřelá generovaná obálka Calibre (C11) nikoli. Odvolání:
+`bmf analyze --recheck-ok`.
 
 Staré soubory review.yaml s blokem `edited:` nebo `action: edit|reject|swap`
 se při načtení migrují (`edited` se sloučí přes `proposed`, `edit` se stane

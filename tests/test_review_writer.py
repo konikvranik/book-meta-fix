@@ -739,3 +739,41 @@ class TestIdentityVerified:
 		assert parsed[0].proposed["title"] == "Novak"
 		assert parsed[0].verified is False
 		assert summary["verified_prefilled"] == 0
+
+	def test_missing_cover_leftover_allows_verified(self, tmp_path):
+		"""No cover.jpg at all + identity confirmed (content + online): the
+		missing cover is a benign leftover — the book may be closed even when
+		apply's cover recovery will find nothing to extract."""
+		meta = self._book_folder(tmp_path, isbn=None, with_cover=False)
+		diag = Diagnosis(category="MISSING_COVER", reason="no cover.jpg sidecar", confidence=Confidence.LOW, verdict=Verdict.AUTO_FIXABLE)
+		enriched = EnrichedMeta(identity_confirmed=True, source="databazeknih", publisher="Argo")
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		summary = _submit_all_and_finish(w, [(meta, diag, None, enriched)])
+		parsed = parse_review(out)
+		assert parsed[0].action == "accept"
+		assert parsed[0].verified is True
+		assert summary["verified_prefilled"] == 1
+
+	def test_generated_cover_suspicion_blocks_verified(self, tmp_path):
+		"""A cover that EXISTS but is a suspected Calibre placeholder (C11,
+		NEEDS_REVIEW) with no replacement cover_url: a known defect — the
+		book stays visible in review instead of being closed behind the
+		skip. The mirror of test_missing_cover_leftover_allows_verified."""
+		from pathlib import Path
+
+		from PIL import Image
+
+		meta = self._book_folder(tmp_path, isbn=None)
+		# Solid 1200x1600 fill = the classic generated-cover signature
+		# (same construction as test_covers.test_solid_1200x1600_...).
+		Image.new("RGB", (1200, 1600), color=(50, 50, 50)).save(Path(meta.path) / "cover.jpg")
+		diag = Diagnosis(category="C11", reason="generated cover (solid)", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
+		enriched = EnrichedMeta(identity_confirmed=True, source="databazeknih", publisher="Argo")
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		summary = _submit_all_and_finish(w, [(meta, diag, None, enriched)])
+		parsed = parse_review(out)
+		assert parsed[0].action == "accept"
+		assert parsed[0].verified is False
+		assert summary["verified_prefilled"] == 0
