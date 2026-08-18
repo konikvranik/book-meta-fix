@@ -3,7 +3,7 @@ book's actual page text (title + author fuzzy match, ISBN exact match)."""
 from __future__ import annotations
 
 from book_meta_fix.extractors import ExtractedMeta
-from book_meta_fix.verifier import _author_in_text, _isbn_in_content, confirm_identity, verify_proposal
+from book_meta_fix.verifier import _author_in_text, _isbn_in_content, confirm_identity, identity_agrees, verify_proposal
 
 
 class _Proposal:
@@ -211,3 +211,47 @@ class TestTitleOnlyStrong:
 		passed, _ = verify_proposal(prop, ext)
 		assert passed is False
 		assert confirm_identity(prop, ext) is False
+
+
+class TestIdentityAgrees:
+	"""identity_agrees — do two identity-bearing objects (the final BookMeta
+	vs the online EnrichedMeta) describe the same book? Gates review_writer's
+	auto-verified pre-fill: the identity that was confirmed must survive the
+	proposal projection."""
+
+	def test_same_identity_agrees(self):
+		a = _Proposal("Zastavený příval", ["Eduard Štorch"], isbn="978-80-204-0311-7")
+		b = _Proposal("Zastavený příval", ["Eduard Štorch"], isbn="9788020403117")
+		assert identity_agrees(a, b) is True
+
+	def test_isbn10_and_isbn13_are_the_same_book(self):
+		a = _Proposal(None, [], isbn="8020403116")
+		b = _Proposal(None, [], isbn="9788020403117")
+		assert identity_agrees(a, b) is True
+
+	def test_different_isbn_disagrees(self):
+		a = _Proposal(None, [], isbn="9788020403117")
+		b = _Proposal(None, [], isbn="9788020403124")
+		assert identity_agrees(a, b) is False
+
+	def test_different_title_disagrees(self):
+		a = _Proposal("Zastavený příval", ["Eduard Štorch"])
+		b = _Proposal("Jiná kniha o dějinách", ["Eduard Štorch"])
+		assert identity_agrees(a, b) is False
+
+	def test_different_author_disagrees(self):
+		a = _Proposal("Zastavený příval", ["Eduard Štorch"])
+		b = _Proposal("Zastavený příval", ["Karel May"])
+		assert identity_agrees(a, b) is False
+
+	def test_one_sided_fields_cannot_contradict(self):
+		"""A field present on one side only is skipped — e.g. an additive-only
+		enrichment (no title/isbn of its own) vs the full metadata."""
+		a = _Proposal(None, [], isbn=None)
+		b = _Proposal("Zastavený příval", ["Eduard Štorch"], isbn="9788020403117")
+		assert identity_agrees(a, b) is True
+
+	def test_diacritics_and_case_tolerated(self):
+		a = _Proposal("Zastaveny Prival", ["Eduard Storch"])
+		b = _Proposal("Zastavený příval", ["Eduard Štorch"])
+		assert identity_agrees(a, b) is True

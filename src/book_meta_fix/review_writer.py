@@ -42,11 +42,20 @@ from .review import (
 	_relative_path,
 	_render_entry,
 )
+from .verifier import identity_agrees
 
 log = logging.getLogger(__name__)
 
 # Sentinel pushed onto the queue to tell the writer thread to stop after drain.
 _SENTINEL: Any = object()
+
+# Enricher sources that are online bibliographic databases. Only a hit from
+# one of these confirms an identity "against an online source" — the LLM
+# (llm:*) reasons from memory, and the content/embedded proposals never left
+# the book's own file. Gates _identity_verified.
+_ONLINE_SOURCES: frozenset[str] = frozenset(
+	{"databazeknih", "legie", "openlibrary", "google_books"}
+)
 
 
 class ReviewWriter:
@@ -102,6 +111,10 @@ class ReviewWriter:
 		self._action_accept = 0
 		self._action_null = 0
 		self._action_other = 0
+		# Entries that got verified via the identity-confirmed gate (content +
+		# online source) rather than a fully detector-clean projection —
+		# surfaced in the analyze summary so the effect is visible.
+		self._verified_prefilled = 0
 		output.write_text(_header(0), encoding="utf-8")
 
 		# 4. Writer thread + queue. The file is opened in append-binary mode and
@@ -256,6 +269,65 @@ class ReviewWriter:
 				return False
 		return True
 
+	@staticmethod
+	def _identity_verified(meta: Any, proposed: dict | None, enriched: Any, action: str | None) -> bool:
+		"""Is the entry's FINAL identity confirmed against content AND online?
+
+		Auto-verified gate (the relaxations of _projected_clean): a book whose
+		identity is double-confirmed may be closed even when benign fields
+		stay missing — no source has them, so re-running analyze would only
+		re-fire the same accept forever.
+
+		Requirements, in order:
+		  1. ``action == "accept"`` — apply must actually execute the entry,
+		     otherwise the verified flag never persists (apply writes only
+		     decided entries). Whenever the ORIGINAL identity is confirmed
+		     this way, the action ladder above has already pre-filled accept
+		     (identity_confirmed accepts with or without a proposal), so
+		     "keep the original and verify" is covered with final=original.
+		  2. ``enriched.identity_confirmed`` with an _ONLINE_SOURCES source.
+		     The pipeline stamps this ONLY after acquire_identity confirmed
+		     the identity against the book's own content AND the online
+		     lookup matched it (ISBN exact / author-filtered); LLM and the
+		     content-only MISSING_* stamp carry no online evidence.
+		  3. The PROJECTED identity agrees with the online record
+		     (identity_agrees): the proposal may have carried a different
+		     title (extracted precedence, a C1-swap merge), and then what
+		     would be written is not the identity that was confirmed.
+		  4. Only benign leftovers in the projected state: OK-verdict
+		     diagnoses and genuinely-missing fields (MISSING_ISBN/YEAR/
+		     COVER, a credited cover_url, C13 which the move resolves).
+		     A remaining NEEDS_REVIEW (e.g. C11 with no replacement cover)
+		     or EMPTY_BOOK must stay visible in review — auto-verifying it
+		     would hide a known defect behind the skip.
+		"""
+		if action != "accept" or enriched is None:
+			return False
+		if enriched.source not in _ONLINE_SOURCES:
+			return False
+		if not getattr(enriched, "identity_confirmed", False):
+			return False
+		import copy
+
+		from .detectors import detect as _detect
+		from .pipeline import _apply_fields
+
+		m2 = copy.copy(meta)
+		if proposed:
+			_apply_fields(m2, proposed)
+		if not identity_agrees(enriched, m2):
+			return False
+		for d in all_diagnoses(_detect(m2)):
+			if d.category == "C13":
+				continue  # the placement move resolves it
+			if d.category == "EMPTY_BOOK":
+				return False  # a dead record is not a verified book
+			if d.category in ("C11", "MISSING_COVER") and proposed and proposed.get("cover_url"):
+				continue  # the cover download at apply resolves it
+			if d.verdict != Verdict.OK and d.category not in ("MISSING_ISBN", "MISSING_YEAR", "MISSING_COVER"):
+				return False
+		return True
+
 	def _build_entry(self, meta: Any, diag: Any, extracted: Any, enriched: Any, prior_entry: dict | None) -> dict:
 		"""Build a review entry dict, carrying over prior user edits."""
 		proposed = _build_proposed(meta, extracted, enriched, diag)
@@ -350,6 +422,12 @@ class ReviewWriter:
 		# The user can still untick the checkbox in the GUI.
 		if self._projected_clean(meta, proposed):
 			entry["verified"] = True
+		elif self._identity_verified(meta, proposed, enriched, action):
+			# Relaxed twin: identity confirmed against content AND an online
+			# source (see _identity_verified) — the book may be closed even
+			# with benign fields still missing.
+			entry["verified"] = True
+			self._verified_prefilled += 1
 		# Expose the full diagnosis list when the book has additional problems,
 		# so apply and the reviewer see every issue (primary is already in
 		# `diagnosis` above). Single-issue books keep the legacy shape.
@@ -458,6 +536,7 @@ class ReviewWriter:
 			"action_accept": self._action_accept,
 			"action_null": self._action_null,
 			"action_other": self._action_other,
+			"verified_prefilled": self._verified_prefilled,
 		}
 
 	def _rewrite_header_count(self, count: int) -> None:

@@ -190,7 +190,18 @@ src/book_meta_fix/
   re-detects — when the projected state is detector-clean (a proposed
   `cover_url` and C13 are credited), the entry is born `verified: true`, so
   a book the analyzer's proposal completes is fixed AND closed in one apply
-  and never re-enters review.
+  and never re-enters review. The relaxed twin `_identity_verified` (same
+  place, runs only when the projection is NOT clean) closes an accepted
+  entry whose FINAL identity is confirmed against the content AND an online
+  source: `enriched.identity_confirmed` with `source` in `_ONLINE_SOURCES`
+  (databazeknih/legie/openlibrary/google_books — the pipeline stamps the
+  flag only after `acquire_identity` + an author-filtered/ISBN-anchored
+  online hit; LLM answers and the content-only MISSING_* stamp do NOT
+  count). `verifier.identity_agrees` checks the projected identity still
+  agrees with the online record (an extracted/C1-swap title must not have
+  overridden it), and the projected state may keep only benign leftovers
+  (OK-verdict or MISSING_*); a NEEDS_REVIEW leftover or EMPTY_BOOK blocks
+  the pre-fill. Counted as `verified_prefilled` in the analyze summary.
 - **EMPTY_BOOK (dead record) is the FIRST rule and routes to
   `needfix/empty/`.** `rule_empty_book` fires when the folder holds only
   metadata sidecars / their `.bak`/`.tmp` backups / `cover.jpg` — no ebook

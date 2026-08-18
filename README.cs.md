@@ -508,7 +508,13 @@ make i18n-compile   # .po -> .mo
 knihu úplně přeskočí a apply ji umístí na cílovou cestu, i když nějaké
 problémy zůstávají. Analyze ho předvyplní, když jeho vlastní návrh knihu
 kompletně doplní (projektovaný stav po apply je detektory čistý) — opravená
-kniha se do review už nikdy nevrátí. Odvolání: `bmf analyze --recheck-ok`.
+kniha se do review už nikdy nevrátí. Předvyplní se i u akceptovaného záznamu,
+jehož FINÁLNÍ identita (titul/autor po aplikování návrhu, případně ISBN) je
+potvrzená proti obsahu knihy A zároveň online zdrojem (databazeknih/legie/
+OpenLibrary/Google Books — odpověď LLM se nepočítá): taková kniha se opraví
+A zavře jedním apply, i když zůstávají benigní chybějící pole (ISBN/rok/
+obálka, které žádný zdroj nemá). Zbylý problém NEEDS_REVIEW předvyplnění
+blokuje, aby známý defekt zůstal viditelný. Odvolání: `bmf analyze --recheck-ok`.
 
 Staré soubory review.yaml s blokem `edited:` nebo `action: edit|reject|swap`
 se při načtení migrují (`edited` se sloučí přes `proposed`, `edit` se stane

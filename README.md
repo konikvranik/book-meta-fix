@@ -499,8 +499,14 @@ checkbox / `Ctrl+O`): apply stores it in the book's `metadata.json`, later
 `analyze` runs skip the book entirely, and apply routes it to the target
 path even if some problems remain unrecoverable. Analyze pre-fills it when
 its own proposal completes the book (the projected post-apply state is
-detector-clean), so a fixed book never re-enters review. Undo with
-`bmf analyze --recheck-ok`.
+detector-clean), so a fixed book never re-enters review. It is also
+pre-filled for an accepted entry whose FINAL identity (the post-proposal
+title/author, plus ISBN when known) is confirmed against the book's content
+AND an online source (databazeknih/legie/OpenLibrary/Google Books — an LLM
+answer does not count): such a book is fixed AND closed in one apply even
+when benign fields stay missing (an ISBN/year/cover no source has). A
+remaining NEEDS_REVIEW problem blocks the pre-fill so a known defect stays
+visible. Undo with `bmf analyze --recheck-ok`.
 
 Old review.yaml files with an `edited:` block or `action: edit|reject|swap`
 are migrated on load (`edited` merges over `proposed`, `edit` becomes

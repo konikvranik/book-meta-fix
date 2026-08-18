@@ -163,7 +163,7 @@ can `tail -f review.yaml` and watch proposals arrive.
 | `accept` | apply `proposed` (edit the values to override the analyzer; a `null` value deletes that field) |
 | `delete` | remove the book folder (C6 ~$ Word lock-file; tar.gz-backed) |
 | `keep` | like `accept`, but the entry is retained (not pruned) in review.yaml |
-| `verified: true` | the user's persistent OK mark: apply stores it in metadata.json, analyze skips the book afterwards, apply routes it to the target path |
+| `verified: true` | the user's persistent OK mark: apply stores it in metadata.json, analyze skips the book afterwards, apply routes it to the target path. Analyze pre-fills it when its own proposal completes the book, or — for an accepted entry — when the FINAL identity is confirmed against the content AND an online source (LLM answers do not count); benign MISSING_* leftovers may remain, a NEEDS_REVIEW leftover blocks it |
 
 On start, the existing `review.yaml` is moved to `review.yaml.bak` (prior
 decisions preserved); on a clean finish the `.bak` is deleted; on interruption

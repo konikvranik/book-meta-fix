@@ -77,6 +77,9 @@ def _header(count: int) -> str:
 		"# Set `verified: true` to mark a book OK: apply stores the flag in\n"
 		"# metadata.json, later analyze runs skip the book and apply moves it\n"
 		"# to the target folder (`proposed.location`) like a clean book.\n"
+		"# The analyzer pre-fills this flag itself when the book's identity is\n"
+		"# confirmed against its content AND an online source — untick if you\n"
+		"# disagree.\n"
 		"# Then run: bmf apply review.yaml\n"
 	).format(date=date.today().isoformat(), count=count) + "\n"
 

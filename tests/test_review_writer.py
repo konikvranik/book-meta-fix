@@ -619,3 +619,123 @@ class TestProjectedVerified:
 		_submit_all_and_finish(w, [(meta, diag, None, enriched)])
 		parsed = parse_review(out)
 		assert parsed[0].verified is True
+
+
+class TestIdentityVerified:
+	"""Auto `verified` via the identity gate: an accepted entry whose FINAL
+	identity was confirmed against the book's content AND an online source
+	(enriched.identity_confirmed from an _ONLINE_SOURCES source) is closed
+	even when benign fields stay missing — no source has them, so re-running
+	analyze would only re-fire the same accept forever."""
+
+	def _book_folder(self, tmp_path, *, title="Kniha", isbn=None, with_year=True, with_cover=True):
+		import json as _json
+
+		from book_meta_fix.readers import read_book_folder
+
+		folder = tmp_path / "lib" / "Jan Novak" / "Kniha (7)"
+		folder.mkdir(parents=True)
+		manifest = {"title": title, "authors": ["Jan Novak"]}
+		if isbn:
+			manifest["isbn"] = isbn
+		if with_year:
+			manifest["publishedYear"] = "2001"
+		(folder / "metadata.json").write_text(_json.dumps(manifest), encoding="utf-8")
+		(folder / "book.epub").write_text("x", encoding="utf-8")
+		if with_cover:
+			(folder / "cover.jpg").write_bytes(b"cover")
+		return read_book_folder(folder)
+
+	def test_online_identity_confirmed_verifies_despite_missing_isbn(self, tmp_path):
+		"""databazeknih confirmed the identity (content + online) but has no
+		ISBN for the edition: MISSING_ISBN survives the projection — a benign
+		leftover — and the entry is accepted AND closed in one apply."""
+		meta = self._book_folder(tmp_path, isbn=None)
+		diag = Diagnosis(category="MISSING_ISBN", reason="no isbn", confidence=Confidence.LOW, verdict=Verdict.AUTO_FIXABLE)
+		enriched = EnrichedMeta(identity_confirmed=True, source="databazeknih", publisher="Argo")
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		summary = _submit_all_and_finish(w, [(meta, diag, None, enriched)])
+		parsed = parse_review(out)
+		assert parsed[0].action == "accept"
+		assert parsed[0].verified is True
+		assert summary["verified_prefilled"] == 1
+
+	def test_openlibrary_identity_change_verifies_enriched_final(self, tmp_path):
+		"""An identity_confirmed online hit that CHANGES the title: the FINAL
+		(enriched) identity is the confirmed one, so the book may be closed —
+		the check is on the post-proposal metadata, not the current one."""
+		meta = self._book_folder(tmp_path, isbn=None)
+		diag = Diagnosis(category="MISSING_ISBN", reason="no isbn", confidence=Confidence.LOW, verdict=Verdict.AUTO_FIXABLE)
+		enriched = EnrichedMeta(title="Správný titul", authors=["Jan Novak"], identity_confirmed=True, source="openlibrary")
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		_submit_all_and_finish(w, [(meta, diag, None, enriched)])
+		parsed = parse_review(out)
+		assert parsed[0].action == "accept"
+		assert parsed[0].proposed["title"] == "Správný titul"
+		assert parsed[0].verified is True
+
+	def test_llm_is_not_an_online_source(self, tmp_path):
+		"""llm:high confirms against content only — the LLM reasons from
+		memory, it is not a bibliographic database. No auto-verified."""
+		meta = self._book_folder(tmp_path, isbn=None)
+		diag = Diagnosis(category="MISSING_ISBN", reason="no isbn", confidence=Confidence.LOW, verdict=Verdict.AUTO_FIXABLE)
+		enriched = EnrichedMeta(identity_confirmed=True, source="llm:high", publisher="Argo")
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		summary = _submit_all_and_finish(w, [(meta, diag, None, enriched)])
+		parsed = parse_review(out)
+		assert parsed[0].action == "accept"
+		assert parsed[0].verified is False
+		assert summary["verified_prefilled"] == 0
+
+	def test_content_stamp_is_not_an_online_source(self, tmp_path):
+		"""The accept-missing stamp (source='content') has no online evidence:
+		those books keep cycling as accept-as-is until closed manually — the
+		documented trade-off of requiring an online confirmation."""
+		meta = self._book_folder(tmp_path, isbn=None)
+		diag = Diagnosis(category="MISSING_ISBN", reason="no isbn", confidence=Confidence.LOW, verdict=Verdict.AUTO_FIXABLE)
+		enriched = EnrichedMeta(identity_confirmed=True, source="content")
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		summary = _submit_all_and_finish(w, [(meta, diag, None, enriched)])
+		parsed = parse_review(out)
+		assert parsed[0].action == "accept"
+		assert not parsed[0].proposed
+		assert parsed[0].verified is False
+		assert summary["verified_prefilled"] == 0
+
+	def test_needs_review_leftover_blocks_verified(self, tmp_path):
+		"""A C2 (filename-as-title) the proposal does not fix survives the
+		projection — a known defect must stay visible in review, not be closed
+		behind the skip."""
+		meta = self._book_folder(tmp_path, isbn=None, title="soubor_epub.epub")
+		diag = Diagnosis(category="C2", reason="filename title", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
+		enriched = EnrichedMeta(identity_confirmed=True, source="databazeknih", publisher="Argo")
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		summary = _submit_all_and_finish(w, [(meta, diag, None, enriched)])
+		parsed = parse_review(out)
+		assert parsed[0].action == "accept"
+		assert parsed[0].verified is False
+		assert summary["verified_prefilled"] == 0
+
+	def test_swap_overriding_online_title_blocks_verified(self, tmp_path):
+		"""A C1-swap merged from diag.proposed overrides the online-confirmed
+		title; the FINAL identity then disagrees with the online record, so the
+		book is not auto-closed."""
+		meta = self._book_folder(tmp_path, isbn=None)
+		diag = Diagnosis(
+			category="C1", reason="swap", confidence=Confidence.HIGH, verdict=Verdict.AUTO_FIXABLE,
+			proposed={"title": "Novak", "author": "Kniha"},
+		)
+		enriched = EnrichedMeta(title="Kniha", authors=["Jan Novak"], identity_confirmed=True, source="databazeknih")
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		summary = _submit_all_and_finish(w, [(meta, diag, None, enriched)])
+		parsed = parse_review(out)
+		assert parsed[0].action == "accept"
+		assert parsed[0].proposed["title"] == "Novak"
+		assert parsed[0].verified is False
+		assert summary["verified_prefilled"] == 0

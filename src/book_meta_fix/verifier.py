@@ -324,6 +324,36 @@ def confirm_identity(proposal, extracted, *, fuzzy_strong: float = 0.8, title_st
 	return False
 
 
+def identity_agrees(a, b, *, floor: float = 0.8) -> bool:
+	"""Do two identity-bearing objects agree on who the book is?
+
+	*a* and *b* may be a BookMeta or an EnrichedMeta (anything with
+	``title`` / ``authors`` / ``isbn`` — read via getattr like confirm_identity
+	does). Only fields BOTH sides carry are compared: title and first author
+	fuzzily (>= *floor*), ISBN by canonical equality. A field present on one
+	side only cannot contradict, so it is skipped.
+
+	Used by review_writer's auto-verified gate: the pipeline confirmed the
+	identity against the book's content AND an online record matched it, but
+	the entry's FINAL identity is the post-proposal state — an extracted or
+	C1-swap title may have overridden the online-confirmed one, and then the
+	metadata that would be written is not the identity that was confirmed.
+	"""
+	ta, tb = getattr(a, "title", None), getattr(b, "title", None)
+	if ta and tb and _fuzzy_match(ta, tb) < floor:
+		return False
+	aa = list(getattr(a, "authors", None) or [])
+	ab = list(getattr(b, "authors", None) or [])
+	if aa and ab and _fuzzy_match(aa[0], ab[0]) < floor:
+		return False
+	ia, ib = getattr(a, "isbn", None), getattr(b, "isbn", None)
+	if ia and ib:
+		ca, cb = canonicalize(ia), canonicalize(ib)
+		if ca and cb and ca != cb:
+			return False
+	return True
+
+
 def verify_proposal(proposal, extracted, *, fuzzy_strong: float = 0.8, title_strong: float = _TITLE_ONLY_STRONG) -> tuple[bool, str]:
 	"""Validate a proposed title/author against the book's actual page text.
 

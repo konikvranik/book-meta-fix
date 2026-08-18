@@ -399,7 +399,7 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 			summary = review_writer.finish(keep_backup=interrupted)
 		except Exception as e:  # noqa: BLE001
 			console.print(f"[red]{_('review writer finalize failed: {error}').format(error=e)}[/red]")
-			summary = {"written": 0, "skipped_user_decided": 0, "remaining_count": 0, "backup_path": None, "action_accept": 0, "action_null": 0, "action_other": 0}
+			summary = {"written": 0, "skipped_user_decided": 0, "remaining_count": 0, "backup_path": None, "action_accept": 0, "action_null": 0, "action_other": 0, "verified_prefilled": 0}
 
 	# Print pipeline summary (action breakdown leads; results list still drives stats).
 	_print_pipeline_summary(results, pipe_stats, review_summary=summary)
@@ -448,6 +448,7 @@ def _print_pipeline_summary(results, stats: dict | None = None, review_summary: 
 	oth = (review_summary or {}).get("action_other", 0)
 	skipped = (review_summary or {}).get("skipped_user_decided", 0)
 	written = (review_summary or {}).get("written", 0)
+	ver = (review_summary or {}).get("verified_prefilled", 0)
 
 	console.print()
 	t = Table(title=_("Pipeline summary"), show_header=True, header_style="bold cyan")
@@ -455,6 +456,8 @@ def _print_pipeline_summary(results, stats: dict | None = None, review_summary: 
 	t.add_column(_("Count"), justify="right")
 	t.add_row(_("OK (already correct — nothing to do)"), str(ok), style="green")
 	t.add_row(_("Auto-fix (action: accept → `bmf apply`)"), str(acc), style="bold green")
+	if ver:
+		t.add_row(_("Auto-verified (identity confirmed vs content + online source)"), str(ver), style="green")
 	t.add_row(_("Manual review (action: null)"), str(nul), style="yellow")
 	if oth:
 		t.add_row(_("Other action (delete/keep)"), str(oth))

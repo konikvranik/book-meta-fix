@@ -172,7 +172,7 @@ přicházejí.
 | `accept` | aplikuje `proposed` (hodnoty upravte, čímž přebijete analyzátor; hodnota `null` dané pole smaže) |
 | `delete` | odstraní složku knihy (zámek Wordu `~$` z C6; zálohováno do tar.gz) |
 | `keep` | jako `accept`, ale záznam se v review.yaml zachová (neodstraní se) |
-| `verified: true` | trvalá značka uživatele „OK": apply ji uloží do metadata.json, analyze knihu pak přeskočí a apply ji umístí na cílovou cestu |
+| `verified: true` | trvalá značka uživatele „OK": apply ji uloží do metadata.json, analyze knihu pak přeskočí a apply ji umístí na cílovou cestu. Analyze ji předvyplní, když vlastní návrh knihu doplní, nebo — u akceptovaného záznamu — když je FINÁLNÍ identita potvrzena proti obsahu A online zdrojem (odpověď LLM se nepočítá); benigní chybějící pole (MISSING_*) zůstat smí, zbylý NEEDS_REVIEW to blokuje |
 
 Na začátku se existující `review.yaml` přesune na `review.yaml.bak`
 (předchozí rozhodnutí se zachovají); při čistém dokončení se `.bak` smaže;
