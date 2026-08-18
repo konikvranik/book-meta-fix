@@ -19,6 +19,7 @@ Parser: parse_review() reads a (possibly human-edited) YAML back into a list
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -51,6 +52,11 @@ class ReviewItem:
 	proposed: dict[str, Any] | None = None
 	# Human decisions:
 	action: Action | None = None
+	# User-confirmed OK: apply writes this into metadata.json (the durable
+	# skip mark analyze honours) and routes the book to the OK path even when
+	# detectors still complain. Orthogonal to `action` — composable as
+	# "accept + verified" (fix AND close) or verified alone (close as-is).
+	verified: bool = False
 	notes: str | None = None
 
 
@@ -67,7 +73,10 @@ def _header(count: int) -> str:
 		"#   accept  - apply `proposed` (edit the values to override the\n"
 		"#             analyzer; a `null` value DELETES the field)\n"
 		"#   delete  - remove the book folder (C6 ~$ Word lock-file; tar.gz-backed)\n"
-		"#   keep    - like accept, but retained (not pruned); skipped on next analyze\n"
+		"#   keep    - apply like accept, but the entry stays in this file\n"
+		"# Set `verified: true` to mark a book OK: apply stores the flag in\n"
+		"# metadata.json, later analyze runs skip the book and apply moves it\n"
+		"# to the target folder (`proposed.location`) like a clean book.\n"
 		"# Then run: bmf apply review.yaml\n"
 	).format(date=date.today().isoformat(), count=count) + "\n"
 
@@ -143,6 +152,8 @@ def _entry_dict(meta: BookMeta, diag: Diagnosis, extracted: Any, enriched: Any, 
 			# verbatim (null = field deletes included) so a fresh run cannot
 			# silently change what accept would apply.
 			entry["proposed"] = prior.get("proposed")
+		if prior.get("verified"):
+			entry["verified"] = True
 		if prior.get("notes"):
 			entry["notes"] = prior["notes"]
 	return entry
@@ -313,6 +324,19 @@ def _build_proposed(
 			if "author" not in proposed:
 				proposed["author"] = meta.title
 				source_parts.append("swap")
+	# C13 (location mismatch): surface the target folder computed by the
+	# detector. INFORMATIONAL only — apply recomputes the destination from
+	# the FINAL metadata (the user may fix author/title in the same pass),
+	# and `_apply_fields` deliberately ignores the `location` key. Suppressed
+	# for EMPTY_BOOK records: their real destination is needfix/empty/, so a
+	# pattern-path proposal would be misleading.
+	if diag is not None and not any(d.category == "EMPTY_BOOK" for d in all_diagnoses(diag)):
+		for d in all_diagnoses(diag):
+			if d.category == "C13" and d.proposed and d.proposed.get("location"):
+				if "location" not in proposed:
+					proposed["location"] = d.proposed["location"]
+					source_parts.append("location")
+				break
 	if source_parts:
 		proposed["source"] = "+".join(sorted(set(source_parts)))
 		return proposed
@@ -403,6 +427,7 @@ def parse_review(path: str | Path) -> list[ReviewItem]:
 			current=entry.get("current") or {},
 			proposed=entry.get("proposed"),
 			action=entry.get("action"),
+			verified=bool(entry.get("verified")),
 			notes=entry.get("notes"),
 		)
 		for entry in _load_raw_entries(path)
@@ -428,3 +453,36 @@ def prune_review(path: str | Path, drop_uuids: set) -> int:
 		body += "\n"
 	Path(path).write_text(header + body, encoding="utf-8")
 	return len(kept)
+
+
+def update_paths(path: str | Path, moves: dict[str, str]) -> int:
+	"""Rewrite the ``path`` field of entries whose uuid moved (kept entries).
+
+	After apply relocates a folder, a retained (``action: keep``) entry would
+	otherwise point at the OLD path forever: analyze skips keep entries only
+	in the freeze model — here the entry survives with a stale path, and the
+	next ``bmf apply`` would fail it with "folder not found". Accept entries
+	are pruned instead, so only keep entries (and any other survivor) need
+	this. *moves* maps uuid → new path relative to the library root. Atomic
+	(tmp + os.replace); returns the number of entries updated.
+	"""
+	if not moves:
+		return 0
+	entries = _load_raw_entries(path)
+	changed = 0
+	for e in entries:
+		new_path = moves.get(e.get("uuid"))
+		if new_path is not None and e.get("path") != new_path:
+			e["path"] = new_path
+			changed += 1
+	if not changed:
+		return 0
+	header = _header(len(entries))
+	body = "\n".join(_render_entry(e) for e in entries)
+	if body:
+		body += "\n"
+	p = Path(path)
+	tmp = p.with_suffix(p.suffix + ".tmp")
+	tmp.write_text(header + body, encoding="utf-8")
+	os.replace(tmp, p)
+	return changed

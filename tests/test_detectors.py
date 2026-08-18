@@ -378,3 +378,137 @@ class TestDetectAll:
 		m = _meta(path=str(tmp_path), isbn="9788020403114", year=2001)
 		cats = {d.category for d in detect_all(m)}
 		assert cats.isdisjoint({"MISSING_ISBN", "MISSING_YEAR", "MISSING_COVER", "C11"})
+
+
+class TestLocationRule:
+	"""C13: the book's folder must match the pattern-derived target path.
+
+	The rule exists only when detect()/detect_all() get library_root — every
+	legacy caller stays location-blind by default.
+	"""
+
+	def _placed(self, tmp_path, rel="Jan Novak/Kniha (7)", *, title="Kniha", author="Jan Novak", **kw):
+		"""A book folder at *rel* (relative to the library root) whose metadata
+		say *title*/*author*. The immediate parent is the author folder and the
+		calibre_id comes from the "(N)" folder suffix — the same shape
+		readers._parse_path produces for real folders."""
+		import re as _re
+		from pathlib import Path
+
+		relp = Path(rel)
+		m = _re.search(r"\((\d+)\)\s*$", relp.name)
+		kw.setdefault("calibre_id", int(m.group(1)) if m else 1)
+		return _meta(path=str(tmp_path / rel), author_folder=relp.parent.name,
+		             title_folder=relp.name, title=title, authors=[author], **kw)
+
+	def test_correct_path_no_c13(self, tmp_path):
+		m = self._placed(tmp_path, isbn="9788020403114", year=2001)
+		d = detect(m, library_root=tmp_path)
+		assert "C13" not in {x.category for x in all_diagnoses(d)}
+
+	def test_misplaced_fires_c13_with_location_proposal(self, tmp_path):
+		m = self._placed(tmp_path, "Spatne/Misto (7)", isbn="9788020403114", year=2001)
+		d = detect(m, library_root=tmp_path)
+		assert d.category == "C13"
+		assert d.verdict.value == "AUTO_FIXABLE"
+		assert d.proposed == {"location": "Jan Novak/Kniha (7)"}
+
+	def test_without_library_root_location_blind(self, tmp_path):
+		"""Back-compat: detect() with no library_root never yields C13."""
+		m = self._placed(tmp_path, "Spatne/Misto (7)", isbn="9788020403114", year=2001)
+		d = detect(m)
+		assert "C13" not in {x.category for x in all_diagnoses(d)}
+
+	def test_custom_pattern(self, tmp_path):
+		m = self._placed(tmp_path, "Spatne/Misto (7)", isbn="9788020403114", year=2001)
+		d = detect(m, library_root=tmp_path, pattern="{author}/{title} [{year}]")
+		assert d.proposed == {"location": "Jan Novak/Kniha [2001]"}
+
+	def test_broken_metadata_stays_primary_over_c13(self, tmp_path):
+		"""A book with a real problem (C2 filename title) keeps it primary —
+		C13 rides in additional and the book routes to manual review."""
+		m = self._placed(tmp_path, "Spatne/Misto (7)", title="soubor_epub.epub",
+		                 isbn="9788020403114", year=2001)
+		d = detect(m, library_root=tmp_path)
+		assert d.category == "C2"
+		assert "C13" in {x.category for x in d.additional}
+
+	def test_c13_promoted_over_ok_verdict_primary(self, tmp_path):
+		"""A genuine anonym (C9 whitelisted to OK) that is ALSO misplaced must
+		not be masked by the OK verdict — C13 becomes primary so the book can
+		be moved through review."""
+		m = self._placed(tmp_path, "Neznamy/Bible (3)", title="Bible",
+		                 author="Neznámý", isbn="9788020403114", year=2001)
+		d = detect(m, library_root=tmp_path)
+		assert d.category == "C13"
+		assert "C9" in {x.category for x in d.additional}
+
+	def test_genuine_anonym_at_correct_path_stays_ok(self, tmp_path):
+		"""The promotion is C13-only: without a location mismatch the C9-OK
+		verdict keeps ruling (and the book stays out of review)."""
+		m = self._placed(tmp_path, "Anonym/Bible (3)", title="Bible",
+		                 author="Neznámý", isbn="9788020403114", year=2001)
+		d = detect(m, library_root=tmp_path)
+		assert d.category == "C9"
+		assert d.verdict.value == "OK"
+		assert "C13" not in {x.category for x in all_diagnoses(d)}
+
+	def test_needfix_path_fires_c13(self, tmp_path):
+		"""A book sitting under needfix/ is misplaced by definition — the C13
+		target is always the root pattern path (needfix/ stripped)."""
+		m = self._placed(tmp_path, "needfix/Jan Novak/Kniha (7)",
+		                 isbn="9788020403114", year=2001)
+		d = detect(m, library_root=tmp_path)
+		assert d.category == "C13"
+		assert d.proposed == {"location": "Jan Novak/Kniha (7)"}
+
+
+class TestEmptyBook:
+	"""EMPTY_BOOK: a folder holding only metadata sidecars / backups / cover —
+	the book file is gone. Any other file or a subdirectory disqualifies."""
+
+	def _folder(self, tmp_path, files=("metadata.json", "metadata.opf")):
+		folder = tmp_path / "A" / "T (1)"
+		folder.mkdir(parents=True)
+		for f in files:
+			(folder / f).write_text("x", encoding="utf-8")
+		return folder
+
+	def _meta_at(self, folder, **kw):
+		return _meta(path=str(folder), author_folder="A", title_folder="T (1)", **kw)
+
+	def test_only_metadata_fires(self, tmp_path):
+		from book_meta_fix.detectors import rule_empty_book
+
+		folder = self._folder(tmp_path, ("metadata.json", "metadata.opf", "cover.jpg", "metadata.json.bak", "cover.jpg.bak"))
+		m = self._meta_at(folder)
+		d = rule_empty_book(m)
+		assert d is not None and d.category == "EMPTY_BOOK"
+		assert d.verdict.value == "AUTO_FIXABLE"
+
+	def test_with_ebook_file_not_empty(self, tmp_path):
+		from book_meta_fix.detectors import rule_empty_book
+
+		folder = self._folder(tmp_path, ("metadata.json", "t.epub"))
+		assert rule_empty_book(self._meta_at(folder)) is None
+
+	def test_with_subdirectory_not_empty(self, tmp_path):
+		from book_meta_fix.detectors import rule_empty_book
+
+		folder = self._folder(tmp_path)
+		(folder / "sub").mkdir()
+		assert rule_empty_book(self._meta_at(folder)) is None
+
+	def test_with_unrelated_file_not_empty(self, tmp_path):
+		from book_meta_fix.detectors import rule_empty_book
+
+		folder = self._folder(tmp_path, ("metadata.json", "poznamky.txt"))
+		assert rule_empty_book(self._meta_at(folder)) is None
+
+	def test_primary_over_other_rules(self, tmp_path):
+		"""EMPTY_BOOK runs FIRST — with the book gone, no other rule's verdict
+		about the metadata matters."""
+		folder = self._folder(tmp_path)
+		m = self._meta_at(folder, title="soubor_epub.epub", isbn="9788020403114", year=2001)
+		d = detect(m, library_root=tmp_path)
+		assert d.category == "EMPTY_BOOK"

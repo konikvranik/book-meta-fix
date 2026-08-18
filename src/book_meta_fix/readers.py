@@ -178,6 +178,11 @@ def _fill_from_json(path: Path, meta: BookMeta) -> None:
 	# needed by the cache or apply; once present it round-trips forever.
 	meta.uuid = data.get("uuid")
 
+	# bmf "verified" flag: the user confirmed this book is OK. json-only —
+	# deliberately NOT read back from the OPF mirror (writers never emits it
+	# there), so a stale OPF can never resurrect a cleared decision.
+	meta.verified = bool(data.get("verified"))
+
 	authors = data.get("authors") or []
 	# ABS often stores translators alongside real authors; we keep them all here
 	# and let detectors/verifier separate translators later.

@@ -13,6 +13,14 @@ bmf analyze --databazeknih -o review.yaml --limit 1000
 bmf analyze --databazeknih --llm -o review.yaml --limit 1000
 ```
 
+Analyze skips books whose metadata.json carries `verified: true` (the
+persistent user-OK mark; see [edit-and-apply.md](edit-and-apply.md)) and
+pre-fills `verified: true` itself when its own proposal completes a book,
+so fixed books never come back. It also checks each book's LOCATION
+(C13): a misplaced-but-healthy book gets a pre-filled `action: accept`
+move proposal. `--no-check-location` skips that check; `--recheck-ok`
+clears the verified flags.
+
 `review.yaml` is written **incrementally** — `tail -f review.yaml` to watch
 proposals arrive. Prior `review.yaml` is moved to `review.yaml.bak` on start;
 on Ctrl-C the `.bak` is kept so you can recover. Every command runs an internal

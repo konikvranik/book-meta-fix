@@ -33,3 +33,14 @@ left and the cover thumbnail flush right on every row. Requires the Tk
 bindings
 (`sudo apt install python3-tk` on Debian/Ubuntu). Edits are written back to
 `review.yaml` — commit them with `bmf apply` as in [edit + apply](edit-and-apply.md).
+
+## Verified (the OK mark)
+
+Next to the action radios sits a **Verified** checkbox (`Ctrl+O` toggles
+it; verified rows show a blue ✓ under the action glyph, and the action
+filter gains a `verified` value). It marks the book OK for good: apply
+stores `verified: true` in the book's `metadata.json`, later analyze runs
+skip the book entirely, and apply places it on the target path even if
+some problems remain. Analyze pre-fills it when its own proposal completes
+the book. The read-only "Target folder" row under the fields previews the
+C13 move proposal (`proposed.location`), if any.

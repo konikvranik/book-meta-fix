@@ -23,6 +23,12 @@ Corruption categories (from empirical study of the library):
 	C11 generated cover (calibre placeholder) NEEDS_REVIEW (download replacement)
 	C12 author slug/artefact pollution      NEEDS_REVIEW (lost capitalization,
 	    leading _ or *, etc. — author recoverable from content/online)
+	C13 location ≠ metadata                 AUTO_FIXABLE (move to the pattern
+	    path; the proposal is informational — apply recomputes the target from
+	    the FINAL metadata after field fixes are applied)
+	EMPTY_BOOK dead record (only metadata/  AUTO_FIXABLE (move to
+	    backups/cover — the book file is    needfix/empty/)
+	    gone; nothing to extract or verify)
 	EXTRA: missing ISBN / year              AUTO_FIXABLE (enrichable)
 	EXTRA: missing cover / generated cover  AUTO_FIXABLE / NEEDS_REVIEW (download)
 """
@@ -30,6 +36,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from pathlib import Path
 
 from .models import BookMeta, Confidence, Diagnosis, Verdict
 
@@ -188,6 +195,47 @@ def _looks_foreign_name(name: str) -> bool:
 # ---------------------------------------------------------------------------
 # Rules (in priority order — first match wins)
 # ---------------------------------------------------------------------------
+
+
+def rule_empty_book(meta: BookMeta) -> Diagnosis | None:
+	"""EMPTY_BOOK: the folder holds only metadata sidecars / backups / cover.
+
+	No ebook file and no subdirectory — the book itself is gone (a failed
+	calibre import, a deleted file; only the record survived). There is
+	nothing to extract or verify, so the record can never be confirmed
+	against content. AUTO_FIXABLE: the fix is mechanical — apply moves the
+	folder under ``needfix/empty/`` (see pipeline._placement_target); the
+	metadata is left untouched for a possible later manual recovery.
+
+	Runs FIRST: with the book file gone, no other rule's opinion about the
+	metadata matters. A folder with any other file (an unrecognized format,
+	a stray document) or a subdirectory is NOT empty — some other rule sees
+	it instead.
+	"""
+	from pathlib import Path
+
+	folder = Path(meta.path)
+	if not folder.is_dir():
+		return None
+	try:
+		entries = list(folder.iterdir())
+	except OSError:
+		return None
+	for e in entries:
+		if e.is_dir():
+			return None
+		name = e.name.lower()
+		if name in ("metadata.json", "metadata.opf", "cover.jpg"):
+			continue
+		if name.endswith(".bak") or name.endswith(".tmp"):
+			continue
+		return None
+	return Diagnosis(
+		category="EMPTY_BOOK",
+		reason="složka obsahuje jen metadata/zálohy/obálku — knižní soubor chybí",
+		confidence=Confidence.HIGH,
+		verdict=Verdict.AUTO_FIXABLE,
+	)
 
 
 def rule_c6_word_lockfile(meta: BookMeta) -> Diagnosis | None:
@@ -591,6 +639,46 @@ def rule_missing_cover(meta: BookMeta) -> Diagnosis | None:
 	)
 
 
+def location_rule(library_root: Path, pattern: str) -> Rule:
+	"""C13 factory: the book's folder does not match its metadata.
+
+	Compares the book's actual location against the pattern-derived target
+	(``mover.compute_target_path`` — the same computation apply uses to place
+	the book, so detector and writer can never disagree about the destination).
+	Pure path math: no content reads, no online lookups. The rule is created as
+	a closure because the plain ``Rule`` signature carries only BookMeta; it is
+	appended by detect()/detect_all() ONLY when the caller passes
+	``library_root`` — every existing caller (classify/report/epubgen/tests)
+	keeps the historic location-blind behaviour.
+
+	The ``proposed.location`` value is informational: apply recomputes the
+	target from the FINAL metadata (the user may have edited author/title in
+	the GUI), so a stale proposal can never move a book to a wrong folder.
+	"""
+
+	def rule(meta: BookMeta) -> Diagnosis | None:
+		# Lazy import: mover imports detectors (_is_anonym_spelling), so a
+		# module-level import here would be circular.
+		from .mover import compute_target_path
+
+		target = compute_target_path(meta, pattern, Path(library_root))
+		try:
+			if Path(meta.path).resolve() == target.resolve():
+				return None
+		except OSError:
+			return None
+		rel = target.relative_to(library_root)
+		return Diagnosis(
+			category="C13",
+			reason=f"umístění neodpovídá metadatům — cílová složka: {rel}",
+			confidence=Confidence.HIGH,
+			verdict=Verdict.AUTO_FIXABLE,
+			proposed={"location": str(rel)},
+		)
+
+	return rule
+
+
 # Priority-ordered list of structural rules (NOT the missing-ISBN/year ones —
 # those are enrichment opportunities applied only to books that pass the
 # structural checks as OK).
@@ -598,6 +686,7 @@ def rule_missing_cover(meta: BookMeta) -> Diagnosis | None:
 # polluted titles often produce false swap signals (the filename contains both
 # author and title). Once C2 fires, C1 is skipped.
 RULES: list[Rule] = [
+	rule_empty_book,
 	rule_c6_word_lockfile,
 	rule_c12_bad_author,
 	rule_c5_placeholder,
@@ -623,18 +712,37 @@ ENRICHMENT_RULES: list[Rule] = [
 ]
 
 
-def detect_all(meta: BookMeta) -> list[Diagnosis]:
+def detect_all(meta: BookMeta, *, library_root: Path | None = None, pattern: str | None = None) -> list[Diagnosis]:
 	"""Apply ALL rules and return every match, in priority order (structural
-	rules first, then enrichment rules).
+	rules first, then the location rule, then enrichment rules).
 
 	Unlike detect(), this surfaces every problem on the book — e.g. a book with
 	a filename-as-title (C2) AND a generated cover (C11) returns [C2, C11], so
 	both can be reported and fixed in a single pass. If nothing matches, returns
 	a single OK diagnosis.
+
+	``library_root`` (with optional ``pattern``) opts into the C13 location
+	check. Without it no location diagnosis is produced — the historic,
+	location-blind behaviour every pre-existing caller relies on.
+
+	C13 sits BEFORE the enrichment rules (and after the structural ones): a
+	misplaced-but-otherwise-fine book must get C13 as its PRIMARY diagnosis,
+	so the pipeline routes it down the cheap no-extraction path and the
+	review writer can pre-fill accept. With C13 last, a co-occurring
+	MISSING_COVER would become primary and the book would pay the full
+	identity-gate treatment for what is really just a move.
 	"""
 	matches: list[Diagnosis] = []
 	for rule in RULES:
 		d = rule(meta)
+		if d is not None:
+			matches.append(d)
+	if library_root is not None:
+		# The default pattern lives in mover (next to compute_target_path, the
+		# single consumer of it); lazy import avoids the circular module dep.
+		from .mover import DEFAULT_PATH_PATTERN
+
+		d = location_rule(library_root, pattern or DEFAULT_PATH_PATTERN)(meta)
 		if d is not None:
 			matches.append(d)
 	for rule in ENRICHMENT_RULES:
@@ -665,16 +773,26 @@ def all_diagnoses(diag: Diagnosis | None) -> list[Diagnosis]:
 	return [diag, *diag.additional]
 
 
-def detect(meta: BookMeta) -> Diagnosis:
+def detect(meta: BookMeta, *, library_root: Path | None = None, pattern: str | None = None) -> Diagnosis:
 	"""Apply rules in priority order; return the first matching Diagnosis as
 	the primary, with every other match attached as ``.additional``.
 
-	The primary (first match) preserves the historical category/verdict that
-	drives the pipeline's branching and organize routing. The remaining matches
-	are carried in ``Diagnosis.additional`` so one book can report several
-	problems at once (e.g. C2 + C11). See detect_all / all_diagnoses.
+	One exception to "first match wins": a C13 (location) match is promoted
+	over an OK-verdict primary (e.g. C9 genuine anonym) — without the
+	promotion, the OK match would mask the location mismatch and a misplaced
+	otherwise-fine book could never be moved. Non-OK matches other than C13
+	are NOT promoted: a C9-whitelisted book stays OK even when an enrichment
+	rule (MISSING_*) also matched, exactly as before.
+
+	``library_root``/``pattern`` opt into the C13 location check (see
+	detect_all); the default keeps the historic location-blind behaviour.
 	"""
-	matches = detect_all(meta)
+	matches = detect_all(meta, library_root=library_root, pattern=pattern)
 	primary = matches[0]
-	primary.additional = matches[1:]
+	if primary.verdict == Verdict.OK:
+		for m in matches[1:]:
+			if m.category == "C13":
+				primary = m
+				break
+	primary.additional = [m for m in matches if m is not primary]
 	return primary

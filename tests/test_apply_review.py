@@ -42,7 +42,7 @@ class TestDeleteAction:
 			"current": {"title": "~$doc"}, "proposed": {"reason": "word lock"},
 			"action": "delete",
 		}])
-		summary = apply_review(review, library, dry_run=True)
+		summary = apply_review(review, library, dry_run=True, place=False)
 		assert summary["deleted"] == 1
 		assert summary["applied"] == 0
 		# Folder still present in dry-run.
@@ -65,7 +65,7 @@ class TestDeleteAction:
 		cwd = os.getcwd()
 		os.chdir(tmp_path)
 		try:
-			summary = apply_review(review, library, dry_run=False)
+			summary = apply_review(review, library, dry_run=False, place=False)
 		finally:
 			os.chdir(cwd)
 		assert summary["deleted"] == 2
@@ -90,7 +90,7 @@ class TestDeleteAction:
 			"id": 9, "path": "nope/missing",
 			"current": {"title": "x"}, "proposed": {}, "action": "delete",
 		}])
-		summary = apply_review(review, library, dry_run=False)
+		summary = apply_review(review, library, dry_run=False, place=False)
 		assert summary["deleted"] == 0
 		assert any("folder not found" in e for e in summary["errors"])
 
@@ -102,7 +102,7 @@ class TestDeleteAction:
 			"id": 1, "path": "a/b",
 			"current": {"title": "x"}, "proposed": {}, "action": "bogus",
 		}])
-		summary = apply_review(review, library, dry_run=False)
+		summary = apply_review(review, library, dry_run=False, place=False)
 		assert any("unknown action" in e for e in summary["errors"])
 
 
@@ -134,7 +134,7 @@ class TestCoverDownloadGate:
 		review = tmp_path / "review.yaml"
 		_write_review(review, [self._entry(1, "C2")])
 		with patch("book_meta_fix.covers.download_cover") as dl:
-			apply_review(review, library, dry_run=False)
+			apply_review(review, library, dry_run=False, place=False)
 		dl.assert_not_called()
 
 	def test_download_for_c11_when_no_cover(self, tmp_path):
@@ -143,7 +143,7 @@ class TestCoverDownloadGate:
 		review = tmp_path / "review.yaml"
 		_write_review(review, [self._entry(1, "C11")])
 		with patch("book_meta_fix.covers.download_cover") as dl:
-			apply_review(review, library, dry_run=False)
+			apply_review(review, library, dry_run=False, place=False)
 		dl.assert_called_once()
 
 	def test_download_for_missing_cover(self, tmp_path):
@@ -152,7 +152,7 @@ class TestCoverDownloadGate:
 		review = tmp_path / "review.yaml"
 		_write_review(review, [self._entry(1, "MISSING_COVER")])
 		with patch("book_meta_fix.covers.download_cover") as dl:
-			apply_review(review, library, dry_run=False)
+			apply_review(review, library, dry_run=False, place=False)
 		dl.assert_called_once()
 
 	def test_skip_c11_when_cover_already_real(self, tmp_path):
@@ -165,7 +165,7 @@ class TestCoverDownloadGate:
 		_write_review(review, [self._entry(1, "C11")])
 		with patch("book_meta_fix.covers.analyze_cover", return_value=CoverInfo(is_generated=False)) as ac, \
 			patch("book_meta_fix.covers.download_cover") as dl:
-			apply_review(review, library, dry_run=False)
+			apply_review(review, library, dry_run=False, place=False)
 		ac.assert_called_once()
 		dl.assert_not_called()
 
@@ -178,7 +178,7 @@ class TestCoverDownloadGate:
 		_write_review(review, [self._entry(1, "C11")])
 		with patch("book_meta_fix.covers.analyze_cover", return_value=CoverInfo(is_generated=True)), \
 			patch("book_meta_fix.covers.download_cover") as dl:
-			apply_review(review, library, dry_run=False)
+			apply_review(review, library, dry_run=False, place=False)
 		dl.assert_called_once()
 
 	def test_skip_missing_cover_when_cover_exists(self, tmp_path):
@@ -189,7 +189,7 @@ class TestCoverDownloadGate:
 		review = tmp_path / "review.yaml"
 		_write_review(review, [self._entry(1, "MISSING_COVER")])
 		with patch("book_meta_fix.covers.download_cover") as dl:
-			apply_review(review, library, dry_run=False)
+			apply_review(review, library, dry_run=False, place=False)
 		dl.assert_not_called()
 
 	def test_download_when_c11_is_secondary_diagnosis(self, tmp_path):
@@ -210,7 +210,7 @@ class TestCoverDownloadGate:
 			"action": "accept",
 		}])
 		with patch("book_meta_fix.covers.download_cover") as dl:
-			apply_review(review, library, dry_run=False)
+			apply_review(review, library, dry_run=False, place=False)
 		dl.assert_called_once()
 
 	def test_no_download_legacy_entry_only_primary_c2(self, tmp_path):
@@ -227,7 +227,7 @@ class TestCoverDownloadGate:
 			"action": "accept",
 		}])
 		with patch("book_meta_fix.covers.download_cover") as dl:
-			apply_review(review, library, dry_run=False)
+			apply_review(review, library, dry_run=False, place=False)
 		dl.assert_not_called()
 
 	def test_extract_for_missing_cover_empty_proposed(self, tmp_path):
@@ -246,7 +246,7 @@ class TestCoverDownloadGate:
 		}])
 		with patch("book_meta_fix.covers.recover_cover_from_book", return_value=True) as rec, \
 			patch("book_meta_fix.covers.download_cover") as dl:
-			apply_review(review, library, dry_run=False)
+			apply_review(review, library, dry_run=False, place=False)
 		rec.assert_called_once()
 		dl.assert_not_called()
 
@@ -258,7 +258,7 @@ class TestCoverDownloadGate:
 		_write_review(review, [self._entry(1, "C11")])  # has cover_url
 		with patch("book_meta_fix.covers.download_cover", return_value=False), \
 			patch("book_meta_fix.covers.recover_cover_from_book", return_value=True) as rec:
-			apply_review(review, library, dry_run=False)
+			apply_review(review, library, dry_run=False, place=False)
 		rec.assert_called_once()
 
 	def test_no_extract_when_download_succeeds(self, tmp_path):
@@ -269,7 +269,7 @@ class TestCoverDownloadGate:
 		_write_review(review, [self._entry(1, "C11")])
 		with patch("book_meta_fix.covers.download_cover", return_value=True), \
 			patch("book_meta_fix.covers.recover_cover_from_book") as rec:
-			apply_review(review, library, dry_run=False)
+			apply_review(review, library, dry_run=False, place=False)
 		rec.assert_not_called()
 
 	def test_no_extract_for_non_cover_category(self, tmp_path):
@@ -280,7 +280,7 @@ class TestCoverDownloadGate:
 		_write_review(review, [self._entry(1, "C2")])
 		with patch("book_meta_fix.covers.recover_cover_from_book") as rec, \
 			patch("book_meta_fix.covers.download_cover") as dl:
-			apply_review(review, library, dry_run=False)
+			apply_review(review, library, dry_run=False, place=False)
 		rec.assert_not_called()
 		dl.assert_not_called()
 
@@ -294,7 +294,7 @@ class TestCoverDownloadGate:
 		_write_review(review, [self._entry(1, "MISSING_COVER")])
 		with patch("book_meta_fix.covers.recover_cover_from_book") as rec, \
 			patch("book_meta_fix.covers.download_cover") as dl:
-			apply_review(review, library, dry_run=False)
+			apply_review(review, library, dry_run=False, place=False)
 		rec.assert_not_called()
 		dl.assert_not_called()
 
@@ -319,7 +319,7 @@ class TestPruning:
 			{"id": 1, "uuid": "u1", "path": "a1/b1", "current": {"title": "A"}, "proposed": {}, "action": "accept"},
 			{"id": 2, "uuid": "u2", "path": "a2/b2", "current": {"title": "B"}, "proposed": {}, "action": "accept"},
 		])
-		summary = apply_review(review, library, dry_run=False)
+		summary = apply_review(review, library, dry_run=False, place=False)
 		assert summary["applied"] == 2
 		assert summary["pruned"] == 2
 		# Both applied → both removed; file is now header-only.
@@ -336,7 +336,7 @@ class TestPruning:
 			{"id": 2, "uuid": "u2", "path": "a2/b2", "current": {"title": "B"}, "proposed": {}, "action": None},
 			{"id": 3, "uuid": "u3", "path": "a3/b3", "current": {"title": "C"}, "proposed": {}, "action": "keep"},
 		])
-		summary = apply_review(review, library, dry_run=False)
+		summary = apply_review(review, library, dry_run=False, place=False)
 		assert summary["applied"] == 1
 		assert summary["kept"] == 1
 		assert summary["pruned"] == 1
@@ -354,7 +354,7 @@ class TestPruning:
 			{"id": 1, "uuid": "u1", "path": "a1/b1", "current": {"title": "A"}, "proposed": {}, "action": "accept"},
 			{"id": 9, "uuid": "u9", "path": "nope/missing", "current": {"title": "X"}, "proposed": {}, "action": "accept"},
 		])
-		summary = apply_review(review, library, dry_run=False)
+		summary = apply_review(review, library, dry_run=False, place=False)
 		assert summary["applied"] == 1
 		assert summary["pruned"] == 1
 		remaining = {r.id for r in parse_review(review)}
@@ -368,7 +368,7 @@ class TestPruning:
 			{"id": 1, "path": "a1/b1", "current": {"title": "A"}, "proposed": {}, "action": "accept"},
 		])
 		before = review.read_text(encoding="utf-8")
-		summary = apply_review(review, library, dry_run=True)
+		summary = apply_review(review, library, dry_run=True, place=False)
 		assert summary["pruned"] == 0
 		assert review.read_text(encoding="utf-8") == before
 
@@ -383,7 +383,7 @@ class TestPruning:
 		_write_review(review, [
 			{"id": None, "uuid": "u-noid", "path": "a1/b1", "current": {"title": "A"}, "proposed": {}, "action": "accept"},
 		])
-		summary = apply_review(review, library, dry_run=False)
+		summary = apply_review(review, library, dry_run=False, place=False)
 		assert summary["applied"] == 1
 		assert summary["pruned"] == 1
 		assert parse_review(review) == []
@@ -419,7 +419,7 @@ class TestCacheInvalidation:
 			"id": 1, "path": "a1/b1",
 			"current": {"title": "Old"}, "proposed": {"title": "New"}, "action": "accept",
 		}])
-		apply_review(review, library, dry_run=False, cache=cache)
+		apply_review(review, library, dry_run=False, place=False, cache=cache)
 		assert not self._has_row(cache, folder)
 		cache.close()
 
@@ -439,7 +439,7 @@ class TestCacheInvalidation:
 		cwd = os.getcwd()
 		os.chdir(tmp_path)
 		try:
-			apply_review(review, library, dry_run=False, cache=cache)
+			apply_review(review, library, dry_run=False, place=False, cache=cache)
 		finally:
 			os.chdir(cwd)
 		assert not folder.exists()
@@ -456,7 +456,7 @@ class TestCacheInvalidation:
 			"id": 1, "path": "a1/b1",
 			"current": {"title": "Old"}, "proposed": {"title": "New"}, "action": "accept",
 		}])
-		apply_review(review, library, dry_run=True, cache=cache)
+		apply_review(review, library, dry_run=True, place=False, cache=cache)
 		assert self._has_row(cache, folder)
 		cache.close()
 
@@ -475,7 +475,7 @@ class TestApplyProgressCallback:
 			for bid in (1, 2, 3)
 		])
 		seen: list[tuple[int, int]] = []
-		summary = apply_review(review, library, dry_run=False, progress_callback=lambda d, t: seen.append((d, t)))
+		summary = apply_review(review, library, dry_run=False, place=False, progress_callback=lambda d, t: seen.append((d, t)))
 		assert summary["applied"] == 3
 		# Every reported total is the entry count.
 		assert all(t == 3 for _, t in seen)
@@ -490,7 +490,7 @@ class TestApplyProgressCallback:
 		review = tmp_path / "review.yaml"
 		_write_review(review, [{"id": 1, "path": "author_1/book_1", "action": None}])
 		# Must not raise when progress_callback is omitted.
-		summary = apply_review(review, library, dry_run=True)
+		summary = apply_review(review, library, dry_run=True, place=False)
 		assert summary["applied"] == 0
 		assert "rejected" not in summary  # the counter is gone with the action
 
@@ -514,7 +514,7 @@ class TestKeepAction:
 			"id": 1, "uuid": "u1", "path": "a1/b1",
 			"current": {"title": "Old"}, "proposed": {"title": "KeptTitle"}, "action": "keep",
 		}])
-		summary = apply_review(review, library, dry_run=False)
+		summary = apply_review(review, library, dry_run=False, place=False)
 		# Counted as kept (not applied), no errors, and the metadata was written.
 		assert summary["kept"] == 1
 		assert summary["applied"] == 0
@@ -531,7 +531,7 @@ class TestKeepAction:
 			"id": 1, "uuid": "u1", "path": "a1/b1",
 			"current": {"title": "Old"}, "proposed": {"title": "New"}, "action": "keep",
 		}])
-		summary = apply_review(review, library, dry_run=False)
+		summary = apply_review(review, library, dry_run=False, place=False)
 		assert summary["pruned"] == 0
 		assert summary["remaining"] is None  # prune_review was never called
 		# The entry survives verbatim (same id, still action: keep).
@@ -550,7 +550,7 @@ class TestKeepAction:
 			{"id": 1, "uuid": "u1", "path": "a1/b1", "current": {}, "proposed": {"title": "A"}, "action": "accept"},
 			{"id": 2, "uuid": "u2", "path": "a2/b2", "current": {}, "proposed": {"title": "B"}, "action": "keep"},
 		])
-		summary = apply_review(review, library, dry_run=False)
+		summary = apply_review(review, library, dry_run=False, place=False)
 		assert summary["applied"] == 1  # accept
 		assert summary["kept"] == 1  # keep
 		assert summary["pruned"] == 1  # only the accept entry
@@ -569,7 +569,7 @@ class TestKeepAction:
 			"proposed": {"cover_url": "https://example.invalid/cover.jpg"}, "action": "keep",
 		}])
 		with patch("book_meta_fix.covers.download_cover", return_value=True) as dl:
-			summary = apply_review(review, library, dry_run=False)
+			summary = apply_review(review, library, dry_run=False, place=False)
 		assert summary["kept"] == 1
 		dl.assert_called_once()  # cover_url was attempted, exactly like accept
 
@@ -593,7 +593,7 @@ class TestSeriesAndFieldCoverage:
 		folder = self._seed_book(library)
 		review = tmp_path / "review.yaml"
 		_write_review(review, [entry])
-		summary = apply_review(review, library, dry_run=False)
+		summary = apply_review(review, library, dry_run=False, place=False)
 		assert summary["errors"] == []
 		data = _json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
 		return folder, data
@@ -622,7 +622,7 @@ class TestSeriesAndFieldCoverage:
 			"id": 1, "uuid": "u1", "path": "a1/b1", "current": {},
 			"proposed": {"series": "New Name"}, "action": "accept",
 		}])
-		apply_review(review, library, dry_run=False)
+		apply_review(review, library, dry_run=False, place=False)
 		data = _json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
 		# The enricher didn't know the index — the current one survives.
 		assert data["series"] == [{"name": "New Name", "index": "3"}]
@@ -681,7 +681,7 @@ class TestAcceptNullDeletesField:
 		(folder / "b1.epub").write_text("x", encoding="utf-8")
 		review = tmp_path / "review.yaml"
 		_write_review(review, [entry])
-		summary = apply_review(review, library, dry_run=False)
+		summary = apply_review(review, library, dry_run=False, place=False)
 		assert summary["errors"] == []
 		data = _json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
 		return folder, data
@@ -760,7 +760,236 @@ class TestAcceptNullDeletesField:
 			"id": 1, "uuid": "u1", "path": "a1/b1", "current": {},
 			"proposed": {"title": "Jiné"}, "action": "reject",
 		}])
-		summary = apply_review(review, library, dry_run=False)
+		summary = apply_review(review, library, dry_run=False, place=False)
 		assert summary["applied"] == 0  # migrated to pending → skipped
 		data = _json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
 		assert data["title"] == "Kniha"
+
+
+class TestPlacement:
+	"""apply_review's placement step (the former `bmf organize`): after writing
+	an entry's metadata, the book is routed to the root target path (clean /
+	verified / acceptable-missing) or needfix/ (unresolved problems). The
+	destination is recomputed from the FINAL metadata; no content is read."""
+
+	def _seed(self, library: Path, rel: str, *, title="Kniha", author="Jan Novak", isbn="9788020403117", year=2001) -> Path:
+		import json as _json
+
+		folder = library / rel
+		folder.mkdir(parents=True)
+		manifest = {"title": title, "authors": [author], "publishedYear": str(year)}
+		if isbn:
+			manifest["isbn"] = isbn
+		(folder / "metadata.json").write_text(_json.dumps(manifest), encoding="utf-8")
+		# NB: the file name must differ from the title ("Kniha") — a stem equal
+		# to the title is the C2 filename-as-title signal and would route the
+		# book to needfix instead of the root path.
+		(folder / "book.epub").write_text("x", encoding="utf-8")
+		return folder
+
+	def _entry(self, rel: str, *, uuid="u1", action="accept", proposed=None, verified=False, category="C13") -> dict:
+		e = {"id": 1, "uuid": uuid, "path": rel, "diagnosis": {"category": category},
+		     "current": {}, "action": action}
+		if proposed is not None:
+			e["proposed"] = proposed
+		if verified:
+			e["verified"] = True
+		return e
+
+	def test_clean_misplaced_moves_to_root(self, tmp_path):
+		library = tmp_path / "lib"
+		self._seed(library, "Spatne/Misto (7)")
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._entry("Spatne/Misto (7)")])
+		summary = apply_review(review, library, dry_run=False)
+		assert summary["moved_to_root"] == 1
+		assert (library / "Jan Novak" / "Kniha (7)" / "metadata.json").is_file()
+		# Empty parent pruned, entry pruned.
+		assert not (library / "Spatne").exists()
+		assert parse_review(review) == []
+
+	def test_acceptable_missing_routes_to_root(self, tmp_path):
+		"""A book without ISBN (MISSING_ISBN, no NEEDS_REVIEW) is
+		acceptable-missing — routed to the root path, not needfix."""
+		library = tmp_path / "lib"
+		self._seed(library, "Spatne/Misto (7)", isbn=None)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._entry("Spatne/Misto (7)")])
+		summary = apply_review(review, library, dry_run=False)
+		assert summary["moved_to_root"] == 1
+		assert summary["moved_to_needfix"] == 0
+		assert (library / "Jan Novak" / "Kniha (7)").is_dir()
+
+	def test_unresolved_problems_route_to_needfix(self, tmp_path):
+		library = tmp_path / "lib"
+		self._seed(library, "Jan Novak/soubor_epub.epub (1)", title="soubor_epub.epub")
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._entry("Jan Novak/soubor_epub.epub (1)", category="C2")])
+		summary = apply_review(review, library, dry_run=False)
+		assert summary["moved_to_needfix"] == 1
+		assert (library / "needfix" / "Jan Novak" / "soubor_epub.epub (1)" / "metadata.json").is_file()
+
+	def test_resolved_book_moves_out_of_needfix(self, tmp_path):
+		"""A clean book sitting under needfix/ moves back out to the root path
+		(the needfix prefix is stripped, not doubled)."""
+		library = tmp_path / "lib"
+		self._seed(library, "needfix/Jan Novak/Kniha (7)")
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._entry("needfix/Jan Novak/Kniha (7)")])
+		summary = apply_review(review, library, dry_run=False)
+		assert summary["moved_to_root"] == 1
+		assert (library / "Jan Novak" / "Kniha (7)" / "metadata.json").is_file()
+		assert not (library / "needfix" / "Jan Novak" / "Kniha (7)").exists()
+
+	def test_verified_overrides_problems_and_persists(self, tmp_path):
+		"""verified: true routes the book to the root path even with an
+		unresolved C2, is persisted into metadata.json — and NOT into the OPF
+		mirror (Calibre must never see it)."""
+		import json as _json
+
+		library = tmp_path / "lib"
+		self._seed(library, "Jan Novak/soubor_epub.epub (1)", title="soubor_epub.epub")
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._entry("Jan Novak/soubor_epub.epub (1)", category="C2", verified=True)])
+		summary = apply_review(review, library, dry_run=False)
+		assert summary["moved_to_needfix"] == 0
+		assert summary["already_placed"] == 1  # target == current path
+		folder = library / "Jan Novak" / "soubor_epub.epub (1)"
+		data = _json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
+		assert data["verified"] is True
+		assert "verified" not in (folder / "metadata.opf").read_text(encoding="utf-8")
+
+	def test_target_recomputed_from_final_metadata(self, tmp_path):
+		"""The accepted proposal changes the title — the destination must be
+		derived from the FINAL metadata, not the stale review proposal."""
+		import json as _json
+
+		library = tmp_path / "lib"
+		self._seed(library, "Spatne/Misto (7)")
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._entry("Spatne/Misto (7)", proposed={"title": "Nová kniha"})])
+		summary = apply_review(review, library, dry_run=False)
+		assert summary["moved_to_root"] == 1
+		folder = library / "Jan Novak" / "Nová kniha (7)"
+		assert (folder / "metadata.json").is_file()
+		assert _json.loads((folder / "metadata.json").read_text(encoding="utf-8"))["title"] == "Nová kniha"
+
+	def test_dry_run_plans_without_moving(self, tmp_path):
+		library = tmp_path / "lib"
+		self._seed(library, "Spatne/Misto (7)")
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._entry("Spatne/Misto (7)")])
+		summary = apply_review(review, library, dry_run=True)
+		assert summary["moved_to_root"] == 1
+		assert (library / "Spatne" / "Misto (7)" / "metadata.json").is_file()
+		assert not (library / "Jan Novak").exists()
+		assert len(parse_review(review)) == 1  # nothing pruned in dry-run
+
+	def test_keep_moved_updates_entry_path(self, tmp_path):
+		"""A retained (keep) entry whose folder moved gets its `path` refreshed,
+		so the next apply finds the book instead of failing 'folder not found'."""
+		library = tmp_path / "lib"
+		self._seed(library, "Spatne/Misto (7)")
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._entry("Spatne/Misto (7)", uuid="u7", action="keep")])
+		summary = apply_review(review, library, dry_run=False)
+		assert summary["kept"] == 1
+		items = parse_review(review)
+		assert len(items) == 1
+		assert items[0].path == "Jan Novak/Kniha (7)"
+		assert items[0].action == "keep"
+
+	def test_occupied_target_same_work_merges(self, tmp_path):
+		"""A book whose target already holds the SAME work merges into it: our
+		approved metadata wins conflicts, format files are combined (collision
+		renamed by loser id), the loser folder disappears."""
+		library = tmp_path / "lib"
+		self._seed(library, "X/Y (1)")
+		self._seed(library, "W/Z (2)")
+		# Different bytes so the merge renames the loser's file instead of
+		# skipping it as an identical duplicate.
+		(library / "W" / "Z (2)" / "book.epub").write_text("other edition", encoding="utf-8")
+		review = tmp_path / "review.yaml"
+		_write_review(review, [
+			self._entry("X/Y (1)", uuid="u1"),
+			self._entry("W/Z (2)", uuid="u2"),
+		])
+		summary = apply_review(review, library, dry_run=False, pattern="{author}/{title}")
+		assert summary["merged"] == 1
+		winner = library / "Jan Novak" / "Kniha"
+		assert (winner / "book.epub").is_file()
+		assert (winner / "book (id2).epub").is_file()
+		assert not (library / "W").exists()
+
+	def test_occupied_target_different_work_disambiguates(self, tmp_path):
+		"""Same title+author but a different year AND ISBN (a different
+		edition) — NOT the same work, so the move falls back to (dup N)."""
+		library = tmp_path / "lib"
+		self._seed(library, "X/Y (1)")
+		self._seed(library, "W/Z (2)", year=2005, isbn="9788020403124")
+		review = tmp_path / "review.yaml"
+		_write_review(review, [
+			self._entry("X/Y (1)", uuid="u1"),
+			self._entry("W/Z (2)", uuid="u2"),
+		])
+		summary = apply_review(review, library, dry_run=False, pattern="{author}/{title}")
+		assert summary["merged"] == 0
+		assert (library / "Jan Novak" / "Kniha").is_dir()
+		assert (library / "Jan Novak" / "Kniha (dup 1)").is_dir()
+
+
+class TestEmptyBookPlacement:
+	"""A dead record (no ebook file) routes to needfix/empty/ — even when
+	verified — and the routing is idempotent on re-runs."""
+
+	def _seed_empty(self, library: Path, rel="Jan Novak/Kniha (7)") -> Path:
+		import json as _json
+
+		folder = library / rel
+		folder.mkdir(parents=True)
+		(folder / "metadata.json").write_text(_json.dumps(
+			{"title": "Kniha", "authors": ["Jan Novak"], "isbn": "9788020403117", "publishedYear": "2001"}), encoding="utf-8")
+		(folder / "metadata.opf").write_text("<package/>", encoding="utf-8")
+		(folder / "cover.jpg").write_bytes(b"cover")
+		return folder
+
+	def _entry(self, rel, **kw):
+		return self._entry_base(rel, **kw)
+
+	def _entry_base(self, rel, *, uuid="u1", action="accept", verified=False):
+		e = {"id": 1, "uuid": uuid, "path": rel, "diagnosis": {"category": "EMPTY_BOOK"},
+		     "current": {}, "action": action}
+		if verified:
+			e["verified"] = True
+		return e
+
+	def test_empty_book_moves_to_needfix_empty(self, tmp_path):
+		library = tmp_path / "lib"
+		self._seed_empty(library)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._entry("Jan Novak/Kniha (7)")])
+		summary = apply_review(review, library, dry_run=False)
+		assert summary["moved_to_needfix"] == 1
+		assert (library / "needfix" / "empty" / "Jan Novak" / "Kniha (7)" / "metadata.json").is_file()
+		assert not (library / "Jan Novak").exists()
+
+	def test_empty_book_stays_empty_even_when_verified(self, tmp_path):
+		"""The missing book file is a hard fact — user approval cannot route
+		a dead record to the root tree."""
+		library = tmp_path / "lib"
+		self._seed_empty(library)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._entry("Jan Novak/Kniha (7)", verified=True)])
+		summary = apply_review(review, library, dry_run=False)
+		assert summary["moved_to_needfix"] == 1
+		assert (library / "needfix" / "empty" / "Jan Novak" / "Kniha (7)").is_dir()
+
+	def test_rerun_under_needfix_empty_is_already_placed(self, tmp_path):
+		library = tmp_path / "lib"
+		self._seed_empty(library, "needfix/empty/Jan Novak/Kniha (7)")
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._entry("needfix/empty/Jan Novak/Kniha (7)")])
+		summary = apply_review(review, library, dry_run=False)
+		assert summary["already_placed"] == 1
+		assert (library / "needfix" / "empty" / "Jan Novak" / "Kniha (7)" / "metadata.json").is_file()
+		assert not (library / "needfix" / "empty" / "needfix").exists()

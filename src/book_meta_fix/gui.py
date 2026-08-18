@@ -647,11 +647,13 @@ class _BookList:
 
 	def insert(self, _parent, _index, *, iid=None, text="", values=(), image=None):
 		# Two-line row: *text* is the TITLE (bold, first line); values are
-		# (action, author) — the author renders italic + indented below.
+		# (action, author, verified) — the author renders italic + indented
+		# below, verified draws a blue ✓ under the action glyph.
 		row = {
 			"iid": str(iid), "title": text,
 			"action": values[0] if values else "",
 			"author": values[1] if len(values) > 1 else "",
+			"verified": bool(values[2]) if len(values) > 2 else False,
 			"image": image,
 		}
 		self._rows.append(row)
@@ -849,11 +851,18 @@ class _BookList:
 			              font=self._italic, fill=fg)
 			# Action: coloured glyph (colour stays even when selected — it
 			# is the orientation cue, and the Tango colours read fine on
-			# the selection blue).
+			# the selection blue). A verified book stacks a blue ✓ under
+			# the action glyph (the two together say "decided AND OK").
 			glyph, colour = self.ACTION_GLYPHS.get(row["action"],
 			                                      self.ACTION_GLYPHS[""])
-			c.create_text(ax, cy, anchor="w", text=glyph,
-			              font=self._bold, fill=colour)
+			if row.get("verified"):
+				c.create_text(ax, cy - 9, anchor="w", text=glyph,
+				              font=self._bold, fill=colour)
+				c.create_text(ax, cy + 13, anchor="w", text="✓",
+				              font=self._bold, fill="#204a87")
+			else:
+				c.create_text(ax, cy, anchor="w", text=glyph,
+				              font=self._bold, fill=colour)
 			if row["image"] is not None:
 				c.create_image(thumb_x, y + (self.ROW_H - self.THUMB_H) // 2,
 				               anchor="nw", image=row["image"])
@@ -960,11 +969,13 @@ class ReviewEditorApp:
 		self._search = tk.StringVar()
 		self._search.trace_add("write", lambda *_: self.refresh_list())
 
-		# Action / notes state.
+		# Action / notes / verified state.
 		self._action_var = tk.StringVar(value="pending")
 		self._notes_var = tk.StringVar()
+		self._verified_var = tk.BooleanVar(value=False)
 		self._action_var.trace_add("write", lambda *_: self._on_action_changed())
 		self._notes_var.trace_add("write", lambda *_: self._mark_dirty())
+		self._verified_var.trace_add("write", lambda *_: self._on_verified_changed())
 
 		# Per-field widgets (checkbutton / RO label / copy btn / target Entry).
 		self._fields: dict[str, dict] = {}
@@ -1062,7 +1073,7 @@ class ReviewEditorApp:
 		ttk.Label(filt, text=_("Action:")).pack(side="left")
 		self._action_combo = ttk.Combobox(
 			filt, textvariable=self._filter_action, state="readonly", width=9,
-			values=["all", "pending", "accept", "delete", "keep"],
+			values=["all", "pending", "accept", "delete", "keep", "verified"],
 		)
 		self._action_combo.pack(side="left", padx=(2, 8))
 		self._action_combo.bind("<<ComboboxSelected>>", lambda *_: self.refresh_list())
@@ -1240,7 +1251,16 @@ class ReviewEditorApp:
 			value.trace_add("write", lambda *_: self._mark_dirty())
 		box.columnconfigure(0, weight=1)
 
-		# Action radios + notes + nav.
+		# Target folder (read-only): the C13 move proposal, if any. Apply
+		# recomputes the destination from the final metadata, so this is a
+		# preview, not an editable field.
+		loc = ttk.Frame(box)
+		loc.pack(fill="x", padx=6, pady=(0, 2))
+		ttk.Label(loc, text=_("Target folder:")).pack(side="left")
+		self._location_lbl = ttk.Label(loc, text="—", relief="sunken", anchor="w")
+		self._location_lbl.pack(side="left", fill="x", expand=True, padx=(4, 0))
+
+		# Action radios + verified checkbox + notes + nav.
 		bottom = ttk.Frame(box)
 		bottom.pack(fill="x", padx=6, pady=6)
 		ttk.Label(bottom, text=_("Action:")).grid(row=0, column=0, sticky="w")
@@ -1248,6 +1268,12 @@ class ReviewEditorApp:
 		rad.grid(row=0, column=1, columnspan=6, sticky="w")
 		for i, a in enumerate(self.ACTIONS):
 			ttk.Radiobutton(rad, text=a, value=a, variable=self._action_var).grid(row=0, column=i, padx=2, sticky="w")
+		self._verified_chk = ttk.Checkbutton(rad, text=_("Verified"), variable=self._verified_var)
+		self._verified_chk.grid(row=0, column=len(self.ACTIONS), padx=(10, 2), sticky="w")
+		_Tooltip(self._verified_chk, _(
+			"Mark the book as OK: apply writes `verified: true` into metadata.json, "
+			"later analyze runs skip the book entirely, and apply places it on the "
+			"target path even if some problems remain. Ctrl+O toggles."))
 		ttk.Label(bottom, text=_("Note:")).grid(row=1, column=0, sticky="w", pady=(4, 0))
 		self._notes_entry = ttk.Entry(bottom, textvariable=self._notes_var)
 		self._notes_entry.grid(row=1, column=1, columnspan=6, sticky="we", pady=(4, 0))
@@ -1655,6 +1681,7 @@ class ReviewEditorApp:
 			return None  # keep native copy/paste/cut/undo/select-all
 		dispatch = {
 			"return": self.act_accept, "d": self.act_delete, "k": self.act_keep,
+			"o": self.toggle_verified,
 			"0": self.act_clear, "s": self.save, "q": self.quit_app,
 			"w": self.swap_fields, "f": self.copy_current_to_focused,
 			"n": self.cover_new,
@@ -1740,7 +1767,7 @@ class ReviewEditorApp:
 			# image=None corrupts ttk's option parsing and the next option's
 			# value (here the ``values`` list) is misread as an option name.
 			kw = dict(iid=str(i), text=self._entry_title(e),
-			          values=(self._action_label(e), self._entry_author(e)))
+			          values=(self._action_label(e), self._entry_author(e), bool(e.get("verified"))))
 			img = self._thumb_photo_for(uuid)
 			if img is not None:
 				kw["image"] = img
@@ -1763,7 +1790,12 @@ class ReviewEditorApp:
 		out = []
 		for i, e in enumerate(self.entries):
 			ea = e.get("action")
-			if act != "all" and (ea or "pending") != act:
+			if act == "verified":
+				# Orthogonal to the action: shows books carrying the OK mark
+				# regardless of their pending/accept/delete/keep state.
+				if not e.get("verified"):
+					continue
+			elif act != "all" and (ea or "pending") != act:
 				continue
 			ec = (e.get("diagnosis") or {}).get("category")
 			if cat != "all" and ec != cat:
@@ -1932,6 +1964,12 @@ class ReviewEditorApp:
 			return
 		e = self.entries[self._cur]
 		e["action"] = action_value(self._action_var.get())
+		# The OK mark is a separate decision channel — stored only when set,
+		# so untouched entries stay byte-identical to analyze output.
+		if self._verified_var.get():
+			e["verified"] = True
+		else:
+			e.pop("verified", None)
 		# The user's field values are merged INTO the proposal (there is no
 		# separate edited block): typed values overwrite, ∅ marks become
 		# nulls, untouched/empty fields keep the existing proposal key.
@@ -1999,9 +2037,14 @@ class ReviewEditorApp:
 				else:
 					f["value"].set(self._display_value(target))
 			self._apply_ro_mode()
-			# Action / notes.
+			# Target folder preview (C13 move proposal; "—" when the book
+			# already sits where its metadata say it belongs).
+			self._location_lbl.configure(
+				text=(e.get("proposed") or {}).get("location") or "—")
+			# Action / notes / verified.
 			self._action_var.set(e.get("action") or "pending")
 			self._notes_var.set(e.get("notes") or "")
+			self._verified_var.set(bool(e.get("verified")))
 		finally:
 			self._loading = False
 		# Covers + content for the new book.
@@ -2113,6 +2156,24 @@ class ReviewEditorApp:
 	def act_delete(self): self.set_action("delete")
 	def act_keep(self): self.set_action("keep")
 	def act_clear(self): self.set_action("pending")
+
+	def toggle_verified(self) -> None:
+		"""Ctrl+O: flip the OK mark on the current book."""
+		self._verified_var.set(not self._verified_var.get())
+
+	def _on_verified_changed(self, *_args) -> None:
+		"""Mirror _on_action_changed: push the OK mark into the entry dict
+		immediately so the list glyph/filter stay in sync with the checkbox."""
+		if self._loading:
+			return
+		self._mark_dirty()
+		if not (0 <= self._cur < len(self.entries)):
+			return
+		if self._verified_var.get():
+			self.entries[self._cur]["verified"] = True
+		else:
+			self.entries[self._cur].pop("verified", None)
+		self.refresh_list()
 
 	def swap_fields(self) -> None:
 		"""Swap the author/title TARGET values (a C1 helper — the analyzer
@@ -2740,7 +2801,8 @@ class ReviewEditorApp:
 			("Ctrl+W", _("swap the author↔title field values (C1 helper)")),
 			("∅ / ↺", _("field button: apply the field as EMPTY (wrong proposal, correct value unknown)")),
 			("Ctrl+D", "delete"),
-			("Ctrl+K", _("keep (applies and retains; analyze skips it)")),
+			("Ctrl+K", _("keep (applies like accept; the entry stays in review)")),
+			("Ctrl+O", _("verified — mark the book OK: apply stores the flag in metadata.json, analyze skips the book, apply places it on the target path")),
 			("Ctrl+0", _("clear → pending")),
 			("Ctrl+S", _("save")),
 			("Ctrl+Q", _("quit")),

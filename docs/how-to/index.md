@@ -6,7 +6,7 @@ Practical recipes. For *why* things work see [concepts.md](../concepts.md); for
 the module/data-flow detail see [architecture.md](../architecture.md); for the
 full command reference see the [README](../../README.md).
 
-Every mutating command (`apply`, `organize`, `epubgen`, `crosscheck`) is a
+Every mutating command (`apply`, `epubgen`, `crosscheck`) is a
 **dry-run by default** — add `--apply` to actually change the filesystem.
 
 ## Recipes
@@ -16,7 +16,7 @@ Every mutating command (`apply`, `organize`, `epubgen`, `crosscheck`) is a
 3. [Generate a review file (the main loop)](review-loop.md)
 4. [Edit + apply](edit-and-apply.md)
 5. [Edit via the GUI](gui.md)
-6. [Organize the library](organize.md)
+6. [Organize the library (placement)](organize.md) — placement runs inside `bmf apply`
 7. [Generate missing EPUBs](epubgen.md)
 8. [Cross-check multi-format folders](crosscheck.md)
 9. [Enabling CZ/SK enrichment](enrichment.md)

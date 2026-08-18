@@ -66,7 +66,7 @@ spolehlivou automatickou opravu.
                     ▼  optional downstream commands
    ┌────────────────┐  ┌───────────────┐  ┌───────────────────┐
    │ mover.py       │  │ epubgen.py    │  │ crosscheck.py     │
-   │ bmf organize   │  │ bmf epubgen   │  │ bmf crosscheck    │
+   │ bmf epubgen    │  │ bmf crosscheck │  │ (organize: stub)  │
    │ (OK→clean path)│  │ (missing epub)│  │ (rogue formats)   │
    └────────────────┘  └───────────────┘  └───────────────────┘
 ```
@@ -74,7 +74,7 @@ spolehlivou automatickou opravu.
 Vertikální páteř (`scan → detect → extract → verify → fix cascade → review`)
 běží uvnitř **jednoho** příkazu: `bmf analyze`. Ostatní příkazy jsou buď
 pohledy jen pro čtení (`scan`, `report`), nebo navazující zapisující
-příkazy (`apply`, `organize`, `epubgen`, `crosscheck`).
+příkazy (`apply`, `epubgen`, `crosscheck`; `organize` je zastaralý stub — umísťování běží uvnitř `apply`).
 
 ## Mapa modulů
 
@@ -98,11 +98,11 @@ Veškerý zdrojový kód leží v `src/book_meta_fix/`. Testy zrcadlí název mo
 | `review_writer.py` | Streamovaný zapisovač `review.yaml`: fronta + zapisovací vlákno přidává jeden YAML dokument za každou dokončenou knihu (styl unixové roury). Přenos `.bak` zachovává předchozí rozhodnutí uživatele. |
 | `review.py` | Parsuje `review.yaml` (multi-doc stream + legacy jeden seznam) → revizní záznamy s `action`. |
 | `writers.py` | Atomické zapisovače pro `metadata.json` + `metadata.opf` (`.tmp` + `os.replace`, historie `.bak`). |
-| `mover.py` | `bmf organize`: přesouvá knihy OK do čistého vzoru cesty; rozbité do `needfix/` se zachováním relativní podcesty. |
+| `mover.py` | move/merge engine pro umísťování v apply: čisté/verified knihy na vzor cesty, nevyřešené do `needfix/`, mrtvé záznamy do `needfix/empty/`. |
 | `epubgen.py` | `bmf epubgen`: generuje chybějící `.epub` z nejlepšího sourozeneckého formátu (calibre `ebook-convert` → `pandoc`). |
 | `crosscheck.py` | `bmf crosscheck`: ověřuje, že víceformátové složky obsahují *tu samou* knihu; soubory cizích formátů karanténuje do izolovaných složek `needfix/`. |
 | `covers.py` | Detekuje vygenerované (zástupné Calibre) obálky pixelovou analýzou; stahuje skutečné obálky z `cover_url` enricheru. C11 + MISSING_COVER. |
-| `cli.py` | CLI přes `click`: `scan`, `report`, `analyze`, `apply`, `organize`, `epubgen`, `crosscheck`. Tenká vrstva nad výše uvedenými moduly. |
+| `cli.py` | CLI přes `click`: `scan`, `report`, `analyze`, `apply`, `epubgen`, `crosscheck`, `gui` (plus zastaralý stub `organize`). Tenká vrstva nad výše uvedenými moduly. |
 | `config.py` | Datová třída `Config` + loader `.env` s průchodem nahoru (walk-up). Rozlišení: CLI přepínač > proměnná prostředí > `.env` > výchozí hodnota. |
 
 ## Hlavní datové modely
@@ -130,7 +130,7 @@ ReconciledMeta  raw LLM output (title, authors, isbn, ..., confidence, reasoning
 
 Kniha protéká `BookMeta → Diagnosis → (ExtractedMeta) → (EnrichedMeta) → review`.
 `Verdict` rozhoduje, kde skončí: knihy `OK/VERIFIED` jsou způsobilé pro
-`organize`; vše ostatní je `NEEDS_REVIEW` a skončí v `review.yaml`.
+umísťování v apply; vše ostatní je `NEEDS_REVIEW` a skončí v `review.yaml`. `bmf apply` navíc umístí každou aplikovanou knihu (dřívější `bmf organize`): čisté/`verified` → vzor cesty, nevyřešené → `needfix/`, mrtvé záznamy → `needfix/empty/`.
 
 ## Kaskáda oprav (nejdřív levné)
 
@@ -215,6 +215,6 @@ skenovaná PDF / čistě obrázkové titulní strany).
   Ctrl-C je bezpečné — vše dosud zapsané už je na disku a `.bak` pořízený
   na začátku se při přerušení běhu zachová, takže předchozí rozhodnutí
   přežijí.
-- **Každý příkaz je ve výchozím nastavení dry-run** (`apply`, `organize`,
+- **Každý příkaz je ve výchozím nastavení dry-run** (`apply`, `epubgen`,
   `epubgen`, `crosscheck`); k mutaci souborového systému je potřeba
   `--apply`.

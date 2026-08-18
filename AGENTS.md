@@ -73,28 +73,32 @@ src/book_meta_fix/
   i18n.py          gettext wrapper: _() with English msgids, cs catalog, locale detect
   readers.py       parse metadata.json (primary) / metadata.opf (fallback) / path
   library.py       traverse library tree + SQLite cache
-  detectors.py     rules C1–C11 → Diagnosis
+  detectors.py     rules C1–C13 → Diagnosis (C13 = location mismatch; exists only
+                   when detect() gets library_root/pattern kwargs)
   extractors.py    per-format content extraction → ExtractedMeta
   text_meta.py     offline page-text mining (1st stage of fix cascade)
   encoding.py      mojibake detection + repair
   isbn.py          ISBN extract/canonicalize/validate
   verifier.py      compare DB meta vs BOOK CONTENT (do NOT trust embedded) + identity primitives
-  classify.py      SINGLE source of truth for OK/needfix disposition (detect + identity gate + opt-in OK-audit)
+  classify.py      disposition for report/epubgen (detect + identity gate + opt-in OK-audit)
   enrichers.py     databazeknih.cz / legie.info / OpenLibrary / Google Books → EnrichedMeta
-  pipeline.py      orchestration: ThreadPoolExecutor, per-book state machine
+  pipeline.py      orchestration: ThreadPoolExecutor, per-book state machine +
+                   apply_review (metadata writes + PLACEMENT — the former organize)
   llm.py           Z.AI provider: LeakyBucket + global 429 cooldown + reconcile_loop + tolerant JSON
   review_writer.py streaming review.yaml writer (queue + writer thread)
-  review.py        parse review.yaml (multi-doc + legacy list)
-  writers.py       atomic metadata.json/.opf writers
-  mover.py         bmf organize
+  review.py        parse review.yaml (multi-doc + legacy list) + update_paths
+  writers.py       atomic metadata.json/.opf writers + ensure_uuid + clear_verified
+  mover.py         move/merge engine used by apply's placement (organize fn kept for tests)
   epubgen.py       bmf epubgen
   crosscheck.py    bmf crosscheck
   covers.py        generated-cover detection (pixel math) + replacement & in-book extraction fallback
   gui.py           bmf gui — keyboard-first Tkinter review.yaml editor (no new writer: loads raw
                   entry dicts, writes via review._header + review._render_entry; scrollable detail
                   column, Tab-trap bindtag, per-format embedded covers, Ctrl+G double-decode recode,
-                  clickable path link / list double-click = open folder via open_folder_in_manager)
-  cli.py           click commands: scan, report, analyze, apply, organize, epubgen, crosscheck, gui
+                  clickable path link / list double-click = open folder via open_folder_in_manager;
+                  Verified checkbox (Ctrl+O) = the persistent user-OK mark)
+  cli.py           click commands: scan, report, analyze, apply, epubgen, crosscheck, gui
+                  (organize is a deprecation stub — placement lives in apply)
 ```
 
 ## Non-obvious gotchas
@@ -116,19 +120,21 @@ src/book_meta_fix/
   review.yaml as flat strings and is packed into the ABS
   `[{"name", "index"}]` list at apply; the wild stored shapes (plain string
   `"Name #N"`, `sequence` key) are normalised by `BookMeta.series_pair()` —
-  the single accessor for GUI display, `organize` patterns and the OPF
+  the single accessor for GUI display, placement patterns and the OPF
   mirror. An edit with an emptied series name clears the series.
 - **Classification is unified in `classify.py`.** The rule "an identified
   MISSING_* book (author+title confirmed against the content, no co-occurring
   `NEEDS_REVIEW`) is acceptable, not broken" lives EXACTLY ONCE in
-  `classify.is_acceptable_missing` + `classify.classify`. `report`, `organize`,
-  `epubgen`, and the pipeline's accept-missing gate all call it, so the OK /
-  needfix disposition cannot drift between commands. `organize` routes an
-  identified MISSING_* book to the OK path (it is NOT broken); `report` does
-  not count it as broken. The identity primitives (`acquire_identity`,
-  `IdentityResult`, `safe_extract`, `has_usable_text`) live in `verifier.py`.
-  Per the agreed identification policy, author+title confirmed against the
-  content is sufficient; the year is never required for identity.
+  `classify.is_acceptable_missing` + `classify.classify`. `report` and
+  `epubgen` call it, the pipeline's accept-missing gate reuses
+  `is_acceptable_missing`, and apply's placement routing
+  (`pipeline._placement_target`) reuses it too — so the OK / needfix
+  disposition cannot drift between commands. `report` does not count an
+  identified MISSING_* book as broken. The identity primitives
+  (`acquire_identity`, `IdentityResult`, `safe_extract`, `has_usable_text`)
+  live in `verifier.py`. Per the agreed identification policy, author+title
+  confirmed against the content is sufficient; the year is never required
+  for identity.
 - **Identity-confirmed MISSING_* books are auto-accepted** (`pipeline.py`
   `_process_book`, gated by `accept_missing_if_identified`, default on). When
   a `MISSING_ISBN`/`MISSING_YEAR`/`MISSING_COVER` book has its author+title
@@ -151,13 +157,66 @@ src/book_meta_fix/
   and keeps the book in review. If any enricher/text_meta DID return data,
   `enriched` is already set and those fields are proposed + applied normally —
   this path fires only when nothing was recovered.
-- **`organize` does NOT content-verify OK books by default.** Consistent with
-  `report`/`analyze`, OK books are routed on the detector verdict alone; the
-  MISMATCH audit is opt-in via `--verify-ok` (and strict on UNCERTAIN unless
-  `--no-strict-verify`). All three commands share `--accept-missing` (default
-  on) and `--verify-ok` (default off). `--no-accept-missing` disables the
-  identity gate → pure detector verdict, no content reads (the historic fast
-  `report`).
+- **Placement lives in `apply`, not a separate command** (the former
+  `bmf organize` is a deprecation stub). After writing an entry's metadata,
+  `apply_review` routes the folder via `_placement_target` + `_place_applied_book`
+  (`pipeline.py`, using `mover` primitives): `verified` or clean or
+  acceptable-missing → the pattern target path; unresolved → `needfix/`
+  (prefix stripped, so a resolved book moves back OUT). Deliberately
+  metadata-only — the plain detector WITHOUT the C13 rule (the move itself
+  resolves C13) and with NO content reads/identity gate; that expensive work
+  belongs to analyze, which is why apply is fast where organize was slow.
+  The destination is RECOMPUTED from the final metadata (user may have fixed
+  author/title — the review `location` proposal is informational only). An
+  occupied target holding the same work is merged (our approved metadata is
+  the `merge_meta` base; the occupant fills gaps); a different work gets
+  `(dup N)`. A moved `keep` entry has its `path` refreshed via
+  `review.update_paths`, or the next apply would fail with "folder not
+  found". `--no-place` (apply_review `place=False`) skips moving entirely.
+- **The `verified` flag is the persistent user-OK mark.** A review entry may
+  carry `verified: true` (GUI checkbox / `Ctrl+O`; orthogonal to `action`, so
+  "accept + verified" = fix AND close in one pass). `apply_review` sets
+  `meta.verified` and `write_book_meta` persists it into `metadata.json`
+  ONLY — `_json_overlay` emits the key just when set (a constant false would
+  pollute every manifest) and the OPF mirror never carries it (Calibre reads
+  OPF only). ABS ignores unknown manifest keys; worst case an ABS rewrite
+  drops the flag and the book simply re-enters review — fail-safe.
+  `run_pipeline(skip_verified=True)` (analyze default) drops verified books
+  right after the scan, before any detection. `bmf analyze --recheck-ok`
+  clears the flag on disk (`writers.clear_verified` pops the key, keeps a
+  `.bak`) and invalidates the cache rows so the scan re-reads them.
+  Analyze also PRE-FILLS the flag: `ReviewWriter._projected_clean` applies
+  the entry's own `proposed` through `_apply_fields` onto a shallow copy and
+  re-detects — when the projected state is detector-clean (a proposed
+  `cover_url` and C13 are credited), the entry is born `verified: true`, so
+  a book the analyzer's proposal completes is fixed AND closed in one apply
+  and never re-enters review.
+- **EMPTY_BOOK (dead record) is the FIRST rule and routes to
+  `needfix/empty/`.** `rule_empty_book` fires when the folder holds only
+  metadata sidecars / their `.bak`/`.tmp` backups / `cover.jpg` — no ebook
+  file, no subdirectory, no other file. With the book gone, no other rule's
+  verdict matters (that is why it runs before C6). The entry pre-fills
+  `accept` (the move is mechanical); `_placement_target` checks
+  `not meta.formats` BEFORE the verified/clean routing — a dead record goes
+  to `needfix/empty/<relpath>` even when verified, and the prefix strip
+  handles both `needfix/` and the nested `empty/` so re-runs are
+  idempotent. Metadata stays untouched (nothing to verify against).
+- **C13 (location mismatch) is opt-in per caller.** `detectors.location_rule`
+  is appended by `detect()`/`detect_all()` ONLY when `library_root` is passed
+  (analyze does; report/epubgen stay location-blind → their semantics are
+  unchanged). Ordering matters: C13 runs BEFORE the enrichment rules, so a
+  misplaced-but-otherwise-fine book gets C13 as PRIMARY — the cheap
+  no-extraction path in `_process_book` (`is_needs_review` is false for a
+  C13 primary) and a pre-filled `accept` in `review_writer` (C13- or
+  EMPTY_BOOK-led with only benign extras: OK-verdict or MISSING_*). C13 is
+  also the ONE non-OK diagnosis promoted over an OK-verdict primary (a
+  misplaced genuine anonym must not be masked by its whitelisted C9-OK).
+  `_apply_fields` ignores the `location` key — it is not a metadata field.
+- **`report`/`analyze` flags** (`--accept-missing` default on,
+  `--verify-ok` default off, `--no-strict-verify`) are unchanged; analyze
+  additionally takes `--pattern`/`--no-check-location`/`--recheck-ok`,
+  apply takes `--pattern`/`--needfix-dir`/`--no-place`
+  (env: `BMF_PATTERN`, `BMF_NEEDFIX_DIR`).
 - **LLM rate limiting is two-layered** (`llm.py`): a `LeakyBucket` smoother
   (constant aggregate RPM) **and** a global 429 cooldown / circuit breaker.
   Z.AI's free tier has a cascade bug — when one model 429s, all models get
@@ -171,7 +230,7 @@ src/book_meta_fix/
 - **`review.yaml` streams** (`review_writer.py`): one YAML document per book,
   appended as each finishes. `.bak` carry-over preserves prior user decisions,
   matched by the book's **uuid** (NOT calibre_id) so a decision survives an
-  `organize` folder move. `bmf apply` reads both the multi-doc and legacy
+  apply placement move. `bmf apply` reads both the multi-doc and legacy
   single-list forms.
 - **The action model is `current` + `proposed` only** (`accept`/`delete`/
   `keep`, plus `null` = pending). `proposed` is the single edit surface:
@@ -187,17 +246,16 @@ src/book_meta_fix/
   `proposed` (user adjustments incl. nulls) is carried verbatim through the
   next `analyze` (review_writer's prior path / `_entry_dict`); undecided
   entries get a fresh proposal.
-- **The `keep` action is accept-but-retain.** `action: keep` applies the
-  proposed fields + cover exactly like `accept` (reuses the `_apply_action`
-  accept branch) but is **NOT pruned** from `review.yaml` after a WRITE apply
-  (`apply_review` skips adding its uuid to `succeeded_uuids`; counted in
-  `summary["kept"]`). The next `bmf analyze` **skips** the book entirely:
-  `run_pipeline(skip_uuids=...)` filters it out before any detect/extract/
-  enrich work, and its review entry is carried over byte-for-byte by
-  `ReviewWriter.finish()`. So a kept book is frozen — visible in review.yaml
-  but never re-processed — until the user flips its action back to `null`,
-  which re-includes it. The skip set is built by `ReviewWriter.keep_uuids()`
-  from the prior `review.yaml` and passed in by the `analyze` CLI.
+- **The `keep` action is accept-but-retain — nothing more.** `action: keep`
+  applies the proposed fields + cover exactly like `accept` (reuses the
+  `_apply_action` accept branch) but is **NOT pruned** from `review.yaml`
+  after a WRITE apply (`apply_review` skips adding its uuid to
+  `succeeded_uuids`; counted in `summary["kept"]`). It does NOT freeze the
+  book anymore — that role moved to the persistent `verified` flag — so the
+  next `analyze` re-processes a kept book normally and its prior decision
+  carries over (decided-prior path in `review_writer._handle`). A kept entry
+  whose folder was moved by apply's placement gets its `path` rewritten
+  (`review.update_paths`).
 - **The book `uuid` is the unified identity** (`models.BookMeta.uuid`): it lives
   in `metadata.json` (source of truth), mirrored to `metadata.opf`, and is the
   single key for **carry-over** (`.bak` match), **pruning** (`apply` drops

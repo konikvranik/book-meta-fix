@@ -10,7 +10,44 @@ from __future__ import annotations
 import json
 
 from book_meta_fix.models import BookMeta
-from book_meta_fix.writers import _json_overlay, _render_opf
+from book_meta_fix.writers import _json_overlay, _render_opf, clear_verified
+
+
+class TestVerifiedFlag:
+	"""`verified` lives in metadata.json only: emitted when set (never as a
+	constant false), never mirrored into the OPF, and clear_verified pops it."""
+
+	def test_overlay_emits_verified_only_when_set(self):
+		assert "verified" not in _json_overlay(BookMeta(title="T"))
+		assert _json_overlay(BookMeta(title="T", verified=True))["verified"] is True
+
+	def test_opf_never_contains_verified(self):
+		opf = _render_opf(BookMeta(title="T", verified=True, uuid="u"))
+		assert "verified" not in opf
+
+	def test_clear_verified_pops_key_and_keeps_the_rest(self, tmp_path):
+		folder = tmp_path / "book"
+		folder.mkdir()
+		(folder / "metadata.json").write_text(json.dumps(
+			{"title": "Kniha", "verified": True, "narrators": ["X"]}), encoding="utf-8")
+		assert clear_verified(folder) is True
+		data = json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
+		assert "verified" not in data
+		assert data["title"] == "Kniha"
+		assert data["narrators"] == ["X"]
+		# A .bak of the pre-clear state is kept (the writers' convention).
+		assert (folder / "metadata.json.bak").is_file()
+
+	def test_clear_verified_without_flag_is_noop(self, tmp_path):
+		folder = tmp_path / "book"
+		folder.mkdir()
+		(folder / "metadata.json").write_text(json.dumps({"title": "Kniha"}), encoding="utf-8")
+		assert clear_verified(folder) is False
+		data = json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
+		assert data == {"title": "Kniha"}
+
+	def test_clear_verified_missing_folder(self, tmp_path):
+		assert clear_verified(tmp_path / "nope") is False
 
 
 class TestSeriesPair:

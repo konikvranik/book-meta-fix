@@ -31,7 +31,7 @@ from .enrichers import EnrichedMeta, Enricher
 from .extractors import ExtractedMeta
 from .library import Cache, scan_library
 from .models import BookMeta, Confidence, Diagnosis, Verdict
-from .review import _COVER_CATEGORIES, _migrate_entry, build_review, parse_review, prune_review
+from .review import _COVER_CATEGORIES, _migrate_entry, build_review, parse_review, prune_review, update_paths
 from .verifier import (
 	IdentityResult,
 	acquire_identity,
@@ -60,6 +60,9 @@ def run_pipeline(
 	only_needs_review: bool = True,
 	review_writer: Any = None,
 	skip_uuids: set[str] | None = None,
+	skip_verified: bool = True,
+	location_root: Path | None = None,
+	location_pattern: str | None = None,
 	verify_ok: bool = False,
 	strict_verify: bool = True,
 	llm_loop: bool = True,
@@ -106,18 +109,42 @@ def run_pipeline(
 	result is also streamed to review.yaml via ``review_writer.submit()`` as it
 	completes (Unix-pipe style), instead of writing the whole file at the end.
 
-	*skip_uuids* (optional): a set of book uuids to skip entirely (no detect /
-	extract / verify / enrich / LLM). Used by ``analyze`` to freeze books the
-	user marked ``action: keep`` — their existing review.yaml entry is carried
-	over verbatim by ReviewWriter.finish() instead of being regenerated.
+	*skip_uuids* (optional): a generic set of book uuids to drop before any
+	detect/extract/enrich work. No CLI command feeds it anymore — the
+	human-freeze feature moved to the persistent ``verified`` flag
+	(*skip_verified*) — but the mechanism is kept as a tested capability.
+
+	*skip_verified* (default True): drop books whose metadata.json carries
+	``verified: true`` right after the scan — before any detection. These are
+	closed books (a human confirmed them OK); analyze must not re-flag them.
+	``bmf analyze --recheck-ok`` clears the flag on disk to re-open one.
+
+	*location_root* / *location_pattern* (optional): opt the detection into
+	the C13 location rule (book sits in a folder that does not match its
+	metadata). Without *location_root* detection stays location-blind — the
+	historic behaviour report/epubgen rely on.
 	"""
 	all_books = scan_library(library, cache=cache)
+	if skip_verified:
+		before = len(all_books)
+		all_books = [b for b in all_books if not b.verified]
+		if before != len(all_books):
+			log.info("pipeline: skipping %d verified book(s)", before - len(all_books))
+			if stats is not None:
+				stats.setdefault("skipped_verified", before - len(all_books))
+	# Location-aware detect (C13) when the caller opted in; plain detect_fn
+	# otherwise so classify-critical behaviour is unchanged for other callers.
+	if location_root is not None:
+		def _detect(b: BookMeta):
+			return detect_fn(b, library_root=location_root, pattern=location_pattern)
+	else:
+		_detect = detect_fn
 	# Apply the detector cheaply to filter out already-OK books (incremental).
 	# This is fast (no I/O — just regex/heuristics over metadata).
 	# verify_ok overrides this: OK books must be kept so they can be verified
 	# against their content (audit mode).
 	if only_needs_review and not verify_ok:
-		books = [b for b in all_books if detect_fn(b).verdict != Verdict.OK]
+		books = [b for b in all_books if _detect(b).verdict != Verdict.OK]
 		log.info(
 			"pipeline: %d total books, %d already OK -> %d to process",
 			len(all_books), len(all_books) - len(books), len(books),
@@ -129,17 +156,13 @@ def run_pipeline(
 				"pipeline: %d total books, verify-ok mode (OK books kept for content check)",
 				len(all_books),
 			)
-	# Skip books the user already decided to ``keep``: their review.yaml entry
-	# is retained verbatim (ReviewWriter.finish() carry-over) and analyze must
-	# not re-detect/extract/enrich them. The set is built by the caller from the
-	# prior review.yaml (ReviewWriter.keep_uuids), so a kept book stays frozen
-	# until the user flips its action back to null. Applied after the detector
-	# filter so it also drops keep-decided books that are now OK.
+	# Generic uuid skip (see the *skip_uuids* docstring above). Applied after
+	# the detector filter so it also drops books that are now OK.
 	if skip_uuids:
 		before = len(books)
 		books = [b for b in books if b.uuid not in skip_uuids]
 		if before != len(books):
-			log.info("pipeline: skipping %d keep-decided book(s)", before - len(books))
+			log.info("pipeline: skipping %d uuid-flagged book(s)", before - len(books))
 	if limit is not None:
 		books = books[:limit]
 	total = len(books)
@@ -177,6 +200,7 @@ def run_pipeline(
 			llm_provider=llm_provider, llm_categories=llm_categories, stats=stats_ref,
 			verify_ok=verify_ok, strict_verify=strict_verify, llm_loop=llm_loop,
 			accept_missing_if_identified=accept_missing_if_identified,
+			detect=_detect,
 		)
 
 	def _process_safe(meta: BookMeta):
@@ -288,6 +312,7 @@ def _process_book(
 	strict_verify: bool = True,
 	llm_loop: bool = True,
 	accept_missing_if_identified: bool = True,
+	detect: Any = None,
 ) -> tuple[BookMeta, Diagnosis, Verification | None, EnrichedMeta | None]:  # noqa: F821
 	"""Process one book end-to-end. Thread-safe (no shared mutable state except *stats*).
 
@@ -295,8 +320,12 @@ def _process_book(
 	checked against the book's content via :func:`verify`. A MISMATCH (or, with
 	*strict_verify*, also an UNCERTAIN) reclassifies the book to NEEDS_REVIEW
 	so the same enrichment/LLM fix path runs as for detector-flagged books.
+
+	*detect*: override the detection function (e.g. run_pipeline's
+	location-aware wrapper that adds C13); defaults to the plain detector.
 	"""
-	diag = detect_fn(meta)
+	dd = detect if detect is not None else detect_fn
+	diag = dd(meta)
 	verification = None
 	enriched = None
 	# Count cover-specific diagnoses for the pipeline summary. Iterate all
@@ -916,11 +945,12 @@ def _yaml_safe_load(path: Path):
 	return entries if entries else None
 
 
-def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cache: Cache | None = None, progress_callback=None) -> dict:
+def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cache: Cache | None = None, progress_callback=None, pattern: str | None = None, needfix_dir: str | None = None, place: bool = True) -> dict:
 	"""Parse a review.yaml and apply approved changes to the library.
 
 	Returns a summary dict: {applied, deleted, pruned, remaining,
-	snapshot, errors, dry_run}.
+	snapshot, errors, dry_run, moved_to_root, moved_to_needfix,
+	already_placed, merged}.
 
 	``action: delete`` removes the whole book folder. Because that is not
 	reversible via the per-file ``.bak`` that ``write_book_meta`` keeps, the
@@ -932,15 +962,41 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cach
 	without error) are pruned from review.yaml so the file reflects
 	only remaining work; pending (action: null) and errored entries
 	are kept. ``action: keep`` is the exception: it applies the proposal like
-	accept but is NOT pruned — the entry is retained and skipped on the next
-	analyze. Dry-run never prunes.
+	accept but is NOT pruned — the entry is retained. Dry-run never prunes.
+
+	PLACEMENT (the former ``bmf organize``, folded in here so review.yaml is
+	the single decision queue): after writing the metadata of an accepted /
+	kept book, apply decides where the folder belongs — NO content reads, no
+	identity gate, just the metadata-only detectors on the FINAL metadata:
+
+	  - ``verified`` (entry flag, persisted into metadata.json by this very
+	    write) → the root target path, even when detectors still complain;
+	  - clean, or only acceptable-missing (MISSING_* with no NEEDS_REVIEW) →
+	    the root target path;
+	  - anything else → ``needfix/`` (a resolved book moves back OUT of
+	    needfix on the next apply — the prefix is stripped).
+
+	The destination is always RECOMPUTED from the final metadata (the user may
+	have fixed author/title in the GUI — the review ``location`` proposal is
+	informational only). An occupied target holding the same work is merged
+	(our approved metadata wins conflicts; the occupant's fields fill gaps);
+	a different work falls back to move_book's ``(dup N)`` disambiguation.
 	"""
 
+	from .mover import DEFAULT_NEEDFIX_DIR, DEFAULT_PATH_PATTERN
+
+	pat = pattern or DEFAULT_PATH_PATTERN
+	nf_dir = needfix_dir or DEFAULT_NEEDFIX_DIR
+
 	items = parse_review(review_path)
-	summary = {"applied": 0, "deleted": 0, "kept": 0, "pruned": 0, "remaining": None, "snapshot": None, "errors": [], "dry_run": dry_run}
+	summary = {"applied": 0, "deleted": 0, "kept": 0, "pruned": 0, "remaining": None, "snapshot": None, "errors": [], "dry_run": dry_run,
+	           "moved_to_root": 0, "moved_to_needfix": 0, "already_placed": 0, "merged": 0}
 	succeeded_uuids: set = set()  # uuids of entries committed this run → pruned
 	# delete collects (folder, uuid) so removal success can be tracked per entry.
 	deletions: list[tuple[Path, str | None]] = []
+	# uuid → new relative path for retained (keep) entries whose book moved —
+	# their review.yaml entry survives, so its `path` must follow the folder.
+	kept_moves: dict[str, str] = {}
 	total = len(items)
 
 	for i, item in enumerate(items):
@@ -975,6 +1031,11 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cach
 
 		meta = read_book_folder(folder)
 		_apply_action(meta, item)
+		# The user's OK mark rides the same write: `verified: true` goes into
+		# metadata.json (the durable flag analyze honours) together with the
+		# field fixes — and gates the root routing below.
+		if item.verified:
+			meta.verified = True
 		# Lazy mint: a book read straight from disk may still lack a uuid (e.g.
 		# a first apply before any scan minted one). write_book_meta persists it;
 		# here we only set it in-memory so we never stamp uuid: null onto disk.
@@ -987,22 +1048,56 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cach
 				summary["errors"].append(f"id={item.id}: {result['error']}")
 			else:
 				# ``keep`` writes metadata like accept but is NOT pruned
-				# from review.yaml — the entry is retained and skipped on the next
-				# analyze (see run_pipeline's skip_uuids). Count it separately so
-				# the summary distinguishes "written and done" from "written and
-				# kept"; only non-keep actions enter the prune set.
+				# from review.yaml — the entry is retained (its `path` is
+				# refreshed below when the folder moved).
 				if item.action == "keep":
 					summary["kept"] += 1
 				else:
 					summary["applied"] += 1
+				# Placement (see the docstring). Runs after the metadata write
+				# so the detectors see the FINAL fields; in dry-run it only
+				# plans (move_book(dry_run=True)). ``place=False`` (bmf apply
+				# --no-place) skips it entirely — metadata only, no moves.
+				move_res = None
+				if place:
+					placement, dest = _placement_target(meta, verified=item.verified, pattern=pat, needfix_dir=nf_dir, library=library)
+					move_res = _place_applied_book(meta, placement, dest, dry_run=dry_run, library=library)
+					if move_res is not None:
+						if move_res.action == "error":
+							summary["errors"].append(f"id={item.id}: move failed: {move_res.error}")
+						elif move_res.action == "already_correct":
+							summary["already_placed"] += 1
+						elif move_res.action == "merged":
+							summary["merged"] += 1
+						elif placement == "ok":
+							summary["moved_to_root"] += 1
+						else:
+							summary["moved_to_needfix"] += 1
 				if not dry_run:
 					if item.uuid is not None and item.action != "keep":
 						succeeded_uuids.add(item.uuid)
 					# The folder's metadata just changed on disk; drop its cached
-					# BookMeta so the next scan re-parses it. Especially matters
-					# on NFS, where the attribute cache can mask the new mtime.
+					# BookMeta so the next scan re-parses it. When the book also
+					# MOVED, drop the destination row too — a repoint would carry
+					# the pre-apply payload, which is exactly the stale entry the
+					# invalidation exists to kill (esp. on NFS).
 					if cache is not None:
 						cache.invalidate(folder)
+						if move_res is not None and move_res.action in ("moved", "collision_renamed", "merged"):
+							cache.invalidate(move_res.destination)
+					# A retained (keep) entry whose folder moved must point at
+					# the new location, or the next apply fails it with
+					# "folder not found".
+					if (
+						item.action == "keep"
+						and move_res is not None
+						and move_res.action in ("moved", "collision_renamed", "merged")
+						and item.uuid is not None
+					):
+						try:
+							kept_moves[item.uuid] = str(Path(move_res.destination).relative_to(library))
+						except ValueError:
+							pass
 		except Exception as e:  # noqa: BLE001
 			summary["errors"].append(f"id={item.id}: write failed: {e}")
 
@@ -1035,12 +1130,99 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cach
 	if not dry_run and succeeded_uuids:
 		summary["remaining"] = prune_review(review_path, succeeded_uuids)
 		summary["pruned"] = len(succeeded_uuids)
+	# Retained (keep) entries whose folders moved: refresh their `path` so the
+	# next apply finds the book. After pruning, so a pruned-and-moved book
+	# (accept) doesn't waste a rewrite on an entry that is already gone.
+	if not dry_run and kept_moves:
+		try:
+			update_paths(review_path, kept_moves)
+		except Exception as e:  # noqa: BLE001
+			summary["errors"].append(f"review.yaml path refresh failed: {e}")
 
 	# Commit any cache invalidations from this run (writes + deletes).
 	if cache is not None and not dry_run:
 		cache.commit()
 
 	return summary
+
+
+def _placement_target(meta: BookMeta, *, verified: bool, pattern: str, needfix_dir: str, library: Path) -> tuple[str, Path]:
+	"""Decide where an applied book belongs: ``("ok", dest)`` or ``("needfix", dest)``.
+
+	Deliberately metadata-only (the plain detector, WITHOUT the C13 location
+	rule — the move itself resolves C13, so it must not force needfix) and with
+	NO content reads: the expensive identity/verification work belongs to
+	analyze. The routing rules, in order:
+
+	  - no format files at all (EMPTY_BOOK dead record) → ``needfix/empty/``,
+	    even when verified — the book file is missing, that is a hard fact no
+	    approval changes. The needfix prefix (and a nested ``empty/``) is
+	    stripped first, so re-runs are idempotent;
+	  - ``verified`` → root, unconditionally (the human's decision outranks
+	    the detectors — e.g. an unrecoverable missing cover);
+	  - detector-clean, or only acceptable-missing (MISSING_* with no
+	    co-occurring NEEDS_REVIEW) → root (mirrors classify's
+	    is_acceptable_missing semantics);
+	  - anything else → needfix/ (compute_needfix_path strips an existing
+	    needfix/ prefix, so a resolved book moves back out).
+	"""
+	from .mover import compute_needfix_path, compute_target_path
+
+	if not meta.formats:
+		try:
+			rel = Path(meta.path).relative_to(library)
+		except ValueError:
+			rel = Path(meta.author_folder) / meta.title_folder
+		parts = rel.parts
+		if len(parts) > 1 and parts[0] == needfix_dir:
+			parts = parts[1:]
+			if len(parts) > 1 and parts[0] == "empty":
+				parts = parts[1:]
+		return "needfix", library / needfix_dir / "empty" / Path(*parts)
+	if verified:
+		return "ok", compute_target_path(meta, pattern, library)
+	diag = detect_fn(meta)
+	if diag.verdict == Verdict.OK or is_acceptable_missing(diag):
+		return "ok", compute_target_path(meta, pattern, library)
+	return "needfix", compute_needfix_path(meta, library, needfix_dir)
+
+
+def _place_applied_book(meta: BookMeta, placement: str, dest: Path, *, dry_run: bool, library: Path) -> Any:
+	"""Move *meta*'s folder to *dest* (or plan the move in dry-run).
+
+	An occupied root target holding the SAME work is a duplicate edition: our
+	(user-approved) metadata becomes the merged base — its values win
+	conflicts, the occupant's fields fill gaps — and our format files move
+	into the occupant's folder (mover.merge_meta / _merge_format_files; the
+	orientation differs from mover.merge_folders because THERE the loser is
+	the folder being absorbed, while here the approved book is the one that
+	moves). A different work at the same path falls back to move_book's
+	``(dup N)`` disambiguation. Returns a mover.MoveResult.
+	"""
+	import shutil
+
+	from . import mover
+	from .mover import move_book
+
+	src = Path(meta.path)
+	if placement == "ok" and dest.exists():
+		try:
+			if src.resolve() == dest.resolve():
+				return move_book(src, dest, dry_run=dry_run, library=library)
+		except OSError:
+			pass
+		other = mover._try_read_meta(dest)
+		if other is not None and mover.same_book(meta, other):
+			merged = mover.merge_meta(meta, other)
+			merged.path = str(dest)
+			details = mover._merge_format_files(src, dest, meta.calibre_id, dry_run=dry_run)
+			if not dry_run:
+				dest.mkdir(parents=True, exist_ok=True)
+				write_book_meta(merged, dry_run=False, backup=True)
+				shutil.rmtree(src, ignore_errors=True)
+				mover._prune_empty_parents(src.parent, library)
+			return mover.MoveResult(str(src), str(dest), "merged", details=details)
+	return move_book(src, dest, dry_run=dry_run, library=library)
 
 
 def _snapshot_deletions(folders: list[Path], library: Path) -> Path | None:
@@ -1075,7 +1257,8 @@ def _apply_fields(meta: BookMeta, fields: dict) -> None:  # noqa: ANN001
 	user's ∅ in the editor — the value is wrong, the correct one unknown):
 	the stored value is CLEARED — the writers serialize that as absence
 	(json null / OPF omission). Unknown keys (cover_url, source, reasoning,
-	...) are ignored here.
+	location, ...) are ignored here — `location` is the C13 move proposal,
+	executed by apply_review's placement step, not a metadata field.
 	"""
 	if "title" in fields:
 		meta.title = fields["title"] or ""

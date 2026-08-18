@@ -207,6 +207,9 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--verify-ok", "verify_ok", is_flag=True, help=_("Audit: also verify books the detectors marked OK against their content. Reads every OK book's file (slower). A MISMATCH reclassifies it to NEEDS_REVIEW and seeks a fix (enrichment + LLM). Use periodically to catch corruption the structural detectors miss."))
 @click.option("--no-strict-verify", "no_strict_verify", is_flag=True, help=_("With --verify-ok: only reclassify a clear MISMATCH (fuzzy title < 0.5). By default (without this flag) UNCERTAIN (0.5–0.8) is also reclassified."))
 @click.option("--accept-missing/--no-accept-missing", "accept_missing", default=True, help=_("Auto-accept MISSING_ISBN/YEAR/COVER books whose author+title were confirmed against the book's content (pre-filled action: accept in review.yaml; pruned by `bmf apply`, safe no-op). Default on. Use --no-accept-missing to keep them for manual review."))
+@click.option("--pattern", "pattern", default=None, help=_("Target path pattern for OK books (default: '{author}/{title} ({id})'). Drives the C13 location detector: a book not sitting at its pattern path enters review with a move proposal that `bmf apply` executes."))
+@click.option("--no-check-location", "no_check_location", is_flag=True, help=_("Skip the C13 location check (analyze metadata only, no placement proposals)."))
+@click.option("--recheck-ok", "recheck_ok", is_flag=True, help=_("Clear the `verified` flag (see review.yaml / the GUI checkbox) from every book, returning user-confirmed books to normal detection. Undo of a too-hasty OK."))
 @click.option("--output", "-o", type=click.Path(path_type=Path), default=None, help=_("Output review file (default: review.yaml)"))
 @click.option("--llm", "use_llm", is_flag=True, help=_("Enable LLM reconciliation (needs ZAI_API_KEY or BMF_LLM_MOCK=1)"))
 @click.option("--llm-categories", default="ALL", help=_("Comma-separated categories to send to LLM, or 'ALL' (default). ALL = every category except C9 (legitimate anonyms like the Bible, where an LLM-invented author would be wrong). Each book is one LLM request that returns all fields at once, so the cost is per-book, not per-category."))
@@ -220,7 +223,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--llm-burst", "llm_burst", type=float, default=None, help=_("Leaky-bucket burst capacity: how many LLM calls may start inside one interval (default 1 = pure even drip, no bunching — one call every --llm-min-interval seconds). This is a count-per-time limiter, not a concurrency cap. Raise only with confirmed rate headroom; a burst >1 fires multiple calls in the same second and trips Z.AI's dynamic RPM limit (429)."))
 @click.option("--llm-rate-limit-base", "llm_rate_limit_base", type=float, default=None, help=_("Base seconds of the global cooldown applied when a 429 is seen (default 5). When ANY worker hits a 429, ALL workers pause this long; the cooldown escalates 5/10/20/... with consecutive 429s, honours the server Retry-After when longer, and is capped by --llm-rate-limit-max. Higher = safer but slower; lower = more 429 risk."))
 @click.option("--llm-rate-limit-max", "llm_rate_limit_max", type=float, default=None, help=_("Cap (seconds) on the escalating 429 cooldown (default 60). Prevents a sustained outage from parking workers indefinitely."))
-def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, use_legie: bool, skip_verify: bool, verify_ok: bool, no_strict_verify: bool, accept_missing: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int, llm_min_interval: float | None, llm_model: str | None, llm_reasoning_effort: str | None, llm_thinking: str | None, no_llm_loop: bool, llm_fallback_model: str | None, llm_burst: float | None, llm_rate_limit_base: float | None, llm_rate_limit_max: float | None) -> None:
+def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, use_legie: bool, skip_verify: bool, verify_ok: bool, no_strict_verify: bool, accept_missing: bool, pattern: str | None, no_check_location: bool, recheck_ok: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int, llm_min_interval: float | None, llm_model: str | None, llm_reasoning_effort: str | None, llm_thinking: str | None, no_llm_loop: bool, llm_fallback_model: str | None, llm_burst: float | None, llm_rate_limit_base: float | None, llm_rate_limit_max: float | None) -> None:
 	"""Run full pipeline and generate a review.yaml for NEEDS_REVIEW books."""
 	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 
@@ -255,6 +258,26 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 	cache: Cache | None = None
 	if not no_cache:
 		cache = Cache(cfg.cache_db)
+
+	# --recheck-ok: wipe the persistent `verified` flag off every book that
+	# carries it, so those user-confirmed books re-enter normal detection.
+	# Must run BEFORE run_pipeline (which skips verified books right after its
+	# scan) and must invalidate the cache rows, or the scan would keep serving
+	# the pre-clear BookMeta (esp. on NFS).
+	if recheck_ok:
+		from .writers import clear_verified
+
+		books = scan_library(cfg.library, cache=cache, use_cache=not no_cache)
+		cleared = 0
+		for b in books:
+			if b.verified:
+				if clear_verified(Path(b.path)):
+					cleared += 1
+				if cache is not None:
+					cache.invalidate(b.path)
+		if cache is not None:
+			cache.commit()
+		console.print("[cyan]--recheck-ok[/cyan]: " + _("cleared the verified flag on {count} book(s)").format(count=cleared))
 
 	enricher = None
 	if not skip_enrich:
@@ -349,7 +372,8 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 			workers=workers,
 			progress_callback=_cb,
 			review_writer=review_writer,
-			skip_uuids=review_writer.keep_uuids(),
+			location_root=None if no_check_location else cfg.library,
+			location_pattern=pattern or cfg.path_pattern,
 			verify_ok=verify_ok,
 			strict_verify=not no_strict_verify,
 			llm_loop=cfg.llm_loop,
@@ -538,8 +562,17 @@ def _print_fix_source_summary(stats: dict) -> None:
 @click.argument("review_file", required=False, type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help=_("Library root"))
 @click.option("--apply", "do_apply", is_flag=True, help=_("Actually write changes (default: dry-run)"))
-def apply(review_file: Path | None, library: Path | None, do_apply: bool) -> None:
-	"""Apply approved changes from a (human-edited) review.yaml."""
+@click.option("--pattern", "pattern", default=None, help=_("Target path pattern for OK books (default: '{author}/{title} ({id})'). Applied books whose metadata is clean (or `verified`) move there; books with unresolved problems move to --needfix-dir."))
+@click.option("--needfix-dir", "needfix_dir", default=None, help=_("Folder for books that still have unresolved problems after apply (default: 'needfix'). A resolved book moves back out of it on the next apply."))
+@click.option("--no-place", "no_place", is_flag=True, help=_("Write metadata only; do not move folders (placement off)."))
+def apply(review_file: Path | None, library: Path | None, do_apply: bool, pattern: str | None, needfix_dir: str | None, no_place: bool) -> None:
+	"""Apply approved changes from a (human-edited) review.yaml.
+
+	After writing an entry's metadata, apply also PLACES the book (the former
+	`bmf organize`, folded in here): clean / verified books move to the target
+	pattern path, unresolved ones to needfix/. No content reads — the decision
+	is re-derived from the final metadata only.
+	"""
 	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 
 	from .pipeline import apply_review
@@ -570,7 +603,13 @@ def apply(review_file: Path | None, library: Path | None, do_apply: bool) -> Non
 				progress.update(task_id, total=total)
 			progress.update(task_id, completed=done)
 
-		summary = apply_review(review_file, cfg.library, dry_run=not do_apply, cache=cache, progress_callback=_cb)
+		summary = apply_review(
+			review_file, cfg.library, dry_run=not do_apply, cache=cache,
+			progress_callback=_cb,
+			pattern=pattern if pattern is not None else cfg.path_pattern,
+			needfix_dir=needfix_dir if needfix_dir is not None else cfg.needfix_dir,
+			place=not no_place,
+		)
 	finally:
 		progress.stop()
 		if cache is not None:
@@ -585,6 +624,13 @@ def apply(review_file: Path | None, library: Path | None, do_apply: bool) -> Non
 	t.add_row(_("Deleted"), str(summary.get("deleted", 0)))
 	if summary.get("snapshot"):
 		t.add_row(_("Deletion snapshot"), summary["snapshot"])
+	if summary.get("moved_to_root") or summary.get("merged") or summary.get("already_placed"):
+		t.add_row(_("Placed on target path"), str(summary.get("moved_to_root", 0)))
+		if summary.get("merged"):
+			t.add_row(_("Merged into same-work folder"), str(summary["merged"]))
+		t.add_row(_("Already on target path"), str(summary.get("already_placed", 0)))
+	if summary.get("moved_to_needfix"):
+		t.add_row(_("Moved to needfix"), str(summary["moved_to_needfix"]))
 	if summary.get("pruned"):
 		t.add_row(_("Pruned from review"), str(summary["pruned"]))
 		t.add_row(_("Remaining in review"), str(summary["remaining"]))
@@ -622,160 +668,27 @@ def gui(library: Path | None, review_file: Path | None) -> None:
 
 
 @main.command()
-@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help=_("Library root"))
-@click.option("--no-cache", is_flag=True, help=_("Disable SQLite cache"))
-@click.option("--limit", type=int, default=None, help=_("Process only the first N books"))
-@click.option("--pattern", default=None, help=_("Path pattern for OK books (default: '{author}/{title} ({id})')"))
-@click.option("--needfix-dir", default=None, help=_("Folder for broken books (default: 'needfix')"))
-@click.option("--apply", "do_apply", is_flag=True, help=_("Actually move (default: dry-run)"))
-@click.option("--accept-missing/--no-accept-missing", "accept_missing", default=True, help=_("Apply the identity gate (same as analyze/report): a MISSING_ISBN/YEAR/COVER book whose author+title are confirmed against its content routes to the OK path, not needfix. Default on. --no-accept-missing routes them to needfix (the historic behaviour) and skips the content read."))
-@click.option("--verify-ok", "verify_ok", is_flag=True, help=_("Audit: also verify books the detectors marked OK against their content. Off by default (consistent with report/analyze). A MISMATCH (or UNCERTAIN, see --no-strict-verify) routes to needfix."))
-@click.option("--no-strict-verify", "no_strict_verify", is_flag=True, help=_("With --verify-ok: only a clear MISMATCH routes to needfix. By default UNCERTAIN does too."))
-def organize(library: Path | None, no_cache: bool, limit: int | None, pattern: str | None, needfix_dir: str | None, do_apply: bool, accept_missing: bool, verify_ok: bool, no_strict_verify: bool) -> None:
-	"""Move OK books to a clean path pattern and broken books to needfix/.
+@click.pass_context
+def organize(ctx: click.Context) -> None:
+	"""(Deprecated) Moved into `bmf apply` — kept as a signpost stub.
 
-	Classification is unified with report/analyze: identified MISSING_* books
-	(author+title confirmed against the content) route to the OK path. OK books
-	are not content-verified unless --verify-ok is given (consistent with report).
+	The old command re-classified the WHOLE library on every run (detectors +
+	content reads for the identity gate), which made it slow and blind to your
+	review decisions. Placement now lives in the review flow:
+
+	  1. bmf analyze     — detects everything ONCE, including location
+	                       mismatches (C13); misplaced-but-healthy books come
+	                       with a pre-filled action: accept
+	  2. bmf gui         — adjust proposals / mark books `verified`
+	  3. bmf apply --apply — writes metadata AND moves each applied book:
+	                       clean/verified → target path, unresolved → needfix/
 	"""
-	from .classify import classify as classify_fn
-	from .mover import DEFAULT_NEEDFIX_DIR, DEFAULT_PATH_PATTERN
-	from .mover import organize as organize_fn
-
-	cfg = Config.from_env()
-	if library is not None:
-		cfg.library = library
-	pat = pattern or DEFAULT_PATH_PATTERN
-	needfix = needfix_dir or DEFAULT_NEEDFIX_DIR
-
-	console.print(f"[bold]{_('Organizing')}[/bold] [cyan]{cfg.library}[/cyan]", highlight=False)
-	console.print(f"  {_('OK pattern')}:    [cyan]{pat}[/cyan]")
-	console.print(f"  {_('needfix dir')}:   [cyan]{needfix}[/cyan]")
-	console.print(f"  {_('mode')}:          [{'WRITE' if do_apply else 'DRY-RUN'}]")
-
-	cache: Cache | None = None
-	if not no_cache:
-		cache = Cache(cfg.cache_db)
-	try:
-		from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
-
-		# Reading metadata for the whole library is the slow, silent gap before
-		# classify — wrap it in a bar so it isn't a dead spot.
-		with Progress(
-			SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-			BarColumn(complete_style="yellow", finished_style="yellow", pulse_style="yellow"), TextColumn("{task.completed}/{task.total}"),
-			TimeRemainingColumn(), console=console, transient=True,
-		) as progress:
-			task_id = progress.add_task(_("Reading library"), total=None)
-
-			def _scan_cb(done: int, total: int) -> None:
-				if progress.tasks[0].total is None and total:
-					progress.update(task_id, total=total)
-				progress.update(task_id, completed=done)
-
-			books = scan_library(cfg.library, cache=cache, use_cache=not no_cache, progress_callback=_scan_cb)
-		if limit is not None:
-			books = books[:limit]
-
-		# Classify each book via the shared classifier (same rules as
-		# report/analyze). An identified MISSING_* book routes to OK; OK books are
-		# content-verified only with --verify-ok. classify() may read the book
-		# file (identity gate / OK audit), so on NFS this can take a while.
-		classifications = []
-		verdicts = []
-		with Progress(
-			SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-			BarColumn(complete_style="yellow", finished_style="yellow", pulse_style="yellow"), TextColumn("{task.completed}/{task.total}"),
-			TimeRemainingColumn(), console=console, transient=True,
-		) as progress:
-			task_id = progress.add_task(_("Classifying"), total=len(books))
-			for meta in books:
-				c = classify_fn(meta, accept_missing=accept_missing, verify_ok=verify_ok, strict_verify=not no_strict_verify)
-				classifications.append(c)
-				verdicts.append((meta, c.verdict))
-				progress.update(task_id, advance=1)
-
-		# Move books (verdict-driven) with a progress bar + ETA. cache is passed
-		# down so organize can invalidate the folders it moves.
-		with Progress(
-			SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-			BarColumn(complete_style="yellow", finished_style="yellow", pulse_style="yellow"), TextColumn("{task.completed}/{task.total}"),
-			TimeRemainingColumn(), console=console, transient=True,
-		) as progress:
-			move_task = progress.add_task(_("Moving books"), total=len(verdicts))
-
-			def _move_cb(done: int, total: int) -> None:
-				progress.update(move_task, completed=done)
-
-			results = organize_fn(
-				verdicts, cfg.library,
-				path_pattern=pat, needfix_dir=needfix, dry_run=not do_apply, cache=cache,
-				progress_callback=_move_cb,
-			)
-		_print_organize_summary(results, classifications)
-	finally:
-		if cache is not None:
-			cache.close()
-
-
-def _print_organize_summary(results, classifications) -> None:  # noqa: ANN001
-	from collections import Counter
-
-
-	# Verdict distribution (from the shared classifier's effective verdict — an
-	# identified MISSING_* book is already folded into OK here).
-	vc: Counter[str] = Counter()
-	identified = 0
-	for c in classifications:
-		vc[c.verdict.value] += 1
-		if c.identified:
-			identified += 1
-	console.print()
-	t = Table(title=_("Classification"), show_header=True, header_style="bold cyan")
-	t.add_column(_("Verdict"))
-	t.add_column(_("Count"), justify="right")
-	t.add_column(_("Destination"), style="dim")
-	for v, n in vc.most_common():
-		dest = "OK path" if v in ("OK", "VERIFIED") else "needfix/"
-		t.add_row(v, str(n), dest)
-	console.print(t)
-	if identified:
-		identified_note = _(
-			"{count} identified (accepted): MISSING_* with author+title confirmed "
-			"against content — routed to OK, not needfix."
-		).format(count=identified)
-		console.print(f"[dim]  {identified_note}[/dim]")
-
-	# Move results
-	rc: Counter[str] = Counter()
-	for r in results:
-		rc[r.action] += 1
-	console.print()
-	t = Table(title=_("Move results"), show_header=True, header_style="bold cyan")
-	t.add_column(_("Action"))
-	t.add_column(_("Count"), justify="right")
-	for a, n in rc.most_common():
-		t.add_row(a, str(n))
-	console.print(t)
-
-	# Collisions: same-book duplicates that were merged (one folder per work,
-	# all formats combined). Show a sample so the user can audit what merged
-	# into what. Disambiguated/dup-N moves show up as plain 'moved'/
-	# 'collision_renamed' above (their destination name carries the suffix).
-	merges = [r for r in results if r.action == "merged"]
-	if merges:
-		console.print()
-		t = Table(title=f"Merges ({len(merges)} folder{'s' if len(merges) != 1 else ''} merged away)", show_header=True, header_style="bold cyan")
-		t.add_column(_("Loser (merged in)"))
-		t.add_column(_("→ Winner"))
-		t.add_column(_("Formats moved"), style="dim")
-		for r in merges[:25]:
-			moved = r.details or []
-			n_moved = sum(1 for _, out in moved if not out.startswith("<skipped"))
-			t.add_row(Path(r.source).name[:40], Path(r.destination).name[:40], f"{n_moved} file(s)")
-		if len(merges) > 25:
-			t.add_row(f"… ({len(merges) - 25} more)", "", "")
-		console.print(t)
+	console.print("[yellow]" + _(
+		"`bmf organize` was merged into `bmf apply`. Run `bmf analyze` "
+		"(it flags misplaced books with a move proposal), review in "
+		"`bmf gui` if needed, then `bmf apply --apply` — applied books are "
+		"placed on their target path (unresolved ones into needfix/)."
+	) + "[/yellow]")
 
 
 @main.command()

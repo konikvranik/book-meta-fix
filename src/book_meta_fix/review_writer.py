@@ -124,16 +124,6 @@ class ReviewWriter:
 		"""
 		self._queue.put(result)
 
-	def keep_uuids(self) -> set:
-		"""Uuids of prior entries the user marked ``action: keep``.
-
-		The caller (analyze) passes this set to ``run_pipeline(skip_uuids=...)``
-		so kept books are not re-processed; their review.yaml entry is carried
-		over verbatim by :meth:`finish`. Read from the already-loaded prior map,
-		so no extra I/O.
-		"""
-		return {u for u, e in self._prior.items() if e.get("action") == "keep"}
-
 	# ------------------------------------------------------------------
 	# Writer thread
 	# ------------------------------------------------------------------
@@ -235,6 +225,37 @@ class ReviewWriter:
 			return "medium"
 		return "low"
 
+	@staticmethod
+	def _projected_clean(meta: Any, proposed: dict | None) -> bool:
+		"""Would *meta* be detector-clean once *proposed* is applied?
+
+		Projects the entry's post-apply state: shallow-copies the meta,
+		applies the proposal through the SAME ``_apply_fields`` apply uses
+		(lazy import — pipeline imports review, so a module-level import
+		here would be circular), then runs the location-blind detector.
+		A proposed ``cover_url`` is credited (the download happens at
+		apply), as is C13 (the apply-time move resolves it). Drives the
+		auto ``verified`` pre-fill: when the analyzer's own proposal
+		completes the book, apply fixes AND closes it in one pass — the
+		book never re-enters review.
+		"""
+		import copy
+
+		from .detectors import detect as _detect
+		from .pipeline import _apply_fields
+
+		m2 = copy.copy(meta)
+		if proposed:
+			_apply_fields(m2, proposed)
+		for d in all_diagnoses(_detect(m2)):
+			if d.category == "C13":
+				continue  # the placement move resolves it
+			if d.category in ("C11", "MISSING_COVER") and proposed and proposed.get("cover_url"):
+				continue  # the cover download at apply resolves it
+			if d.verdict != Verdict.OK:
+				return False
+		return True
+
 	def _build_entry(self, meta: Any, diag: Any, extracted: Any, enriched: Any, prior_entry: dict | None) -> dict:
 		"""Build a review entry dict, carrying over prior user edits."""
 		proposed = _build_proposed(meta, extracted, enriched, diag)
@@ -295,6 +316,21 @@ class ReviewWriter:
 		# confirmed and nothing was recovered. `bmf apply` then prunes it.
 		if action is None and enriched is not None and getattr(enriched, "identity_confirmed", False) and not proposed:
 			action = "accept"
+		# Location-led (C13 primary, with at most benign extras — OK-verdict
+		# matches like a genuine anonym, or acceptable-missing MISSING_*):
+		# the metadata is FINE, the book merely sits in the wrong folder (and
+		# may lack an ISBN/cover, which apply recovers independently). The
+		# move is mechanical and identity-safe (apply recomputes the target
+		# from the same metadata), so pre-fill accept — "metadata correct →
+		# auto approve", the user just runs bmf apply. A real problem (C2,
+		# C11, …) keeps the primary and stays action: null.
+		if action is None and diag.category in ("C13", "EMPTY_BOOK") and all(
+			d.category in ("C13", "EMPTY_BOOK")
+			or d.verdict == Verdict.OK
+			or d.category in ("MISSING_ISBN", "MISSING_YEAR", "MISSING_COVER")
+			for d in all_diagnoses(diag)
+		):
+			action = "accept"
 		entry: dict[str, Any] = {
 			"id": meta.calibre_id,
 			"uuid": meta.uuid,
@@ -308,6 +344,12 @@ class ReviewWriter:
 			"proposed": proposed,
 			"action": action,
 		}
+		# Auto-verified: the analyzer's own proposal completes the book (the
+		# projected post-apply state is detector-clean), so pre-fill the
+		# persistent OK mark — apply then fixes AND closes it in one pass.
+		# The user can still untick the checkbox in the GUI.
+		if self._projected_clean(meta, proposed):
+			entry["verified"] = True
 		# Expose the full diagnosis list when the book has additional problems,
 		# so apply and the reviewer see every issue (primary is already in
 		# `diagnosis` above). Single-issue books keep the legacy shape.
@@ -321,6 +363,8 @@ class ReviewWriter:
 			# fresh (an undecided book may get a better proposal this run);
 			# decided priors never reach here, they are carried verbatim
 			# above (see _handle).
+			if prior_entry.get("verified"):
+				entry["verified"] = True
 			if prior_entry.get("notes"):
 				entry["notes"] = prior_entry["notes"]
 		return entry

@@ -44,3 +44,13 @@ class TestInstallCompletion:
 	def test_invalid_shell_rejected(self) -> None:
 		result = CliRunner().invoke(main, ["install-completion", "powershell"])
 		assert result.exit_code != 0
+
+
+class TestOrganizeShim:
+	"""`bmf organize` was merged into apply — the command is now a signpost."""
+
+	def test_prints_migration_message(self) -> None:
+		result = CliRunner().invoke(main, ["organize"])
+		assert result.exit_code == 0
+		assert "merged into `bmf apply`" in result.output
+		assert "bmf analyze" in result.output

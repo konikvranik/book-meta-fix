@@ -114,6 +114,15 @@ class Config:
 	# anything else → English). Override via BMF_LANGUAGE or --lang.
 	language: str = ""
 
+	# Placement pattern for OK books (apply's routing + the C13 location
+	# detector). None = mover.DEFAULT_PATH_PATTERN ('{author}/{title} ({id})').
+	# Override via BMF_PATTERN or --pattern.
+	path_pattern: str | None = None
+	# Folder for books apply cannot consider resolved. None =
+	# mover.DEFAULT_NEEDFIX_DIR ('needfix'). Override via BMF_NEEDFIX_DIR or
+	# --needfix-dir.
+	needfix_dir: str | None = None
+
 	# Verification thresholds
 	verify_fuzzy_strong: float = 0.8  # >= -> VERIFIED
 	verify_fuzzy_weak: float = 0.5  # >= -> NEEDS_REVIEW (uncertain)
@@ -144,6 +153,11 @@ class Config:
 		# Interface language (cs|en; empty = auto-detect from locale)
 		if v := os.environ.get("BMF_LANGUAGE"):
 			cfg.language = v.strip().lower()
+		# Placement (apply routing + C13 location detector)
+		if v := os.environ.get("BMF_PATTERN"):
+			cfg.path_pattern = v.strip()
+		if v := os.environ.get("BMF_NEEDFIX_DIR"):
+			cfg.needfix_dir = v.strip()
 		# Enricher negative-cache TTL (seconds)
 		if (v := os.environ.get("BMF_ENRICH_NEGATIVE_TTL")) is not None:
 			try:
@@ -223,7 +237,12 @@ def load_dotenv_walk_up(*, max_depth: int = 20, override: bool = False) -> Path 
 	"""
 	cwd = Path.cwd()
 	for depth in range(max_depth + 1):
-		candidate = cwd.parents[depth - 1] if depth > 0 else cwd
+		# Stop once we've walked past the filesystem root (running from a
+		# shallow path like /tmp/x made parents[depth-1] raise IndexError).
+		try:
+			candidate = cwd.parents[depth - 1] if depth > 0 else cwd
+		except IndexError:
+			break
 		# At depth 0 we look at cwd itself; for depth>0 we look at parents[depth-1]
 		# (parents[0] is the immediate parent of cwd).
 		env_path = candidate / ".env"

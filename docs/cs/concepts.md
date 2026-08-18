@@ -43,8 +43,8 @@ který rozhoduje, co se s ní stane:
 
 | Verdikt | Význam | Kam jde |
 |---|---|---|
-| `OK` | projde všemi pravidly detektoru | způsobilá pro `organize` (čistá cesta) |
-| `VERIFIED` | OK **a** potvrzeno obsahem knihy | způsobilá pro `organize` |
+| `OK` | projde všemi pravidly detektoru | způsobilá pro umísťování v `apply` (čistá cesta) |
+| `VERIFIED` | OK **a** potvrzeno obsahem knihy | způsobilá pro umísťování v `apply` |
 | `AUTO_FIXABLE` | oprava s vysokou spolehlivostí, bezpečná pro automatické aplikování | `review.yaml` s předvyplněným `action: accept`, nebo aplikováno automaticky (smazání C5, zámek C6, obohacení MISSING_ISBN/YEAR/COVER) |
 | `NEEDS_REVIEW` | nejisté — musí rozhodnout člověk | `review.yaml`, akci nastavujete vy |
 | `UNFIXABLE` | nelze vyřešit bez ručního zásahu | `review.yaml` (hodnoty `proposed` opravte ručně) |
@@ -171,7 +171,8 @@ přicházejí.
 |---|---|
 | `accept` | aplikuje `proposed` (hodnoty upravte, čímž přebijete analyzátor; hodnota `null` dané pole smaže) |
 | `delete` | odstraní složku knihy (zámek Wordu `~$` z C6; zálohováno do tar.gz) |
-| `keep` | jako `accept`, ale záznam se zachová (neodstraní se); při dalším analyze se přeskočí |
+| `keep` | jako `accept`, ale záznam se v review.yaml zachová (neodstraní se) |
+| `verified: true` | trvalá značka uživatele „OK": apply ji uloží do metadata.json, analyze knihu pak přeskočí a apply ji umístí na cílovou cestu |
 
 Na začátku se existující `review.yaml` přesune na `review.yaml.bak`
 (předchozí rozhodnutí se zachovají); při čistém dokončení se `.bak` smaže;
@@ -215,12 +216,15 @@ při zapnutém obohacení — **první zásah vyhrává**:
 3. **Google Books podle ISBN** — často rate-limitované bez API klíče.
 4. **OpenLibrary podle názvu**.
 
-## Vzory pro organize
+## Vzory pro umísťování
 
-`bmf organize` přesouvá knihy OK/VERIFIED na cestu postavenou z
-formátovacího řetězce (výchozí `{author}/{title} ({id})`). Rozbité knihy
-jdou do `<library>/<needfix-dir>/<original relative path>` (výchozí
-`needfix/`), se zachováním struktury, abyste mohli dohledat provenienci.
+`bmf apply` umístí každou aplikovanou knihu: čisté / `verified` se přesunou
+na cestu postavenou z formátovacího řetězce (výchozí
+`{author}/{title} ({id})`); knihy s nevyřešenými problémy jdou do
+`<library>/<needfix-dir>/<original relative path>` (výchozí `needfix/`),
+se zachováním struktury, abyste mohli dohledat provenienci; mrtvé záznamy
+(bez knižního souboru) do `needfix/empty/`. Vyřešená kniha se při příštím
+apply vrátí z needfix zpět ven.
 
 | Pole | Příklad | Poznámky |
 |---|---|---|

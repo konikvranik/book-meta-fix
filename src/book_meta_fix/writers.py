@@ -125,6 +125,33 @@ def ensure_uuid(meta: BookMeta, *, dry_run: bool = False) -> str | None:
 	return uuid
 
 
+def clear_verified(folder: Path) -> bool:
+	"""Remove the bmf ``verified`` flag from a book's metadata.json.
+
+	The inverse of the apply-time ``verified: true`` write, used by
+	``bmf analyze --recheck-ok`` to put a user-confirmed book back into the
+	normal detection flow. Pops the key entirely (instead of writing
+	``false``) so unverified manifests stay byte-identical to books that were
+	never verified. json-only — the OPF mirror never carried the flag.
+
+	Returns True when a flag was actually removed, False otherwise (no
+	manifest, corrupt manifest, or no flag present). Never raises.
+	"""
+	json_path = Path(folder) / "metadata.json"
+	if not json_path.is_file():
+		return False
+	try:
+		data = json.loads(json_path.read_text(encoding="utf-8"))
+	except (json.JSONDecodeError, OSError):
+		return False
+	if not isinstance(data, dict) or "verified" not in data:
+		return False
+	data.pop("verified")
+	_backup(json_path)
+	_atomic_write(json_path, json.dumps(data, ensure_ascii=False, indent=2))
+	return True
+
+
 def _inject_opf_uuid(opf_path: Path, uuid: str) -> None:
 	"""Set ``<dc:identifier opf:scheme="uuid">`` in an existing OPF to *uuid*.
 
@@ -199,7 +226,7 @@ def _json_overlay(meta: BookMeta) -> dict[str, Any]:
 	write_book_meta / _load_manifest) — emitting them here would overwrite real
 	values with defaults.
 	"""
-	return {
+	overlay: dict[str, Any] = {
 		"tags": meta.tags,
 		# uuid is the stable per-book identity; persisted to the source of truth
 		# so it survives folder renames/moves (organize). Read back by
@@ -216,6 +243,13 @@ def _json_overlay(meta: BookMeta) -> dict[str, Any]:
 		"isbn": meta.isbn,
 		"language": meta.language,
 	}
+	# `verified` is emitted ONLY when set: the surgical merge preserves
+	# existing manifest keys, so emitting a constant False would write
+	# "verified": false into every book. Clearing the flag is a dedicated
+	# operation (clear_verified) that pops the key.
+	if meta.verified:
+		overlay["verified"] = True
+	return overlay
 
 
 def _render_json(meta: BookMeta) -> str:

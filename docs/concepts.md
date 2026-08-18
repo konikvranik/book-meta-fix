@@ -40,8 +40,8 @@ After detection + verification each book lands in one `Verdict`
 
 | Verdict | Meaning | Where it goes |
 |---|---|---|
-| `OK` | passes all detector rules | eligible for `organize` (clean path) |
-| `VERIFIED` | OK **and** confirmed by book content | eligible for `organize` |
+| `OK` | passes all detector rules | eligible for apply's placement (clean path) |
+| `VERIFIED` | OK **and** confirmed by book content | eligible for apply's placement |
 | `AUTO_FIXABLE` | high-confidence fix, safe to apply automatically | `review.yaml` with `action: accept` pre-set, or auto-applied (C5 delete, C6 lock-file, MISSING_ISBN/YEAR/COVER enrich) |
 | `NEEDS_REVIEW` | uncertain — a human must decide | `review.yaml`, you set the action |
 | `UNFIXABLE` | cannot be resolved without manual input | `review.yaml` (fix the `proposed` values by hand) |
@@ -162,7 +162,8 @@ can `tail -f review.yaml` and watch proposals arrive.
 |---|---|
 | `accept` | apply `proposed` (edit the values to override the analyzer; a `null` value deletes that field) |
 | `delete` | remove the book folder (C6 ~$ Word lock-file; tar.gz-backed) |
-| `keep` | like `accept`, but the entry is retained (not pruned); skipped on the next analyze |
+| `keep` | like `accept`, but the entry is retained (not pruned) in review.yaml |
+| `verified: true` | the user's persistent OK mark: apply stores it in metadata.json, analyze skips the book afterwards, apply routes it to the target path |
 
 On start, the existing `review.yaml` is moved to `review.yaml.bak` (prior
 decisions preserved); on a clean finish the `.bak` is deleted; on interruption
@@ -205,12 +206,14 @@ is on — **first hit wins**:
 3. **Google Books by ISBN** — often rate-limited without an API key.
 4. **OpenLibrary by title**.
 
-## Organize patterns
+## Placement patterns
 
-`bmf organize` moves OK/VERIFIED books to a path built from a format string
-(default `{author}/{title} ({id})`). Broken books go to
-`<library>/<needfix-dir>/<original relative path>` (default `needfix/`),
-preserving the structure so you can trace provenance.
+`bmf apply` places each applied book: clean/`verified` ones move to a path
+built from a format string (default `{author}/{title} ({id})`); books with
+unresolved problems go to `<library>/<needfix-dir>/<original relative
+path>` (default `needfix/`), preserving the structure so you can trace
+provenance; dead records (no ebook file) to `needfix/empty/`. A resolved
+book moves back out of needfix on the next apply.
 
 | Field | Example | Notes |
 |---|---|---|

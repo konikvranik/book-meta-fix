@@ -6,7 +6,7 @@ Praktické recepty. *Proč* věci fungují najdete v [concepts.md](../concepts.m
 detaily modulů a toku dat v [architecture.md](../architecture.md); úplnou
 referenci příkazů v [README](../../../README.cs.md).
 
-Každý měnící příkaz (`apply`, `organize`, `epubgen`, `crosscheck`) je
+Každý měnící příkaz (`apply`, `epubgen`, `crosscheck`) je
 **ve výchozím nastavení dry-run** — přidejte `--apply`, chcete-li skutečně
 změnit souborový systém.
 
@@ -17,7 +17,7 @@ změnit souborový systém.
 3. [Vygenerování revizního souboru (hlavní smyčka)](review-loop.md)
 4. [Úprava + aplikování](edit-and-apply.md)
 5. [Úprava přes GUI](gui.md)
-6. [Organizace knihovny](organize.md)
+6. [Organizace knihovny (umísťování)](organize.md) — umísťování běží uvnitř `bmf apply`
 7. [Generování chybějících EPUB](epubgen.md)
 8. [Křížová kontrola složek s více formáty](crosscheck.md)
 9. [Zapnutí CZ/SK obohacení](enrichment.md)

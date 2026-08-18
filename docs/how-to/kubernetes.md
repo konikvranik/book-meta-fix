@@ -5,7 +5,7 @@
 The multi-arch Docker image (see the `Dockerfile` and the
 `docker` GitHub Actions workflow — `linux/amd64`, `linux/arm64`,
 `linux/arm/v7`) lets you run the batch commands on whatever cluster nodes
-you have, including Raspberry Pi / ARM workers. `analyze`, `organize` and
+you have, including Raspberry Pi / ARM workers. `analyze` and
 `crosscheck` are batch jobs — run each as a Kubernetes `Job`, not a
 long-lived Deployment.
 
@@ -151,15 +151,15 @@ command finishes** and propagates its exit code. The whole review loop:
 # 3. apply the approved fixes
 ./scripts/k8s-bmf.sh apply --apply
 
-# 4. reorganize the library
-./scripts/k8s-bmf.sh organize --apply
+# 4. (placement runs inside apply — every applied book is placed;
+#    a standalone `organize` no longer exists)
 
 # 5. quarantine rogue format files
 ./scripts/k8s-bmf.sh crosscheck --apply
 ```
 
 Any extra flags pass straight through to `bmf` (`./scripts/k8s-bmf.sh
-organize --pattern "{author_sort}/{title} ({id})" --apply`). The wrapper
+apply --apply --pattern "{author_sort}/{title} ({id})"`). The wrapper
 reads its defaults from the environment — image, NFS server/path
 (`BMF_K8S_NFS_SRV=""` switches to the `books` PVC), secret name, and the
 `BMF_REVIEW`/`BMF_CACHE` locations — see the header of the script. It
@@ -207,22 +207,23 @@ When the Job completes, `review.yaml` sits next to the books on the PVC
 `args: ["apply", "/review/review.yaml", "--apply"]` — or just
 `args: ["apply", "--apply"]` with `BMF_REVIEW` set.
 
-## organize (restructure the library)
+## apply (write metadata + place books)
 
 Same Job skeleton, different `name` and `args`. Keep `--apply` off for the
-first run to read the dry-run plan in the logs:
+first run to read the dry-run plan (planned writes and moves) in the logs.
+The former `organize` Job is gone — placement is part of apply:
 
 ```yaml
 metadata:
-  name: bmf-organize
+  name: bmf-apply
 spec:
   template:
     spec:
       containers:
         - name: bmf
           image: ghcr.io/konikvranik/book-meta-fix:latest
-          args: ["organize", "--library", "/library"]          # dry-run
-          # args: ["organize", "--library", "/library", "--apply"]
+          args: ["apply", "--library", "/library"]          # dry-run
+          # args: ["apply", "--library", "/library", "--apply"]
 ```
 
 Node selector for ARM-only clusters (the image is multi-arch, but you may
@@ -256,7 +257,7 @@ spec:
   it off NFS (locking) and never point two concurrently running Jobs at the
   same cache file — run the Jobs sequentially
   (e.g. `kubectl wait --for=condition=complete`).
-- **One Job at a time**: `analyze` / `apply` / `organize` all write to the
+- **One Job at a time**: `analyze` / `apply` both write to the
   library; serialize them. A simple `CronJob` chain or an Argo/Airflow DAG
   works if you want scheduled runs.
 - **Covers and external tools**: the image ships poppler (`pdftotext` /

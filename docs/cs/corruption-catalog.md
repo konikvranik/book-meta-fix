@@ -144,6 +144,43 @@ to nejde.
 
 **Verdikt:** NEEDS_REVIEW
 
+## C13 — Nesouhlas umístění (složka ≠ metadata)
+
+Složka knihy neodpovídá cílové cestě odvozené ze vzoru
+(`{author}/{title} ({id})` ve výchozím stavu; viz `--pattern` /
+`BMF_PATTERN`). Nejde o poškození samotných metadat — záznam je v pořádku,
+kniha jen leží na špatném místě (přejmenování v calibre, které složku nikdy
+nepřesunulo, pobyt pod `needfix/`, který už je vyřešený, …).
+
+Čistá cestová matematika: žádné čtení obsahu, žádné online dotazy.
+Vyhodnocuje se jen při analyze se zapnutou kontrolou umístění (výchozí
+stav); `report`/`epubgen` umístění neřeší. Hodnota `proposed.location` je
+informativní — `bmf apply` cíl přepočítá z FINÁLNÍCH metadat (v témže
+průchodu můžeš opravit autora/název). Když je C13 jediný skutečný problém
+(nanejvýš s benigními doprovody — verdiktem OK nebo MISSING_*), položka v
+review dostane předvyplněné `action: accept`, takže zdravá, ale špatně
+umístěná kniha se přesune hromadně. Kniha pod `needfix/`, jejíž problémy
+byly vyřešeny, se stejnou cestou vrací zpět do kořenového stromu.
+
+**Verdikt:** AUTO_FIXABLE (přesun)
+
+## EMPTY_BOOK — Mrtvý záznam (knižní soubor chybí)
+
+Složka obsahuje jen metadata, jejich zálohy a případně obálku — žádný
+knižní soubor a žádný podadresář. Kniha sama byla ztracena (nepovedený
+import do calibre, smazaný soubor); přežil jen záznam. Není co extrahovat
+ani čím ověřovat — záznam nelze potvrdit proti obsahu.
+
+Pravidlo běží PRVNÍ: když chybí samotný soubor knihy, na názoru ostatních
+pravidel na metadata nezáleží. `bmf apply` přesune složku do
+`needfix/empty/` (se zachováním relativní cesty); metadata zůstávají
+nedotčená pro případnou pozdější ruční záchranu. Položka dostane
+předvyplněné `action: accept` — přesun je mechanický a vratný. Složka
+obsahující jakýkoli jiný soubor (nerozpoznaný formát, zatoulaný dokument)
+nebo podadresář prázdná NENÍ.
+
+**Verdikt:** AUTO_FIXABLE (karanténa do `needfix/empty/`)
+
 ## MISSING_ISBN / MISSING_YEAR
 
 Není poškození — jen chybějící data, která lze doplnit online dotazem

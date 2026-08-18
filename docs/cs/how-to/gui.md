@@ -37,3 +37,14 @@ bindings
 (`sudo apt install python3-tk` na Debianu/Ubuntu). Úpravy se zapisují
 zpět do `review.yaml` — potvrďte je příkazem `bmf apply` jako v
 [úprava + aplikování](edit-and-apply.md).
+
+## Verified (značka OK)
+
+Vedle radiobuttonů akcí je checkbox **Verified** (přepíná `Ctrl+O`;
+verified řádky mají modré ✓ pod glyfem akce a filtr akcí nabízí hodnotu
+`verified`). Označuje knihu jako OK napořád: apply zapíše `verified:
+true` do `metadata.json` knihy, další běhy analyze knihu úplně přeskočí
+a apply ji umístí na cílovou cestu, i když nějaké problémy zůstávají.
+Analyze ho předvyplní, když jeho vlastní návrh knihu kompletně doplní.
+Řádek „Cílová složka" pod poli zobrazuje (jen pro čtení) návrh přesunu
+C13 (`proposed.location`), pokud existuje.

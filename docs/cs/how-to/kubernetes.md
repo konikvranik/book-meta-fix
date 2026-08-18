@@ -5,7 +5,7 @@
 Multiarch Docker obraz (viz `Dockerfile` a workflow `docker` na GitHub
 Actions — `linux/amd64`, `linux/arm64`, `linux/arm/v7`) vám umožňuje
 spouštět dávkové příkazy na libovolných uzlech clusteru, včetně workerů
-Raspberry Pi / ARM. `analyze`, `organize` a `crosscheck` jsou dávkové
+Raspberry Pi / ARM. `analyze` a `crosscheck` jsou dávkové
 úlohy — každou spouštějte jako Kubernetes `Job`, ne jako dlouho běžící
 Deployment.
 
@@ -153,15 +153,15 @@ a propaguje jeho exit kód. Celá revizní smyčka:
 # 3. apply the approved fixes
 ./scripts/k8s-bmf.sh apply --apply
 
-# 4. reorganize the library
-./scripts/k8s-bmf.sh organize --apply
+# 4. (umísťování běží uvnitř apply — každá aplikovaná kniha se umístí;
+#    samostatný `organize` už neexistuje)
 
 # 5. quarantine rogue format files
 ./scripts/k8s-bmf.sh crosscheck --apply
 ```
 
 Další přepínače se předají rovnou `bmf` (`./scripts/k8s-bmf.sh
-organize --pattern "{author_sort}/{title} ({id})" --apply`). Wrapper čte
+apply --apply --pattern "{author_sort}/{title} ({id})"`). Wrapper čte
 své výchozí hodnoty z prostředí — obraz, NFS server/cestu
 (`BMF_K8S_NFS_SRV=""` přepne na PVC `books`), název secretu a umístění
 `BMF_REVIEW`/`BMF_CACHE` — viz hlavičku skriptu. Očekává PVC `bmf-review`
@@ -209,22 +209,22 @@ Po dokončení Jobu leží `review.yaml` vedle knih na PVC (nebo na volume
 s `args: ["apply", "/review/review.yaml", "--apply"]` — nebo prostě
 `args: ["apply", "--apply"]` s nastaveným `BMF_REVIEW`.
 
-## organize (restrukturalizace knihovny)
+## apply (zápis metadat + umístění knih)
 
 Stejná kostra Jobu, jiné `name` a `args`. První běh nechte bez `--apply`,
 abyste si v logu přečetli dry-run plán:
 
 ```yaml
 metadata:
-  name: bmf-organize
+  name: bmf-apply
 spec:
   template:
     spec:
       containers:
         - name: bmf
           image: ghcr.io/konikvranik/book-meta-fix:latest
-          args: ["organize", "--library", "/library"]          # dry-run
-          # args: ["organize", "--library", "/library", "--apply"]
+          args: ["apply", "--library", "/library"]          # dry-run
+          # args: ["apply", "--library", "/library", "--apply"]
 ```
 
 Node selector pro clustery pouze s ARM (obraz je multiarch, ale možná
@@ -259,7 +259,7 @@ spec:
   držte jej mimo NFS (zamykání) a nikdy nemiřte dva souběžně běžící Joby
   na týž soubor cache — Joby spouštějte sekvenčně
   (např. `kubectl wait --for=condition=complete`).
-- **Jeden Job najednou**: `analyze` / `apply` / `organize` všechny
+- **Jeden Job najednou**: `analyze` / `apply` oba
   zapisují do knihovny; serializujte je. Jednoduchý řetěz `CronJob`ů nebo
   Argo/Airflow DAG funguje, chcete-li naplánované běhy.
 - **Obálky a externí nástroje**: obraz obsahuje poppler (`pdftotext` /

@@ -289,3 +289,83 @@ class TestSkipUuids:
 			patch("book_meta_fix.pipeline._process_book", side_effect=fake_process):
 			run_pipeline(tmp_path, skip_uuids=None, workers=1, only_needs_review=False)
 		assert set(seen) == {"keep-me", "process-me"}
+
+
+class TestSkipVerified:
+	"""run_pipeline drops books whose metadata.json carries verified: true
+	right after the scan — a closed book never pays detection again."""
+
+	def _two_books(self, tmp_path):
+		from book_meta_fix.models import BookMeta
+		return [
+			BookMeta(calibre_id=1, uuid="v1", verified=True, title="A", authors=["X"], path=str(tmp_path / "a")),
+			BookMeta(calibre_id=2, uuid="p1", title="B", authors=["Y"], path=str(tmp_path / "b")),
+		]
+
+	def test_verified_book_skipped_by_default(self, tmp_path):
+		from book_meta_fix.pipeline import run_pipeline
+
+		seen = []
+
+		def fake_process(meta, *a, **k):
+			seen.append(meta.uuid)
+			return (meta, None, None, None)
+
+		with patch("book_meta_fix.pipeline.scan_library", return_value=self._two_books(tmp_path)), \
+			patch("book_meta_fix.pipeline._process_book", side_effect=fake_process):
+			run_pipeline(tmp_path, workers=1, only_needs_review=False)
+		assert seen == ["p1"]
+
+	def test_skip_verified_false_processes_all(self, tmp_path):
+		from book_meta_fix.pipeline import run_pipeline
+
+		seen = []
+
+		def fake_process(meta, *a, **k):
+			seen.append(meta.uuid)
+			return (meta, None, None, None)
+
+		with patch("book_meta_fix.pipeline.scan_library", return_value=self._two_books(tmp_path)), \
+			patch("book_meta_fix.pipeline._process_book", side_effect=fake_process):
+			run_pipeline(tmp_path, skip_verified=False, workers=1, only_needs_review=False)
+		assert set(seen) == {"v1", "p1"}
+
+
+class TestLocationAwarePipeline:
+	"""With location_root the incremental filter sees C13; without it, a
+	misplaced-but-clean book stays OK (location-blind) and is skipped."""
+
+	def _lib(self, tmp_path):
+		import json as _json
+
+		lib = tmp_path / "lib"
+		for rel in ("Jan Novak/Kniha (7)", "Spatne/Misto (8)"):
+			folder = lib / rel
+			folder.mkdir(parents=True)
+			(folder / "metadata.json").write_text(_json.dumps({
+				"title": "Kniha" if "Kniha" in rel else "Misto",
+				"authors": ["Jan Novak"],
+				"isbn": "9788020403117",
+				"publishedYear": "2001",
+			}), encoding="utf-8")
+			# A real book file — without it the EMPTY_BOOK rule (which runs
+			# first) would claim the folder instead of C13.
+			(folder / "book.epub").write_text("x", encoding="utf-8")
+		return lib
+
+	def test_misplaced_book_reaches_pipeline_with_location_root(self, tmp_path):
+		from book_meta_fix.pipeline import run_pipeline
+
+		lib = self._lib(tmp_path)
+		results = run_pipeline(lib, workers=1, skip_enrich=True, skip_verify=True, location_root=lib)
+		cats = {r[1].category for r in results}
+		assert "C13" in cats
+
+	def test_location_blind_without_location_root(self, tmp_path):
+		from book_meta_fix.pipeline import run_pipeline
+
+		lib = self._lib(tmp_path)
+		results = run_pipeline(lib, workers=1, skip_enrich=True, skip_verify=True, location_root=None)
+		# Books may still be picked up for other reasons (no cover here), but
+		# never with a C13 primary — detection stays location-blind.
+		assert all(r[1].category != "C13" for r in results)

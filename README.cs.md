@@ -18,17 +18,17 @@ při opětovném prohledání.
 | [docs/cs/architecture.md](docs/cs/architecture.md) | Mapa modulů, tok dat, model souběžnosti, cache, atomicita |
 | [docs/cs/concepts.md](docs/cs/concepts.md) | Skupiny verdiktů, filozofie verifikace, kaskáda oprav, smyčka LLM, formát review.yaml |
 | [docs/cs/how-to/](docs/cs/how-to/index.md) | Návody krok za krokem (spustit dávku, vyladit rate limit, ladit, …) |
-| [docs/cs/corruption-catalog.md](docs/cs/corruption-catalog.md) | Kategorie C1–C10 s reálnými příklady |
+| [docs/cs/corruption-catalog.md](docs/cs/corruption-catalog.md) | Kategorie C1–C13 s reálnými příklady |
 | [AGENTS.md](AGENTS.md) | Průvodce pro AI agenty upravující tento kód (konvence, rozložení, zádrhele) |
 
 ## Stav
 
 - [x] Skenování (`bmf scan`)
-- [x] Detekce (`bmf report`) — pravidla C1–C10
+- [x] Detekce (`bmf report`) — pravidla C1–C13
 - [x] Verifikace (kaskáda obsah vs metadata)
 - [x] Obohacení (scraping databazeknih.cz pro CZ/SK žánry + metadata; legie.info pro sci-fi/fantasy povídky a série; OpenLibrary + Google Books jako fallback)
 - [x] Analýza + YAML revize (`bmf analyze`, `bmf apply`)
-- [x] Organizace (`bmf organize`) — rozdělení OK vs needfix
+- [x] Umísťování (`bmf apply`) — čisté/verified knihy na vzor cesty, nevyřešené do needfix/ (organize sloučeno)
 - [x] Generování EPUB (`bmf epubgen`)
 - [x] Konzistence napříč formáty (`bmf crosscheck`) — karanténa formátů, jejichž obsah odporuje metadatům
 - [ ] LLM rekonciliace (Z.AI, pro C1/C4/C5) — čeká na `ZAI_API_KEY`
@@ -58,20 +58,17 @@ $EDITOR review.yaml
 # 4. Preview the changes (dry-run, no writes)
 bmf apply review.yaml
 
-# 5. Apply for real
+# 5. Apply for real: zapíše metadata A umístí každou aplikovanou knihu —
+#    čisté/verified na vzor cesty, nevyřešené do needfix/
 bmf apply --apply review.yaml
 
-# 6. Split library: OK books to clean paths, broken to needfix/
-bmf organize                       # dry-run
-bmf organize --apply
-
-# 7. Generate missing EPUBs for OK books
+# 6. Generate missing EPUBs for OK books
 bmf epubgen                        # dry-run
 bmf epubgen --apply
 ```
 
 > **Poznámka:** každý příkaz, který potřebuje metadata knih (`report`,
-> `analyze`, `organize`, `epubgen`), spustí interní skenování přes
+> `analyze`, `apply`, `epubgen`), spustí interní skenování přes
 > `scan_library()`. Není potřeba nejdřív spouštět `bmf scan` — jeho jediným
 > účelem je vypsat souhrnné statistiky. Skenování používá SQLite cache
 > (`bmf_cache.db`), takže opakované běhy jsou rychlé; předejte `--no-cache`,
@@ -98,13 +95,13 @@ zůstane zachován, abyste mohli obnovit stav před během.
 | Příkaz | Co dělá |
 |---|---|
 | `bmf scan` | Prochází knihovnu, parsuje metadata, vypisuje souhrnné statistiky |
-| `bmf report` | Spustí detektorová pravidla C1–C10, zobrazí rozdělení do kategorií + ukázky |
+| `bmf report` | Spustí detektorová pravidla C1–C13, zobrazí rozdělení do kategorií + ukázky |
 | `bmf analyze` | Úplná pipeline (sken+detekce+extrakce+verifikace+obohacení) → vygeneruje `review.yaml` |
 | `bmf apply <file>` | Aplikuje schválené změny z review.yaml (ve výchozím nastavení dry-run) |
 | `bmf apply --apply <file>` | Skutečně zapíše `metadata.json` + `metadata.opf` |
 | `bmf gui` | Interaktivní Tkinter editor ovládaný klávesnicí pro `review.yaml` |
-| `bmf organize` | Přesune knihy OK do čistého vzoru cesty; rozbité do `needfix/` |
-| `bmf organize --apply` | Skutečně přesune složky |
+| `bmf apply --apply <file>` | Zapíše `metadata.json` + `metadata.opf` A umístí knihu: čisté/`verified` → vzor cesty, nevyřešené → `needfix/`, mrtvé záznamy → `needfix/empty/` |
+| `bmf organize` | *(zastaralý stub)* — umísťování bylo sloučeno do `bmf apply` |
 | `bmf epubgen` | Vygeneruje chybějící soubory `.epub` pro knihy OK (z pdb/mobi/pdf/doc/txt) |
 | `bmf epubgen --apply` | Skutečně vygeneruje EPUBy |
 | `bmf crosscheck` | Ověří, že všechny formáty ve složce jsou tatáž kniha; vetřelce dá do karantény |
@@ -397,7 +394,8 @@ rate limit 1 s na hostitele.
 │       ├── <Title> - <Author>.epub
 │       ├── <Title> - <Author>.pdb
 │       └── cover.jpg
-└── needfix/                  # broken books moved here by `bmf organize`
+└── needfix/                  # nevyřešené knihy sem umísťuje `bmf apply`
+    └── empty/                # mrtvé záznamy (žádný knižní soubor)
     └── <Author>/...          #   (preserving the original relative subpath)
 ```
 
@@ -452,7 +450,7 @@ $EDITOR src/book_meta_fix/locales/cs/LC_MESSAGES/bmf.po
 make i18n-compile   # .po -> .mo
 ```
 
-## Kategorie poškození (C1–C10)
+## Kategorie poškození (C1–C13)
 
 Úplný katalog s reálnými příklady najdete v
 [`docs/cs/corruption-catalog.md`](docs/cs/corruption-catalog.md). Souhrn:
@@ -470,6 +468,9 @@ make i18n-compile   # .po -> .mo
 | C9 | anonym (většinou falešný — skutečný anonym je na whitelistu) | NEEDS_REVIEW |
 | C10 | dlouhý seznam více autorů (antologie vs. tým překladatelů) | NEEDS_REVIEW |
 | C11 | generovaná obálka (zástupná z Calibre) detekovaná pixelovou analýzou | NEEDS_REVIEW |
+| C12 | znečištění autora (ztracená kapitalizace, úvodní `_`/`*`) | NEEDS_REVIEW |
+| C13 | nesouhlas umístění (složka ≠ vzorová cílová cesta) | AUTO_FIXABLE (přesun) |
+| — | EMPTY_BOOK (jen metadata/zálohy/obálka — knižní soubor chybí) | AUTO_FIXABLE (`needfix/empty/`) |
 | — | MISSING_ISBN / MISSING_YEAR | AUTO_FIXABLE (obohacení) |
 | — | MISSING_COVER (chybí přiložený `cover.jpg`) | AUTO_FIXABLE (stažení) |
 
@@ -500,8 +501,14 @@ make i18n-compile   # .po -> .mo
 - `accept` — aplikuje `proposed` (hodnoty upravte, chcete-li přebít analyzátor;
   hodnota `null` dané pole při aplikování smaže)
 - `delete` — odstraní složku knihy (C6 ~$ zámek Wordu; se zálohou tar.gz)
-- `keep` — jako `accept`, ale záznam zůstává (neprořezává se); při příštím
-  analyze se přeskočí
+- `keep` — jako `accept`, ale záznam zůstává (neprořezává se) v tomto souboru
+
+**Příznak verified** (`verified: true`, nezávisle na akci — checkbox v GUI /
+`Ctrl+O`): apply ho uloží do `metadata.json` knihy, další běhy `analyze`
+knihu úplně přeskočí a apply ji umístí na cílovou cestu, i když nějaké
+problémy zůstávají. Analyze ho předvyplní, když jeho vlastní návrh knihu
+kompletně doplní (projektovaný stav po apply je detektory čistý) — opravená
+kniha se do review už nikdy nevrátí. Odvolání: `bmf analyze --recheck-ok`.
 
 Staré soubory review.yaml s blokem `edited:` nebo `action: edit|reject|swap`
 se při načtení migrují (`edited` se sloučí přes `proposed`, `edit` se stane
@@ -520,10 +527,19 @@ skutečného textu knihy**:
 3. **UNCERTAIN**, pokud jsou k dispozici jen vložená metadata (žádný čitelný
    text)
 
-## Vzory pro organize
+## Vzory pro umísťování (apply)
 
-`bmf organize` přesouvá knihy OK do cesty složené z formátovacího řetězce.
-Výchozí: `{author}/{title} ({id})`. Dostupná pole:
+`bmf apply` nezapisuje jen metadata — po aplikaci položky knihu také
+**umístí**: čisté / `verified` knihy se přesunou na cestu složenou z
+formátovacího řetězce (výchozí `{author}/{title} ({id})`), knihy s
+nevyřešenými problémy do `needfix/` a mrtvé záznamy (žádný knižní soubor)
+do `needfix/empty/`. Rozhodnutí se odvozuje z FINÁLNÍCH metadat pomocí
+čistě metadatových detektorů — bez čtení obsahu, takže apply zůstává
+rychlé. Dřívější `bmf organize` (který při každém běhu znovu klasifikoval
+celou knihovnu) je zastaralý stub; špatně umístěné knihy označí analyze
+pomocí kontroly umístění C13 (s předvyplněným `action: accept`).
+
+Dostupná pole:
 
 | Pole | Příklad | Poznámky |
 |---|---|---|
@@ -540,8 +556,9 @@ Výchozí: `{author}/{title} ({id})`. Dostupná pole:
 
 Příklady:
 ```bash
-bmf organize --pattern "{author_sort}/{title} ({id})"
-bmf organize --pattern "{author}/{series}/{title}" --needfix-dir "_problems"
+bmf apply --apply review.yaml --pattern "{author_sort}/{title} ({id})"
+bmf apply --apply review.yaml --pattern "{author}/{series}/{title}" --needfix-dir "_problems"
+# (nebo BMF_PATTERN / BMF_NEEDFIX_DIR v .env; --no-place přesuny úplně vypne)
 ```
 
 Rozbité knihy míří do `<library>/<needfix-dir>/<původní relativní cesta>`
@@ -572,7 +589,7 @@ ukazuje tabulku sloučení („Merges“ — který poražený se sloučil do kt
 vítěze), takže výsledek lze auditovat.
 
 ```bash
-bmf organize --pattern "{author}/{title}" --apply   # merge dups, disambiguate editions
+bmf apply --apply review.yaml --pattern "{author}/{title}"   # merge dups, disambiguate editions
 ```
 
 ## Konzistence napříč formáty (`bmf crosscheck`)

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from book_meta_fix.enrichers import EnrichedMeta
 from book_meta_fix.models import BookMeta, Confidence, Diagnosis, Verdict
-from book_meta_fix.review import _build_current, _build_proposed, _header, build_review, parse_review
+from book_meta_fix.review import _build_current, _build_proposed, _header, build_review, parse_review, update_paths
 
 
 def _meta(calibre_id: int, title: str = "T", author: str = "A") -> BookMeta:
@@ -341,3 +341,68 @@ class TestC1SwapProposal:
 	def test_non_c1_never_proposes_swap(self):
 		meta = _meta(1, title="Jan Drda", author="NŘm Barik da")
 		assert _build_proposed(meta, None, None, _diag("C2")) is None
+
+
+class TestLocationAndVerified:
+	"""The C13 `location` proposal and the `verified` entry flag."""
+
+	def test_build_proposed_surfaces_location(self):
+		"""A C13 diagnosis (primary or additional) contributes its target path
+		to the proposal — informational; apply recomputes the destination."""
+		from book_meta_fix.detectors import Diagnosis as D
+
+		c13 = D(category="C13", reason="umístění", confidence=Confidence.HIGH,
+		        verdict=Verdict.AUTO_FIXABLE, proposed={"location": "A/T (1)"})
+		proposed = _build_proposed(_meta(1), None, None, c13)
+		assert proposed["location"] == "A/T (1)"
+
+	def test_build_proposed_location_from_additional_c13(self):
+		from book_meta_fix.detectors import Diagnosis as D
+
+		diag = _diag("C2")
+		diag.additional = [D(category="C13", reason="umístění", confidence=Confidence.HIGH,
+		                     verdict=Verdict.AUTO_FIXABLE, proposed={"location": "A/T (1)"})]
+		proposed = _build_proposed(_meta(1), None, None, diag)
+		assert proposed["location"] == "A/T (1)"
+
+	def test_parse_review_reads_verified(self, tmp_path):
+		import yaml
+
+		path = tmp_path / "review.yaml"
+		body = (
+			"---\n" + yaml.safe_dump({"id": 1, "uuid": "u1", "path": "a/b",
+			                          "diagnosis": {"category": "C2"}, "current": {},
+			                          "verified": True, "action": None}, sort_keys=False) +
+			"---\n" + yaml.safe_dump({"id": 2, "uuid": "u2", "path": "c/d",
+			                          "diagnosis": {"category": "C2"}, "current": {},
+			                          "action": None}, sort_keys=False)
+		)
+		path.write_text(body, encoding="utf-8")
+		items = parse_review(path)
+		assert items[0].verified is True
+		assert items[1].verified is False
+
+	def test_update_paths_rewrites_moved_entries(self, tmp_path):
+		import yaml
+
+		path = tmp_path / "review.yaml"
+		entries = [
+			{"id": 1, "uuid": "u1", "path": "old/place", "diagnosis": {"category": "C2"},
+			 "current": {}, "action": "keep"},
+			{"id": 2, "uuid": "u2", "path": "untouched", "diagnosis": {"category": "C2"},
+			 "current": {}, "action": None},
+		]
+		path.write_text("".join("---\n" + yaml.safe_dump(e, sort_keys=False) for e in entries), encoding="utf-8")
+		changed = update_paths(path, {"u1": "Jan Novak/Kniha (7)"})
+		assert changed == 1
+		items = parse_review(path)
+		assert items[0].path == "Jan Novak/Kniha (7)"
+		assert items[1].path == "untouched"
+
+	def test_update_paths_no_moves_is_noop(self, tmp_path):
+		path = tmp_path / "review.yaml"
+		path.write_text("---\n{uuid: u1, path: a}\n", encoding="utf-8")
+		assert update_paths(path, {}) == 0
+
+	def test_header_documents_verified(self):
+		assert "verified" in _header(0)

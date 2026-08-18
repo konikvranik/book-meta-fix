@@ -140,6 +140,42 @@ titles; everything else with anonym spelling is flagged.
 
 **Verdict:** NEEDS_REVIEW
 
+## C13 — Location mismatch (folder ≠ metadata)
+
+The book's folder does not match the pattern-derived target path
+(`{author}/{title} ({id})` by default; see `--pattern` / `BMF_PATTERN`).
+Not corruption of the metadata itself — the record is fine, the book merely
+sits in the wrong place (a calibre rename that never moved the folder, a
+stint under `needfix/` that is now resolved, ...).
+
+Pure path math: no content reads, no online lookups. Evaluated only when
+analyze runs with location checking on (default); `report`/`epubgen` stay
+location-blind. The `proposed.location` value is informational — `bmf apply`
+recomputes the destination from the FINAL metadata (you may fix
+author/title in the same pass). When C13 is the only real problem (with at
+most benign extras — OK-verdict or MISSING_* diagnoses), the review entry is
+pre-filled `action: accept`, so a misplaced-but-healthy book is moved in
+bulk. A book under `needfix/` whose problems were resolved moves back out
+to the root tree the same way.
+
+**Verdict:** AUTO_FIXABLE (move)
+
+## EMPTY_BOOK — Dead record (the book file is gone)
+
+The folder holds only metadata sidecars, their backups and/or a cover —
+no ebook file and no subdirectory. The book itself was lost (a failed
+calibre import, a deleted file); only the record survived. There is nothing
+to extract or verify, so the record can never be confirmed against content.
+
+The rule runs FIRST: with the book file gone, no other rule's opinion about
+the metadata matters. `bmf apply` moves the folder to `needfix/empty/`
+(preserving the relative path); the metadata is left untouched for a
+possible later manual recovery. The entry is pre-filled `action: accept` —
+the move is mechanical and reversible. A folder containing any other file
+(an unrecognized format, a stray document) or a subdirectory is NOT empty.
+
+**Verdict:** AUTO_FIXABLE (quarantine to `needfix/empty/`)
+
 ## MISSING_ISBN / MISSING_YEAR
 
 Not corruption — just missing data that can be filled by online lookup

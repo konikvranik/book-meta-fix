@@ -506,37 +506,116 @@ class TestCoverOnlyAccept:
 		assert parsed[0].action == "accept"
 
 
-class TestKeepUuids:
-	"""keep_uuids() exposes the uuids the user marked ``action: keep`` so
-	``analyze`` can pass them to run_pipeline(skip_uuids=...)."""
+class TestLocationPrefill:
+	"""C13 (location mismatch) with otherwise-benign extras pre-fills accept:
+	the metadata is fine, apply just moves the folder (and recovers a missing
+	cover independently). A real problem alongside keeps action: null."""
 
-	def _write_prior(self, out, entries):
+	def _c13_result(self, calibre_id: int, *, additional: list[Diagnosis] | None = None):
+		meta = _meta(calibre_id)
+		diag = Diagnosis(
+			category="C13", reason="umístění", confidence=Confidence.HIGH,
+			verdict=Verdict.AUTO_FIXABLE, proposed={"location": f"A/T ({calibre_id})"},
+			additional=additional or [],
+		)
+		return (meta, diag, None, None)
+
+	def test_c13_only_prefills_accept_with_location(self, tmp_path):
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		_submit_all_and_finish(w, [self._c13_result(1)])
+		parsed = parse_review(out)
+		assert parsed[0].action == "accept"
+		assert parsed[0].proposed["location"] == "A/T (1)"
+
+	def test_c13_with_acceptable_missing_prefills_accept(self, tmp_path):
+		extra = Diagnosis(category="MISSING_COVER", reason="no cover", confidence=Confidence.LOW, verdict=Verdict.AUTO_FIXABLE)
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		_submit_all_and_finish(w, [self._c13_result(1, additional=[extra])])
+		parsed = parse_review(out)
+		assert parsed[0].action == "accept"
+
+	def test_c13_with_real_problem_stays_null(self, tmp_path):
+		extra = Diagnosis(category="C11", reason="generated cover", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		_submit_all_and_finish(w, [self._c13_result(1, additional=[extra])])
+		parsed = parse_review(out)
+		assert parsed[0].action is None
+
+	def test_prior_verified_carried_onto_fresh_entry(self, tmp_path):
+		"""An UNDECIDED prior entry carrying verified: true keeps the mark when
+		the book is re-analyzed (decided priors are carried verbatim anyway)."""
 		import yaml
-		body = "".join(f"---\n{yaml.safe_dump(e, sort_keys=False)}" for e in entries)
-		out.write_text(body, encoding="utf-8")
 
-	def test_returns_only_keep_entries(self, tmp_path):
 		out = tmp_path / "review.yaml"
-		self._write_prior(out, [
-			{"uuid": "k1", "path": "a", "current": {}, "action": "keep"},
-			{"uuid": "k2", "path": "b", "current": {}, "action": "keep"},
-			{"uuid": "a1", "path": "c", "current": {}, "action": "accept"},
-			{"uuid": "p1", "path": "d", "current": {}, "action": None},
-		])
+		out.write_text("---\n" + yaml.safe_dump({
+			"id": 1, "uuid": "u1", "path": "a", "diagnosis": {"category": "C2"},
+			"current": {}, "verified": True, "action": None,
+		}, sort_keys=False), encoding="utf-8")
 		w = ReviewWriter(out)
-		try:
-			assert w.keep_uuids() == {"k1", "k2"}
-		finally:
-			w.finish()
+		_submit_all_and_finish(w, [self._c13_result(1)])
+		parsed = parse_review(out)
+		assert parsed[0].verified is True
 
-	def test_empty_when_no_keep_entries(self, tmp_path):
+
+
+class TestProjectedVerified:
+	"""Auto `verified` pre-fill: when the analyzer's own proposal completes
+	the book (the projected post-apply state is detector-clean), the entry
+	carries verified: true so apply fixes AND closes it in one pass."""
+
+	def _book_folder(self, tmp_path, *, with_year=False, title="Kniha"):
+		import json as _json
+
+		from book_meta_fix.readers import read_book_folder
+
+		folder = tmp_path / "lib" / "Jan Novak" / "Kniha (7)"
+		folder.mkdir(parents=True)
+		manifest = {"title": title, "authors": ["Jan Novak"], "isbn": "9788020403117"}
+		if with_year:
+			manifest["publishedYear"] = "2001"
+		(folder / "metadata.json").write_text(_json.dumps(manifest), encoding="utf-8")
+		(folder / "book.epub").write_text("x", encoding="utf-8")
+		(folder / "cover.jpg").write_bytes(b"cover")
+		return read_book_folder(folder)
+
+	def test_completing_proposal_prefills_verified(self, tmp_path):
+		"""MISSING_YEAR + a databazeknih year proposal: after apply the book
+		is complete → accept AND verified are pre-filled."""
+		meta = self._book_folder(tmp_path)  # no year
+		diag = Diagnosis(category="MISSING_YEAR", reason="no year", confidence=Confidence.LOW, verdict=Verdict.AUTO_FIXABLE)
+		enriched = EnrichedMeta(title=None, authors=[], year=2001, source="databazeknih")
 		out = tmp_path / "review.yaml"
-		self._write_prior(out, [
-			{"uuid": "a1", "path": "a", "current": {}, "action": "accept"},
-			{"uuid": "r1", "path": "b", "current": {}, "action": "reject"},
-		])
 		w = ReviewWriter(out)
-		try:
-			assert w.keep_uuids() == set()
-		finally:
-			w.finish()
+		_submit_all_and_finish(w, [(meta, diag, None, enriched)])
+		parsed = parse_review(out)
+		assert parsed[0].action == "accept"
+		assert parsed[0].proposed["year"] == 2001
+		assert parsed[0].verified is True
+
+	def test_unresolved_problem_no_verified(self, tmp_path):
+		"""A proposal that leaves a NEEDS_REVIEW problem (C2 title) standing
+		does NOT pre-fill verified — the book stays open for review."""
+		meta = self._book_folder(tmp_path, title="soubor_epub.epub", with_year=True)
+		diag = Diagnosis(category="C2", reason="filename title", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		_submit_all_and_finish(w, [(meta, diag, None, None)])
+		parsed = parse_review(out)
+		assert parsed[0].verified is False
+
+	def test_cover_url_credited(self, tmp_path):
+		"""A proposed cover_url counts as resolving MISSING_COVER — the
+		download happens at apply."""
+		meta = self._book_folder(tmp_path, with_year=True)
+		(folder := tmp_path / "lib" / "Jan Novak" / "Kniha (7)")
+		(folder / "cover.jpg").unlink()
+		diag = Diagnosis(category="MISSING_COVER", reason="no cover", confidence=Confidence.LOW, verdict=Verdict.AUTO_FIXABLE)
+		enriched = EnrichedMeta(title=None, authors=[], cover_url="http://x/cover.jpg", source="databazeknih")
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		_submit_all_and_finish(w, [(meta, diag, None, enriched)])
+		parsed = parse_review(out)
+		assert parsed[0].verified is True

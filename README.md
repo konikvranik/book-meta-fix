@@ -17,17 +17,17 @@ Audiobookshelf and Kavita pick up the fixes on rescan.
 | [docs/architecture.md](docs/architecture.md) | Module map, data flow, concurrency model, caching, atomicity |
 | [docs/concepts.md](docs/concepts.md) | Verdict buckets, verification philosophy, fix cascade, LLM loop, review.yaml format |
 | [docs/how-to/](docs/how-to/index.md) | Step-by-step recipes (run a batch, tune the rate limit, debug, …) |
-| [docs/corruption-catalog.md](docs/corruption-catalog.md) | The C1–C10 categories with real examples |
+| [docs/corruption-catalog.md](docs/corruption-catalog.md) | The C1–C13 categories with real examples |
 | [AGENTS.md](AGENTS.md) | Guide for AI agents editing this codebase (conventions, layout, gotchas) |
 
 ## Status
 
 - [x] Scan (`bmf scan`)
-- [x] Detect (`bmf report`) — C1–C10 rules
+- [x] Detect (`bmf report`) — C1–C13 rules
 - [x] Verify (content vs metadata cascade)
 - [x] Enrich (databazeknih.cz scraping for CZ/SK genres + metadata; legie.info for sci-fi/fantasy short stories & series; OpenLibrary + Google Books fallback)
 - [x] Analyze + YAML review (`bmf analyze`, `bmf apply`)
-- [x] Organize (`bmf organize`) — split OK vs needfix
+- [x] Placement (`bmf apply`) — clean/verified books to the pattern path, unresolved to needfix/ (organize merged in)
 - [x] EPUB generation (`bmf epubgen`)
 - [x] Cross-format consistency (`bmf crosscheck`) — quarantine formats whose content differs from metadata
 - [ ] LLM reconciliation (Z.AI, for C1/C4/C5) — pending `ZAI_API_KEY`
@@ -57,20 +57,17 @@ $EDITOR review.yaml
 # 4. Preview the changes (dry-run, no writes)
 bmf apply review.yaml
 
-# 5. Apply for real
+# 5. Apply for real: writes metadata AND places each applied book —
+#    clean/verified books to the pattern path, unresolved to needfix/
 bmf apply --apply review.yaml
 
-# 6. Split library: OK books to clean paths, broken to needfix/
-bmf organize                       # dry-run
-bmf organize --apply
-
-# 7. Generate missing EPUBs for OK books
+# 6. Generate missing EPUBs for OK books
 bmf epubgen                        # dry-run
 bmf epubgen --apply
 ```
 
 > **Note:** every command that needs book metadata (`report`, `analyze`,
-> `organize`, `epubgen`) runs an internal scan via `scan_library()`. There is
+> `apply`, `epubgen`) runs an internal scan via `scan_library()`. There is
 > no need to run `bmf scan` first — its only purpose is to print summary
 > statistics. The scan uses a SQLite cache (`bmf_cache.db`) so repeated runs
 > are fast; pass `--no-cache` to force a full re-parse.
@@ -96,13 +93,12 @@ can recover the pre-run state.
 | Command | What it does |
 |---|---|
 | `bmf scan` | Traverse library, parse metadata, print summary stats |
-| `bmf report` | Run C1–C10 detector rules, show category breakdown + samples |
-| `bmf analyze` | Full pipeline (scan+detect+extract+verify+enrich) → generate `review.yaml` |
+| `bmf report` | Run C1–C13 detector rules, show category breakdown + samples |
+| `bmf analyze` | Full pipeline (scan+detect+extract+verify+enrich+location check) → generate `review.yaml` |
 | `bmf apply <file>` | Apply approved changes from a review.yaml (dry-run by default) |
-| `bmf apply --apply <file>` | Actually write `metadata.json` + `metadata.opf` |
+| `bmf apply --apply <file>` | Write `metadata.json` + `metadata.opf` AND place each book: clean/`verified` → target pattern path, unresolved → `needfix/`, dead records → `needfix/empty/` |
 | `bmf gui` | Interactive keyboard-driven Tkinter editor for `review.yaml` |
-| `bmf organize` | Move OK books to a clean path pattern; broken to `needfix/` |
-| `bmf organize --apply` | Actually move the folders |
+| `bmf organize` | *(deprecated stub)* — placement was merged into `bmf apply` |
 | `bmf epubgen` | Generate missing `.epub` files for OK books (from pdb/mobi/pdf/doc/txt) |
 | `bmf epubgen --apply` | Actually generate the EPUBs |
 | `bmf crosscheck` | Verify all formats in a folder are the same book; quarantine rogues |
@@ -389,7 +385,8 @@ Download is one HTTP request per replaced cover, rate-limited at 1 s/host.
 │       ├── <Title> - <Author>.epub
 │       ├── <Title> - <Author>.pdb
 │       └── cover.jpg
-└── needfix/                  # broken books moved here by `bmf organize`
+└── needfix/                  # unresolved books placed here by `bmf apply`
+    └── empty/                # dead records (no ebook file at all)
     └── <Author>/...          #   (preserving the original relative subpath)
 ```
 
@@ -443,7 +440,7 @@ $EDITOR src/book_meta_fix/locales/cs/LC_MESSAGES/bmf.po
 make i18n-compile   # .po -> .mo
 ```
 
-## Corruption categories (C1–C10)
+## Corruption categories (C1–C13)
 
 See [`docs/corruption-catalog.md`](docs/corruption-catalog.md) for the full
 catalog with real examples. Summary:
@@ -461,6 +458,9 @@ catalog with real examples. Summary:
 | C9 | anonym (mostly fake — real anonym is whitelisted) | NEEDS_REVIEW |
 | C10 | long multi-author list (anthology vs translator team) | NEEDS_REVIEW |
 | C11 | generated cover (Calibre placeholder) detected by pixel analysis | NEEDS_REVIEW |
+| C12 | author slug/artefact pollution (lost capitalization, leading `_`/`*`) | NEEDS_REVIEW |
+| C13 | location mismatch (folder ≠ pattern-derived target) | AUTO_FIXABLE (move) |
+| — | EMPTY_BOOK (only metadata/backups/cover — the book file is gone) | AUTO_FIXABLE (`needfix/empty/`) |
 | — | MISSING_ISBN / MISSING_YEAR | AUTO_FIXABLE (enrich) |
 | — | MISSING_COVER (no `cover.jpg` sidecar) | AUTO_FIXABLE (download) |
 
@@ -485,14 +485,22 @@ catalog with real examples. Summary:
     year: 1920
     source: embedded+openlibrary
   action: accept          # ← you fill this in
+  verified: true          # ← mark the book OK for good (see below)
 ```
 
 **Actions:**
 - `accept` — apply `proposed` (edit the values to override the analyzer; a
   `null` value deletes that field at apply time)
 - `delete` — remove the book folder (C6 ~$ Word lock-file; tar.gz-backed)
-- `keep` — like `accept`, but the entry is retained (not pruned); skipped on
-  the next analyze
+- `keep` — like `accept`, but the entry is retained (not pruned) in this file
+
+**Verified flag** (`verified: true`, orthogonal to the action — the GUI
+checkbox / `Ctrl+O`): apply stores it in the book's `metadata.json`, later
+`analyze` runs skip the book entirely, and apply routes it to the target
+path even if some problems remain unrecoverable. Analyze pre-fills it when
+its own proposal completes the book (the projected post-apply state is
+detector-clean), so a fixed book never re-enters review. Undo with
+`bmf analyze --recheck-ok`.
 
 Old review.yaml files with an `edited:` block or `action: edit|reject|swap`
 are migrated on load (`edited` merges over `proposed`, `edit` becomes
@@ -509,10 +517,19 @@ text** can confirm a record:
 2. **Fuzzy title match against first-page text** (rapidfuzz)
 3. **UNCERTAIN** if only embedded metadata is available (no readable text)
 
-## Organize patterns
+## Placement patterns (apply)
 
-`bmf organize` moves OK books to a path built from a format string. Default:
-`{author}/{title} ({id})`. Available fields:
+`bmf apply` does not only write metadata — after applying an entry it also
+**places the book**: clean / `verified` books move to a path built from a
+format string (default `{author}/{title} ({id})`), books with unresolved
+problems move to `needfix/`, and dead records (no ebook file at all) to
+`needfix/empty/`. The decision is re-derived from the FINAL metadata using
+the metadata-only detectors — no content reads, so apply stays fast. The
+former `bmf organize` command (which re-classified the whole library on
+every run) is a deprecation stub; analyze flags misplaced books for you via
+the C13 location check (pre-filled `action: accept`).
+
+Available pattern fields:
 
 | Field | Example | Notes |
 |---|---|---|
@@ -529,8 +546,9 @@ text** can confirm a record:
 
 Examples:
 ```bash
-bmf organize --pattern "{author_sort}/{title} ({id})"
-bmf organize --pattern "{author}/{series}/{title}" --needfix-dir "_problems"
+bmf apply --apply review.yaml --pattern "{author_sort}/{title} ({id})"
+bmf apply --apply review.yaml --pattern "{author}/{series}/{title}" --needfix-dir "_problems"
+# (or set BMF_PATTERN / BMF_NEEDFIX_DIR in .env; --no-place skips moving entirely)
 ```
 
 Broken books go to `<library>/<needfix-dir>/<original relative path>`
@@ -540,7 +558,7 @@ trace where they came from.
 ### Collision handling (duplicate-book merge)
 
 When two OK books resolve to the same target path (common with an `{id}`-less
-pattern, or duplicate `calibre_id`s), `organize` no longer blindly appends
+pattern, or duplicate `calibre_id`s), apply no longer blindly appends
 ` (dup N)`. It detects whether they are the **same book** and acts accordingly:
 
 - **Same book** (ISBN agrees, **or** title + author fuzzy-match and the year
@@ -561,7 +579,7 @@ a "Merges" table (which loser merged into which winner) so the result is
 auditable.
 
 ```bash
-bmf organize --pattern "{author}/{title}" --apply   # merge dups, disambiguate editions
+bmf apply --apply review.yaml --pattern "{author}/{title}"   # merge dups, disambiguate editions
 ```
 
 ## Cross-format consistency (`bmf crosscheck`)
@@ -606,7 +624,7 @@ books):
 <library>/needfix/crosscheck/<Author> - <Title> (<id>) - <filename>/<filename>
 ```
 
-Collisions append ` (dup N)` to the folder name (the same convention `organize`
+Collisions append ` (dup N)` to the folder name (the same convention apply's placement
 uses — never merge, never overwrite). The book folder's cache entry is
 invalidated on a real move so the next scan re-parses it.
 

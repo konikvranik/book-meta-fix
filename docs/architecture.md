@@ -57,7 +57,8 @@ pick up the fix on rescan. Every change is gated by a human-in-the-loop
         │   (one `---` doc/blk) │  (tail -f live; .bak carry-over)
         └───────────┬───────────┘
                     ▼  human sets action: accept/delete/keep
-                    (edits the proposed values; null = field delete)
+                    (edits proposed values; null = field delete;
+                     verified: true = the persistent user-OK mark)
         ┌───────────────────────┐
         │   review.py (parse) → │  bmf apply
         │   writers.py          │  atomic write metadata.json + .opf (.bak)
@@ -65,7 +66,7 @@ pick up the fix on rescan. Every change is gated by a human-in-the-loop
                     ▼  optional downstream commands
    ┌────────────────┐  ┌───────────────┐  ┌───────────────────┐
    │ mover.py       │  │ epubgen.py    │  │ crosscheck.py     │
-   │ bmf organize   │  │ bmf epubgen   │  │ bmf crosscheck    │
+   │ bmf epubgen    │  │ bmf crosscheck │  │ (organize: stub)  │
    │ (OK→clean path)│  │ (missing epub)│  │ (rogue formats)   │
    └────────────────┘  └───────────────┘  └───────────────────┘
 ```
@@ -73,7 +74,7 @@ pick up the fix on rescan. Every change is gated by a human-in-the-loop
 The vertical spine (`scan → detect → extract → verify → fix cascade → review`)
 runs inside **one** command: `bmf analyze`. The other commands are either
 read-only views (`scan`, `report`) or downstream writers
-(`apply`, `organize`, `epubgen`, `crosscheck`).
+(`apply`, `epubgen`, `crosscheck`; `organize` is a deprecation stub — placement runs inside `apply`).
 
 ## Module map
 
@@ -97,11 +98,11 @@ All source lives under `src/book_meta_fix/`. Tests mirror the module name
 | `review_writer.py` | Streaming `review.yaml` writer: a queue + writer thread appends one YAML document per finished book (Unix-pipe style). `.bak` carry-over preserves prior user decisions. |
 | `review.py` | Parse `review.yaml` (multi-doc stream + legacy single-list) → review entries with `action`. |
 | `writers.py` | Atomic writers for `metadata.json` + `metadata.opf` (`.tmp` + `os.replace`, `.bak` history). |
-| `mover.py` | `bmf organize`: move OK books to a clean path pattern; broken to `needfix/` preserving the relative subpath. |
+| `mover.py` | the move/merge engine used by apply's placement: clean/verified books to the pattern path, unresolved to `needfix/`, dead records to `needfix/empty/`. |
 | `epubgen.py` | `bmf epubgen`: generate missing `.epub` from the best sibling format (calibre `ebook-convert` → `pandoc`). |
 | `crosscheck.py` | `bmf crosscheck`: verify multi-format folders hold the *same* book; quarantine rogue format files into isolated `needfix/` folders. |
 | `covers.py` | Detect generated (Calibre placeholder) covers by pixel analysis; download real covers from enricher `cover_url`. C11 + MISSING_COVER. |
-| `cli.py` | `click` CLI: `scan`, `report`, `analyze`, `apply`, `organize`, `epubgen`, `crosscheck`. Thin layer over the modules above. |
+| `cli.py` | `click` CLI: `scan`, `report`, `analyze`, `apply`, `epubgen`, `crosscheck`, `gui` (plus a deprecation-stub `organize`). Thin layer over the modules above. |
 | `config.py` | `Config` dataclass + `.env` walk-up loader. Resolution: CLI flag > env var > `.env` > default. |
 
 ## Core data models
@@ -129,7 +130,10 @@ ReconciledMeta  raw LLM output (title, authors, isbn, ..., confidence, reasoning
 
 A book flows `BookMeta → Diagnosis → (ExtractedMeta) → (EnrichedMeta) → review`.
 `Verdict` decides where it lands: `OK/VERIFIED` books are eligible for
-`organize`; everything else is `NEEDS_REVIEW` and lands in `review.yaml`.
+apply's placement; everything else is `NEEDS_REVIEW` and lands in
+`review.yaml`. `bmf apply` also places every applied book (the former
+`bmf organize`): clean/`verified` → the pattern path, unresolved →
+`needfix/`, dead records → `needfix/empty/`.
 
 ## The fix cascade (cheap first)
 
@@ -203,5 +207,5 @@ text sibling formats. Optional external tools extend coverage: `pdftotext`/
 - **`review.yaml`** (`review_writer.py`) is appended one document at a time;
   Ctrl-C is safe — everything flushed so far is already on disk, and a `.bak`
   taken at start is kept if the run is interrupted so prior decisions survive.
-- **Every command is a dry-run by default** (`apply`, `organize`, `epubgen`,
+- **Every command is a dry-run by default** (`apply`, `epubgen`,
   `crosscheck`); `--apply` is required to mutate the filesystem.

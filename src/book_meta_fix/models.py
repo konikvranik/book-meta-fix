@@ -61,6 +61,13 @@ class BookMeta:
 	formats: list[str] = field(default_factory=list)  # ['.epub', '.pdb', ...]
 	primary_file: str | None = None  # best file for content extraction
 
+	# User disposition: a human reviewed this book and confirmed it OK.
+	# Persisted in metadata.json only (NOT mirrored to metadata.opf — Calibre
+	# never needs it, and ABS ignores unknown manifest keys). analyze skips
+	# verified books entirely; apply routes them to the OK path even when
+	# detectors still complain. Cleared again by `bmf analyze --recheck-ok`.
+	verified: bool = False
+
 	# Provenance: where each field's value came from
 	source: str = "json"  # 'json' | 'opf' | 'path'
 
