@@ -507,18 +507,22 @@ class TestCoverOnlyAccept:
 
 
 class TestLocationPrefill:
-	"""C13 (location mismatch) with otherwise-benign extras pre-fills accept:
-	the metadata is fine, apply just moves the folder (and recovers a missing
-	cover independently). A real problem alongside keeps action: null."""
+	"""C13 (location mismatch) with benign extras pre-fills accept: the
+	metadata is fine, apply just moves the folder. A cover-diagnosis extra
+	(C11 / MISSING_COVER) is tolerated too — apply's cover recovery runs for
+	a cover category anywhere in the entry's list, and refusing would freeze
+	the book (C13 outranks the enrichment rules, so the location rule would
+	shadow the cover problem on every run). A real metadata problem, or a
+	proposal that changes title/author, keeps action: null."""
 
-	def _c13_result(self, calibre_id: int, *, additional: list[Diagnosis] | None = None):
+	def _c13_result(self, calibre_id: int, *, additional: list[Diagnosis] | None = None, enriched: EnrichedMeta | None = None):
 		meta = _meta(calibre_id)
 		diag = Diagnosis(
 			category="C13", reason="umístění", confidence=Confidence.HIGH,
 			verdict=Verdict.AUTO_FIXABLE, proposed={"location": f"A/T ({calibre_id})"},
 			additional=additional or [],
 		)
-		return (meta, diag, None, None)
+		return (meta, diag, None, enriched)
 
 	def test_c13_only_prefills_accept_with_location(self, tmp_path):
 		out = tmp_path / "review.yaml"
@@ -536,13 +540,59 @@ class TestLocationPrefill:
 		parsed = parse_review(out)
 		assert parsed[0].action == "accept"
 
-	def test_c13_with_real_problem_stays_null(self, tmp_path):
+	def test_c13_with_generated_cover_prefills_accept(self, tmp_path):
+		"""C13 + C11 (the dominant real-world combination: a misplaced book
+		with a calibre-generated cover): accept pre-fills — apply moves the
+		folder AND retries the cover in the same pass."""
 		extra = Diagnosis(category="C11", reason="generated cover", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
 		out = tmp_path / "review.yaml"
 		w = ReviewWriter(out)
 		_submit_all_and_finish(w, [self._c13_result(1, additional=[extra])])
 		parsed = parse_review(out)
+		assert parsed[0].action == "accept"
+
+	def test_c13_with_real_problem_stays_null(self, tmp_path):
+		extra = Diagnosis(category="C2", reason="filename as title", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		_submit_all_and_finish(w, [self._c13_result(1, additional=[extra])])
+		parsed = parse_review(out)
 		assert parsed[0].action is None
+
+	def test_c13_cover_extra_with_identity_change_stays_null(self, tmp_path):
+		"""A C13+C11 entry whose proposal CHANGES the title must not accept:
+		a mere-move accept must not apply an unconfirmed identity change.
+		(llm:low is below the pre-fill thresholds, so the ladder above leaves
+		the action to this branch.)"""
+		extra = Diagnosis(category="C11", reason="generated cover", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
+		enriched = EnrichedMeta(title="Úplně jiný titul", authors=["Jiný Autor"], source="llm:low")
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		_submit_all_and_finish(w, [self._c13_result(1, additional=[extra], enriched=enriched)])
+		parsed = parse_review(out)
+		assert parsed[0].action is None
+
+	def test_empty_book_prefills_accept_despite_needs_review_extras(self, tmp_path):
+		"""EMPTY_BOOK pre-fills accept unconditionally: with the book file
+		gone, the other rules fire on the leftover sidecar metadata and none
+		of those verdicts matters (the accept only parks the record in
+		needfix/empty/). Without this, an empty Anonym-authored record kept
+		its C9 NEEDS_REVIEW extra and never left review."""
+		meta = _meta(1)
+		diag = Diagnosis(
+			category="EMPTY_BOOK", reason="no ebook file", confidence=Confidence.HIGH,
+			verdict=Verdict.AUTO_FIXABLE,
+			additional=[
+				Diagnosis(category="C9", reason="anonym", confidence=Confidence.MEDIUM, verdict=Verdict.NEEDS_REVIEW),
+				Diagnosis(category="C13", reason="umístění", confidence=Confidence.HIGH, verdict=Verdict.AUTO_FIXABLE),
+				Diagnosis(category="MISSING_ISBN", reason="no isbn", confidence=Confidence.LOW, verdict=Verdict.AUTO_FIXABLE),
+			],
+		)
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		_submit_all_and_finish(w, [(meta, diag, None, None)])
+		parsed = parse_review(out)
+		assert parsed[0].action == "accept"
 
 	def test_prior_verified_carried_onto_fresh_entry(self, tmp_path):
 		"""An UNDECIDED prior entry carrying verified: true keeps the mark when

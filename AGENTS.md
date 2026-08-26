@@ -218,8 +218,19 @@ src/book_meta_fix/
   unchanged). Ordering matters: C13 runs BEFORE the enrichment rules, so a
   misplaced-but-otherwise-fine book gets C13 as PRIMARY — the cheap
   no-extraction path in `_process_book` (`is_needs_review` is false for a
-  C13 primary) and a pre-filled `accept` in `review_writer` (C13- or
-  EMPTY_BOOK-led with only benign extras: OK-verdict or MISSING_*). C13 is
+  C13 primary) and a pre-filled `accept` in `review_writer` (C13-led with
+  only benign extras: OK-verdict, MISSING_*, or a cover category C11/
+  MISSING_COVER — apply's cover recovery runs for a cover diagnosis
+  ANYWHERE in the entry's list, and refusing would freeze the book because
+  C13 would shadow the cover problem as the primary on every run; the
+  proposal must not change title/author. EMPTY_BOOK-led pre-fills
+  unconditionally: with the book file gone every other rule fires on the
+  leftover sidecar metadata and none of those verdicts matters). ONE
+  exception to the cheap path: a C13-primary book carrying a cover extra
+  (`cover_shadowed` in `_process_book`) IS extracted and enriched, so an
+  enricher can propose `cover_url` in the same pass — the LLM/accept-missing
+  gates still key on the primary, so a misplaced book never pays for an LLM
+  call. C13 is
   also the ONE non-OK diagnosis promoted over an OK-verdict primary (a
   misplaced genuine anonym must not be masked by its whitelisted C9-OK).
   `_apply_fields` ignores the `location` key — it is not a metadata field.

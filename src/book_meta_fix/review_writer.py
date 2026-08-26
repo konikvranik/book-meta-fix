@@ -388,20 +388,39 @@ class ReviewWriter:
 		# confirmed and nothing was recovered. `bmf apply` then prunes it.
 		if action is None and enriched is not None and getattr(enriched, "identity_confirmed", False) and not proposed:
 			action = "accept"
-		# Location-led (C13 primary, with at most benign extras — OK-verdict
-		# matches like a genuine anonym, or acceptable-missing MISSING_*):
-		# the metadata is FINE, the book merely sits in the wrong folder (and
-		# may lack an ISBN/cover, which apply recovers independently). The
-		# move is mechanical and identity-safe (apply recomputes the target
-		# from the same metadata), so pre-fill accept — "metadata correct →
-		# auto approve", the user just runs bmf apply. A real problem (C2,
-		# C11, …) keeps the primary and stays action: null.
-		if action is None and diag.category in ("C13", "EMPTY_BOOK") and all(
-			d.category in ("C13", "EMPTY_BOOK")
-			or d.verdict == Verdict.OK
-			or d.category in ("MISSING_ISBN", "MISSING_YEAR", "MISSING_COVER")
-			for d in all_diagnoses(diag)
-		):
+		# Location-led (C13 primary) and dead records (EMPTY_BOOK): the
+		# metadata is FINE, the book merely sits in the wrong folder. The move
+		# is mechanical and identity-safe (apply recomputes the target from
+		# the same metadata), so pre-fill accept — "metadata correct → auto
+		# approve", the user just runs bmf apply.
+		#
+		# Tolerated extras under a C13 primary:
+		#   - OK-verdict matches (a genuine anonym) and MISSING_* — apply
+		#     recovers those independently of the move;
+		#   - a cover diagnosis (C11 / MISSING_COVER): apply's cover recovery
+		#     runs for a cover category ANYWHERE in the entry's diagnosis
+		#     list, so the accept also retries the cover. Refusing here would
+		#     freeze the book: C13 outranks the enrichment rules, so while it
+		#     waits unresolved in needfix/ the location rule stays the primary
+		#     on every run (a real library had ~600 C13+C11 books cycling in
+		#     review with zero progress).
+		# A real metadata problem (C2, C12, …) still stays action: null, and
+		# so does a proposal that changes title/author — a mere-move accept
+		# must not sneak an unconfirmed identity change through.
+		#
+		# EMPTY_BOOK pre-fills unconditionally: with the book file gone, every
+		# other rule fires on the leftover sidecar metadata and none of those
+		# verdicts matters — the accept only parks the dead record in
+		# needfix/empty/ (nothing is deleted).
+		if action is None and diag.category in ("C13", "EMPTY_BOOK") and (
+			diag.category == "EMPTY_BOOK"
+			or all(
+				d.category in ("C13", *_COVER_CATEGORIES)
+				or d.verdict == Verdict.OK
+				or d.category in ("MISSING_ISBN", "MISSING_YEAR", "MISSING_COVER")
+				for d in all_diagnoses(diag)
+			)
+		) and (not proposed or self._proposal_preserves_identity(proposed, meta)):
 			action = "accept"
 		entry: dict[str, Any] = {
 			"id": meta.calibre_id,

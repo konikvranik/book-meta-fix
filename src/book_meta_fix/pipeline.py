@@ -379,9 +379,21 @@ def _process_book(
 			return (meta, diag, None, None)
 
 	is_needs_review = diag.verdict == Verdict.NEEDS_REVIEW or diag.category in ("MISSING_ISBN", "MISSING_YEAR", "MISSING_COVER")
+	# A C13-primary book whose extras include a cover diagnosis (C11 generated
+	# cover / MISSING_COVER) must NOT take the cheap no-extraction path: C13
+	# outranks the enrichment rules, so while such a book waits unresolved in
+	# needfix/ the location rule shadows the cover problem as the primary on
+	# EVERY run — no enricher is ever asked for a cover_url, the cover can
+	# never be recovered, and the book can never leave review. Route it
+	# through the deterministic fix path (extract + identity-anchored online
+	# fill) so the cover — and any missing field — is recovered in the same
+	# pass. The gates below still key on the PRIMARY: the LLM and the
+	# accept-missing stamp fire only for is_needs_review books, so a merely
+	# misplaced book never pays for an LLM call.
+	cover_shadowed = diag.category == "C13" and any(d.category in _COVER_CATEGORIES for d in all_diagnoses(diag))
 
 	# --- NEEDS_REVIEW books: try cheap fixes first, LLM last ---
-	if is_needs_review:
+	if is_needs_review or cover_shadowed:
 		stats["needs_review"] += 1
 		# Extract content once (reused by both deterministic fixes and LLM).
 		# Prefer content already extracted during verify() to avoid a second
@@ -412,11 +424,12 @@ def _process_book(
 
 		# Step 4: LLM fallback only if deterministic + online failed AND the
 		# book has usable first-page text (LLM cannot work without it).
-		# llm_categories gates WHICH books the LLM is asked about: each book is
-		# one request that returns all fields at once (cost is per-book, not
-		# per-category). 'ALL' expands to every category except C9 (legitimate
-		# anonyms like the Bible — an LLM-invented author there would be wrong).
-		if enriched is None and llm_provider is not None and _llm_wants(diag.category, llm_categories):
+		# llm_categories gates WHICH books the LLM is asked about (each book is
+		# one request that returns all fields at once — cost is per-book, not
+		# per-category; see _llm_wants). Keyed on is_needs_review (the
+		# PRIMARY), not cover_shadowed: an LLM recovers metadata, never a
+		# cover, so a misplaced C13+C11 book must not pay for a call.
+		if is_needs_review and enriched is None and llm_provider is not None and _llm_wants(diag.category, llm_categories):
 			# Pre-filter: skip LLM if no first-page text or only CSS noise.
 			# This is the #1 cost saver — books with empty/CSS-only content
 			# would waste an API call for nothing.

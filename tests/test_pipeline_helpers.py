@@ -249,6 +249,72 @@ class TestAcceptMissingIdentified:
 		assert (meta.title, list(meta.authors), meta.isbn, meta.year, meta.publisher) == before
 
 
+class TestCoverShadowedC13Routing:
+	"""A C13-primary book whose extras carry a cover diagnosis (C11 generated
+	cover / MISSING_COVER) is routed through the enrichment path (extraction +
+	deterministic/online fill), NOT the cheap no-extraction path: C13 outranks
+	the enrichment rules, so without the reroute the location rule shadows the
+	cover problem as the primary on every run and no enricher is ever asked
+	for a cover_url. The LLM gate still keys on the PRIMARY (is_needs_review)
+	— a merely misplaced book never pays for an LLM call."""
+
+	C11 = [Diagnosis(category="C11", reason="generated cover", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)]
+	MISSING_ONLY = [Diagnosis(category="MISSING_ISBN", reason="no isbn", confidence=Confidence.LOW, verdict=Verdict.AUTO_FIXABLE)]
+
+	def _run(self, *, additional, llm_provider=None):
+		from book_meta_fix import pipeline as pmod
+
+		meta = _missing_isbn_book(title="Kniha", author="Autor", calibre_id=21)
+		extract_calls: list[int] = []
+
+		def fake_detect(_m):
+			d = Diagnosis(category="C13", reason="umístění", confidence=Confidence.HIGH, verdict=Verdict.AUTO_FIXABLE)
+			d.additional = list(additional)
+			return d
+
+		def fake_extract(_m):
+			extract_calls.append(1)
+			return ExtractedMeta(first_page_text="Kniha\nAutor\nPrvní stránka knihy.")
+
+		patches = [patch.object(pmod, "detect_fn", fake_detect), patch.object(pmod, "safe_extract", fake_extract)]
+		for p in patches:
+			p.start()
+		try:
+			stats = _empty_stats()
+			result = _process_book(
+				meta, enricher=None, skip_enrich=True, skip_verify=False,
+				llm_provider=llm_provider, llm_categories=("ALL",), stats=stats,
+			)
+		finally:
+			for p in patches:
+				p.stop()
+		return result, stats, extract_calls
+
+	def test_c13_with_c11_extracts_and_enriches(self):
+		result, stats, extract_calls = self._run(additional=self.C11)
+		assert extract_calls == [1]  # NOT the cheap path — the enrichers get their chance
+		assert stats["needs_review"] == 1
+		# No enricher/LLM here and the text offers no better fields -> unfixed.
+		assert result[3] is None
+		assert stats["unfixed"] == 1
+
+	def test_plain_c13_stays_cheap(self):
+		# C13 with only benign extras (MISSING_*): still the cheap no-extraction
+		# path — a misplaced-but-fine book must not pay for extraction.
+		result, stats, extract_calls = self._run(additional=self.MISSING_ONLY)
+		assert extract_calls == []
+		assert stats["needs_review"] == 0
+		assert result[3] is None
+
+	def test_c13_with_c11_never_calls_llm(self):
+		# The LLM gate keys on the primary (C13 is not needs-review): passing a
+		# broken provider proves it is never touched (any use would raise inside
+		# the reconciled try/except and bump stats["llm_error"]).
+		_, stats, _ = self._run(additional=self.C11, llm_provider=object())
+		assert stats["llm_error"] == 0
+		assert stats["llm_no_result"] == 0
+
+
 class TestSkipUuids:
 	"""run_pipeline(skip_uuids=...) freezes keep-decided books: they are filtered
 	out before the processing loop, so they never reach _process_book (no

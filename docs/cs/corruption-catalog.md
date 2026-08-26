@@ -156,10 +156,13 @@ nepřesunulo, pobyt pod `needfix/`, který už je vyřešený, …).
 Vyhodnocuje se jen při analyze se zapnutou kontrolou umístění (výchozí
 stav); `report`/`epubgen` umístění neřeší. Hodnota `proposed.location` je
 informativní — `bmf apply` cíl přepočítá z FINÁLNÍCH metadat (v témže
-průchodu můžeš opravit autora/název). Když je C13 jediný skutečný problém
-(nanejvýš s benigními doprovody — verdiktem OK nebo MISSING_*), položka v
+průchodu můžeš opravit autora/název). Když je C13 jediným skutečným
+problémem (nanejvýš s benigními doprovody — verdiktem OK, MISSING_* nebo
+diagnózou obálky C11/MISSING_COVER, kterou apply v témže průchodu zkusí
+obnovit), položka v
 review dostane předvyplněné `action: accept`, takže zdravá, ale špatně
-umístěná kniha se přesune hromadně. Kniha pod `needfix/`, jejíž problémy
+umístěná kniha se přesune hromadně; návrh, který mění autora/název,
+zůstává na individuální kontrolu. Kniha pod `needfix/`, jejíž problémy
 byly vyřešeny, se stejnou cestou vrací zpět do kořenového stromu.
 
 **Verdikt:** AUTO_FIXABLE (přesun)

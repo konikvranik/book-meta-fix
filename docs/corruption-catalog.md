@@ -153,10 +153,12 @@ analyze runs with location checking on (default); `report`/`epubgen` stay
 location-blind. The `proposed.location` value is informational — `bmf apply`
 recomputes the destination from the FINAL metadata (you may fix
 author/title in the same pass). When C13 is the only real problem (with at
-most benign extras — OK-verdict or MISSING_* diagnoses), the review entry is
-pre-filled `action: accept`, so a misplaced-but-healthy book is moved in
-bulk. A book under `needfix/` whose problems were resolved moves back out
-to the root tree the same way.
+most benign extras — OK-verdict, MISSING_*, or a cover diagnosis C11/
+MISSING_COVER, which apply's cover recovery retries in the same pass), the
+review entry is pre-filled `action: accept`, so a misplaced-but-healthy
+book is moved in bulk; a proposal that changes title/author keeps the entry
+for individual review. A book under `needfix/` whose problems were resolved
+moves back out to the root tree the same way.
 
 **Verdict:** AUTO_FIXABLE (move)
 
