@@ -278,3 +278,28 @@ class TestJsonRepairSalvage:
 		result = _parse_llm_json(content)
 		assert result is not None
 		assert result.title == "X"
+
+
+class TestRepairWarningNamesModel:
+	"""The repair warnings carry the calling model: flash and the paid
+	reasoning model damage JSON at different rates, and the log must show
+	WHO truncated so the right knob gets turned (max_tokens vs prompt)."""
+
+	def test_truncation_warning_names_model(self, caplog) -> None:
+		import logging as _logging
+
+		content = '{"title": "X", "genres": ["sc'  # cut mid-string at the token limit
+		with caplog.at_level(_logging.WARNING, logger="book_meta_fix.llm"):
+			result = _parse_llm_json(content, model="glm-4.7-flash")
+		assert result is not None  # repaired to a parseable object
+		warnings = [r.getMessage() for r in caplog.records if r.levelno == _logging.WARNING]
+		assert any("truncated" in w and "model=glm-4.7-flash" in w for w in warnings)
+
+	def test_no_model_context_gets_explicit_placeholder(self, caplog) -> None:
+		"""Direct callers without model context still yield a parseable
+		message (an explicit '?', not a Python None repr)."""
+		import logging as _logging
+
+		with caplog.at_level(_logging.WARNING, logger="book_meta_fix.llm"):
+			_parse_llm_json('{"genres": ["sc')
+		assert any("model=?" in r.getMessage() for r in caplog.records if r.levelno == _logging.WARNING)

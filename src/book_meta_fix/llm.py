@@ -736,6 +736,11 @@ class ZaiProvider(LLMProvider):
 		if b.interval > self._interval_floor:
 			b.interval = max(self._interval_floor, b.interval * 0.97)
 
+	def _paused_for(self, model: str) -> float:
+		"""Seconds left in *model*'s transient-rejection pause (0 = usable)."""
+		with self._cooldown_lock:
+			return self._overload_until.get(model, 0.0) - time.monotonic()
+
 	def _on_transient_rejection(self, model: str, code: str) -> bool:
 		"""Record one transient 429 rejection (1305/1113) on *model*.
 
@@ -747,8 +752,16 @@ class ZaiProvider(LLMProvider):
 		code: 1305 capacity waves last minutes (OVERLOAD_PAUSE_SEC), 1113
 		bursts pass in tens of seconds (BALANCE_PAUSE_SEC — and the model it
 		hits is usually the only working capacity left). Returns True when
-		the pause just tripped (the caller gives up the current call too —
-		every further attempt would be rejected anyway).
+		this rejection tripped or extended the pause (the caller gives up
+		the current call too — every further attempt would be rejected
+		anyway).
+
+		Rejections arriving while the pause is ALREADY active (straggler
+		calls that were inside their retry loop when it armed) still extend
+		it — fresh evidence the model is still dead is welcome — but are
+		announced only at debug level: the fleet already knows, and a
+		straggler herd re-logging "pausing model X" at WARNING seven times
+		in as many seconds buried everything else in the run log.
 		"""
 		pause = self.OVERLOAD_PAUSE_SEC if code == self.OVERLOADED_CODE else self.BALANCE_PAUSE_SEC
 		with self._cooldown_lock:
@@ -756,13 +769,23 @@ class ZaiProvider(LLMProvider):
 			self._fail_streak[model] = streak
 			if streak < self.OVERLOAD_STREAK:
 				return False
-			self._overload_until[model] = time.monotonic() + pause
-		log.warning(
-			"Z.AI: %d consecutive transient rejections; pausing model %s for %.0fs, falling back until then",
-			self.OVERLOAD_STREAK,
-			model,
-			pause,
-		)
+			now = time.monotonic()
+			already_paused = now < self._overload_until.get(model, 0.0)
+			self._overload_until[model] = now + pause
+		if already_paused:
+			log.debug(
+				"Z.AI: model %s rejected again while paused (streak %d); pause re-armed for another %.0fs",
+				model,
+				streak,
+				pause,
+			)
+		else:
+			log.warning(
+				"Z.AI: %d consecutive transient rejections; pausing model %s for %.0fs, falling back until then",
+				streak,
+				model,
+				pause,
+			)
 		return True
 
 	def _get_client(self, model: str | None = None):
@@ -841,8 +864,7 @@ class ZaiProvider(LLMProvider):
 		disabled = self._disabled_models.get(model)
 		if disabled:
 			return None, f"{disabled}; model {model} disabled for this run"
-		with self._cooldown_lock:
-			pause_left = self._overload_until.get(model, 0.0) - time.monotonic()
+		pause_left = self._paused_for(model)
 		if pause_left > 0:
 			return None, f"service overloaded (429/1305); model {model} paused for another {pause_left:.0f}s"
 		prompt = build_user_prompt(evidence)
@@ -858,6 +880,15 @@ class ZaiProvider(LLMProvider):
 		pressured = False
 		attempt = 0
 		while attempt < max_retries:
+			# The pause may have armed while this call was handling an error
+			# or waiting on a bucket token (another worker's streak tripped):
+			# give up here instead of feeding a model the fleet just parked —
+			# a straggler's retries would only re-arm the pause they ignore
+			# and burn drip slots the fallback needs (measured: flash drew
+			# 1302s while its own 180 s pause was running).
+			pause_left = self._paused_for(model)
+			if pause_left > 0:
+				return None, f"service overloaded (429/1305); model {model} paused for another {pause_left:.0f}s"
 			# Wait out any active rate-limit cooldown on THIS endpoint before
 			# acquiring a token. The cascade-cooldown fix: a 429 on one thread
 			# parks all workers on that endpoint (per endpoint — the two
@@ -978,7 +1009,7 @@ class ZaiProvider(LLMProvider):
 				time.sleep(1.0 * (attempt + 1))
 				attempt += 1
 				continue
-			result = _parse_llm_json(content)
+			result = _parse_llm_json(content, model=model)
 			if result is not None:
 				reasoning = getattr(choice.message, "reasoning_content", None)
 				if reasoning and not result.reasoning:
@@ -1258,13 +1289,17 @@ def _repair_truncated_json(content: str) -> str | None:
 	return result + suffix
 
 
-def _parse_llm_json(content: str) -> ReconciledMeta | None:
+def _parse_llm_json(content: str, *, model: str | None = None) -> ReconciledMeta | None:
 	"""Parse the LLM's JSON response into a ReconciledMeta.
 
 	Tolerant of two common LLM failure modes (each previously caused a
 	3-retry waste of API calls + an eventual give-up):
 	  1. Python literals (None/True/False) instead of JSON (null/true/false).
 	  2. Truncation at the token limit — closes open braces/arrays.
+
+	*model* is diagnostics-only: the repair warnings name the model so the
+	log shows WHO truncates (flash and the paid reasoning model fail at
+	different rates — and point at different fixes).
 	"""
 	# Strip markdown fences if present (```json ... ```)
 	content = content.strip()
@@ -1293,7 +1328,7 @@ def _parse_llm_json(content: str) -> ReconciledMeta | None:
 		if repaired is not None:
 			try:
 				data = json.loads(repaired)
-				log.warning("LLM JSON was truncated; repaired to parseable object (dropping incomplete trailing field)")
+				log.warning("LLM JSON was truncated; repaired to parseable object (dropping incomplete trailing field) (model=%s)", model or "?")
 			except json.JSONDecodeError:
 				# Truncation repair didn't yield valid JSON either. Fall through
 				# to the json-repair salvage below (handles the same content).
@@ -1313,7 +1348,7 @@ def _parse_llm_json(content: str) -> ReconciledMeta | None:
 				except Exception:  # noqa: BLE001 - third-party, never fatal
 					salvaged = None
 				if isinstance(salvaged, dict):
-					log.warning("LLM JSON salvaged via json-repair (unescaped quotes/control chars fixed)")
+					log.warning("LLM JSON salvaged via json-repair (unescaped quotes/control chars fixed) (model=%s)", model or "?")
 					data = salvaged
 			if data is None:
 				log.warning("LLM returned invalid JSON; content: %s", content[:500])

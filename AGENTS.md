@@ -314,7 +314,14 @@ src/book_meta_fix/
   trip anything) would otherwise silently eat the shared RPM drip that the
   paid fallback needs; with the streak, the fleet parks flash within
   seconds of a wave and every drip slot goes to the model that answers.
-  The drip is ADAPTIVE: the configured interval is only the floor —
+  A straggler `_call` already inside its retry loop re-checks the pause
+  before every further attempt (its retries would only feed a parked model
+  and re-arm the pause they ignore — measured: flash drew 1302s while its
+  own 180 s pause was running), and a rejection landing while a pause is
+  still active extends it silently at debug level — the "pausing model"
+  WARNING is announced once per pause, and again only if the pause expires
+  without a 200 clearing the streak (then with the honest streak count,
+  not the hardcoded threshold). The drip is ADAPTIVE: the configured interval is only the floor —
   1302/1113 stretch it (x1.3, capped ~4x floor; Z.AI's real ceiling is
   dynamic: four 1302s in two minutes at a steady 30 RPM were measured one
   evening), every 200 shrinks it back (x0.97). The pause length follows the

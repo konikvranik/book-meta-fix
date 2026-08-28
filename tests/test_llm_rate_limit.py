@@ -725,6 +725,69 @@ class Test429SubCodes:
 		client = p._get_client()
 		assert client.max_retries == 0
 
+	def test_retrip_while_paused_extends_silently(self, caplog):
+		"""A rejection landing while the pause is ALREADY active (a straggler
+		call inside its retry loop when the streak tripped) must extend the
+		pause but re-announce it only at debug level: the 2026-08-28 evening
+		run printed the identical 'pausing model' WARNING seven times in
+		twelve seconds, burying everything else in the log."""
+		import logging as _logging
+
+		p = ZaiProvider("k", min_interval=0.0)
+		with caplog.at_level(_logging.DEBUG, logger="book_meta_fix.llm"):
+			results = [p._on_transient_rejection("glm-4.7-flash", "1305") for _ in range(6)]
+		# Streak 1-3 builds below the threshold, 4 trips, 5-6 re-trip.
+		assert results == [False, False, False, True, True, True]
+		warnings = [r for r in caplog.records if r.levelno == _logging.WARNING and "pausing model" in r.getMessage()]
+		assert len(warnings) == 1
+		# The re-trips still extended the pause — fresh evidence is welcome.
+		assert time.monotonic() < p._overload_until["glm-4.7-flash"]
+		debugs = [r for r in caplog.records if r.levelno == _logging.DEBUG and "rejected again while paused" in r.getMessage()]
+		assert len(debugs) == 2
+
+	def test_trip_after_pause_expiry_warns_again_with_real_count(self, caplog):
+		"""When the pause expires without a 200 ever clearing the streak, the
+		next rejection re-arms at WARNING — with the HONEST streak count, not
+		the hardcoded threshold (the model is still dead; the fleet should
+		hear about it again)."""
+		import logging as _logging
+
+		p = ZaiProvider("k", min_interval=0.0)
+		for _ in range(4):
+			p._on_transient_rejection("glm-4.7-flash", "1305")
+		p._overload_until["glm-4.7-flash"] = time.monotonic() - 1.0  # expired
+		with caplog.at_level(_logging.WARNING, logger="book_meta_fix.llm"):
+			assert p._on_transient_rejection("glm-4.7-flash", "1305") is True
+		msgs = [r.getMessage() for r in caplog.records if r.levelno == _logging.WARNING]
+		assert any("5 consecutive transient rejections" in m for m in msgs)
+
+	def test_straggler_aborts_when_pause_arms_midcall(self):
+		"""A pause armed by ANOTHER worker while this call sits in its retry
+		loop must abort the straggler before its next attempt: its retries
+		would hammer a model the fleet just parked and re-arm the very pause
+		they ignore (measured: flash drew 1302s while its own 180 s pause was
+		running)."""
+		p = ZaiProvider("k", min_interval=0.0)
+		hits = {"n": 0}
+
+		def fake_create(**kwargs):
+			hits["n"] += 1
+			if hits["n"] == 1:
+				# Another worker's streak trips while this call is busy
+				# handling its own first 1305.
+				p._overload_until["glm-4.7-flash"] = time.monotonic() + 60.0
+				raise _err("1305", "The service may be temporarily overloaded, please try again later")
+			return _ok_response()
+
+		client = MagicMock()
+		client.chat.completions.create.side_effect = fake_create
+		p._client = client
+		r, e = p._call("glm-4.7-flash", {"current": {"title": "x"}})
+		assert r is None
+		assert "paused for another" in (e or "")
+		# Exactly ONE hit: no retry into the parked model.
+		assert hits["n"] == 1
+
 
 class TestInflightCap:
 	"""The Z.AI coding plan admits only ~5 concurrent requests per ACCOUNT
