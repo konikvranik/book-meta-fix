@@ -120,14 +120,18 @@ který se připojí k promptu dalšího pokusu. Knihy bez čitelného textu
 verifikaci přeskočí a výsledek Flashe přijmou tak, jak je.
 
 **Omezování rychlosti** — všechna volání (Flash + finální + retry) procházejí
-dvěma sdílenými vrstvami (viz
+sdíleným leaky bucketem a odpovědi HTTP 429 se rozesílají podle **sub-kódu
+Z.AI** (viz
 [architecture.md → Model souběžnosti](architecture.md#model-souběžnosti)):
-vyhlazovačem leaky-bucket (konstantní agregované RPM) a **globálním 429
-cooldownem** (jedno 429 zaparkuje všechny workery, protože bezplatná vrstva
-Z.AI kaskádově zpomalí každý model, jakmile jeden model dostane 429). Při
-429 od Flashe smyčka okamžitě propadne na placený finální model, místo aby
-pálila další pokusy bezplatné vrstvy — ale finální volání teď nejdřív
-*počká* na cooldown, místo aby taky okamžitě dostalo 429.
+**globální 429/1302 cooldown** pro skutečné `Rate limit reached for requests`
+(jedno 1302 zaparkuje všechny workery, protože bezplatná vrstva Z.AI
+kaskádově zpomalí každý model, jakmile jeden model dostane 429), krátká
+retry s rozestupem intervalu pro `1305 The service may be temporarily
+overloaded` (kapacita serveru — chronické u bezplatných flash modelů a NE
+naše vina, takže nikdy neozbrojuje fleet cooldown; po vyčerpání rozpočtu
+pokusů smyčka propadne na placený finální model a opakovaná plně neúspěšná
+volání pozastaví přetížený model na ~10 minut) a přeskočení modelu pro
+`1308 Usage limit reached` (kvóta vyčerpána do konce běhu).
 
 **Tolerantní JSON** — modely GLM často emitují nevalidní JSON: pythonové
 literály (`None`/`True`), koncové čárky, **neescapované dvojité uvozovky

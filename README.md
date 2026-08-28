@@ -103,6 +103,8 @@ can recover the pre-run state.
 | `bmf epubgen --apply` | Actually generate the EPUBs |
 | `bmf crosscheck` | Verify all formats in a folder are the same book; quarantine rogues |
 | `bmf crosscheck --apply` | Actually move the mismatched format files |
+| `bmf strip-covers` | Remove generated covers (dry-run: list affected books) |
+| `bmf strip-covers --apply` | Actually remove them: `cover.jpg` → `.bak` + embedded EPUB covers stripped |
 
 Common options: `--library PATH`, `--limit N`, `--no-cache`, `-o FILE`,
 `--skip-enrich`, `--skip-verify`, `--databazeknih`, `--legie`,
@@ -295,23 +297,31 @@ first-page text (fuzzy 0.41)") that is appended to the next attempt's prompt.
 Books with no readable text (image-only title pages, scanned PDFs) skip
 verification and accept the Flash result as-is.
 
-**Rate limiting**: all calls (Flash + final + retries) go through two shared
-layers:
-1. a **leaky-bucket smoother** (count-per-time, default capacity 1 = pure even
-   drip: exactly one call starts every `--llm-min-interval` seconds, evenly
-   spaced, no bunching). `--llm-min-interval 2.0` = a steady 30 evenly-spaced
-   requests/minute — what Z.AI's sliding-window limit wants. A burst >1 lets
-   several calls fire in the same second and trips the dynamic RPM limit; raise
-   only with confirmed headroom; and
-2. a **global 429 cooldown** (circuit breaker) — Z.AI's free tier has a
-   cascade-cooldown bug: when one model gets rate-limited, the others (incl.
-   the paid fallback) get throttled too. So when *any* worker sees a 429,
-   *all* workers pause (`--llm-rate-limit-base` seconds, escalating
+**Rate limiting**: all calls (Flash + final + retries) go through a shared
+leaky bucket, and HTTP-429 responses are dispatched on their **Z.AI sub-code**
+(all three arrive as 429 but mean opposite things):
+1. the **leaky-bucket smoother** (count-per-time, default capacity 1 = pure
+   even drip: exactly one call starts every `--llm-min-interval` seconds,
+   evenly spaced, no bunching). `--llm-min-interval 2.0` = a steady 30
+   evenly-spaced requests/minute — what Z.AI's sliding-window limit wants. A
+   burst >1 lets several calls fire in the same second and trips the dynamic
+   RPM limit; raise only with confirmed headroom; and
+2. a **global 429/1302 cooldown** (circuit breaker) — `Rate limit reached for
+   requests` means OUR request rate tripped the RPM window (and Z.AI's free
+   tier cascade-throttles the other models too), so when *any* worker sees a
+   1302, *all* workers pause (`--llm-rate-limit-base` seconds, escalating
    5/10/20/…, honouring the server `Retry-After`, capped at
    `--llm-rate-limit-max`). One 429 parks the fleet instead of every worker
-   hammering and 429-ing. On a Flash 429 the loop falls through to the paid
-   final model immediately — but that final call now *waits* for the cooldown
-   rather than instantly 429-ing too.
+   hammering and 429-ing; and
+3. **429/1305 overload retries** — `The service may be temporarily
+   overloaded` is SERVER-side capacity (chronically frequent on the free
+   flash models, not caused by our rate): the call retries shortly
+   (interval-spaced, bounded budget) *without* arming the global cooldown,
+   then falls back to the paid model; repeated fully-failed calls pause the
+   overloaded model for ~10 minutes so later books skip straight to the
+   fallback. 429/1113 "Insufficient balance" (also intermittent on the
+   coding endpoint under concurrent load) gets the same transient handling.
+   (429/1308 `Usage limit reached` skips the model for the rest of the run.)
 
 See [how-to/llm.md → Tuning the LLM rate limit](docs/how-to/llm.md#tuning-the-llm-rate-limit)
 for practical guidance.

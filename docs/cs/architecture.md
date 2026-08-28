@@ -173,14 +173,26 @@ Dvě vrstvy drží rychlost volání LLM pod dynamickým RPM limitem Z.AI:
    bez hromadění. Burst >1 by pustil několik volání ve stejné sekundě —
    přesně to, co shodí dynamický RPM limit — takže zůstává na 1, pokud
    nemáte potvrzenou rezervu.
-2. **Globální 429 cooldown** (jistič) — bezplatná vrstva Z.AI má kaskádovou
+2. **Globální 429/1302 cooldown** (jistič) — bezplatná vrstva Z.AI má kaskádovou
    chybu: když *jeden* model dostane 429, ostatní (včetně placeného
-   fallbacku) se také zpomalí. Takže když *jakýkoli* worker uvidí 429,
-   nastaví se sdílený deadline cooldownu, na který před svým dalším voláním
-   čekají *všechna* vlákna (`--llm-rate-limit-base` výchozí 5 s, eskalující
-   5/10/20/…, respektující `Retry-After` serveru, se stropem
-   `--llm-rate-limit-max` výchozí 60 s). Jedno 429 zaparkuje celou flotilu,
-   místo aby každý worker dál bušil a dostával další 429.
+   fallbacku) se také zpomalí. Takže když *jakýkoli* worker uvidí 1302
+   `Rate limit reached for requests`, nastaví se sdílený deadline cooldownu,
+   na který před svým dalším voláním čekají *všechna* vlákna
+   (`--llm-rate-limit-base` výchozí 5 s, eskalující 5/10/20/…, respektující
+   `Retry-After` serveru, se stropem `--llm-rate-limit-max` výchozí 60 s).
+   Jedno 429 zaparkuje celou flotilu, místo aby každý worker dál bušil a
+   dostával další 429. Rozlišení sub-kódu je důležité, protože Z.AI vrací
+   429 i pro **1305** "The service may be temporarily overloaded" (kapacita
+   serveru, chronické u bezplatných flash modelů): ta se krátce retrajuje,
+   s rozestupem intervalu a s rozpočtem pokusů, BEZ ozbrojení fleet cooldownu
+   — její zaměňování za 1302 dřív měnilo přechodná přetížení v trvalé
+   60s lockouty — a pak se propadne na placený model. Opakovaná plně
+   neúspěšná volání model na ~10 minut pozastaví (`OVERLOAD_PAUSE_SEC`),
+   takže nasycený bezplatný pool stojí jedno ohraničené zkušební kolo
+   místo sedmi zahozených requestů na knihu. **1308** "Usage limit
+   reached" vypne jen dotčený model do konce běhu. Klient openai se staví s
+   `max_retries=0`, aby každé 429 vyplavalo až sem ke klasifikaci, místo aby ho
+   tiše pohltila SDK retry mimo bucket.
 
 Praktické rady najdete v
 [how-to/llm.md → Ladění omezení rychlosti LLM](how-to/llm.md#ladění-omezení-rychlosti-llm).

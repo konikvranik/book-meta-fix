@@ -92,12 +92,15 @@ src/book_meta_fix/
   epubgen.py       bmf epubgen
   crosscheck.py    bmf crosscheck
   covers.py        generated-cover detection (pixel math) + replacement & in-book extraction fallback
+                  + embedded-cover strip (EPUB zip+OPF surgery) + strip_generated_covers
+                  (the per-folder engine of `bmf strip-covers`: sidecar → .bak, embedded EPUB probe+strip)
   gui.py           bmf gui — keyboard-first Tkinter review.yaml editor (no new writer: loads raw
                   entry dicts, writes via review._header + review._render_entry; scrollable detail
                   column, Tab-trap bindtag, per-format embedded covers, Ctrl+G double-decode recode,
                   clickable path link / list double-click = open folder via open_folder_in_manager;
                   Verified checkbox (Ctrl+O) = the persistent user-OK mark)
-  cli.py           click commands: scan, report, analyze, apply, epubgen, crosscheck, gui
+  cli.py           click commands: scan, report, analyze, apply, epubgen, crosscheck,
+                  strip-covers, gui
                   (organize is a deprecation stub — placement lives in apply)
 ```
 
@@ -239,12 +242,37 @@ src/book_meta_fix/
   additionally takes `--pattern`/`--no-check-location`/`--recheck-ok`,
   apply takes `--pattern`/`--needfix-dir`/`--no-place`
   (env: `BMF_PATTERN`, `BMF_NEEDFIX_DIR`).
-- **LLM rate limiting is two-layered** (`llm.py`): a `LeakyBucket` smoother
-  (constant aggregate RPM) **and** a global 429 cooldown / circuit breaker.
-  Z.AI's free tier has a cascade bug — when one model 429s, all models get
-  throttled — so when *any* worker sees a 429, *all* workers pause
-  (`_wait_cooldown` → `_on_rate_limited` escalating, honouring `Retry-After`,
-  capped). Do not remove the global cooldown thinking the bucket is enough.
+- **LLM rate limiting is layered, and the 429 SUB-CODE decides the
+  reaction** (`llm.py`): a `LeakyBucket` smoother (constant aggregate RPM)
+  plus a code-aware circuit breaker. Z.AI returns HTTP 429 for three
+  different conditions (`docs.z.ai/api-reference/api-code`): **1302**
+  "Rate limit reached for requests" — OUR rate tripped the RPM window →
+  the escalating global cooldown (`_wait_cooldown` → `_on_rate_limited`,
+  honouring `Retry-After`, capped); Z.AI's free tier also cascade-throttles
+  every model when one 429s, which is why the cooldown is fleet-wide. Do not
+  remove it thinking the bucket is enough. **1305** "The service may be
+  temporarily overloaded" — SERVER-side capacity (chronically frequent on
+  the free flash models, evenings ~60 % of calls): must NOT arm the global
+  cooldown (treating it as 1302 turned transient overloads into permanent
+  60 s fleet lockouts); `_call` retries it shortly (interval-spaced via the
+  bucket, `OVERLOAD_RETRIES` budget) and then falls back to the paid model.
+  When `OVERLOAD_PAUSE_AFTER` consecutive calls on one model each burn the
+  whole budget (measured reality: the free flash pool sits at ~90 % 1305 at
+  EU evening peak while the paid glm-5.3 serves clean), the model is PAUSED
+  for `OVERLOAD_PAUSE_SEC` (10 min) — later `_call`s short-circuit straight
+  to the fallback instead of re-burning 7 requests per book; a single 200
+  clears the streak and the pause simply expires.
+  **1113** "Insufficient balance or no resource package" — also HTTP 429,
+  documented as a hard billing error BUT fires intermittently on the coding
+  endpoint under concurrent load with quota left (verified against the
+  dashboard); gets the same transient treatment as 1305 (retry, then
+  time-boxed pause), never a run-long disable.
+  **1308** "Usage limit reached" — quota exhausted: `_disable_model` adds
+  the model to `_disabled_models` (model → reason) and every later `_call`
+  for it short-circuits without an API hit. The openai client is built with `max_retries=0` — SDK retries
+  fire outside the bucket and silently absorb 429s before `_call` can
+  classify them. `_on_success` (any HTTP 200, not just parseable JSON)
+  resets the escalation counter.
 - **LLM JSON is salvaged, not rejected.** `_parse_llm_json` tries the cheap
   built-in sanitizer first, then `json-repair` (the `[llm]` extra) recovers
   unescaped quotes / control chars / truncation. The `json_repair` import is

@@ -7,9 +7,25 @@
   JSON a ten byl zachráněn. Není potřeba žádná akce; toto nahrazuje dřívější
   plýtvání 3 opakováními. Pokud vidíte `LLM returned invalid JSON` (bez řádku
   o záchraně), nainstalujte extra `[llm]` (`json-repair`).
-- **Rate limit** — `Z.AI rate-limited (429); global cooldown Xs` znamená, že
-  jistič (circuit breaker) dělá svou práci. Časté výskyty znamenají, že
-  máte zvýšit hodnoty v [ladění omezení rychlosti LLM](llm.md#ladění-omezení-rychlosti-llm).
+- **Rate limit** — `Z.AI rate-limited (429/1302 …); global cooldown Xs`
+  znamená, že jistič (circuit breaker) dělá svou práci. Časté výskyty
+  znamenají, že máte zvýšit hodnoty v
+  [ladění omezení rychlosti LLM](llm.md#ladění-omezení-rychlosti-llm).
+- **Přetížení serveru** — `Z.AI service overloaded (429/1305); retrying …`
+  znamená, že serverům Z.AI (obvykle bezplatný flash model) došla kapacita —
+  ne že byste posílali příliš rychle. Zpomalení nepomůže; běh to přežívá
+  retry a přepnutím na placený model. `pausing model … for 600s` po
+  opakovaných plných selháních je tentýž příběh: bezplatný pool je
+  nasycený, takže běh model na ~10 min zaparkuje a jde rovnou na placený.
+  Časté večery? Viz
+  [ladění omezení rychlosti LLM](llm.md#ladění-omezení-rychlosti-llm).
+- **Vyčerpaná kvóta** — `Z.AI usage limit reached (429/1308 …)` vypne
+  dotčený model do konce běhu; kvóta se obnoví na straně Z.AI (hodiny).
+- **Nedostatečný balance** — `Z.AI insufficient balance (429/1113 …)` znamená, že
+  billingová kontrola odmítla. Na coding endpointu obvykle přechodné při
+  paralelní zátěži (i se zbývající kvótou) a přežije se retry; trvá-li,
+  prověřte balance plánu a poznámku o spárování `ZAI_BASE_URL` v
+  `.env.example`.
 - **Kam se poděla moje revize?** — `review.yaml.bak` obsahuje stav před
   spuštěním, pokud byl běh přerušen; pro obnovu jej přejmenujte zpět.
 - **Kniha nedostala návrh** — pravděpodobně není k dispozici použitelný text

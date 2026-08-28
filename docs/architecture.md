@@ -170,13 +170,26 @@ Two layers keep the LLM call rate under Z.AI's dynamic RPM limit:
    (default 2.0 s ≈ 30 evenly-spaced RPM), no bunching. A burst >1 would let
    several calls fire in the same second — exactly what trips the dynamic RPM
    limit — so it stays 1 unless you have confirmed headroom.
-2. **Global 429 cooldown** (circuit breaker) — Z.AI's free tier has a
+2. **Global 429/1302 cooldown** (circuit breaker) — Z.AI's free tier has a
    cascade bug: when *one* model gets a 429, the others (incl. the paid
-   fallback) get throttled too. So when *any* worker sees a 429, a shared
-   cooldown deadline is set that *all* threads wait on before their next call
-   (`--llm-rate-limit-base` default 5 s, escalating 5/10/20/…, honouring the
-   server's `Retry-After`, capped at `--llm-rate-limit-max` default 60 s). One
-   429 parks the whole fleet instead of every worker hammering and 429-ing.
+   fallback) get throttled too. So when *any* worker sees a 1302 `Rate limit
+   reached for requests`, a shared cooldown deadline is set that *all*
+   threads wait on before their next call (`--llm-rate-limit-base` default
+   5 s, escalating 5/10/20/…, honouring the server's `Retry-After`, capped at
+   `--llm-rate-limit-max` default 60 s). One 429 parks the whole fleet
+   instead of every worker hammering and 429-ing. The sub-code dispatch
+   matters because Z.AI also returns 429 for **1305** "The service may be
+   temporarily overloaded" (server-side capacity, chronic on the free flash
+   models): that one is retried shortly, interval-spaced with a bounded
+   budget, WITHOUT arming the fleet cooldown — treating it as 1302 used to
+   turn transient overloads into permanent 60 s lockouts — and then falls
+   back to the paid model. Repeated fully-failed calls pause the model for
+   ~10 minutes (`OVERLOAD_PAUSE_SEC`), so a saturated free pool costs one
+   bounded probing round instead of seven wasted requests per book.
+   **1308** "Usage limit reached" disables just that
+   model for the rest of the run. The openai client is built with
+   `max_retries=0` so every 429 surfaces here for classification instead of
+   being silently absorbed by SDK retries outside the bucket.
 
 See [how-to/llm.md → Tuning the LLM rate limit](how-to/llm.md#tuning-the-llm-rate-limit)
 for practical guidance.

@@ -6,7 +6,7 @@ Practical recipes. For *why* things work see [concepts.md](../concepts.md); for
 the module/data-flow detail see [architecture.md](../architecture.md); for the
 full command reference see the [README](../../README.md).
 
-Every mutating command (`apply`, `epubgen`, `crosscheck`) is a
+Every mutating command (`apply`, `epubgen`, `crosscheck`, `strip-covers`) is a
 **dry-run by default** — add `--apply` to actually change the filesystem.
 
 ## Recipes
@@ -19,10 +19,11 @@ Every mutating command (`apply`, `epubgen`, `crosscheck`) is a
 6. [Organize the library (placement)](organize.md) — placement runs inside `bmf apply`
 7. [Generate missing EPUBs](epubgen.md)
 8. [Cross-check multi-format folders](crosscheck.md)
-9. [Enabling CZ/SK enrichment](enrichment.md)
-10. [Running with the LLM fallback](llm.md)
-11. [Choosing an LLM model](llm-models.md)
-12. [Running in Kubernetes](kubernetes.md)
-13. [Debugging a run](debugging.md)
-14. [Configuration](configuration.md)
-15. [Running the tests](testing.md)
+9. [Strip generated covers](strip-covers.md)
+10. [Enabling CZ/SK enrichment](enrichment.md)
+11. [Running with the LLM fallback](llm.md)
+12. [Choosing an LLM model](llm-models.md)
+13. [Running in Kubernetes](kubernetes.md)
+14. [Debugging a run](debugging.md)
+15. [Configuration](configuration.md)
+16. [Running the tests](testing.md)

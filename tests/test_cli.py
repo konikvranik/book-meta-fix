@@ -1,9 +1,19 @@
-"""Tests for the install-completion CLI command."""
+"""Tests for CLI commands: completion installer, shims, strip-covers."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from click.testing import CliRunner
+from test_covers import (
+	_gradient_cover,
+	_gradient_jpeg_bytes,
+	_make_epub,
+	_solid_cover,
+	_solid_jpeg_bytes,
+)
 
 from book_meta_fix.cli import main
+from book_meta_fix.covers import epub_cover_image
 
 
 class TestInstallCompletion:
@@ -54,3 +64,54 @@ class TestOrganizeShim:
 		assert result.exit_code == 0
 		assert "merged into `bmf apply`" in result.output
 		assert "bmf analyze" in result.output
+
+
+class TestStripCovers:
+	"""`bmf strip-covers` removes generated covers (sidecar + embedded EPUB)."""
+
+	_MINI_OPF = (
+		'<?xml version="1.0" encoding="utf-8"?>'
+		'<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="BookId">'
+		'<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+		"<dc:title>Kniha</dc:title><dc:creator>Autor</dc:creator>"
+		'<dc:identifier id="BookId">x</dc:identifier><dc:language>ces</dc:language>'
+		"</metadata></package>"
+	)
+
+	def _make_library(self, root: Path) -> tuple[Path, Path]:
+		"""Two books: one with generated covers everywhere, one clean."""
+		bad = root / "Jan Autor - Kniha"
+		bad.mkdir(parents=True)
+		(bad / "metadata.opf").write_text(self._MINI_OPF)
+		_solid_cover(bad / "cover.jpg")
+		_make_epub(bad / "b.epub", cover_bytes=_solid_jpeg_bytes())
+		good = root / "Jana Autorka - Kniha"
+		good.mkdir(parents=True)
+		(good / "metadata.opf").write_text(self._MINI_OPF)
+		_gradient_cover(good / "cover.jpg")
+		_make_epub(good / "g.epub", cover_bytes=_gradient_jpeg_bytes())
+		return bad, good
+
+	def test_dry_run_reports_and_touches_nothing(self, tmp_path: Path) -> None:
+		bad, good = self._make_library(tmp_path)
+		result = CliRunner().invoke(main, ["strip-covers", "--library", str(tmp_path), "--no-cache"])
+		assert result.exit_code == 0
+		assert "DRY-RUN" in result.output
+		assert "Cover strip summary" in result.output
+		assert (bad / "cover.jpg").is_file()
+		assert not (bad / "cover.jpg.bak").exists()
+		assert epub_cover_image(bad / "b.epub") is not None
+		assert (good / "cover.jpg").is_file()
+		assert epub_cover_image(good / "g.epub") is not None
+
+	def test_apply_removes_generated_only(self, tmp_path: Path) -> None:
+		bad, good = self._make_library(tmp_path)
+		result = CliRunner().invoke(main, ["strip-covers", "--library", str(tmp_path), "--no-cache", "--apply"])
+		assert result.exit_code == 0
+		assert "WRITE" in result.output
+		assert not (bad / "cover.jpg").exists()
+		assert (bad / "cover.jpg.bak").is_file()
+		assert epub_cover_image(bad / "b.epub") is None
+		# the clean book is untouched
+		assert (good / "cover.jpg").is_file()
+		assert epub_cover_image(good / "g.epub") is not None

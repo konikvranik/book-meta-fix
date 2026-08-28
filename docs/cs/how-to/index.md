@@ -6,7 +6,7 @@ Praktické recepty. *Proč* věci fungují najdete v [concepts.md](../concepts.m
 detaily modulů a toku dat v [architecture.md](../architecture.md); úplnou
 referenci příkazů v [README](../../../README.cs.md).
 
-Každý měnící příkaz (`apply`, `epubgen`, `crosscheck`) je
+Každý měnící příkaz (`apply`, `epubgen`, `crosscheck`, `strip-covers`) je
 **ve výchozím nastavení dry-run** — přidejte `--apply`, chcete-li skutečně
 změnit souborový systém.
 
@@ -20,10 +20,11 @@ změnit souborový systém.
 6. [Organizace knihovny (umísťování)](organize.md) — umísťování běží uvnitř `bmf apply`
 7. [Generování chybějících EPUB](epubgen.md)
 8. [Křížová kontrola složek s více formáty](crosscheck.md)
-9. [Zapnutí CZ/SK obohacení](enrichment.md)
-10. [Běh s LLM fallbackem](llm.md)
-11. [Výběr LLM modelu](llm-models.md)
-12. [Spuštění v Kubernetes](kubernetes.md)
-13. [Ladění běhu](debugging.md)
-14. [Konfigurace](configuration.md)
-15. [Spuštění testů](testing.md)
+9. [Odstranění vygenerovaných obálek](strip-covers.md)
+10. [Zapnutí CZ/SK obohacení](enrichment.md)
+11. [Běh s LLM fallbackem](llm.md)
+12. [Výběr LLM modelu](llm-models.md)
+13. [Spuštění v Kubernetes](kubernetes.md)
+14. [Ladění běhu](debugging.md)
+15. [Konfigurace](configuration.md)
+16. [Spuštění testů](testing.md)

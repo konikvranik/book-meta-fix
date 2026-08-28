@@ -106,6 +106,8 @@ zůstane zachován, abyste mohli obnovit stav před během.
 | `bmf epubgen --apply` | Skutečně vygeneruje EPUBy |
 | `bmf crosscheck` | Ověří, že všechny formáty ve složce jsou tatáž kniha; vetřelce dá do karantény |
 | `bmf crosscheck --apply` | Skutečně přesune nesouhlasící soubory formátů |
+| `bmf strip-covers` | Odstraní vygenerované obálky (dry-run: jen vypíše postižené knihy) |
+| `bmf strip-covers --apply` | Skutečně je odstraní: `cover.jpg` → `.bak` a vysoupne embedded obálky EPUB |
 
 Společné volby: `--library PATH`, `--limit N`, `--no-cache`, `-o FILE`,
 `--skip-enrich`, `--skip-verify`, `--databazeknih`, `--legie`,
@@ -303,7 +305,8 @@ nenachází (fuzzy 0,41)“), které se připojí k promptu dalšího pokusu. Kn
 přeskočí a výsledek Flash přijmou beze změny.
 
 **Rate limiting**: všechna volání (Flash + finální + opakování) procházejí
-dvěma sdílenými vrstvami:
+sdíleným leaky bucketem a odpovědi HTTP 429 se rozesílají podle **sub-kódu
+Z.AI** (všechny tři přicházejí jako 429, ale znamenají opačné věci):
 1. **vyhlazovač leaky-bucket** (počet za čas, výchozí kapacita 1 = čistě
    rovnoměrný kapající tok: přesně každých `--llm-min-interval` sekund
    startuje jedno volání, rovnoměrně rozložená, bez shlukování).
@@ -311,15 +314,21 @@ dvěma sdílenými vrstvami:
    za minutu — přesně to chce klouzavý oknový limit Z.AI. Burst >1 dovolí v
    téže sekundě vystartovat několik volání a vyrazí dynamický RPM limit;
    zvedejte jen s ověřenou rezervou; a
-2. **globální 429 cooldown** (jistič) — bezplatná úroveň Z.AI má kaskádový
-   cooldown bug: když jednoho modelu dosáhne rate limit, přibrzdí se i
-   ostatní (včetně placeného fallbacku). Takže když *kterýkoli* worker uvidí
-   429, pozastaví se *všichni* workeři (`--llm-rate-limit-base` sekund,
-   eskalace 5/10/20/…, respektuje serverové `Retry-After`, strop
-   `--llm-rate-limit-max`). Jedno 429 zaparkuje celou flotilu, místo aby každý
-   worker bušil dál a dostával 429. Při 429 na Flash smyčka okamžitě propadne
-   na placený finální model — to finální volání ale teď na konec cooldownu
-   *čeká*, místo aby taky hned dostalo 429.
+2. **globální 429/1302 cooldown** (jistič) — `Rate limit reached for
+   requests` znamená, že **naše** rychlost vyrazila RPM okno (a bezplatná
+   úroveň Z.AI navíc kaskádově přibrzdí i ostatní modely), takže když
+   *kterýkoli* worker uvidí 1302, pozastaví se *všichni* workeři
+   (`--llm-rate-limit-base` sekund, eskalace 5/10/20/…, respektuje serverové
+   `Retry-After`, strop `--llm-rate-limit-max`); a
+3. **overload retry 429/1305** — `The service may be temporarily overloaded`
+   je kapacita **serveru** Z.AI (chronicky časté u bezplatných flash modelů,
+   rychlostí se to neovlivní): volání se krátce zopakuje (s rozestupem
+   intervalu, s rozpočtem pokusů) *bez* nasazení globálního cooldownu a pak
+   se přepne na placený model; opakovaná plně neúspěšná volání pozastaví
+   přetížený model na ~10 minut, takže další knihy míří rovnou na fallback.
+   429/1113 "Insufficient balance" (na coding endpointu rovněž přechodné
+   při paralelní zátěži) dostává stejné tranzientní zacházení.
+   (429/1308 `Usage limit reached` přeskočí model do konce běhu.)
 
 Praktické pokyny v [how-to/llm.md → Ladění omezení rychlosti LLM](docs/cs/how-to/llm.md#ladění-omezení-rychlosti-llm).
 

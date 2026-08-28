@@ -114,13 +114,17 @@ reason ("the title 'X' not found in first-page text (fuzzy 0.41)") that is
 appended to the next attempt's prompt. Books with no readable text skip
 verification and accept the Flash result as-is.
 
-**Rate limiting** — all calls (Flash + final + retries) go through two shared
-layers (see [architecture.md → Concurrency model](architecture.md#concurrency-model)):
-a leaky-bucket smoother (constant aggregate RPM) and a **global 429 cooldown**
-(one 429 parks all workers, because Z.AI's free tier cascade-throttles every
-model when one 429s). On a Flash 429 the loop falls through to the paid final
-model immediately rather than burning more free-tier attempts — but now the
-final call *waits* for the cooldown first instead of instantly 429-ing too.
+**Rate limiting** — all calls (Flash + final + retries) go through a shared
+leaky bucket, and HTTP-429 responses are dispatched on their **Z.AI sub-code**
+(see [architecture.md → Concurrency model](architecture.md#concurrency-model)):
+a **global 429/1302 cooldown** for the real `Rate limit reached for requests`
+(one 1302 parks all workers, because Z.AI's free tier cascade-throttles every
+model when one 429s), short interval-spaced retries for `1305 The service may
+be temporarily overloaded` (server-side capacity — chronic on the free flash
+models and NOT our fault, so it never arms the fleet cooldown; after a bounded
+retry budget the loop falls through to the paid final model, and repeated
+fully-failed calls pause the overloaded model for ~10 minutes), and a per-model
+skip for `1308 Usage limit reached` (quota exhausted for the run).
 
 **Tolerant JSON** — GLM models frequently emit invalid JSON: Python literals
 (`None`/`True`), trailing commas, **unescaped double-quotes inside string

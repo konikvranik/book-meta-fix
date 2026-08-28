@@ -7,19 +7,23 @@ Covers two layers:
 from __future__ import annotations
 
 import io
+import os
 import posixpath
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from PIL import Image
 
 from book_meta_fix.covers import (
 	analyze_cover,
 	download_cover,
 	epub_cover_image,
+	probe_embedded_cover,
 	recover_cover_from_book,
 	strip_cover_from_book,
+	strip_generated_covers,
 )
 from book_meta_fix.models import BookMeta, Confidence, Verdict
 
@@ -63,6 +67,31 @@ def _extractor_writing(image_fn):
 		return dest
 
 	return _fake
+
+
+def _solid_jpeg_bytes(size: tuple[int, int] = (1200, 1600), color=(60, 60, 60)) -> bytes:
+	"""Solid-colour JPEG in memory — a generated placeholder for embedding in EPUBs."""
+	buf = io.BytesIO()
+	Image.new("RGB", size, color=color).save(buf, format="JPEG")
+	return buf.getvalue()
+
+
+def _gradient_jpeg_bytes(size: tuple[int, int] = (458, 500)) -> bytes:
+	"""Colour-rich JPEG in memory — real artwork, must not be flagged generated."""
+	img = Image.new("RGB", size)
+	px = img.load()
+	import random
+
+	random.seed(7)
+	for y in range(size[1]):
+		for x in range(size[0]):
+			r = (x + y) % 256
+			g = (x * 2 + random.randint(0, 50)) % 256
+			b = (y * 2 + random.randint(0, 50)) % 256
+			px[x, y] = (r, g, b)
+	buf = io.BytesIO()
+	img.save(buf, format="JPEG")
+	return buf.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -420,13 +449,16 @@ _OPF_NO_COVER = """<?xml version="1.0" encoding="UTF-8"?>
 
 def _make_epub(path: Path, opf_tmpl: str = _OPF_EPUB2, opf_name: str = "content.opf",
                chapter: bytes = b"<html><body>text</body></html>",
-               with_page: bool = True) -> Path:
+               with_page: bool = True, cover_bytes: bytes | None = None) -> Path:
 	"""Synthetic EPUB with the calibre-style cover chain (image + page + wiring).
 
 	Content entries live next to the OPF (as in real books), i.e. under
 	*opf_name*'s folder. The image bytes are arbitrary — strip_cover_from_book
 	never parses the image, it only relocates zip entries and OPF elements.
-	Set with_page=False for OPFs that reference no cover page (e.g. EPUB3).
+	Pass *cover_bytes* (e.g. _solid_jpeg_bytes) to embed a REAL image; the
+	probing path (probe_embedded_cover) analyses the pixels, so it needs a
+	genuine JPEG. Set with_page=False for OPFs that reference no cover page
+	(e.g. EPUB3).
 	"""
 	base = posixpath.dirname(opf_name)
 
@@ -441,7 +473,7 @@ def _make_epub(path: Path, opf_tmpl: str = _OPF_EPUB2, opf_name: str = "content.
 		zf.writestr(opf_name, opf_tmpl.format(
 			img="images/cover.jpg", page="cover.xhtml", chap="chap.xhtml",
 		))
-		zf.writestr(p("images/cover.jpg"), b"\xff\xd8fakejpeg")
+		zf.writestr(p("images/cover.jpg"), cover_bytes if cover_bytes is not None else b"\xff\xd8fakejpeg")
 		if with_page:
 			zf.writestr(p("cover.xhtml"), b"<html><body><img src='images/cover.jpg'/></body></html>")
 		zf.writestr(p("chap.xhtml"), chapter)
@@ -572,3 +604,118 @@ class TestEpubCoverImage:
 	def test_opf_in_subfolder(self, tmp_path: Path) -> None:
 		epub = _make_epub(tmp_path / "b.epub", opf_name="OEBPS/content.opf")
 		assert epub_cover_image(epub) == b"\xff\xd8fakejpeg"
+
+
+class TestProbeEmbeddedCover:
+	def test_generated_placeholder_detected(self, tmp_path: Path) -> None:
+		epub = _make_epub(tmp_path / "b.epub", cover_bytes=_solid_jpeg_bytes())
+		info = probe_embedded_cover(epub)
+		assert info.is_generated is True
+		assert (info.width, info.height) == (1200, 1600)
+
+	def test_real_artwork_not_flagged(self, tmp_path: Path) -> None:
+		epub = _make_epub(tmp_path / "b.epub", cover_bytes=_gradient_jpeg_bytes())
+		assert probe_embedded_cover(epub).is_generated is False
+
+	def test_non_epub_returns_empty_info(self, tmp_path: Path) -> None:
+		mobi = tmp_path / "b.mobi"
+		mobi.write_bytes(b"BOOKMOBI")
+		info = probe_embedded_cover(mobi)
+		assert info.is_generated is False
+		assert info.width == 0
+
+	def test_no_embedded_cover_returns_empty_info(self, tmp_path: Path) -> None:
+		epub = _make_epub(tmp_path / "b.epub", opf_tmpl=_OPF_NO_COVER)
+		info = probe_embedded_cover(epub)
+		assert info.is_generated is False
+		assert info.width == 0
+
+	def test_undecodable_image_bytes_not_flagged(self, tmp_path: Path) -> None:
+		# The default fake bytes are not a decodable image — analyze_cover's
+		# never-raise contract must yield "not generated", not an exception.
+		epub = _make_epub(tmp_path / "b.epub")
+		assert probe_embedded_cover(epub).is_generated is False
+
+
+class TestStripGeneratedCovers:
+	def test_dry_run_reports_but_touches_nothing(self, tmp_path: Path) -> None:
+		cover = tmp_path / "cover.jpg"
+		_solid_cover(cover)
+		epub = _make_epub(tmp_path / "b.epub", cover_bytes=_solid_jpeg_bytes())
+		result = strip_generated_covers(tmp_path, dry_run=True)
+		assert result.touched is True
+		assert result.cover_bak is True
+		assert result.stripped_epubs == ["b.epub"]
+		assert cover.is_file()
+		assert not (tmp_path / "cover.jpg.bak").exists()
+		assert epub_cover_image(epub) is not None  # still embedded
+
+	def test_apply_baks_sidecar_and_strips_epub(self, tmp_path: Path) -> None:
+		cover = tmp_path / "cover.jpg"
+		_solid_cover(cover)
+		before = cover.read_bytes()
+		epub = _make_epub(tmp_path / "b.epub", cover_bytes=_solid_jpeg_bytes())
+		result = strip_generated_covers(tmp_path, dry_run=False)
+		assert result.cover_bak is True
+		assert result.stripped_epubs == ["b.epub"]
+		assert not cover.exists()
+		bak = tmp_path / "cover.jpg.bak"
+		assert bak.is_file() and bak.read_bytes() == before  # reversible
+		assert epub_cover_image(epub) is None  # cover no longer wired in
+
+	def test_real_covers_untouched(self, tmp_path: Path) -> None:
+		cover = tmp_path / "cover.jpg"
+		_gradient_cover(cover)
+		epub = _make_epub(tmp_path / "b.epub", cover_bytes=_gradient_jpeg_bytes())
+		before_epub = epub.read_bytes()
+		result = strip_generated_covers(tmp_path, dry_run=False)
+		assert result.touched is False
+		assert cover.is_file()
+		assert epub.read_bytes() == before_epub
+
+	def test_epub_only_stripped_when_no_sidecar(self, tmp_path: Path) -> None:
+		epub = _make_epub(tmp_path / "b.epub", cover_bytes=_solid_jpeg_bytes())
+		result = strip_generated_covers(tmp_path, dry_run=False)
+		assert result.cover_bak is False
+		assert result.stripped_epubs == ["b.epub"]
+		assert epub_cover_image(epub) is None
+
+	def test_existing_bak_overwritten(self, tmp_path: Path) -> None:
+		cover = tmp_path / "cover.jpg"
+		_solid_cover(cover)
+		before = cover.read_bytes()
+		bak = tmp_path / "cover.jpg.bak"
+		bak.write_bytes(b"old junk")
+		strip_generated_covers(tmp_path, dry_run=False)
+		assert bak.read_bytes() == before
+
+	def test_mobi_untouched(self, tmp_path: Path) -> None:
+		# Non-EPUB formats are never opened for stripping; a generated sidecar
+		# is still removed around them.
+		cover = tmp_path / "cover.jpg"
+		_solid_cover(cover)
+		mobi = tmp_path / "b.mobi"
+		raw = b"BOOKMOBI\x00\x01binary"
+		mobi.write_bytes(raw)
+		result = strip_generated_covers(tmp_path, dry_run=False)
+		assert result.cover_bak is True
+		assert result.stripped_epubs == []
+		assert result.failed_epubs == []
+		assert mobi.read_bytes() == raw
+
+	def test_empty_folder_is_noop(self, tmp_path: Path) -> None:
+		result = strip_generated_covers(tmp_path, dry_run=False)
+		assert result.touched is False
+
+	@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+	def test_write_failure_recorded_not_raised(self, tmp_path: Path) -> None:
+		# The probe sees a generated cover but the strip cannot write (the
+		# folder is read-only) — recorded in failed_epubs, never raised.
+		_make_epub(tmp_path / "b.epub", cover_bytes=_solid_jpeg_bytes())
+		tmp_path.chmod(0o555)
+		try:
+			result = strip_generated_covers(tmp_path, dry_run=False)
+		finally:
+			tmp_path.chmod(0o755)
+		assert result.failed_epubs == ["b.epub"]
+		assert result.stripped_epubs == []

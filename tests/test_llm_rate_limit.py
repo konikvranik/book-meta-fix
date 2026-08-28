@@ -361,3 +361,299 @@ class TestGlobalCooldown:
 		# The cooldown (0.15s) separates the 429 from the next firing.
 		gap = fired[1] - fired[0]
 		assert gap >= 0.15 - 0.05, f"cooldown not honoured (gap {gap:.3f}s)"
+
+
+def _ok_response():
+	"""A mocked chat completion returning a minimal parseable ReconciledMeta."""
+	msg = MagicMock()
+	msg.content = '{"title":"x","authors":[],"confidence":"low"}'
+	msg.reasoning_content = None
+	choice = MagicMock()
+	choice.message = msg
+	choice.finish_reason = "stop"
+	resp = MagicMock()
+	resp.choices = [choice]
+	return resp
+
+
+def _err(code: str, message: str) -> RuntimeError:
+	"""A fake exception shaped like the observed Z.AI 429 payload."""
+	return RuntimeError(f"Error code: 429 - {{'error': {{'code': '{code}', 'message': '{message}'}}}}")
+
+
+class Test429SubCodes:
+	"""HTTP 429 carries three Z.AI sub-codes with OPPOSITE meanings; _call
+	must dispatch on the code, not on the status alone.
+
+	1302 = our RPM rate tripped → escalating global fleet cooldown (above).
+	1305 = SERVER overloaded → short interval-spaced retries, NO cooldown.
+	1308 = usage quota exhausted → model disabled for the rest of the run.
+	"""
+
+	def test_server_error_from_exc_body(self):
+		"""The openai SDK exposes the parsed payload as exc.body."""
+		exc = RuntimeError("Error code: 429")
+		exc.body = {"error": {"code": "1305", "message": "The service may be temporarily overloaded"}}
+		assert ZaiProvider._server_error(exc) == ("1305", "The service may be temporarily overloaded")
+
+	def test_server_error_from_string(self):
+		"""Plain exceptions fall back to a regex over the observed text form."""
+		exc = _err("1302", "Rate limit reached for requests")
+		assert ZaiProvider._server_error(exc) == ("1302", "Rate limit reached for requests")
+
+	def test_server_error_absent(self):
+		assert ZaiProvider._server_error(RuntimeError("connection reset")) == (None, "")
+
+	def test_overloaded_retries_without_global_cooldown(self):
+		"""1305 must recover via short retries while leaving the global
+		cooldown disarmed — the pre-fix code parked the whole fleet for it."""
+		p = ZaiProvider("k", min_interval=0.0, rate_limit_base=5.0, rate_limit_max=60.0)
+		attempts = {"n": 0}
+
+		def fake_create(**kwargs):
+			attempts["n"] += 1
+			if attempts["n"] < 3:
+				raise _err("1305", "The service may be temporarily overloaded, please try again later")
+			return _ok_response()
+
+		client = MagicMock()
+		client.chat.completions.create.side_effect = fake_create
+		p._client = client
+		result = p.reconcile({"current": {"title": "x"}})
+		assert result is not None
+		assert attempts["n"] == 3
+		assert p._consecutive_429 == 0
+		# _cooldown_until stays at its initial 0.0 — no cooldown was ever armed.
+		assert p._cooldown_until == 0.0
+
+	def test_overloaded_budget_spent_falls_back_to_paid_model(self):
+		"""When flash keeps 1305ing past the retry budget, reconcile_loop gives
+		up on flash and answers via the fallback model — without ever arming
+		the global cooldown."""
+		p = ZaiProvider("k", min_interval=0.0, rate_limit_base=5.0, rate_limit_max=60.0)
+		calls: list[str] = []
+
+		def fake_create(**kwargs):
+			calls.append(kwargs["model"])
+			if kwargs["model"] == "glm-4.7-flash":
+				raise _err("1305", "The service may be temporarily overloaded, please try again later")
+			return _ok_response()
+
+		client = MagicMock()
+		client.chat.completions.create.side_effect = fake_create
+		p._client = client
+		result, src = p.reconcile_loop({"current": {"title": "x"}}, extracted=None)
+		assert result is not None
+		assert src == "llm:high"
+		# 1 initial hit + exactly the overload budget, then the fallback.
+		assert calls.count("glm-4.7-flash") == 1 + ZaiProvider.OVERLOAD_RETRIES
+		assert calls.count("glm-5.3") == 1
+		assert p._cooldown_until == 0.0
+
+	def test_real_rate_limit_1302_still_arms_cooldown(self):
+		"""Regression guard: the genuine RPM limit keeps the fleet cooldown."""
+		p = ZaiProvider("k", min_interval=0.0, burst=10.0, rate_limit_base=0.01, rate_limit_max=0.05)
+		attempts = {"n": 0}
+
+		def fake_create(**kwargs):
+			attempts["n"] += 1
+			if attempts["n"] < 2:
+				raise _err("1302", "Rate limit reached for requests")
+			return _ok_response()
+
+		client = MagicMock()
+		client.chat.completions.create.side_effect = fake_create
+		p._client = client
+		result = p.reconcile({"current": {"title": "x"}})
+		assert result is not None
+		# A cooldown was armed at some point (_cooldown_until is absolute
+		# monotonic; it only leaves 0.0 via _on_rate_limited).
+		assert p._cooldown_until > 0.0
+		# ...and the recovery reset the escalation.
+		assert p._consecutive_429 == 0
+
+	def test_usage_limit_disables_model_for_the_run(self):
+		"""1308 marks the model exhausted; later _calls short-circuit with no
+		HTTP hit, but the other model stays usable."""
+		p = ZaiProvider("k", min_interval=0.0)
+		calls: list[str] = []
+
+		def fake_create(**kwargs):
+			calls.append(kwargs["model"])
+			if kwargs["model"] == "glm-4.7-flash":
+				raise _err("1308", "Usage limit reached for GLM-4.7-Flash")
+			return _ok_response()
+
+		client = MagicMock()
+		client.chat.completions.create.side_effect = fake_create
+		p._client = client
+		result, src = p.reconcile_loop({"current": {"title": "x"}}, extracted=None)
+		assert result is not None
+		assert src == "llm:high"
+		assert "glm-4.7-flash" in p._disabled_models
+		assert "glm-5.3" not in p._disabled_models
+		# One flash hit recorded the exhaustion; a direct flash _call now
+		# short-circuits without touching the API.
+		flash_hits = calls.count("glm-4.7-flash")
+		res, err = p._call("glm-4.7-flash", {"current": {"title": "x"}})
+		assert res is None
+		assert "usage limit" in (err or "")
+		assert calls.count("glm-4.7-flash") == flash_hits
+
+	def test_insufficient_balance_is_transient_not_run_long(self):
+		"""429/1113 'Insufficient balance' arrives with HTTP 429 but is NOT a
+		rate limit — and NOT a hard account state either: on the coding
+		endpoint it fires intermittently under concurrent load even with quota
+		left (dashboard showed 73% free while a 10-worker run tripped it). So
+		it must retry shortly, and only a persistent streak time-boxes the
+		model via the overload pause — never a run-long disable, never the
+		global cooldown."""
+		p = ZaiProvider("k", min_interval=0.0)
+		calls: list[str] = []
+		state = {"mode": "blip"}  # blip = 1113 twice then ok; dead = always 1113
+
+		def fake_create(**kwargs):
+			calls.append(kwargs["model"])
+			if kwargs["model"] == "glm-5.3":
+				if state["mode"] == "dead":
+					raise _err("1113", "Insufficient balance or no resource package. Please recharge.")
+				if calls.count("glm-5.3") <= 2:
+					raise _err("1113", "Insufficient balance or no resource package. Please recharge.")
+			return _ok_response()
+
+		client = MagicMock()
+		client.chat.completions.create.side_effect = fake_create
+		p._client = client
+		ev = {"current": {"title": "x"}}
+		p._disabled_models["glm-4.7-flash"] = "test"  # force the fallback path
+		# A blip: two 1113s then a 200 — recovers within the retry budget,
+		# no pause, no run-long disable, no global cooldown.
+		result, src = p.reconcile_loop(dict(ev), extracted=None)
+		assert result is not None
+		assert src == "llm:high"
+		assert "glm-5.3" not in p._disabled_models
+		assert "glm-5.3" not in p._overload_until
+		assert p._cooldown_until == 0.0
+		# Persistent 1113s: two fully-failed calls arm the time-boxed pause.
+		state["mode"] = "dead"
+		for _ in range(2):
+			r, e = p._call("glm-5.3", dict(ev))
+			assert r is None
+			assert "balance" in (e or "")
+		assert time.monotonic() < p._overload_until["glm-5.3"]
+		assert "glm-5.3" not in p._disabled_models  # pause, not disable
+		# While paused the model short-circuits with zero API hits.
+		glm_calls = calls.count("glm-5.3")
+		r, e = p._call("glm-5.3", dict(ev))
+		assert r is None
+		assert calls.count("glm-5.3") == glm_calls
+
+	def test_success_resets_escalation_even_on_bad_json(self):
+		"""Any HTTP 200 (not just a parseable one) resets the escalation — a
+		bad-JSON streak must not masquerade as a sustained rate limit."""
+		p = ZaiProvider("k", min_interval=0.0)
+		p._on_rate_limited(None)
+		p._on_rate_limited(None)
+		assert p._consecutive_429 == 2
+
+		def fake_create(**kwargs):
+			msg = MagicMock()
+			msg.content = "not json at all"
+			msg.reasoning_content = None
+			choice = MagicMock()
+			choice.message = msg
+			choice.finish_reason = "stop"
+			resp = MagicMock()
+			resp.choices = [choice]
+			return resp
+
+		client = MagicMock()
+		client.chat.completions.create.side_effect = fake_create
+		p._client = client
+		result = p.reconcile({"current": {"title": "x"}})
+		assert result is None  # never parsed
+		assert p._consecutive_429 == 0
+
+	def test_overloaded_pauses_model_after_repeated_full_failures(self):
+		"""Two consecutive fully-failed flash calls (each burning the whole
+		overload budget) arm a pause; the next call skips flash entirely and
+		answers via the fallback — no more wasted requests on a dead model."""
+		p = ZaiProvider("k", min_interval=0.0)
+		calls: list[str] = []
+
+		def fake_create(**kwargs):
+			calls.append(kwargs["model"])
+			if kwargs["model"] == "glm-4.7-flash":
+				raise _err("1305", "The service may be temporarily overloaded, please try again later")
+			return _ok_response()
+
+		client = MagicMock()
+		client.chat.completions.create.side_effect = fake_create
+		p._client = client
+		ev = {"current": {"title": "x"}}
+		# First loop: flash burns its full budget (fail streak = 1, no pause).
+		result, _ = p.reconcile_loop(dict(ev), extracted=None)
+		assert result is not None
+		flash_after_1 = calls.count("glm-4.7-flash")
+		assert flash_after_1 == 1 + ZaiProvider.OVERLOAD_RETRIES
+		assert "glm-4.7-flash" not in p._overload_until
+		# Second loop: same again — the pause arms.
+		result, _ = p.reconcile_loop(dict(ev), extracted=None)
+		assert result is not None
+		assert calls.count("glm-4.7-flash") == flash_after_1 + 1 + ZaiProvider.OVERLOAD_RETRIES
+		assert time.monotonic() < p._overload_until["glm-4.7-flash"]
+		# Third loop: flash is short-circuited with ZERO API hits.
+		flash_after_2 = calls.count("glm-4.7-flash")
+		result, src = p.reconcile_loop(dict(ev), extracted=None)
+		assert result is not None
+		assert src == "llm:high"
+		assert calls.count("glm-4.7-flash") == flash_after_2
+		assert calls.count("glm-5.3") == 3
+
+	def test_model_success_clears_overload_streak(self):
+		"""A 200 on the model clears its failure streak, so an isolated bad
+		call does not accumulate into a pause across healthy calls."""
+		p = ZaiProvider("k", min_interval=0.0)
+		calls: list[str] = []
+		state = {"flash_ok": False}
+
+		def fake_create(**kwargs):
+			calls.append(kwargs["model"])
+			if kwargs["model"] == "glm-4.7-flash" and not state["flash_ok"]:
+				raise _err("1305", "The service may be temporarily overloaded, please try again later")
+			return _ok_response()
+
+		client = MagicMock()
+		client.chat.completions.create.side_effect = fake_create
+		p._client = client
+		ev = {"current": {"title": "x"}}
+		# Fully-failed flash call (streak = 1), then a healthy flash call.
+		p.reconcile_loop(dict(ev), extracted=None)
+		state["flash_ok"] = True
+		p.reconcile_loop(dict(ev), extracted=None)
+		assert p._overload_failures["glm-4.7-flash"] == 0
+		# One more fully-failed call (streak back to 1) must NOT arm a pause.
+		state["flash_ok"] = False
+		calls.clear()
+		p.reconcile_loop(dict(ev), extracted=None)
+		assert p._overload_failures["glm-4.7-flash"] == 1
+		assert "glm-4.7-flash" not in p._overload_until
+
+	def test_overload_pause_expires(self):
+		"""An expired pause lets the model back in without an API penalty."""
+		p = ZaiProvider("k", min_interval=0.0)
+		client = MagicMock()
+		client.chat.completions.create.side_effect = lambda **kw: _ok_response()
+		p._client = client
+		p._overload_until["glm-4.7-flash"] = time.monotonic() - 1.0  # already past
+		result = p.reconcile({"current": {"title": "x"}})
+		assert result is not None
+		assert client.chat.completions.create.call_count == 1
+
+	def test_client_built_without_sdk_retries(self):
+		"""The openai client must not retry on its own: SDK retries fire
+		outside the leaky bucket (breaking the count-per-time guarantee) and
+		silently absorb 429s before _call can classify them."""
+		p = ZaiProvider("k")
+		client = p._get_client()
+		assert client.max_retries == 0

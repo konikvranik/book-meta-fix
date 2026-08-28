@@ -17,15 +17,23 @@ zároveň mají použitelný text první strany. Výstupem je vždy *návrh* pro
 
 ## Ladění omezení rychlosti LLM
 
-Coding plan Z.AI vynucuje dynamický limit počtu požadavků za minutu; 429
-`Rate limit reached for requests` (kód 1302) se spustí, když v posuvném
-okně přistane příliš mnoho volání. Pod limitem vás drží dvě vrstvy (viz
+Z.AI vrací HTTP 429 pro tři různé situace a `bmf` na každou reaguje jinak
+(sub-kód se vždy zaloguje):
+
+| Sub-kód | Význam | Reakce `bmf` |
+|---|---|---|
+| `1302` Rate limit reached for requests | **Vaše** rychlost požadavků vyšlapala RPM okno | Globální cooldown: pozastaví se všichni workeri, eskaluje `base * 2^(n-1)` (5, 10, 20, …), respektuje serverové `Retry-After`, je-li delší, strop `max` |
+| `1305` The service may be temporarily overloaded | **Kapacita serveru** Z.AI (chronické u bezplatných flash modelů — nezpůsobeno vámi) | Krátké retry s rozestupem intervalu (bez globálního cooldownu), pak přepnutí na placený model; opakovaná plná selhání pozastaví přetížený model na ~10 min |
+| `1113` Insufficient balance or no resource package | Billingová kontrola — tvrdá chyba, když kvóta opravdu došla, na coding endpointu ale občas vystřelí i paralelní zátěží při zbývající kvótě | Stejné tranzientní zacházení jako 1305 (retry, pak časově ohraničená pauza). Přetrvává-li, prověřte plán / spárování endpointu v `.env.example` |
+| `1308` Usage limit reached | Vyčerpaná kvóta usage modelu | Model se do konce běhu přeskočí |
+
+Pod limitem 1302 vás drží dvě vrstvy (viz
 [architecture.md → Model souběžnosti](../architecture.md#model-souběžnosti)):
 
 1. **Vyhlazovač typu leaky bucket** — konstantní agregované RPM.
-2. **Globální 429 cooldown** — free tier Z.AI kaskádově škrtí *každý*
+2. **Globální 429/1302 cooldown** — free tier Z.AI kaskádově škrtí *každý*
    model, jakmile jeden dostane 429, takže když *kterýkoli* worker uvidí
-   429, pozastaví se *všechny* workery.
+   1302, pozastaví se *všechny* workery.
 
 | Parametr | CLI | Env | Výchozí |
 |---|---|---|---|
@@ -41,13 +49,9 @@ bez hromadění (5 volání v jedné sekundě a pak nic je přesně to, co limit
 vyšlape). Burst >1 dovolí, aby ve stejné sekundě startovalo několik volání;
 zvyšte jej jen s potvrzenou rezervou v limitu.
 
-Cooldown eskaluje `base * 2^(n-1)` (5, 10, 20, …) s po sobě jdoucími 429,
-respektuje serverové `Retry-After`, je-li delší, a je zastropován na
-`max`.
-
-**Pokud stále narážíte na 429** (v logu uvidíte `Z.AI rate-limited (429);
-global cooldown …s across all workers`), zpomalte kapání a prodlužte
-cooldown — burst už je ve výchozím nastavení 1:
+**Pokud stále narážíte na 1302** (v logu uvidíte `Z.AI rate-limited
+(429/1302 …); global cooldown …s across all workers`), zpomalte kapání a
+prodlužte cooldown — burst už je ve výchozím nastavení 1:
 
 ```bash
 # Slower drip: 4s apart (15 RPM), longer cooldown
@@ -56,6 +60,20 @@ bmf analyze --llm --llm-min-interval 4.0 --llm-rate-limit-base 10
 # Slow it down hard for a free tier
 bmf analyze --llm --llm-min-interval 4.0 --llm-rate-limit-base 15 --llm-rate-limit-max 120
 ```
+
+**Pokud je log místo toho plný řádků `429/1305` (overload)**, jde o kapacitu
+Z.AI, ne o vaši rychlost — zpomalení nepomůže. Běh už to přežívá retry a
+přepnutím na placený model a po opakovaných plných selháních pozastaví
+přetížený model na ~10 minut (`pausing model … for 600s`). Pokud to večer
+dominuje, přepněte smyčku rovnou na placený model:
+
+```bash
+bmf analyze --llm --llm-model glm-5.3
+```
+
+**Uvidíte-li `429/1308 usage limit reached`**, kvóta usage modelu je
+vyčerpaná, dokud se neobnoví na straně Z.AI (typicky hodiny); `bmf` tento
+model automaticky přeskočí do konce běhu.
 
 **Máte-li vyšší tier a chcete rychlost**, snižte interval a základ
 cooldownu:

@@ -457,6 +457,89 @@ def strip_cover_from_book(book_path: str | Path) -> bool:
 			tmp_path.unlink(missing_ok=True)
 
 
+@dataclass
+class CoverStripResult:
+	"""Outcome of one book folder's pass of :func:`strip_generated_covers`."""
+
+	path: str
+	# cover.jpg was (or would be, under dry-run) renamed to cover.jpg.bak.
+	cover_bak: bool = False
+	# EPUB file names whose embedded cover was (or would be) stripped.
+	stripped_epubs: list[str] = field(default_factory=list)
+	# EPUBs whose cover probed as generated but the strip failed — surfaced in
+	# the summary so the failure is visible, not silent.
+	failed_epubs: list[str] = field(default_factory=list)
+
+	@property
+	def touched(self) -> bool:
+		return self.cover_bak or bool(self.stripped_epubs) or bool(self.failed_epubs)
+
+
+def probe_embedded_cover(book_path: str | Path) -> CoverInfo:
+	"""Analyze the cover EMBEDDED in an ebook file, without touching the file.
+
+	EPUB-only and calibre-free: reads the OPF-wired cover bytes via
+	:func:`epub_cover_image` (deliberately no page-render fallback — calibre's
+	``--get-cover`` fabricates a "default cover" even for a coverless EPUB),
+	spills them to a temp file and runs the same pixel math as the C11
+	detector. Returns an empty CoverInfo (is_generated=False) for non-EPUB
+	files, EPUBs without an embedded cover and anything unreadable. Never
+	raises.
+	"""
+	data = epub_cover_image(book_path)
+	if not data:
+		return CoverInfo()
+	tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False, prefix="bmf-probe-")
+	try:
+		tmp.write(data)
+		tmp.close()
+		return analyze_cover(tmp.name)
+	finally:
+		Path(tmp.name).unlink(missing_ok=True)
+
+
+def strip_generated_covers(folder: str | Path, *, dry_run: bool = True) -> CoverStripResult:
+	"""Remove every GENERATED cover from one book folder — sidecar and embedded.
+
+	Per-folder engine of ``bmf strip-covers``. Bulk cleanup before the pipeline
+	refetches real covers: once cover.jpg is gone the book re-fires
+	MISSING_COVER, whose recovery/replacement path already exists. Two targets:
+
+	- ``cover.jpg`` that :func:`analyze_cover` classifies as generated (the C11
+	  pixel math) → renamed to ``cover.jpg.bak`` (reversible; overwrites any
+	  existing .bak) — never hard-deleted.
+	- each ``*.epub`` whose embedded cover probes as generated
+	  (:func:`probe_embedded_cover`) → :func:`strip_cover_from_book` surgery.
+
+	Non-EPUB format files are deliberately untouched: their covers live in
+	binary EXTH headers with no safe removal path (see
+	:func:`strip_cover_from_book`). With *dry_run* nothing is modified — the
+	result reports what WOULD happen. Never raises.
+	"""
+	folder = Path(folder)
+	result = CoverStripResult(path=str(folder))
+
+	cover_path = folder / "cover.jpg"
+	if cover_path.is_file() and analyze_cover(cover_path).is_generated:
+		if dry_run:
+			result.cover_bak = True
+		else:
+			try:
+				os.replace(cover_path, cover_path.with_suffix(cover_path.suffix + ".bak"))
+				result.cover_bak = True
+			except OSError as exc:
+				log.warning("sidecar cover strip failed for %s: %s", folder, exc)
+
+	for epub in sorted(folder.glob("*.epub")):
+		if not probe_embedded_cover(epub).is_generated:
+			continue
+		if dry_run or strip_cover_from_book(epub):
+			result.stripped_epubs.append(epub.name)
+		else:
+			result.failed_epubs.append(epub.name)
+	return result
+
+
 def download_cover(url: str, dest_path: str | Path, *, timeout: float = 15.0) -> bool:
 	"""Download a cover image from *url* to *dest_path* atomically.
 
