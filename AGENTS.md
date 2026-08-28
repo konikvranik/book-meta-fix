@@ -255,18 +255,29 @@ src/book_meta_fix/
   the free flash models, evenings ~60 % of calls): must NOT arm the global
   cooldown (treating it as 1302 turned transient overloads into permanent
   60 s fleet lockouts); `_call` retries it shortly (interval-spaced via the
-  bucket, `OVERLOAD_RETRIES` budget) and then falls back to the paid model.
-  When `OVERLOAD_PAUSE_AFTER` consecutive calls on one model each burn the
-  whole budget (measured reality: the free flash pool sits at ~90 % 1305 at
-  EU evening peak while the paid glm-5.3 serves clean), the model is PAUSED
-  for `OVERLOAD_PAUSE_SEC` (10 min) — later `_call`s short-circuit straight
-  to the fallback instead of re-burning 7 requests per book; a single 200
-  clears the streak and the pause simply expires.
+  bucket, small `OVERLOAD_RETRIES` budget) and then falls back to the paid
+  model. The throughput keystone is the fleet-wide rejection STREAK:
+  `OVERLOAD_STREAK` consecutive 1305/1113 rejections on one model across
+  ALL calls/workers (reset by any HTTP 200 on it) pause it for
+  `OVERLOAD_PAUSE_SEC` (3 min) — a half-dead flash (a 200 every few
+  rejections, so its calls keep "succeeding" and per-call budgets never
+  trip anything) would otherwise silently eat the shared RPM drip that the
+  paid fallback needs; with the streak, the fleet parks flash within
+  seconds of a wave and every drip slot goes to the model that answers.
+  The drip is ADAPTIVE: the configured interval is only the floor —
+  1302/1113 stretch it (x1.3, capped ~4x floor; Z.AI's real ceiling is
+  dynamic: four 1302s in two minutes at a steady 30 RPM were measured one
+  evening), every 200 shrinks it back (x0.97). The pause length follows the
+  code: 1305 capacity waves last minutes (`OVERLOAD_PAUSE_SEC` 180 s),
+  1113 bursts pass in tens of seconds (`BALANCE_PAUSE_SEC` 30 s — the
+  model it hits is usually the only working capacity left). While a pause
+  runs, the per-book fallback chatter is debug-only and a once-a-minute
+  "every model is paused" info line marks the (rare) fully-idle LLM stage.
   **1113** "Insufficient balance or no resource package" — also HTTP 429,
   documented as a hard billing error BUT fires intermittently on the coding
-  endpoint under concurrent load with quota left (verified against the
-  dashboard); gets the same transient treatment as 1305 (retry, then
-  time-boxed pause), never a run-long disable.
+  endpoint in short metering bursts with quota left (verified against the
+  dashboard; concurrency and max_tokens both refuted by experiment); gets
+  the same transient streak treatment, never a run-long disable.
   **1308** "Usage limit reached" — quota exhausted: `_disable_model` adds
   the model to `_disabled_models` (model → reason) and every later `_call`
   for it short-circuits without an API hit. The openai client is built with `max_retries=0` — SDK retries

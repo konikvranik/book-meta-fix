@@ -122,9 +122,10 @@ a **global 429/1302 cooldown** for the real `Rate limit reached for requests`
 model when one 429s), short interval-spaced retries for `1305 The service may
 be temporarily overloaded` (server-side capacity — chronic on the free flash
 models and NOT our fault, so it never arms the fleet cooldown; after a bounded
-retry budget the loop falls through to the paid final model, and repeated
-fully-failed calls pause the overloaded model for ~10 minutes), and a per-model
-skip for `1308 Usage limit reached` (quota exhausted for the run).
+retry budget the loop falls through to the paid final model, and a fleet-wide
+streak of consecutive rejections pauses the overloaded model for ~3 minutes),
+and a per-model skip for `1308 Usage limit reached` (quota exhausted for the
+run).
 
 **Tolerant JSON** — GLM models frequently emit invalid JSON: Python literals
 (`None`/`True`), trailing commas, **unescaped double-quotes inside string

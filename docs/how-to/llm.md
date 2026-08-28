@@ -22,8 +22,8 @@ each differently (the sub-code is always logged):
 | Sub-code | Meaning | `bmf` reaction |
 |---|---|---|
 | `1302` Rate limit reached for requests | **Your** request rate tripped the RPM window | Global cooldown: all workers pause, escalating `base * 2^(n-1)` (5, 10, 20, …), honouring the server's `Retry-After` when longer, capped at `max` |
-| `1305` The service may be temporarily overloaded | **Z.AI's** server capacity (chronic on the free flash models — nothing you did) | Short interval-spaced retries (no global cooldown), then fall back to the paid model; repeated fully-failed calls pause the overloaded model for ~10 min |
-| `1113` Insufficient balance or no resource package | Billing check — hard when the quota is really gone, but on the coding endpoint it also fires intermittently under concurrent load with quota left | Same transient handling as 1305 (retry, then time-boxed pause). If it persists, check the plan / endpoint pairing in `.env.example` |
+| `1305` The service may be temporarily overloaded | **Z.AI's** server capacity (chronic on the free flash models — nothing you did) | Short interval-spaced retries (no global cooldown), then fall back to the paid model; a fleet-wide streak of consecutive rejections pauses the model for ~3 min |
+| `1113` Insufficient balance or no resource package | Billing check — hard when the quota is really gone, but on the coding endpoint it also fires in short bursts with quota left (it tracks flash-storm account throttling) | Same transient streak handling as 1305 but with a short ~30 s pause; the drip also widens a notch. If it persists, check the plan / endpoint pairing in `.env.example` |
 | `1308` Usage limit reached | The model's usage quota is exhausted | The model is skipped for the rest of the run |
 
 Two layers keep you under the 1302 limit (see
@@ -46,6 +46,13 @@ the default `--llm-burst 1` it is a pure even drip — exactly one call starts
 every `--llm-min-interval` seconds, evenly spaced, no bunching (5 calls in one
 second then nothing is exactly what trips the limit). A burst >1 lets several
 calls fire in the same second; raise it only with confirmed rate headroom.
+The interval is **adaptive**: it is only a floor. Z.AI's real request ceiling
+moves (four 1302s in two minutes were observed at a steady 30 RPM one
+evening), so 1302/1113 stretch the drip (×1.3, capped at ~4× the floor) and
+every successful response eases it back — within a minute or two it settles
+at whatever the account is actually allowed right now. When every model is
+paused at once you'll see a once-a-minute `every model is paused` line and
+books flow through without LLM proposals until a pause expires.
 
 **If you are still hitting 1302** (you'll see `Z.AI rate-limited (429/1302
 …); global cooldown …s across all workers` in the log), slow the drip and
@@ -60,10 +67,11 @@ bmf analyze --llm --llm-min-interval 4.0 --llm-rate-limit-base 15 --llm-rate-lim
 ```
 
 **If the log is full of `429/1305` overload lines instead**, that is Z.AI's
-capacity, not your request rate — slowing down will not help. The run already
-retries through it and falls back to the paid model, and after repeated full
-failures it pauses the overloaded model for ~10 minutes (`pausing model … for
-600s`). If it dominates your evenings, switch the loop model to a paid one:
+capacity, not your request rate — slowing down will not help. The run retries
+through it, falls back to the paid model, and a fleet-wide streak of
+consecutive rejections parks the overloaded model for ~3 minutes
+(`pausing model … for 180s`). If it dominates your evenings, switch the loop
+model to a paid one:
 
 ```bash
 bmf analyze --llm --llm-model glm-5.3

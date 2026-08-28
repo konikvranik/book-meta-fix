@@ -298,8 +298,10 @@ Books with no readable text (image-only title pages, scanned PDFs) skip
 verification and accept the Flash result as-is.
 
 **Rate limiting**: all calls (Flash + final + retries) go through a shared
-leaky bucket, and HTTP-429 responses are dispatched on their **Z.AI sub-code**
-(all three arrive as 429 but mean opposite things):
+leaky bucket whose interval is **adaptive** (the configured value is only a
+floor: 1302/1113 widen the drip, successes ease it back), and HTTP-429
+responses are dispatched on their **Z.AI sub-code** (all three arrive as 429
+but mean opposite things):
 1. the **leaky-bucket smoother** (count-per-time, default capacity 1 = pure
    even drip: exactly one call starts every `--llm-min-interval` seconds,
    evenly spaced, no bunching). `--llm-min-interval 2.0` = a steady 30
@@ -313,14 +315,16 @@ leaky bucket, and HTTP-429 responses are dispatched on their **Z.AI sub-code**
    5/10/20/…, honouring the server `Retry-After`, capped at
    `--llm-rate-limit-max`). One 429 parks the fleet instead of every worker
    hammering and 429-ing; and
-3. **429/1305 overload retries** — `The service may be temporarily
+3. **429/1305 overload handling** — `The service may be temporarily
    overloaded` is SERVER-side capacity (chronically frequent on the free
    flash models, not caused by our rate): the call retries shortly
    (interval-spaced, bounded budget) *without* arming the global cooldown,
-   then falls back to the paid model; repeated fully-failed calls pause the
-   overloaded model for ~10 minutes so later books skip straight to the
-   fallback. 429/1113 "Insufficient balance" (also intermittent on the
-   coding endpoint under concurrent load) gets the same transient handling.
+   then falls back to the paid model; a fleet-wide streak of consecutive
+   rejections pauses the overloaded model for ~3 minutes so every rate slot
+   goes to the model that actually answers. 429/1113 "Insufficient balance"
+   (short bursts on the coding endpoint that track flash-storm account
+   throttling, despite quota left) gets the same handling with a shorter
+   ~30 s pause.
    (429/1308 `Usage limit reached` skips the model for the rest of the run.)
 
 See [how-to/llm.md → Tuning the LLM rate limit](docs/how-to/llm.md#tuning-the-llm-rate-limit)

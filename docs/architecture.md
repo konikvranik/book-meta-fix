@@ -183,9 +183,15 @@ Two layers keep the LLM call rate under Z.AI's dynamic RPM limit:
    models): that one is retried shortly, interval-spaced with a bounded
    budget, WITHOUT arming the fleet cooldown — treating it as 1302 used to
    turn transient overloads into permanent 60 s lockouts — and then falls
-   back to the paid model. Repeated fully-failed calls pause the model for
-   ~10 minutes (`OVERLOAD_PAUSE_SEC`), so a saturated free pool costs one
-   bounded probing round instead of seven wasted requests per book.
+   back to the paid model. A fleet-wide streak of consecutive 1305/1113
+   rejections on one model (reset by any 200 on it) pauses it — ~3 min for
+   1305 capacity waves (`OVERLOAD_PAUSE_SEC`), ~30 s for 1113 bursts
+   (`BALANCE_PAUSE_SEC`, usually hitting the last working model) — so a
+   saturated free pool costs a few probing requests instead of eating the
+   shared RPM drip book after book. The drip itself is adaptive
+   (1302/1113 stretch it, successes shrink it back toward the floor), and
+   when every model is paused at once the LLM stage is a quiet no-op with
+   a once-a-minute idle notice.
    **1308** "Usage limit reached" disables just that
    model for the rest of the run. The openai client is built with
    `max_retries=0` so every 429 surfaces here for classification instead of

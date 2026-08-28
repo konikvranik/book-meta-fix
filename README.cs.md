@@ -305,8 +305,10 @@ nenachází (fuzzy 0,41)“), které se připojí k promptu dalšího pokusu. Kn
 přeskočí a výsledek Flash přijmou beze změny.
 
 **Rate limiting**: všechna volání (Flash + finální + opakování) procházejí
-sdíleným leaky bucketem a odpovědi HTTP 429 se rozesílají podle **sub-kódu
-Z.AI** (všechny tři přicházejí jako 429, ale znamenají opačné věci):
+sdíleným leaky bucketem s **adaptivním** intervalem (nastavená hodnota je
+jen podlaha: 1302/1113 drip roztáhnou, úspěchy ho stáhnou zpět) a odpovědi
+HTTP 429 se rozesílají podle **sub-kódu Z.AI** (všechny tři přicházejí jako
+429, ale znamenají opačné věci):
 1. **vyhlazovač leaky-bucket** (počet za čas, výchozí kapacita 1 = čistě
    rovnoměrný kapající tok: přesně každých `--llm-min-interval` sekund
    startuje jedno volání, rovnoměrně rozložená, bez shlukování).
@@ -320,14 +322,15 @@ Z.AI** (všechny tři přicházejí jako 429, ale znamenají opačné věci):
    *kterýkoli* worker uvidí 1302, pozastaví se *všichni* workeři
    (`--llm-rate-limit-base` sekund, eskalace 5/10/20/…, respektuje serverové
    `Retry-After`, strop `--llm-rate-limit-max`); a
-3. **overload retry 429/1305** — `The service may be temporarily overloaded`
+3. **řízení 429/1305 overload** — `The service may be temporarily overloaded`
    je kapacita **serveru** Z.AI (chronicky časté u bezplatných flash modelů,
    rychlostí se to neovlivní): volání se krátce zopakuje (s rozestupem
    intervalu, s rozpočtem pokusů) *bez* nasazení globálního cooldownu a pak
-   se přepne na placený model; opakovaná plně neúspěšná volání pozastaví
-   přetížený model na ~10 minut, takže další knihy míří rovnou na fallback.
-   429/1113 "Insufficient balance" (na coding endpointu rovněž přechodné
-   při paralelní zátěži) dostává stejné tranzientní zacházení.
+   se přepne na placený model; fleet-wide série po sobě jdoucích odmítnutí
+   pozastaví přetížený model na ~3 minuty, takže každý rate slot jde modelu,
+   který opravdu odpovídá. 429/1113 "Insufficient balance" (krátké bursty
+   na coding endpointu navzdory zbývající kvótě) dostává stejné zacházení
+   s kratší pauzou ~30 s.
    (429/1308 `Usage limit reached` přeskočí model do konce běhu.)
 
 Praktické pokyny v [how-to/llm.md → Ladění omezení rychlosti LLM](docs/cs/how-to/llm.md#ladění-omezení-rychlosti-llm).

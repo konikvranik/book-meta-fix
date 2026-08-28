@@ -262,25 +262,34 @@ class ZaiProvider(LLMProvider):
 	USAGE_LIMIT_CODE = "1308"
 	BALANCE_CODE = "1113"
 
-	# Short retries a single _call may spend on 1305 (server overload) before
-	# giving up on the model for that call (the loop then falls back to the
-	# paid model). Each retry re-acquires a bucket token, so they stay
-	# interval-spaced; the budget just bounds how long we nurse a saturated
-	# free model. Empirically (evening peak) ~60% of flash calls 1305 once and
-	# recover on the first or second retry, so 6 absorbs all but ~5% tail.
-	OVERLOAD_RETRIES = 6
+	# Short retries a single _call may spend on a transient 429 (1305/1113)
+	# before giving up on the model for that call (the loop then falls back
+	# to the paid model). Keep SMALL: the streak pause below parks a
+	# distressed model fleet-wide within seconds, so a long per-call budget
+	# only burns shared drip slots that the other model needs. A sporadic
+	# single 1305 recovers on the first retry.
+	OVERLOAD_RETRIES = 2
 
-	# When OVERLOAD_PAUSE_AFTER consecutive _calls on one model each burn
-	# their whole 1305 retry budget, the model is paused for
-	# OVERLOAD_PAUSE_SEC and callers fall straight through to the fallback —
-	# at ~90% 1305 saturation (measured on the free flash pool at EU evening
-	# peak) every flash-led book would otherwise waste 7 requests + ~14s
-	# before the fallback anyway. A pause, not a disable: 1305 is transient
-	# load, so the model re-qualifies itself when the window expires (unlike
-	# 1308, which kills the model for the run). Two strikes, not one, so a
-	# healthy model (P(all-6-retries-fail) ~1e-7 at 10% 1305) never trips it.
-	OVERLOAD_PAUSE_AFTER = 2
-	OVERLOAD_PAUSE_SEC = 600.0
+	# Per-model streak circuit breaker for transient 429s (1305 overload,
+	# 1113 balance rejection): FOUR consecutive rejections across ALL
+	# calls/workers (reset by any HTTP 200 on the model) pause it for
+	# OVERLOAD_PAUSE_SEC. This is the throughput keystone: a half-dead free
+	# flash pool (2-3 rejections, one 200, repeat) never trips the old
+	# "whole-budget burnout" trigger, yet its retries silently eat the shared
+	# RPM drip that the paid fallback needs — with the streak, the fleet
+	# parks flash within seconds of a wave and every drip slot goes to the
+	# model that actually answers. 3 minutes, not 10: re-probing a paused
+	# model costs one call, and 1305 waves / 1113 metering bursts last
+	# minutes, not tens of them.
+	OVERLOAD_STREAK = 4
+	OVERLOAD_PAUSE_SEC = 180.0
+
+	# 1113 rejection bursts track flash storms / account-level throttling and
+	# pass in tens of seconds. The fallback model it hits is usually the ONLY
+	# working capacity at that moment — parking it for minutes would turn a
+	# brief burst into minutes of zero LLM output — so its pause is much
+	# shorter: books fail fast for ~30 s, then the model is probed again.
+	BALANCE_PAUSE_SEC = 30.0
 
 	# Default minimum interval between LLM requests, in seconds. Z.AI's coding
 	# plan applies a dynamic RPM (requests-per-minute) limit; 429 'Rate limit
@@ -312,8 +321,19 @@ class ZaiProvider(LLMProvider):
 		# — which is what Z.AI's sliding-window request limit wants. Raise
 		# burst only with rate headroom; a burst of N inside one second is what
 		# trips the dynamic RPM limit (429 code 1302).
+		# The drip is ADAPTIVE: the configured interval is only the floor.
+		# Z.AI's real request ceiling is dynamic — observed: four 1302s in
+		# two minutes at a steady 30 RPM one evening, none the next day —
+		# so a fixed interval is either wasteful (set below the ceiling) or
+		# a 429 storm (set above). 1302 and 1113 stretch the interval (x1.3,
+		# capped), every HTTP 200 shrinks it back (x0.97, floored); within a
+		# minute or two it settles at whatever the account is actually
+		# allowed right now. 1305 does NOT stretch (it is server capacity,
+		# not our rate — the streak pause handles it).
 		interval = self.DEFAULT_MIN_INTERVAL if min_interval is None else min_interval
-		self._bucket = LeakyBucket(capacity=burst, interval=max(0.0, interval))
+		self._interval_floor = max(0.0, interval)
+		self._interval_cap = max(self._interval_floor * 4.0, 8.0)
+		self._bucket = LeakyBucket(capacity=burst, interval=self._interval_floor)
 		# Global rate-limit cooldown (circuit breaker) shared across ALL worker
 		# threads. The leaky bucket caps the steady-state call rate per worker,
 		# but Z.AI's free tier has a cascade-cooldown bug: when ONE model gets a
@@ -333,11 +353,14 @@ class ZaiProvider(LLMProvider):
 		# exhausted, 429/1113 no balance): model -> reason. _call
 		# short-circuits them without an API hit.
 		self._disabled_models: dict[str, str] = {}
-		# Per-model sustained-overload circuit breaker (429/1305): consecutive
-		# fully-failed _calls, and a skip-until deadline once the pause trips.
-		# Guarded by _cooldown_lock (shared small-state lock).
-		self._overload_failures: dict[str, int] = {}
+		# Per-model sustained-overload circuit breaker (429/1305 + 429/1113):
+		# consecutive rejections (reset by any 200) and a skip-until deadline
+		# once the streak trips. Guarded by _cooldown_lock (shared small-state
+		# lock).
+		self._fail_streak: dict[str, int] = {}
 		self._overload_until: dict[str, float] = {}
+		# Throttle for the "every model is paused" notice (once per minute).
+		self._next_idle_log = 0.0
 		# Models used by reconcile_loop: self.model is the (free) first-attempt
 		# model — glm-4.7-flash, best CZ/SK quality among free models per
 		# scripts/llm_experiment.py; fallback_model is the paid high-quality
@@ -491,31 +514,57 @@ class ZaiProvider(LLMProvider):
 			self._disabled_models[model] = reason
 		log.warning("Z.AI: model %s disabled for this run — %s", model, reason)
 
-	def _on_overload_giveup(self, model: str) -> None:
-		"""A _call just burned its whole transient-failure retry budget
-		(429/1305 overload or 429/1113 balance rejection) on *model*.
+	def _stretch_interval(self) -> float:
+		"""Widen the drip after a rate-shaped 429 (1302, 1113).
 
-		Counts consecutive fully-failed calls per model; after
-		OVERLOAD_PAUSE_AFTER it arms a time-boxed pause (OVERLOAD_PAUSE_SEC)
-		during which _call short-circuits the model so the fleet goes straight
-		to the fallback instead of re-burning the budget on every book. A
-		single 200 on the model clears the streak; the pause itself simply
-		expires (transient load or a recovered balance check — not a dead
-		quota like 1308, which disables the model for the whole run).
+		Z.AI's real request ceiling is dynamic — measured: four 1302s in two
+		minutes at a steady 30 RPM one evening, none the next day — so a
+		fixed interval is either wasteful or a 429 storm. Each stretch is
+		x1.3 +0.1s capped at ~4x the floor; every HTTP 200 shrinks it back
+		(x0.97, floored), so the drip re-finds the ceiling of the moment
+		within a minute or two. 1305 does NOT stretch (server capacity, not
+		our rate — the streak pause handles it).
 		"""
-		pause = False
+		b = self._bucket
+		if self._interval_floor <= 0 or b.interval <= 0:
+			return b.interval
+		b.interval = min(self._interval_cap, b.interval * 1.3 + 0.1)
+		return b.interval
+
+	def _shrink_interval(self) -> None:
+		"""Nudge the drip back toward the configured floor after a success."""
+		b = self._bucket
+		if b.interval > self._interval_floor:
+			b.interval = max(self._interval_floor, b.interval * 0.97)
+
+	def _on_transient_rejection(self, model: str, code: str) -> bool:
+		"""Record one transient 429 rejection (1305/1113) on *model*.
+
+		Counts consecutive rejections per model across ALL calls/workers
+		(reset by any HTTP 200 on the model); at OVERLOAD_STREAK it arms a
+		time-boxed pause during which _call short-circuits the model so the
+		fleet goes straight to the fallback instead of bleeding drip slots
+		into a model that is not answering. The pause length follows the
+		code: 1305 capacity waves last minutes (OVERLOAD_PAUSE_SEC), 1113
+		bursts pass in tens of seconds (BALANCE_PAUSE_SEC — and the model it
+		hits is usually the only working capacity left). Returns True when
+		the pause just tripped (the caller gives up the current call too —
+		every further attempt would be rejected anyway).
+		"""
+		pause = self.OVERLOAD_PAUSE_SEC if code == self.OVERLOADED_CODE else self.BALANCE_PAUSE_SEC
 		with self._cooldown_lock:
-			fails = self._overload_failures.get(model, 0) + 1
-			self._overload_failures[model] = fails
-			if fails >= self.OVERLOAD_PAUSE_AFTER:
-				self._overload_until[model] = time.monotonic() + self.OVERLOAD_PAUSE_SEC
-				pause = True
-		if pause:
-			log.warning(
-				"Z.AI service overloaded (429/1305); pausing model %s for %.0fs, falling back until then",
-				model,
-				self.OVERLOAD_PAUSE_SEC,
-			)
+			streak = self._fail_streak.get(model, 0) + 1
+			self._fail_streak[model] = streak
+			if streak < self.OVERLOAD_STREAK:
+				return False
+			self._overload_until[model] = time.monotonic() + pause
+		log.warning(
+			"Z.AI: %d consecutive transient rejections; pausing model %s for %.0fs, falling back until then",
+			self.OVERLOAD_STREAK,
+			model,
+			pause,
+		)
+		return True
 
 	def _get_client(self):
 		"""Lazy-init the OpenAI client (avoids import error if openai not installed).
@@ -544,13 +593,14 @@ class ZaiProvider(LLMProvider):
 		     the fleet (cascade-cooldown coordination).
 		  2. the leaky-bucket caps the steady-state call rate (also on retries).
 		  3. 1302 (real RPM limit) → escalating global cooldown, retry.
-		     1305 (server overloaded) → short interval-spaced retries that do
+		     1305 (server overloaded) and 1113 (intermittent balance
+		     rejection) → transient: short interval-spaced retries that do
 		     NOT arm the global cooldown; after OVERLOAD_RETRIES give up this
-		     call so reconcile_loop can fall back to another model, and after
-		     OVERLOAD_PAUSE_AFTER such fully-failed calls pause the model for
-		     OVERLOAD_PAUSE_SEC (later books skip straight to the fallback).
-		     1308 (usage limit) and 1113 (no balance) → the model is disabled
-		     for the run.
+		     call so reconcile_loop can fall back to another model, and
+		     OVERLOAD_STREAK consecutive rejections across the fleet pause
+		     the model for OVERLOAD_PAUSE_SEC (later books skip straight to
+		     the fallback).
+		     1308 (usage limit) → the model is disabled for the run.
 		On a hard failure (length / exhausted) returns (None, reason) so the
 		caller can fall through to the next model.
 		"""
@@ -595,8 +645,14 @@ class ZaiProvider(LLMProvider):
 						# constants). Retry shortly — the next loop pass
 						# re-acquires a bucket token, so retries stay
 						# interval-spaced, and neither the escalation counter
-						# nor the global cooldown is touched.
+						# nor the global cooldown is touched. A rejection
+						# streak across the fleet parks the model outright.
 						what = "service overloaded" if code == self.OVERLOADED_CODE else "insufficient balance"
+						if self._on_transient_rejection(model, code):
+							return None, f"{what} ({code})"
+						if code == self.BALANCE_CODE:
+							# Rate-shaped rejection: widen the drip a notch.
+							self._stretch_interval()
 						if overload_budget > 0:
 							overload_budget -= 1
 							log.info(
@@ -608,7 +664,6 @@ class ZaiProvider(LLMProvider):
 							)
 							continue
 						log.warning("Z.AI %s (429/%s); retry budget spent, giving up this call (model=%s)", what, code, model)
-						self._on_overload_giveup(model)
 						return None, f"{what} ({code})"
 					if code == self.USAGE_LIMIT_CODE:
 						reason = f"usage limit reached (429/1308: {srv_msg})"
@@ -617,13 +672,16 @@ class ZaiProvider(LLMProvider):
 					# 1302, or an unknown 429 code (conservatively read as our
 					# fault): set a global cooldown so all workers pause, then
 					# retry (the next loop's _wait_cooldown blocks until it
-					# elapses).
+					# elapses). Also widen the drip — a 1302 means the current
+					# interval is above the account's real ceiling.
 					cooldown = self._on_rate_limited(self._extract_retry_after(e))
+					drip = self._stretch_interval()
 					log.info(
-						"Z.AI rate-limited (429/%s %s); global cooldown %.1fs across all workers (model=%s)",
+						"Z.AI rate-limited (429/%s %s); global cooldown %.1fs across all workers, drip -> %.1fs (model=%s)",
 						code or "?",
 						srv_msg,
 						cooldown,
+						drip,
 						model,
 					)
 					last_error = "rate limited"
@@ -637,10 +695,12 @@ class ZaiProvider(LLMProvider):
 
 			# Any HTTP 200 means the endpoint is serving us again — reset the
 			# 429 escalation before looking at the content (a parse failure is
-			# not a rate problem) and clear the model's overload streak.
+			# not a rate problem) and clear the model's rejection streak, and
+			# let the drip ease back toward the configured floor.
 			self._on_success()
+			self._shrink_interval()
 			with self._cooldown_lock:
-				self._overload_failures[model] = 0
+				self._fail_streak[model] = 0
 			choice = resp.choices[0]
 			content = choice.message.content or ""
 			if not content.strip():
@@ -722,13 +782,27 @@ class ZaiProvider(LLMProvider):
 				log.debug("Loop model attempt %d failed verify: %s", attempt + 1, new_fb[:120])
 			elif error and any(k in error.lower() for k in ("rate", "overload", "usage limit", "balance")):
 				# The loop model is unusable right now — rate-limited (1302),
-				# overloaded (1305, retry budget spent), quota-exhausted (1308)
-				# or unfundable (1113). Bail to the paid model immediately
-				# rather than burning more loop attempts that will also fail.
-				log.info("Loop model unusable (%s); falling back to %s", error, self.fallback_model)
+				# overloaded (1305), quota-exhausted (1308) or unfundable
+				# (1113). Bail to the paid model immediately rather than
+				# burning more loop attempts that will also fail. A model
+				# that is merely PAUSED short-circuited above: every book
+				# hits this while a pause runs, so it stays off the info log
+				# (the pausing warning already said it once).
+				if "paused for another" in error:
+					log.debug("Loop model paused; falling back to %s", self.fallback_model)
+				else:
+					log.info("Loop model unusable (%s); falling back to %s", error, self.fallback_model)
 				break
 		# Final fallback: the paid high-quality model, one attempt.
 		result, error = self._call(self.fallback_model, evidence)
+		if result is None and error and "paused for another" in error:
+			# BOTH models are paused — the LLM stage is idle until a pause
+			# expires. Say so once a minute, not once per book.
+			with self._cooldown_lock:
+				now = time.monotonic()
+				if now >= self._next_idle_log:
+					self._next_idle_log = now + 60.0
+					log.info("Z.AI: every model is paused right now — the LLM stage is idle until a pause expires")
 		if result is not None:
 			if extracted is None:
 				return result, "llm:high"

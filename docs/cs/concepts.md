@@ -129,9 +129,9 @@ kaskádově zpomalí každý model, jakmile jeden model dostane 429), krátká
 retry s rozestupem intervalu pro `1305 The service may be temporarily
 overloaded` (kapacita serveru — chronické u bezplatných flash modelů a NE
 naše vina, takže nikdy neozbrojuje fleet cooldown; po vyčerpání rozpočtu
-pokusů smyčka propadne na placený finální model a opakovaná plně neúspěšná
-volání pozastaví přetížený model na ~10 minut) a přeskočení modelu pro
-`1308 Usage limit reached` (kvóta vyčerpána do konce běhu).
+pokusů smyčka propadne na placený finální model a fleet-wide série po sobě
+jdoucích odmítnutí pozastaví přetížený model na ~3 minuty) a přeskočení
+modelu pro `1308 Usage limit reached` (kvóta vyčerpána do konce běhu).
 
 **Tolerantní JSON** — modely GLM často emitují nevalidní JSON: pythonové
 literály (`None`/`True`), koncové čárky, **neescapované dvojité uvozovky

@@ -23,8 +23,8 @@ Z.AI vrací HTTP 429 pro tři různé situace a `bmf` na každou reaguje jinak
 | Sub-kód | Význam | Reakce `bmf` |
 |---|---|---|
 | `1302` Rate limit reached for requests | **Vaše** rychlost požadavků vyšlapala RPM okno | Globální cooldown: pozastaví se všichni workeri, eskaluje `base * 2^(n-1)` (5, 10, 20, …), respektuje serverové `Retry-After`, je-li delší, strop `max` |
-| `1305` The service may be temporarily overloaded | **Kapacita serveru** Z.AI (chronické u bezplatných flash modelů — nezpůsobeno vámi) | Krátké retry s rozestupem intervalu (bez globálního cooldownu), pak přepnutí na placený model; opakovaná plná selhání pozastaví přetížený model na ~10 min |
-| `1113` Insufficient balance or no resource package | Billingová kontrola — tvrdá chyba, když kvóta opravdu došla, na coding endpointu ale občas vystřelí i paralelní zátěží při zbývající kvótě | Stejné tranzientní zacházení jako 1305 (retry, pak časově ohraničená pauza). Přetrvává-li, prověřte plán / spárování endpointu v `.env.example` |
+| `1305` The service may be temporarily overloaded | **Kapacita serveru** Z.AI (chronické u bezplatných flash modelů — nezpůsobeno vámi) | Krátké retry s rozestupem intervalu (bez globálního cooldownu), pak přepnutí na placený model; fleet-wide série po sobě jdoucích odmítnutí pozastaví model na ~3 min |
+| `1113` Insufficient balance or no resource package | Billingová kontrola — tvrdá chyba, když kvóta opravdu došla, na coding endpointu ale vystřeluje i krátkými bursty při zbývající kvótě (sleduje account-throttling při flash bouřích) | Stejné tranzientní zacházení (streak) jako 1305, ale s krátkou pauzou ~30 s; drip se zároveň mírně roztáhne. Přetrvává-li, prověřte plán / spárování endpointu v `.env.example` |
 | `1308` Usage limit reached | Vyčerpaná kvóta usage modelu | Model se do konce běhu přeskočí |
 
 Pod limitem 1302 vás drží dvě vrstvy (viz
@@ -48,6 +48,13 @@ volání začne každých `--llm-min-interval` sekund, rovnoměrně rozložená,
 bez hromadění (5 volání v jedné sekundě a pak nic je přesně to, co limit
 vyšlape). Burst >1 dovolí, aby ve stejné sekundě startovalo několik volání;
 zvyšte jej jen s potvrzenou rezervou v limitu.
+Interval je **adaptivní**: je jen podlahou. Skutečný strop požadavků Z.AI
+se hýbe (jednoho večera naměřeny čtyři 1302 za dvě minuty při klidných
+30 RPM), proto 1302/1113 drip roztáhnou (×1.3, strop ~4× podlaha) a každá
+úspěšná odpověď ho zase vrátí — během minut se usadí na tom, co účtu
+danou chvíli skutečně náleží. Jsou-li jednou pozastaveny všechny modely,
+uvidíte jednou za minutu řádek `every model is paused` a knihy protéčejí
+bez LLM návrhů, dokud některá pauza nevyprší.
 
 **Pokud stále narážíte na 1302** (v logu uvidíte `Z.AI rate-limited
 (429/1302 …); global cooldown …s across all workers`), zpomalte kapání a
@@ -62,10 +69,10 @@ bmf analyze --llm --llm-min-interval 4.0 --llm-rate-limit-base 15 --llm-rate-lim
 ```
 
 **Pokud je log místo toho plný řádků `429/1305` (overload)**, jde o kapacitu
-Z.AI, ne o vaši rychlost — zpomalení nepomůže. Běh už to přežívá retry a
-přepnutím na placený model a po opakovaných plných selháních pozastaví
-přetížený model na ~10 minut (`pausing model … for 600s`). Pokud to večer
-dominuje, přepněte smyčku rovnou na placený model:
+Z.AI, ne o vaši rychlost — zpomalení nepomůže. Běh to přežívá retry a
+přepnutím na placený model a fleet-wide série po sobě jdoucích odmítnutí
+zaparkuje přetížený model na ~3 minuty (`pausing model … for 180s`). Pokud to
+večer dominuje, přepněte smyčku rovnou na placený model:
 
 ```bash
 bmf analyze --llm --llm-model glm-5.3

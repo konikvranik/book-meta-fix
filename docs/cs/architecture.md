@@ -186,10 +186,16 @@ Dvě vrstvy drží rychlost volání LLM pod dynamickým RPM limitem Z.AI:
    serveru, chronické u bezplatných flash modelů): ta se krátce retrajuje,
    s rozestupem intervalu a s rozpočtem pokusů, BEZ ozbrojení fleet cooldownu
    — její zaměňování za 1302 dřív měnilo přechodná přetížení v trvalé
-   60s lockouty — a pak se propadne na placený model. Opakovaná plně
-   neúspěšná volání model na ~10 minut pozastaví (`OVERLOAD_PAUSE_SEC`),
-   takže nasycený bezplatný pool stojí jedno ohraničené zkušební kolo
-   místo sedmi zahozených requestů na knihu. **1308** "Usage limit
+   60s lockouty — a pak se propadne na placený model. Fleet-wide série
+   po sobě jdoucích odmítnutí 1305/1113 na jednom modelu (resetovaná
+   každým 200) jej pozastaví — ~3 min u kapacitních vln 1305
+   (`OVERLOAD_PAUSE_SEC`), ~30 s u burstů 1113 (`BALANCE_PAUSE_SEC`, které
+   obvykle postihují poslední funkční model) — takže nasycený
+   bezplatný pool stojí pár zkušebních requestů místo toho, aby kniha za
+   knihou žral sdílený RPM drip. Drip samotný je adaptivní (1302/1113 ho
+   roztahují, úspěchy stahují zpět k podlaze) a jsou-li jednou
+   pozastaveny všechny modely, je LLM fáze tichým no-opem s jednou
+   minutovou idle hláškou. **1308** "Usage limit
    reached" vypne jen dotčený model do konce běhu. Klient openai se staví s
    `max_retries=0`, aby každé 429 vyplavalo až sem ke klasifikaci, místo aby ho
    tiše pohltila SDK retry mimo bucket.
