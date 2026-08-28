@@ -225,7 +225,8 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--llm-burst", "llm_burst", type=float, default=None, help=_("Leaky-bucket burst capacity: how many LLM calls may start inside one interval (default 1 = pure even drip, no bunching — one call every --llm-min-interval seconds). This is a count-per-time limiter, not a concurrency cap. Raise only with confirmed rate headroom; a burst >1 fires multiple calls in the same second and trips Z.AI's dynamic RPM limit (429)."))
 @click.option("--llm-rate-limit-base", "llm_rate_limit_base", type=float, default=None, help=_("Base seconds of the global cooldown applied when a 429 is seen (default 5). When ANY worker hits a 429, ALL workers pause this long; the cooldown escalates 5/10/20/... with consecutive 429s, honours the server Retry-After when longer, and is capped by --llm-rate-limit-max. Higher = safer but slower; lower = more 429 risk."))
 @click.option("--llm-rate-limit-max", "llm_rate_limit_max", type=float, default=None, help=_("Cap (seconds) on the escalating 429 cooldown (default 60). Prevents a sustained outage from parking workers indefinitely."))
-def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, use_legie: bool, skip_verify: bool, verify_ok: bool, no_strict_verify: bool, accept_missing: bool, pattern: str | None, no_check_location: bool, recheck_ok: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int, llm_min_interval: float | None, llm_model: str | None, llm_reasoning_effort: str | None, llm_thinking: str | None, no_llm_loop: bool, llm_fallback_model: str | None, llm_burst: float | None, llm_rate_limit_base: float | None, llm_rate_limit_max: float | None) -> None:
+@click.option("--llm-max-inflight", "llm_max_inflight", type=int, default=None, help=_("Hard cap on LLM requests running at the same instant (default 3). The Z.AI coding plan admits only ~5 concurrent requests per account (interactive clients draw from the same ceiling), so a deep fallback herd gets 429/1302 storms — and false 1113 'insufficient balance' — no matter how slow the drip is. Workers queue on this instead of being rejected. Flash-family models get a stricter sub-cap of min(2, this value)."))
+def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, use_legie: bool, skip_verify: bool, verify_ok: bool, no_strict_verify: bool, accept_missing: bool, pattern: str | None, no_check_location: bool, recheck_ok: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int, llm_min_interval: float | None, llm_model: str | None, llm_reasoning_effort: str | None, llm_thinking: str | None, no_llm_loop: bool, llm_fallback_model: str | None, llm_burst: float | None, llm_rate_limit_base: float | None, llm_rate_limit_max: float | None, llm_max_inflight: int | None) -> None:
 	"""Run full pipeline and generate a review.yaml for NEEDS_REVIEW books."""
 	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 
@@ -297,6 +298,8 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 	if use_llm:
 		if llm_min_interval is not None:
 			cfg.llm_min_interval = llm_min_interval
+		if llm_max_inflight is not None:
+			cfg.llm_max_inflight = max(1, llm_max_inflight)
 		if llm_model is not None:
 			cfg.llm_model = llm_model
 		if llm_reasoning_effort is not None:
@@ -319,19 +322,20 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 		else:
 			cats = tuple(c.strip() for c in llm_categories.split(",") if c.strip())
 			rpm = round(60.0 / cfg.llm_min_interval) if cfg.llm_min_interval > 0 else float("inf")
+			flash_via = f", flash via {llm_provider.flash_base_url}" if getattr(llm_provider, "flash_base_url", None) else ""
 			if cfg.llm_loop:
 				# Loop mode (default): free loop model first, paid fallback second.
 				console.print(
 					f"  LLM: [cyan]{llm_provider.name}[/cyan] "
 					f"primary={llm_provider.model} → fallback={llm_provider.fallback_model} "
 					f"(reasoning_effort={cfg.zai_reasoning_effort}) "
-					f"for categories {cats} (≤{rpm} RPM, min {cfg.llm_min_interval}s between calls)"
+					f"for categories {cats} (≤{rpm} RPM, min {cfg.llm_min_interval}s between calls, max {cfg.llm_max_inflight} in flight, adaptive{flash_via})"
 				)
 			else:
 				# Single-call mode (--no-llm-loop): one model, no fallback.
 				is_glm5 = llm_provider.model.lower().startswith("glm-5")
 				reason = f"reasoning_effort={cfg.zai_reasoning_effort}" if is_glm5 else f"thinking={cfg.zai_thinking}"
-				console.print(f"  LLM: [cyan]{llm_provider.name}[/cyan] model={llm_provider.model} ({reason}) for categories {cats} (≤{rpm} RPM, min {cfg.llm_min_interval}s between calls)")
+				console.print(f"  LLM: [cyan]{llm_provider.name}[/cyan] model={llm_provider.model} ({reason}) for categories {cats} (≤{rpm} RPM, min {cfg.llm_min_interval}s between calls, max {cfg.llm_max_inflight} in flight, adaptive{flash_via})")
 
 	# Streaming review writer: appends each processed book to review.yaml as it
 	# completes (Unix-pipe style). The original is moved to .bak on

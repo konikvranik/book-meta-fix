@@ -98,6 +98,70 @@ class LeakyBucket:
 			time.sleep(wait)
 
 
+class _InflightGate:
+	"""Counting gate — a Semaphore whose capacity can shrink/grow at runtime.
+
+	Z.AI's account-level concurrency ceiling (~5, tier-based and dynamic) is
+	shared with clients bmf CANNOT see: an external ZCode/chat session on the
+	same coding plan draws from the same slots. A fixed cap therefore cannot
+	be right in both worlds — 3 is too deep with an external client running,
+	too shallow when the account is otherwise idle. The gate adapts instead:
+	a 1302 (or a false 1113) means the ceiling is exhausted RIGHT NOW, so the
+	effective capacity steps DOWN (yielding a slot to whoever else is
+	drawing); a streak of clean 200s earns capacity back up to the configured
+	max. This is the depth counterpart of the adaptive drip: the drip adapts
+	how fast calls START, the gate adapts how many RUN at once.
+
+	Shrinking below the currently-taken count is fine — new acquirers block
+	until the in-flight calls drain under the new capacity.
+	"""
+
+	def __init__(self, cap: int, recover_successes: int = 20) -> None:
+		self._max = max(1, cap)
+		self._cap = self._max
+		self._recover = max(1, recover_successes)
+		self._successes = 0
+		self._taken = 0
+		self._cond = threading.Condition()
+
+	@property
+	def cap(self) -> int:
+		with self._cond:
+			return self._cap
+
+	def acquire(self) -> None:
+		with self._cond:
+			while self._taken >= self._cap:
+				self._cond.wait()
+			self._taken += 1
+
+	def release(self) -> None:
+		with self._cond:
+			self._taken = max(0, self._taken - 1)
+			self._cond.notify_all()
+
+	def on_pressure(self, why: str) -> None:
+		"""The ceiling was hit (429/1302, false 429/1113): yield one slot."""
+		with self._cond:
+			self._successes = 0
+			if self._cap <= 1:
+				return
+			self._cap -= 1
+			log.info("Z.AI: in-flight cap %d -> %d (%s) — making room for external clients on the same plan", self._cap + 1, self._cap, why)
+			self._cond.notify_all()
+
+	def on_success(self) -> None:
+		"""A clean HTTP 200: after a streak, earn a slot back (up to the max)."""
+		with self._cond:
+			if self._cap >= self._max:
+				return
+			self._successes += 1
+			if self._successes >= self._recover:
+				self._successes = 0
+				self._cap += 1
+				log.info("Z.AI: in-flight cap recovered -> %d", self._cap)
+
+
 @dataclass
 class ReconciledMeta:
 	"""Output of LLM reconciliation. All fields optional — only those the LLM
@@ -291,6 +355,40 @@ class ZaiProvider(LLMProvider):
 	# shorter: books fail fast for ~30 s, then the model is probed again.
 	BALANCE_PAUSE_SEC = 30.0
 
+	# Hard cap on CONCURRENT in-flight HTTP requests to Z.AI, across all
+	# workers/models/retries. Measured on the coding plan (2026-08-28): the
+	# endpoint admits only ~5 simultaneous requests per ACCOUNT — a 12-deep
+	# spike drew 7x 429/1302 'Rate limit reached for requests' while serial
+	# calls and a 6-deep burst passed cleanly. Z.AI publishes no exact numbers:
+	# per docs.z.ai/devpack/usage-policy the (concurrency) limits are TIED TO
+	# THE PLAN TIER (Max > Pro > Lite) and adjusted DYNAMICALLY with resource
+	# availability (and boosted off-peak), so ~5 is the measured ceiling of one
+	# Pro-tier evening, not a contract. The leaky bucket spaces call STARTS but
+	# not call DEPTH: with 10 pipeline workers and multi-second reasoning
+	# calls, the fallback herd (flash dies -> every worker pivots to the paid
+	# model at once) blew past the ceiling, and the resulting 1302 storms +
+	# metering chaos also surfaced as FALSE 1113 'insufficient balance' with
+	# quota clearly left (docs.z.ai/devpack/faq officially acknowledges 1113
+	# firing on a purchased coding package). The semaphore QUEUES workers
+	# before Z.AI can reject them; interactive clients (ZCode / chat) draw
+	# from the same account ceiling, so the default keeps headroom.
+	MAX_INFLIGHT_CALLS = 3
+
+	# Extra, stricter in-flight cap for FLASH-family models (any model whose
+	# name contains 'flash'). The free flash pool is chronically capacity-
+	# saturated (1305 waves, evenings ~60 % rejections) and community reports
+	# put its coding-plan concurrency as low as 1 (undocumented by Z.AI);
+	# pushing a deep herd into it only feeds the 1305 retry storm. Flash calls
+	# hold BOTH semaphores (this one inside the global one), so a flash wave
+	# can never squeeze the paid fallback out of the global slots entirely.
+	FLASH_INFLIGHT_CALLS = 2
+
+	# How many clean 200s earn a yielded in-flight slot back (_InflightGate).
+	# ~20 successes at the default 2 s drip ≈ 40 s of calm traffic before bmf
+	# re-deepens — the external client that caused the yield gets a fair,
+	# quiet window, and recovery is still quick when it was a blip.
+	INFLIGHT_RECOVER_SUCCESSES = 20
+
 	# Default minimum interval between LLM requests, in seconds. Z.AI's coding
 	# plan applies a dynamic RPM (requests-per-minute) limit; 429 'Rate limit
 	# reached for requests' (code 1302) fires when too many calls land inside a
@@ -299,10 +397,24 @@ class ZaiProvider(LLMProvider):
 	# which is the safest match for the documented dynamic RPM cap.
 	DEFAULT_MIN_INTERVAL = 2.0
 
-	def __init__(self, api_key: str, base_url: str = "https://api.z.ai/api/paas/v4/", *, model: str = "glm-4.7-flash", fallback_model: str = "glm-5.3", min_interval: float | None = None, reasoning_effort: str | None = None, thinking: str | None = None, burst: float = 1.0, rate_limit_base: float = 5.0, rate_limit_max: float = 60.0) -> None:
+	# The PaaS (pay-as-you-go) endpoint. Coding-plan keys work here too, and
+	# the GLM-4.x flash models are served from the FREE tier on it — separate
+	# from the coding plan's concurrency ceiling AND its credit quota.
+	PAAS_BASE_URL = "https://api.z.ai/api/paas/v4/"
+
+	def __init__(self, api_key: str, base_url: str = "https://api.z.ai/api/paas/v4/", *, model: str = "glm-4.7-flash", fallback_model: str = "glm-5.3", min_interval: float | None = None, reasoning_effort: str | None = None, thinking: str | None = None, burst: float = 1.0, rate_limit_base: float = 5.0, rate_limit_max: float = 60.0, max_inflight: int | None = None, flash_base_url: str | None = None) -> None:
 		self.api_key = api_key
 		self.base_url = base_url
+		# Endpoint split (measured 2026-08-28): the coding endpoint's ~5-request
+		# concurrency ceiling and the PaaS endpoint's are INDEPENDENT, and a
+		# coding-plan key may call glm-4.x flash on PaaS for FREE (the paid
+		# models 1113 there — no cash balance — and glm-5.x flash is not served,
+		# 400/1210 — those stay on the primary). Default AUTO: split when the
+		# primary is the coding endpoint; ZAI_FLASH_BASE_URL=<url> forces a
+		# URL, =off/0 disables the split (everything on the primary).
+		self.flash_base_url = self._resolve_flash_base_url(base_url, flash_base_url)
 		self._client = None
+		self._flash_client = None
 		# Per-model reasoning controls. GLM-5.x exposes reasoning_effort
 		# (low|medium|max); GLM-4.x exposes a binary thinking toggle
 		# (enabled|disabled). We pick the right one based on the model family
@@ -333,7 +445,24 @@ class ZaiProvider(LLMProvider):
 		interval = self.DEFAULT_MIN_INTERVAL if min_interval is None else min_interval
 		self._interval_floor = max(0.0, interval)
 		self._interval_cap = max(self._interval_floor * 4.0, 8.0)
+		self._burst = max(0.0, burst)
+		self._inflight_max = max(1, self.MAX_INFLIGHT_CALLS if max_inflight is None else max_inflight)
 		self._bucket = LeakyBucket(capacity=burst, interval=self._interval_floor)
+		# In-flight concurrency caps (see MAX_INFLIGHT_CALLS / FLASH_INFLIGHT_CALLS).
+		# The bucket caps how often calls START; these cap how many are RUNNING
+		# at once. Held only around the HTTP request itself — cooldown waits and
+		# bucket acquire must never sit inside a semaphore, or a paused fleet
+		# would deadlock on slots instead of waiting on the clock. Flash calls
+		# acquire the flash semaphore INSIDE the global one (fixed order, no
+		# deadlock), so the two compose: flash <= FLASH_INFLIGHT_CALLS and
+		# total <= the global cap. The user knob scales the global cap and
+		# clamps flash with it (--llm-max-inflight 1 pins everything to 1).
+		# The gate is adaptive (_InflightGate): it yields slots when
+		# Z.AI signals ceiling pressure on ITS endpoint (an external client on
+		# the same plan cannot be seen, only its effect) and earns them back
+		# on 200 streaks.
+		self._call_sem = _InflightGate(self._inflight_max, self.INFLIGHT_RECOVER_SUCCESSES)
+		self._flash_sem = threading.Semaphore(max(1, min(self.FLASH_INFLIGHT_CALLS, self._inflight_max)))
 		# Global rate-limit cooldown (circuit breaker) shared across ALL worker
 		# threads. The leaky bucket caps the steady-state call rate per worker,
 		# but Z.AI's free tier has a cascade-cooldown bug: when ONE model gets a
@@ -348,6 +477,16 @@ class ZaiProvider(LLMProvider):
 		self._rate_limit_max = max(self._rate_limit_base, rate_limit_max)
 		self._cooldown_until = 0.0  # monotonic timestamp; callers block until past it
 		self._consecutive_429 = 0
+		# The whole rate machinery (bucket, cooldown, escalation, in-flight
+		# gate) is PER ENDPOINT URL: with the flash split the two endpoints
+		# have independent limiters (measured), so pressure on one must never
+		# throttle the other. The PRIMARY endpoint's state lives in the
+		# classic attributes above; every other URL gets its own set here,
+		# created lazily with the same configuration.
+		self._ep_bucket: dict[str, LeakyBucket] = {}
+		self._ep_gate: dict[str, _InflightGate] = {}
+		self._ep_cooldown: dict[str, float] = {}
+		self._ep_429: dict[str, int] = {}
 		self._cooldown_lock = threading.Lock()
 		# Models disabled for the rest of the run (429/1308 usage quota
 		# exhausted, 429/1113 no balance): model -> reason. _call
@@ -371,6 +510,30 @@ class ZaiProvider(LLMProvider):
 		self.model = model
 		self.fallback_model = fallback_model
 
+	@classmethod
+	def _resolve_flash_base_url(cls, base_url: str, flash_base_url: str | None) -> str | None:
+		"""Resolve the flash-family endpoint (None = use the primary for all)."""
+		if flash_base_url:
+			if flash_base_url.strip().lower() in ("off", "0", "no"):
+				return None
+			return flash_base_url.strip()
+		# AUTO: a coding-plan primary gets glm-4.x flash from the free PaaS
+		# tier — separate concurrency pool, zero coding credits.
+		if "/api/coding/" in base_url:
+			return cls.PAAS_BASE_URL
+		return None
+
+	def _endpoint_for(self, model: str) -> str:
+		"""Which base URL serves *model* (see flash_base_url)."""
+		if (
+			self.flash_base_url
+			and "flash" in model.lower()
+			# glm-5.x flash is Devpack-native: NOT served on PaaS (400/1210).
+			and not model.lower().startswith("glm-5")
+		):
+			return self.flash_base_url
+		return self.base_url
+
 	def _extra_body_for(self, model: str) -> dict[str, Any]:
 		"""Pick the right reasoning/thinking knobs for *model*."""
 		if model.lower().startswith("glm-5"):
@@ -382,44 +545,74 @@ class ZaiProvider(LLMProvider):
 	# Global rate-limit cooldown (shared across all worker threads)
 	# ------------------------------------------------------------------
 
-	def _wait_cooldown(self) -> None:
-		"""Block until any active global rate-limit cooldown has elapsed.
+	def _bucket_for(self, url: str) -> LeakyBucket:
+		"""The drip bucket serving *url* (per endpoint — see _ep_bucket)."""
+		if url == self.base_url:
+			return self._bucket
+		return self._ep_bucket.setdefault(url, LeakyBucket(capacity=self._burst, interval=self._interval_floor))
+
+	def _gate_for(self, url: str) -> _InflightGate:
+		"""The in-flight gate serving *url* (per endpoint — see _ep_gate)."""
+		if url == self.base_url:
+			return self._call_sem
+		return self._ep_gate.setdefault(url, _InflightGate(self._inflight_max, self.INFLIGHT_RECOVER_SUCCESSES))
+
+	def _cooldown_until_for(self, url: str) -> float:
+		if url == self.base_url:
+			return self._cooldown_until
+		return self._ep_cooldown.get(url, 0.0)
+
+	def _wait_cooldown(self, url: str) -> None:
+		"""Block until any active rate-limit cooldown on *url*'s endpoint has
+		elapsed.
 
 		Called at the top of every _call attempt, before the bucket acquire, so
-		that a 429 observed by one thread pauses the whole fleet. Re-checks the
-		deadline periodically (a 429 on another thread can extend it while we
-		wait) rather than sleeping the full gap in one go.
+		that a 429 observed by one thread pauses every worker on THAT endpoint
+		(the cascade-cooldown coordination — scoped per endpoint because the
+		endpoints' limiters are independent). Re-checks the deadline
+		periodically (a 429 on another thread can extend it while we wait)
+		rather than sleeping the full gap in one go.
 		"""
 		while True:
 			with self._cooldown_lock:
 				now = time.monotonic()
-				if now >= self._cooldown_until:
+				until = self._cooldown_until_for(url)
+				if now >= until:
 					return
 				# Sleep at most ~1s, then re-check: another thread may push the
 				# deadline out with another 429 while we nap.
-				wait = min(1.0, self._cooldown_until - now)
+				wait = min(1.0, until - now)
 			time.sleep(wait)
 
-	def _on_rate_limited(self, retry_after: float | None) -> float:
-		"""Record an observed 429 and return the cooldown applied (seconds).
+	def _on_rate_limited(self, url: str, retry_after: float | None) -> float:
+		"""Record an observed 429 on *url*'s endpoint; return the cooldown (s).
 
 		Escalates with consecutive 429s (base * 2**(n-1): 5, 10, 20, ...) and
 		honours the server's Retry-After when it is longer. Capped at
 		``rate_limit_max`` so a sustained outage doesn't park workers forever.
 		"""
 		with self._cooldown_lock:
-			self._consecutive_429 += 1
-			escalated = self._rate_limit_base * (2 ** (self._consecutive_429 - 1))
+			if url == self.base_url:
+				self._consecutive_429 += 1
+				n = self._consecutive_429
+			else:
+				n = self._ep_429.get(url, 0) + 1
+				self._ep_429[url] = n
+			escalated = self._rate_limit_base * (2 ** (n - 1))
 			if retry_after and retry_after > escalated:
 				cooldown = retry_after
 			else:
 				cooldown = escalated
 			cooldown = min(cooldown, self._rate_limit_max)
-			self._cooldown_until = time.monotonic() + cooldown
+			until = time.monotonic() + cooldown
+			if url == self.base_url:
+				self._cooldown_until = until
+			else:
+				self._ep_cooldown[url] = until
 			return cooldown
 
-	def _on_success(self) -> None:
-		"""Any HTTP 200 got through: reset the escalation counter.
+	def _on_success(self, url: str) -> None:
+		"""Any HTTP 200 on *url*'s endpoint: reset ITS escalation counter.
 
 		Called the moment a response arrives (before content/JSON checks) — a
 		200 proves the endpoint is serving us again even when the payload then
@@ -430,7 +623,13 @@ class ZaiProvider(LLMProvider):
 		all unblocking the instant one call sneaks through.
 		"""
 		with self._cooldown_lock:
-			self._consecutive_429 = 0
+			if url == self.base_url:
+				self._consecutive_429 = 0
+			else:
+				self._ep_429[url] = 0
+		# A clean 200 feeds the in-flight recovery (_InflightGate.on_success
+		# is a no-op while the gate is at its configured max).
+		self._gate_for(url).on_success()
 
 	@staticmethod
 	def _is_rate_limit(exc: BaseException) -> bool:
@@ -514,8 +713,8 @@ class ZaiProvider(LLMProvider):
 			self._disabled_models[model] = reason
 		log.warning("Z.AI: model %s disabled for this run — %s", model, reason)
 
-	def _stretch_interval(self) -> float:
-		"""Widen the drip after a rate-shaped 429 (1302, 1113).
+	def _stretch_interval(self, url: str) -> float:
+		"""Widen *url*'s endpoint drip after a rate-shaped 429 (1302, 1113).
 
 		Z.AI's real request ceiling is dynamic — measured: four 1302s in two
 		minutes at a steady 30 RPM one evening, none the next day — so a
@@ -525,15 +724,15 @@ class ZaiProvider(LLMProvider):
 		within a minute or two. 1305 does NOT stretch (server capacity, not
 		our rate — the streak pause handles it).
 		"""
-		b = self._bucket
+		b = self._bucket_for(url)
 		if self._interval_floor <= 0 or b.interval <= 0:
 			return b.interval
 		b.interval = min(self._interval_cap, b.interval * 1.3 + 0.1)
 		return b.interval
 
-	def _shrink_interval(self) -> None:
-		"""Nudge the drip back toward the configured floor after a success."""
-		b = self._bucket
+	def _shrink_interval(self, url: str) -> None:
+		"""Nudge *url*'s endpoint drip back toward the floor after a success."""
+		b = self._bucket_for(url)
 		if b.interval > self._interval_floor:
 			b.interval = max(self._interval_floor, b.interval * 0.97)
 
@@ -566,8 +765,11 @@ class ZaiProvider(LLMProvider):
 		)
 		return True
 
-	def _get_client(self):
-		"""Lazy-init the OpenAI client (avoids import error if openai not installed).
+	def _get_client(self, model: str | None = None):
+		"""Lazy-init the OpenAI client for *model*'s endpoint (avoids import
+		error if openai not installed). One pooled client PER ENDPOINT (the
+		flash split means two base URLs can be live at once; each keeps its
+		own keep-alive pool).
 
 		Built with max_retries=0: the SDK's own retries fire OUTSIDE our leaky
 		bucket (invisible extra requests that break the count-per-time
@@ -576,13 +778,45 @@ class ZaiProvider(LLMProvider):
 		retry timing lives in _call, next to the bucket, the cooldown, and the
 		429 sub-code dispatch.
 		"""
-		if self._client is None:
-			try:
-				from openai import OpenAI
-			except ImportError as e:
-				raise RuntimeError("openai package not installed; run: pip install openai") from e
-			self._client = OpenAI(api_key=self.api_key, base_url=self.base_url, max_retries=0)
-		return self._client
+		base = self._endpoint_for(model) if model else self.base_url
+		is_flash_ep = base != self.base_url
+		if is_flash_ep:
+			if self._flash_client is not None:
+				return self._flash_client
+		elif self._client is not None:
+			return self._client
+		try:
+			from openai import OpenAI
+		except ImportError as e:
+			raise RuntimeError("openai package not installed; run: pip install openai") from e
+		# Explicit pooled httpx client (one per endpoint, shared by every
+		# thread — connection reuse = HTTP keep-alive):
+		#   * keepalive_expiry=60 s outlives the typical 30 s balance pause
+		#     / 5-20 s cooldowns, so a parked fleet does not pay a fresh
+		#     TLS handshake for every re-start (httpx's 5 s default would
+		#     drop the connection during any pause);
+		#   * the pool is sized to the in-flight caps — deeper than that
+		#     only invites Z.AI to see overlapping bursts;
+		#   * read timeout 180 s is generous for max_tokens=8000 reasoning
+		#     calls yet finite: the SDK's 600 s default would let one hung
+		#     call squat a scarce in-flight slot for ten minutes.
+		import httpx
+
+		pool = self._gate_for(base).cap + 2
+		client = OpenAI(
+			api_key=self.api_key,
+			base_url=base,
+			max_retries=0,
+			http_client=httpx.Client(
+				limits=httpx.Limits(max_connections=pool, max_keepalive_connections=pool, keepalive_expiry=60.0),
+				timeout=httpx.Timeout(connect=10.0, read=180.0, write=30.0, pool=10.0),
+			),
+		)
+		if is_flash_ep:
+			self._flash_client = client
+		else:
+			self._client = client
+		return client
 
 	def _call(self, model: str, evidence: dict[str, Any], *, max_retries: int = 3) -> tuple[ReconciledMeta | None, str | None]:
 		"""Single LLM call to *model* with retry/backoff. Returns (result, error).
@@ -615,27 +849,48 @@ class ZaiProvider(LLMProvider):
 		last_error: str | None = None
 		extra = self._extra_body_for(model)
 		overload_budget = self.OVERLOAD_RETRIES
+		url = self._endpoint_for(model)
+		bucket = self._bucket_for(url)
+		gate = self._gate_for(url)
+		# Ceiling-pressure debounce: one _call yields at most ONE in-flight
+		# slot (a 1302 retry cascade inside a single call must not shrink the
+		# gate several times; the endpoint cooldown already parks the fleet).
+		pressured = False
 		attempt = 0
 		while attempt < max_retries:
-			# Wait out any global rate-limit cooldown before acquiring a token.
-			# This is the cascade-cooldown fix: a 429 on one thread parks all.
-			self._wait_cooldown()
+			# Wait out any active rate-limit cooldown on THIS endpoint before
+			# acquiring a token. The cascade-cooldown fix: a 429 on one thread
+			# parks all workers on that endpoint (per endpoint — the two
+			# endpoints' limiters are independent).
+			self._wait_cooldown(url)
 			# Acquire a rate-limit token BEFORE the HTTP call. The bucket
 			# smooths concurrent workers; retries also acquire, so a flapping
 			# endpoint cannot exceed the configured rate while backing off.
-			self._bucket.acquire()
+			bucket.acquire()
 			try:
-				client = self._get_client()
-				resp = client.chat.completions.create(
-					model=model,
-					messages=[
-						{"role": "system", "content": SYSTEM_PROMPT},
-						{"role": "user", "content": prompt},
-					],
-					temperature=0.1,
-					max_tokens=8000,
-					extra_body=extra or None,
-				)
+				client = self._get_client(model)
+				# Flash-family models hold both semaphores (the model-family
+				# flash sub-cap inside the endpoint gate — fixed order); other
+				# models hold the endpoint gate only. See FLASH_INFLIGHT_CALLS.
+				sems = [gate]
+				if "flash" in model.lower():
+					sems.append(self._flash_sem)
+				for s in sems:
+					s.acquire()
+				try:
+					resp = client.chat.completions.create(
+						model=model,
+						messages=[
+							{"role": "system", "content": SYSTEM_PROMPT},
+							{"role": "user", "content": prompt},
+						],
+						temperature=0.1,
+						max_tokens=8000,
+						extra_body=extra or None,
+					)
+				finally:
+					for s in reversed(sems):
+						s.release()
 			except Exception as e:  # noqa: BLE001
 				if self._is_rate_limit(e):
 					code, srv_msg = self._server_error(e)
@@ -649,10 +904,15 @@ class ZaiProvider(LLMProvider):
 						# streak across the fleet parks the model outright.
 						what = "service overloaded" if code == self.OVERLOADED_CODE else "insufficient balance"
 						if self._on_transient_rejection(model, code):
+							if code == self.BALANCE_CODE and not pressured:
+								# A false 1113 is ceiling pressure too (see
+								# _InflightGate) — yield a slot for external clients.
+								pressured = True
+								gate.on_pressure(f"429/{code}")
 							return None, f"{what} ({code})"
 						if code == self.BALANCE_CODE:
 							# Rate-shaped rejection: widen the drip a notch.
-							self._stretch_interval()
+							self._stretch_interval(url)
 						if overload_budget > 0:
 							overload_budget -= 1
 							log.info(
@@ -674,8 +934,13 @@ class ZaiProvider(LLMProvider):
 					# retry (the next loop's _wait_cooldown blocks until it
 					# elapses). Also widen the drip — a 1302 means the current
 					# interval is above the account's real ceiling.
-					cooldown = self._on_rate_limited(self._extract_retry_after(e))
-					drip = self._stretch_interval()
+					cooldown = self._on_rate_limited(url, self._extract_retry_after(e))
+					drip = self._stretch_interval(url)
+					# 1302 = the account ceiling is exhausted right now (possibly
+					# by an external client on the same plan) — yield a slot.
+					if not pressured:
+						pressured = True
+						gate.on_pressure(f"429/{code or '1302'}")
 					log.info(
 						"Z.AI rate-limited (429/%s %s); global cooldown %.1fs across all workers, drip -> %.1fs (model=%s)",
 						code or "?",
@@ -697,8 +962,8 @@ class ZaiProvider(LLMProvider):
 			# 429 escalation before looking at the content (a parse failure is
 			# not a rate problem) and clear the model's rejection streak, and
 			# let the drip ease back toward the configured floor.
-			self._on_success()
-			self._shrink_interval()
+			self._on_success(url)
+			self._shrink_interval(url)
 			with self._cooldown_lock:
 				self._fail_streak[model] = 0
 			choice = resp.choices[0]
@@ -905,6 +1170,8 @@ def get_provider(config: Any) -> LLMProvider | None:  # noqa: ANN001
 			burst=getattr(config, "llm_burst", 1.0),
 			rate_limit_base=getattr(config, "llm_rate_limit_base", 5.0),
 			rate_limit_max=getattr(config, "llm_rate_limit_max", 60.0),
+			max_inflight=getattr(config, "llm_max_inflight", None),
+			flash_base_url=getattr(config, "zai_flash_base_url", None),
 		)
 	if os.environ.get("BMF_LLM_MOCK"):
 		return MockProvider()

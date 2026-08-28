@@ -299,23 +299,45 @@ verification and accept the Flash result as-is.
 
 **Rate limiting**: all calls (Flash + final + retries) go through a shared
 leaky bucket whose interval is **adaptive** (the configured value is only a
-floor: 1302/1113 widen the drip, successes ease it back), and HTTP-429
-responses are dispatched on their **Z.AI sub-code** (all three arrive as 429
-but mean opposite things):
+floor: 1302/1113 widen the drip, successes ease it back) **and** a hard
+in-flight concurrency cap, and HTTP-429 responses are dispatched on their
+**Z.AI sub-code** (all three arrive as 429 but mean opposite things):
 1. the **leaky-bucket smoother** (count-per-time, default capacity 1 = pure
    even drip: exactly one call starts every `--llm-min-interval` seconds,
    evenly spaced, no bunching). `--llm-min-interval 2.0` = a steady 30
    evenly-spaced requests/minute — what Z.AI's sliding-window limit wants. A
    burst >1 lets several calls fire in the same second and trips the dynamic
    RPM limit; raise only with confirmed headroom; and
-2. a **global 429/1302 cooldown** (circuit breaker) — `Rate limit reached for
+2. an **in-flight cap** (`--llm-max-inflight`, default 3) — the bucket spaces
+   call *starts* but not call *depth*: with 10 workers and multi-second
+   reasoning calls, the fallback herd (flash dies → everyone pivots to the
+   paid model at once) exceeded the ~5 concurrent requests per account the
+   coding plan admits (Z.AI publishes no exact numbers — the limits are
+   tier-based and dynamic per their usage policy; measured: a 12-deep spike
+   drew 7× 429/1302 while a 6-deep burst passed, and interactive clients —
+   ZCode/chat — draw from the same ceiling), and the storms also surfaced as
+   **false 1113** "insufficient balance" with quota left (acknowledged in
+   Z.AI's own FAQ). Workers now queue on the semaphore instead of being
+   rejected. Flash-family models get a stricter sub-cap (`min(2, cap)`): the
+   free pool is chronically saturated and community reports put its
+   concurrency as low as 1. With a coding-plan `ZAI_BASE_URL`, glm-4.x flash
+   is additionally routed to the **PaaS endpoint** (`ZAI_FLASH_BASE_URL`,
+   empty = auto): the two endpoints' concurrency ceilings are independent
+   (measured), and flash there is free — its own pool and zero coding-plan
+   credits. The global cap is also **adaptive** — an external
+   client on the same plan (ZCode, chat) is invisible to bmf, so when Z.AI
+   signals ceiling pressure (1302 / false 1113) bmf yields one in-flight
+   slot and earns it back after ~20 clean responses; all calls share one
+   pooled keep-alive HTTP connection set (no TLS re-handshake after a
+   pause) with a finite read timeout so a hung call cannot squat a slot; and
+3. a **global 429/1302 cooldown** (circuit breaker) — `Rate limit reached for
    requests` means OUR request rate tripped the RPM window (and Z.AI's free
    tier cascade-throttles the other models too), so when *any* worker sees a
    1302, *all* workers pause (`--llm-rate-limit-base` seconds, escalating
    5/10/20/…, honouring the server `Retry-After`, capped at
    `--llm-rate-limit-max`). One 429 parks the fleet instead of every worker
    hammering and 429-ing; and
-3. **429/1305 overload handling** — `The service may be temporarily
+4. **429/1305 overload handling** — `The service may be temporarily
    overloaded` is SERVER-side capacity (chronically frequent on the free
    flash models, not caused by our rate): the call retries shortly
    (interval-spaced, bounded budget) *without* arming the global cooldown,
@@ -346,6 +368,7 @@ Toggles:
 | Flash model | `--llm-model` | `BMF_LLM_MODEL` | `glm-4.7-flash` |
 | Fallback model | `--llm-fallback-model` | `BMF_LLM_FALLBACK_MODEL` | `glm-5.3` |
 | Steady call interval (s) | `--llm-min-interval` | `BMF_LLM_MIN_INTERVAL` | `2.0` |
+| Max requests in flight | `--llm-max-inflight` | `BMF_LLM_MAX_INFLIGHT` | `3` |
 | Burst capacity | `--llm-burst` | `BMF_LLM_BURST` | `1` (even drip) |
 | Base 429 cooldown (s) | `--llm-rate-limit-base` | `BMF_LLM_RATE_LIMIT_BASE` | `5` |
 | Max 429 cooldown (s) | `--llm-rate-limit-max` | `BMF_LLM_RATE_LIMIT_MAX` | `60` |

@@ -221,46 +221,46 @@ class TestGlobalCooldown:
 
 	def test_on_rate_limited_escalates(self):
 		p = ZaiProvider("k", min_interval=0.0, rate_limit_base=5.0, rate_limit_max=60.0)
-		assert p._on_rate_limited(None) == 5.0
-		assert p._on_rate_limited(None) == 10.0
-		assert p._on_rate_limited(None) == 20.0
+		assert p._on_rate_limited(p.base_url, None) == 5.0
+		assert p._on_rate_limited(p.base_url, None) == 10.0
+		assert p._on_rate_limited(p.base_url, None) == 20.0
 		assert p._consecutive_429 == 3
 
 	def test_on_rate_limited_caps_at_max(self):
 		p = ZaiProvider("k", min_interval=0.0, rate_limit_base=5.0, rate_limit_max=12.0)
-		assert p._on_rate_limited(None) == 5.0
-		assert p._on_rate_limited(None) == 10.0
+		assert p._on_rate_limited(p.base_url, None) == 5.0
+		assert p._on_rate_limited(p.base_url, None) == 10.0
 		# Would escalate to 20, but capped at rate_limit_max.
-		assert p._on_rate_limited(None) == 12.0
+		assert p._on_rate_limited(p.base_url, None) == 12.0
 
 	def test_on_rate_limited_honours_retry_after_when_longer(self):
 		p = ZaiProvider("k", min_interval=0.0, rate_limit_base=5.0, rate_limit_max=60.0)
 		# First 429: escalated base is 5; server Retry-After of 8 wins.
-		assert p._on_rate_limited(8.0) == 8.0
+		assert p._on_rate_limited(p.base_url, 8.0) == 8.0
 		# Second 429: escalated base is 10; server Retry-After of 7 loses.
-		assert p._on_rate_limited(7.0) == 10.0
+		assert p._on_rate_limited(p.base_url, 7.0) == 10.0
 
 	def test_on_success_resets_counter(self):
 		p = ZaiProvider("k", min_interval=0.0, rate_limit_base=5.0, rate_limit_max=60.0)
-		p._on_rate_limited(None)  # 5
-		p._on_rate_limited(None)  # 10
-		p._on_success()
+		p._on_rate_limited(p.base_url, None)  # 5
+		p._on_rate_limited(p.base_url, None)  # 10
+		p._on_success(p.base_url)
 		assert p._consecutive_429 == 0
 		# Next 429 starts over from the base.
-		assert p._on_rate_limited(None) == 5.0
+		assert p._on_rate_limited(p.base_url, None) == 5.0
 
 	def test_wait_cooldown_blocks_until_deadline(self):
 		p = ZaiProvider("k", min_interval=0.0, rate_limit_base=0.05, rate_limit_max=1.0)
-		assert p._on_rate_limited(None) == 0.05
+		assert p._on_rate_limited(p.base_url, None) == 0.05
 		t0 = time.monotonic()
-		p._wait_cooldown()
+		p._wait_cooldown(p.base_url)
 		elapsed = time.monotonic() - t0
 		assert elapsed >= 0.05 - 0.02, f"wait_cooldown returned too early ({elapsed:.3f}s)"
 
 	def test_wait_cooldown_noop_when_idle(self):
 		p = ZaiProvider("k", min_interval=0.0)
 		t0 = time.monotonic()
-		p._wait_cooldown()
+		p._wait_cooldown(p.base_url)
 		assert time.monotonic() - t0 < 0.05, "wait_cooldown blocked despite no active cooldown"
 
 	def test_is_rate_limit_detects_real_429_strings(self):
@@ -609,15 +609,15 @@ class Test429SubCodes:
 		# Stretching is capped.
 		p._bucket.interval = p._interval_floor
 		for _ in range(50):
-			p._stretch_interval()
+			p._stretch_interval(p.base_url)
 		assert p._bucket.interval == p._interval_cap
 
 	def test_success_resets_escalation_even_on_bad_json(self):
 		"""Any HTTP 200 (not just a parseable one) resets the escalation — a
 		bad-JSON streak must not masquerade as a sustained rate limit."""
 		p = ZaiProvider("k", min_interval=0.0)
-		p._on_rate_limited(None)
-		p._on_rate_limited(None)
+		p._on_rate_limited(p.base_url, None)
+		p._on_rate_limited(p.base_url, None)
 		assert p._consecutive_429 == 2
 
 		def fake_create(**kwargs):
@@ -724,3 +724,226 @@ class Test429SubCodes:
 		p = ZaiProvider("k")
 		client = p._get_client()
 		assert client.max_retries == 0
+
+
+class TestInflightCap:
+	"""The Z.AI coding plan admits only ~5 concurrent requests per ACCOUNT
+	(measured 2026-08-28: a 12-deep simultaneous spike drew 7x 429/1302
+	'Rate limit reached for requests' while serial calls and a 6-deep burst
+	passed; interactive clients like ZCode draw from the same ceiling). The
+	leaky bucket spaces call STARTS but not DEPTH — with slow reasoning calls
+	and 10 workers, the fallback herd (flash dies -> everyone pivots at once)
+	blew past the limit, and the storms also surfaced as false 1113
+	'insufficient balance' with quota left. The semaphore makes workers QUEUE
+	locally instead of being rejected."""
+
+	def _slow_provider(self, *, max_inflight=None, workers=10, hold=0.12):
+		p = ZaiProvider("k", min_interval=0.0, burst=float(workers), max_inflight=max_inflight)
+		depth = {"n": 0, "max": 0}
+		lock = threading.Lock()
+
+		def fake_create(**kwargs):
+			with lock:
+				depth["n"] += 1
+				depth["max"] = max(depth["max"], depth["n"])
+			time.sleep(hold)
+			with lock:
+				depth["n"] -= 1
+			return _ok_response()
+
+		client = MagicMock()
+		client.chat.completions.create.side_effect = fake_create
+		p._client = client
+		return p, depth
+
+	def _fire(self, p, workers=10, model="glm-5.3"):
+		threads = [
+			threading.Thread(target=p._call, args=(model, {"current": {"title": "x"}}))
+			for _ in range(workers)
+		]
+		for t in threads:
+			t.start()
+		for t in threads:
+			t.join()
+
+	def test_inflight_never_exceeds_cap(self):
+		"""Ten workers, zero drip, slow calls: the observed in-flight depth
+		stays at or below MAX_INFLIGHT_CALLS — the herd queues on the
+		semaphore, not on Z.AI rejections."""
+		p, depth = self._slow_provider()
+		self._fire(p)
+		assert depth["max"] <= ZaiProvider.MAX_INFLIGHT_CALLS
+		assert depth["max"] >= 2  # it really ran concurrently, not serialised to 1
+
+	def test_inflight_cap_configurable(self):
+		p, depth = self._slow_provider(max_inflight=2)
+		self._fire(p)
+		assert depth["max"] <= 2
+
+	def test_default_cap_keeps_headroom_under_measured_ceiling(self):
+		"""The measured account ceiling is ~5 and interactive clients (ZCode)
+		draw from it too, so the default must stay strictly below 5."""
+		assert 1 <= ZaiProvider.MAX_INFLIGHT_CALLS < 5
+
+	def test_flash_models_get_a_stricter_sub_cap(self):
+		"""Flash-family models hold BOTH semaphores (flash inside the global
+		one): a flash herd may never exceed FLASH_INFLIGHT_CALLS in flight —
+		the free pool is chronically capacity-saturated and community reports
+		put its coding-plan concurrency as low as 1 — and it may not squeeze
+		the paid fallback out of the global slots entirely."""
+		p, depth = self._slow_provider()
+		self._fire(p, model="glm-4.7-flash")
+		assert depth["max"] <= ZaiProvider.FLASH_INFLIGHT_CALLS
+
+	def test_knob_pins_flash_too(self):
+		"""--llm-max-inflight 1 must serialize EVERYTHING (flash included) —
+		that is the documented last resort when rejections persist."""
+		p, depth = self._slow_provider(max_inflight=1)
+		self._fire(p, workers=6, model="glm-4.7-flash")
+		assert depth["max"] == 1
+
+	def test_1302_yields_a_slot_200s_earn_it_back(self):
+		"""The global gate is ADAPTIVE: an external client (ZCode/chat) on the
+		same plan is invisible to bmf, so the ceiling pressure it causes is
+		observed, not predicted — each 1302 (or false 1113) yields one in-flight
+		slot and a streak of clean 200s earns it back up to the configured cap."""
+		p = ZaiProvider("k", min_interval=0.0, burst=10.0, rate_limit_base=0.01, rate_limit_max=0.05)
+		state = {"n": 0}
+
+		def fake_create(**kwargs):
+			state["n"] += 1
+			if state["n"] == 1:
+				raise _err("1302", "Rate limit reached for requests")
+			return _ok_response()
+
+		client = MagicMock()
+		client.chat.completions.create.side_effect = fake_create
+		p._client = client
+		cap0 = p._call_sem.cap
+		r, e = p._call("glm-5.3", {"current": {"title": "x"}})
+		assert r is not None
+		assert p._call_sem.cap == cap0 - 1  # yielded on the 1302
+		for _ in range(ZaiProvider.INFLIGHT_RECOVER_SUCCESSES):
+			p._call("glm-5.3", {"current": {"title": "x"}})
+		assert p._call_sem.cap == cap0  # earned back by the 200 streak
+
+	def test_false_1113_yields_a_slot(self):
+		"""A false 1113 (ceiling pressure mislabeled as billing) yields a slot
+		when the streak trips: one _call burns 3 rejections (retry budget)
+		without tripping, the NEXT rejection is the 4th -> trip -> give up
+		AND yield."""
+		p = ZaiProvider("k", min_interval=0.0)
+
+		def fake_create(**kwargs):
+			raise _err("1113", "Insufficient balance or no resource package. Please recharge.")
+
+		client = MagicMock()
+		client.chat.completions.create.side_effect = fake_create
+		p._client = client
+		cap0 = p._call_sem.cap
+		r, e = p._call("glm-5.3", {"current": {"title": "x"}})
+		assert r is None and "balance" in (e or "")
+		assert p._call_sem.cap == cap0  # 3 rejections: streak below threshold
+		r, e = p._call("glm-5.3", {"current": {"title": "x"}})
+		assert r is None and "balance" in (e or "")
+		assert p._call_sem.cap == cap0 - 1  # the 4th rejection tripped + yielded
+
+	def test_client_uses_pooled_keepalive_http(self):
+		"""One shared httpx client for the whole run (connection reuse), with
+		keep-alive that outlives the 30 s balance pauses (httpx default 5 s
+		would drop connections on every pause) and a finite read timeout so a
+		hung call cannot squat a scarce in-flight slot for the SDK's 600 s."""
+		p = ZaiProvider("k")
+		client = p._get_client()
+		http = client._client  # noqa: SLF001 — the SDK's httpx.Client
+		limits = http._transport._pool._max_connections  # noqa: SLF001
+		keepalive = http._transport._pool._max_keepalive_connections  # noqa: SLF001
+		assert http.timeout.read == 180.0
+		assert http.timeout.connect == 10.0
+		assert limits == ZaiProvider.MAX_INFLIGHT_CALLS + 2
+		assert keepalive == ZaiProvider.MAX_INFLIGHT_CALLS + 2
+
+
+CODING = "https://api.z.ai/api/coding/paas/v4/"
+PAAS = "https://api.z.ai/api/paas/v4/"
+
+
+class TestFlashEndpointSplit:
+	"""The coding endpoint's ~5-request concurrency ceiling and the PaaS
+	endpoint's are INDEPENDENT (measured 2026-08-28: 6 flash@PaaS + 6
+	glm-5.3@coding simultaneously -> the coding side passed 5 exactly as its
+	solo baseline), and a coding-plan key may call glm-4.x flash on PaaS for
+	FREE (paid models 1113 there — no cash balance; glm-5.x flash is not
+	served, 400/1210). So glm-4.x flash defaults to PaaS when the primary is
+	the coding endpoint: its own concurrency pool AND zero coding credits."""
+
+	def test_auto_split_on_coding_primary(self):
+		p = ZaiProvider("k", base_url=CODING)
+		assert p.flash_base_url == PAAS
+		assert p._endpoint_for("glm-4.7-flash") == PAAS
+		assert p._endpoint_for("glm-5.3") == CODING
+
+	def test_no_split_on_paas_primary(self):
+		"""A PaaS (pay-as-you-go) primary already serves flash; no split."""
+		p = ZaiProvider("k", base_url=PAAS)
+		assert p.flash_base_url is None
+		assert p._endpoint_for("glm-4.7-flash") == PAAS
+
+	def test_glm5_flash_stays_on_primary(self):
+		"""glm-5.x flash is Devpack-native (NOT on PaaS, 400/1210) — it must
+		not be routed to the flash endpoint even when the split is on."""
+		p = ZaiProvider("k", base_url=CODING)
+		assert p._endpoint_for("glm-5.3-flash") == CODING
+
+	def test_explicit_url_forced_and_off_disables(self):
+		custom = "https://proxy.example/v4/"
+		assert ZaiProvider("k", base_url=CODING, flash_base_url=custom).flash_base_url == custom
+		assert ZaiProvider("k", base_url=CODING, flash_base_url="off").flash_base_url is None
+		assert ZaiProvider("k", base_url=CODING, flash_base_url="0").flash_base_url is None
+
+	def test_call_routes_model_to_its_endpoint_client(self):
+		"""_call must send flash to the flash-endpoint client and everything
+		else to the primary client — two separate keep-alive pools."""
+		p = ZaiProvider("k", min_interval=0.0, base_url=CODING)
+		flash_client, paid_client = MagicMock(), MagicMock()
+		flash_client.chat.completions.create.side_effect = lambda **kw: _ok_response()
+		paid_client.chat.completions.create.side_effect = lambda **kw: _ok_response()
+		p._flash_client, p._client = flash_client, paid_client
+		p._call("glm-4.7-flash", {"current": {"title": "x"}})
+		assert flash_client.chat.completions.create.call_count == 1
+		assert paid_client.chat.completions.create.call_count == 0
+		p._call("glm-5.3", {"current": {"title": "x"}})
+		assert paid_client.chat.completions.create.call_count == 1
+		assert flash_client.chat.completions.create.call_count == 1
+
+	def test_rate_machinery_is_per_endpoint(self):
+		"""The WHOLE rate stack (bucket, cooldown, escalation, in-flight gate)
+		is per endpoint URL: the endpoints' limiters are independent
+		(measured), so pressure on the flash endpoint must not throttle the
+		primary — and vice versa."""
+		p = ZaiProvider("k", min_interval=0.0, burst=10.0, rate_limit_base=5.0, rate_limit_max=60.0, base_url=CODING)
+		flash_client, paid_client = MagicMock(), MagicMock()
+
+		def flash_err(**kw):
+			raise _err("1302", "Rate limit reached for requests")
+
+		flash_client.chat.completions.create.side_effect = flash_err
+		paid_client.chat.completions.create.side_effect = lambda **kw: _ok_response()
+		p._flash_client, p._client = flash_client, paid_client
+		# Flash (PaaS) rate-limited hard: its call retries through 1302s...
+		r, e = p._call("glm-4.7-flash", {"current": {"title": "x"}})
+		assert r is None and "rate limited" in (e or "")
+		# ...which parked ONLY the flash endpoint: cooldown armed there,
+		flash_cd = p._ep_cooldown.get(PAAS, 0.0)
+		assert flash_cd > time.monotonic()
+		# ...its gate yielded a slot,
+		assert p._gate_for(PAAS).cap < p._inflight_max
+		# ...and the primary endpoint is COMPLETELY untouched — no cooldown,
+		# no escalation, gate at full cap (the coding path keeps serving).
+		assert p._cooldown_until == 0.0
+		assert p._consecutive_429 == 0
+		assert p._call_sem.cap == p._inflight_max
+		assert p._call("glm-5.3", {"current": {"title": "x"}})[0] is not None
+		# The two endpoints even drip independently: the flash stretch never
+		# widened the primary bucket.
+		assert p._bucket.interval == 0.0

@@ -24,25 +24,59 @@ Z.AI vrací HTTP 429 pro tři různé situace a `bmf` na každou reaguje jinak
 |---|---|---|
 | `1302` Rate limit reached for requests | **Vaše** rychlost požadavků vyšlapala RPM okno | Globální cooldown: pozastaví se všichni workeri, eskaluje `base * 2^(n-1)` (5, 10, 20, …), respektuje serverové `Retry-After`, je-li delší, strop `max` |
 | `1305` The service may be temporarily overloaded | **Kapacita serveru** Z.AI (chronické u bezplatných flash modelů — nezpůsobeno vámi) | Krátké retry s rozestupem intervalu (bez globálního cooldownu), pak přepnutí na placený model; fleet-wide série po sobě jdoucích odmítnutí pozastaví model na ~3 min |
-| `1113` Insufficient balance or no resource package | Billingová kontrola — tvrdá chyba, když kvóta opravdu došla, na coding endpointu ale vystřeluje i krátkými bursty při zbývající kvótě (sleduje account-throttling při flash bouřích) | Stejné tranzientní zacházení (streak) jako 1305, ale s krátkou pauzou ~30 s; drip se zároveň mírně roztáhne. Přetrvává-li, prověřte plán / spárování endpointu v `.env.example` |
+| `1113` Insufficient balance or no resource package | Billingová kontrola — tvrdá chyba, když kvóta opravdu došla, na coding endpointu ale vystřeluje i při zbývající kvótě, když se překročí ~5souběžný strop požadavků na účet (fallback stádo bouří na placený model najednou) | Strop souběžných volání bouře předchází; zbytky dostanou tranzientní zacházení (streak) jako 1305 s krátkou pauzou ~30 s. Přetrvává-li i při `--llm-max-inflight 1`, prověřte plán / spárování endpointu v `.env.example` |
 | `1308` Usage limit reached | Vyčerpaná kvóta usage modelu | Model se do konce běhu přeskočí |
 
-Pod limitem 1302 vás drží dvě vrstvy (viz
+Pod limitem 1302 vás drží tři vrstvy (viz
 [architecture.md → Model souběžnosti](../architecture.md#model-souběžnosti)):
 
 1. **Vyhlazovač typu leaky bucket** — konstantní agregované RPM.
-2. **Globální 429/1302 cooldown** — free tier Z.AI kaskádově škrtí *každý*
+2. **Strop souběžných volání** — coding plan Z.AI připouští jen **~5
+   souběžných požadavků na účet** (Z.AI přesná čísla nezveřejňuje: limity
+   jsou tierové a dynamické podle usage policy Devpacku; změřeno: 12hluboký
+   současný spike dostal 7× 429/1302, zatímco 6hluboký burst prošel, a
+   interaktivní klienti — ZCode/chat — čerpají ze stejného stropu). Bucket
+   rozestupuje *starty* volání, ne jejich *hloubku*: s 10 workery a
+   vícesekundovými reasoning voláními může fallback stádo strop překročit
+   a bouře se projeví i jako falešné `1113` „insufficient balance" při
+   jasně zbývající kvótě (vlastní FAQ Z.AI přiznává 1113 na koupeném
+   balíčku). Semafor (`--llm-max-inflight`) capuje, kolik požadavků běží
+   najednou — workeři čekají lokálně ve frontě, místo aby je Z.AI odmítal.
+   Flash-modely drží přísnější sub-strop `min(2, cap)`: bezplatný pool je
+   chronicky nasycený a komunita udává jeho souběžnost i na 1, takže hluboké
+   flash stádo jen živí 1305 bouři a vytlačuje placený fallback ze sdílených
+   slotů. Při coding-plánovém `ZAI_BASE_URL` se glm-4.x flash navíc routuje
+   na **PaaS endpoint** (`ZAI_FLASH_BASE_URL`, prázdné = auto, `off` = vypnout):
+   stropy souběžnosti obou endpointů jsou nezávislé (změřeno: 6 flash@PaaS +
+   6 glm-5.3@coding současně nechalo coding stranu na jejích obvyklých ~5)
+   a flash je tam zdarma — vlastní pool, nula kreditů z plánu. Placené
+   modely zůstávají na coding endpointu (na PaaS dávají 1113 — žádný cash
+   balance) a glm-5.x flash na PaaS není (400/1210), takže také zůstává.
+   Celá rate machinery (drip, cooldown, in-flight brána) je rovněž per
+   endpoint: tlak na jednom endpointu nikdy nebrzdí druhý.
+   Globální strop je **adaptivní**: externí klient na stejném plánu
+   (ZCode, chat) je pro bmf neviditelný, takže tlak na strop se pozoruje,
+   nepředpovídá — každé 1302 / falešné 1113 uvolní jeden in-flight slot
+   (log: `in-flight cap 3 -> 2`) a ~20 čistých odpovědí si ho vrátí.
+   Pod kapotou všechna volání sdílejí jednu sadu pooled keep-alive HTTP
+   spojení (keep-alive 60 s přežije 30s balance pauzy, takže po žádné
+   nenásleduje zbytečný nový TLS handshake) s read timeoutem 180 s —
+   zavěšené volání nemůže obsadit vzácný in-flight slot po SDK výchozích
+   600 s.
+3. **Globální 429/1302 cooldown** — free tier Z.AI kaskádově škrtí *každý*
    model, jakmile jeden dostane 429, takže když *kterýkoli* worker uvidí
    1302, pozastaví se *všechny* workery.
 
 | Parametr | CLI | Env | Výchozí |
 |---|---|---|---|
 | Stálý interval (s) mezi voláními | `--llm-min-interval` | `BMF_LLM_MIN_INTERVAL` | `2.0` (~30 RPM) |
+| Max současně běžících volání | `--llm-max-inflight` | `BMF_LLM_MAX_INFLIGHT` | `3` (strop účtu ~5, flash sub-strop `min(2, ·)`) |
 | Kapacita burstu (volání na interval) | `--llm-burst` | `BMF_LLM_BURST` | `1` (rovnoměrné kapání) |
 | Základní cooldown 429 (s) | `--llm-rate-limit-base` | `BMF_LLM_RATE_LIMIT_BASE` | `5` |
 | Strop maximálního cooldownu 429 (s) | `--llm-rate-limit-max` | `BMF_LLM_RATE_LIMIT_MAX` | `60` |
 
-Leaky bucket je omezovač typu **počet za čas**, ne strop souběžnosti. S
+Leaky bucket je omezovač typu **počet za čas**, ne strop souběžnosti — k tomu
+slouží `--llm-max-inflight`. S
 výchozím `--llm-burst 1` jde o čisté rovnoměrné kapání — přesně jedno
 volání začne každých `--llm-min-interval` sekund, rovnoměrně rozložená,
 bez hromadění (5 volání v jedné sekundě a pak nic je přesně to, co limit

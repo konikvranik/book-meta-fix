@@ -162,15 +162,43 @@ calls), so threads scale well. The shared objects are thread-safe:
 - **SQLite Enricher cache** — `check_same_thread=False`, serialized by the
   connection.
 
-Two layers keep the LLM call rate under Z.AI's dynamic RPM limit:
+Three layers keep the LLM call rate under Z.AI's dynamic RPM limit:
 
 1. **Leaky-bucket smoother** (`LeakyBucket` in `llm.py`) — a count-per-time
-   limiter shared across all workers. With the default `--llm-burst 1` it is a
+   limiter shared across all workers **per endpoint URL** (with the flash
+   endpoint split each endpoint drips — and adapts — on its own). With the
+   default `--llm-burst 1` it is a
    pure even drip: exactly one call starts every `--llm-min-interval`
    (default 2.0 s ≈ 30 evenly-spaced RPM), no bunching. A burst >1 would let
    several calls fire in the same second — exactly what trips the dynamic RPM
    limit — so it stays 1 unless you have confirmed headroom.
-2. **Global 429/1302 cooldown** (circuit breaker) — Z.AI's free tier has a
+2. **In-flight cap** (`MAX_INFLIGHT_CALLS` / `--llm-max-inflight`, default 3,
+   plus a stricter `FLASH_INFLIGHT_CALLS = min(2, ·)` sub-cap for flash-family
+   models) — the coding plan admits only ~5 concurrent requests per *account*
+   (Z.AI publishes no exact numbers: the limits are tier-based and dynamic per
+   the Devpack usage policy; measured: a 12-deep spike drew 7× 429/1302 while
+   a 6-deep burst passed, and interactive clients — ZCode/chat — draw from
+   the same ceiling). The bucket spaces call *starts* but not call *depth*:
+   with 10 workers and multi-second reasoning calls, the fallback herd (flash
+   dies → every worker pivots to the paid model at once) blew past the
+   ceiling, and the storms also surfaced as **false 1113** "insufficient
+   balance" with quota clearly left (Z.AI's own FAQ acknowledges 1113 firing
+   on a purchased package). The global cap is a `_InflightGate` — a semaphore
+   with runtime-resizable capacity — because external clients on the same
+   plan are invisible: each 1302/false-1113 yields one slot (floor 1) and
+   `INFLIGHT_RECOVER_SUCCESSES` clean 200s earn it back, the depth
+   counterpart of the adaptive drip. The semaphores are held only around the
+   HTTP request itself (cooldown waits and bucket acquires stay outside, or a
+   parked fleet would deadlock on slots instead of waiting on the clock);
+   flash calls acquire the flash semaphore inside the global one (fixed
+   order), so a flash wave cannot squeeze the paid fallback out of the global
+   slots — workers queue locally instead of being rejected. The HTTP layer is
+   one shared pooled `httpx.Client` for the whole run: keep-alive expiry 60 s
+   (outlives the 30 s balance pauses — httpx's 5 s default would force a TLS
+   re-handshake after every pause), the pool sized to cap+2, and a finite
+   read timeout (180 s, generous for max_tokens=8000 reasoning) so a hung
+   call cannot squat a scarce slot for the SDK's 600 s default.
+3. **Global 429/1302 cooldown** (circuit breaker) — Z.AI's free tier has a
    cascade bug: when *one* model gets a 429, the others (incl. the paid
    fallback) get throttled too. So when *any* worker sees a 1302 `Rate limit
    reached for requests`, a shared cooldown deadline is set that *all*

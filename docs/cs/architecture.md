@@ -164,16 +164,44 @@ objekty jsou bezpečné pro vlákna:
 - **SQLite cache Enricheru** — `check_same_thread=False`, serializováno
   spojením.
 
-Dvě vrstvy drží rychlost volání LLM pod dynamickým RPM limitem Z.AI:
+Tři vrstvy drží rychlost volání LLM pod dynamickým RPM limitem Z.AI:
 
 1. **Vyhlazovač leaky-bucket** (`LeakyBucket` v `llm.py`) — omezovač počtu
-   za čas sdílený napříč všemi workery. S výchozím `--llm-burst 1` je to
+   za čas sdílený napříč všemi workery **per endpoint URL** (při flash
+   splitu kapě každý endpoint — a adaptuje se — sám za sebe). S výchozím
+   `--llm-burst 1` je to
    čistě rovnoměrné kapání: přesně jedno volání startuje každých
    `--llm-min-interval` (výchozí 2.0 s ≈ 30 rovnoměrně rozložených RPM),
    bez hromadění. Burst >1 by pustil několik volání ve stejné sekundě —
    přesně to, co shodí dynamický RPM limit — takže zůstává na 1, pokud
    nemáte potvrzenou rezervu.
-2. **Globální 429/1302 cooldown** (jistič) — bezplatná vrstva Z.AI má kaskádovou
+2. **Strop souběžných volání** (`MAX_INFLIGHT_CALLS` / `--llm-max-inflight`,
+   výchozí 3, plus přísnější sub-strop `FLASH_INFLIGHT_CALLS = min(2, ·)` pro
+   flash-modely) — coding plan připouští jen ~5 souběžných požadavků na
+   *účet* (Z.AI přesná čísla nezveřejňuje: limity jsou tierové a dynamické
+   podle usage policy Devpacku; změřeno: 12hluboký spike dostal 7× 429/1302,
+   zatímco 6hluboký burst prošel, a interaktivní klienti — ZCode/chat —
+   čerpají ze stejného stropu). Bucket rozestupuje *starty* volání, ne jejich
+   *hloubku*: s 10 workery a vícesekundovými reasoning voláními fallback
+   stádo (flash padne → všichni se najednou přelijí na placený model) strop
+   překročilo a bouře se projevovaly i jako **falešné 1113** „insufficient
+   balance" při jasně zbývající kvótě (vlastní FAQ Z.AI přiznává 1113 na
+   koupeném balíčku). Globální strop je `_InflightGate` — semafor s
+   za běhu měnitelnou kapacitou — protože externí klienty na stejném plánu
+   nelze vidět: každé 1302/falešné 1113 uvolní jeden slot (podlaha 1) a
+   `INFLIGHT_RECOVER_SUCCESSES` čistých 200 si ho vrátí; je to protějšek
+   adaptivního dripu v dimenze hloubky. Semafor se drží jen okolo samotného
+   HTTP požadavku (čekání na cooldown a acquire bucketu zůstávají venku,
+   jinak by zaparkovaná flotila deadlockla na slotech místo čekání na
+   hodinách); flash volání získávají flash semafor uvnitř globálního (fixní
+   pořadí), takže flash vlna nemůže vytlačit placený fallback z globálních
+   slotů — workeři tedy čekají lokálně ve frontě, místo aby je Z.AI odmítal.
+   HTTP vrstva je jeden sdílený pooled `httpx.Client` pro celý běh:
+   keep-alive 60 s (přežije 30s balance pauzy — httpx výchozích 5 s by po
+   každé pauze vynutilo nový TLS handshake), pool velikosti cap+2 a konečný
+   read timeout (180 s, vstřícné pro reasoning s max_tokens=8000), aby
+   zavěšené volání nemohlo obsadit vzácný slot po SDK výchozích 600 s.
+3. **Globální 429/1302 cooldown** (jistič) — bezplatná vrstva Z.AI má kaskádovou
    chybu: když *jeden* model dostane 429, ostatní (včetně placeného
    fallbacku) se také zpomalí. Takže když *jakýkoli* worker uvidí 1302
    `Rate limit reached for requests`, nastaví se sdílený deadline cooldownu,

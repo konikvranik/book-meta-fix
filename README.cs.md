@@ -306,9 +306,9 @@ přeskočí a výsledek Flash přijmou beze změny.
 
 **Rate limiting**: všechna volání (Flash + finální + opakování) procházejí
 sdíleným leaky bucketem s **adaptivním** intervalem (nastavená hodnota je
-jen podlaha: 1302/1113 drip roztáhnou, úspěchy ho stáhnou zpět) a odpovědi
-HTTP 429 se rozesílají podle **sub-kódu Z.AI** (všechny tři přicházejí jako
-429, ale znamenají opačné věci):
+jen podlaha: 1302/1113 drip roztáhnou, úspěchy ho stáhnou zpět) **a** tvrdým
+stropem souběžnosti, a odpovědi HTTP 429 se rozesílají podle **sub-kódu
+Z.AI** (všechny tři přicházejí jako 429, ale znamenají opačné věci):
 1. **vyhlazovač leaky-bucket** (počet za čas, výchozí kapacita 1 = čistě
    rovnoměrný kapající tok: přesně každých `--llm-min-interval` sekund
    startuje jedno volání, rovnoměrně rozložená, bez shlukování).
@@ -316,13 +316,36 @@ HTTP 429 se rozesílají podle **sub-kódu Z.AI** (všechny tři přicházejí j
    za minutu — přesně to chce klouzavý oknový limit Z.AI. Burst >1 dovolí v
    téže sekundě vystartovat několik volání a vyrazí dynamický RPM limit;
    zvedejte jen s ověřenou rezervou; a
-2. **globální 429/1302 cooldown** (jistič) — `Rate limit reached for
+2. **strop souběžných volání** (`--llm-max-inflight`, výchozí 3) — bucket
+   rozestupuje *starty* volání, ne jejich *hloubku*: s 10 workery a
+   vícesekundovými reasoning voláními fallback stádo (flash padne → všichni
+   se najednou přelijí na placený model) překročil ~5 souběžných požadavků
+   na účet, které coding plan připouští (Z.AI přesná čísla nezveřejňuje —
+   limity jsou tierové a dynamické podle jejich usage policy; změřeno:
+   12hluboký špičkový spike dostal 7× 429/1302, zatímco 6hluboký burst
+   prošel, a interaktivní klienti — ZCode/chat — čerpají ze stejného stropu),
+   a bouře se projevovaly i jako **falešné 1113** „insufficient balance"
+   při zbývající kvótě (potvrzuje i FAQ Z.AI). Workeři teď čekají na
+   semaforu, místo aby je Z.AI odmítal. Flash-modely dostávají přísnější
+   sub-strop (`min(2, cap)`): bezplatný pool je chronicky nasycený a
+   komunita udává jeho souběžnost i na 1. Při coding-plánovém `ZAI_BASE_URL`
+   se glm-4.x flash navíc routuje na **PaaS endpoint** (`ZAI_FLASH_BASE_URL`,
+   prázdné = auto): stropy souběžnosti obou endpointů jsou nezávislé
+   (změřeno) a flash je tam zdarma — vlastní pool a nula kreditů z plánu.
+   Globální strop je navíc
+   **adaptivní** — externí klient na stejném plánu (ZCode, chat) je pro bmf
+   neviditelný, takže když Z.AI signalizuje tlak na strop (1302 / falešné
+   1113), bmf uvolní jeden in-flight slot a po ~20 čistých odpovědích si ho
+   zpět vydělá; všechna volání sdílejí jednu sadu pooled keep-alive HTTP
+   spojení (žádné nové TLS handshake po pauze) s konečným read timeoutem,
+   aby zavěšené volání nemohlo obsadit slot donekonečna; a
+3. **globální 429/1302 cooldown** (jistič) — `Rate limit reached for
    requests` znamená, že **naše** rychlost vyrazila RPM okno (a bezplatná
    úroveň Z.AI navíc kaskádově přibrzdí i ostatní modely), takže když
    *kterýkoli* worker uvidí 1302, pozastaví se *všichni* workeři
    (`--llm-rate-limit-base` sekund, eskalace 5/10/20/…, respektuje serverové
    `Retry-After`, strop `--llm-rate-limit-max`); a
-3. **řízení 429/1305 overload** — `The service may be temporarily overloaded`
+4. **řízení 429/1305 overload** — `The service may be temporarily overloaded`
    je kapacita **serveru** Z.AI (chronicky časté u bezplatných flash modelů,
    rychlostí se to neovlivní): volání se krátce zopakuje (s rozestupem
    intervalu, s rozpočtem pokusů) *bez* nasazení globálního cooldownu a pak
@@ -351,6 +374,7 @@ Přepínače:
 | Model Flash | `--llm-model` | `BMF_LLM_MODEL` | `glm-4.7-flash` |
 | Fallback model | `--llm-fallback-model` | `BMF_LLM_FALLBACK_MODEL` | `glm-5.3` |
 | Interval volání (s) | `--llm-min-interval` | `BMF_LLM_MIN_INTERVAL` | `2.0` |
+| Max souběžných volání | `--llm-max-inflight` | `BMF_LLM_MAX_INFLIGHT` | `3` |
 | Kapacita burst | `--llm-burst` | `BMF_LLM_BURST` | `1` (rovnoměrný odkap) |
 | Základní 429 cooldown (s) | `--llm-rate-limit-base` | `BMF_LLM_RATE_LIMIT_BASE` | `5` |
 | Maximální 429 cooldown (s) | `--llm-rate-limit-max` | `BMF_LLM_RATE_LIMIT_MAX` | `60` |

@@ -243,8 +243,58 @@ src/book_meta_fix/
   apply takes `--pattern`/`--needfix-dir`/`--no-place`
   (env: `BMF_PATTERN`, `BMF_NEEDFIX_DIR`).
 - **LLM rate limiting is layered, and the 429 SUB-CODE decides the
-  reaction** (`llm.py`): a `LeakyBucket` smoother (constant aggregate RPM)
-  plus a code-aware circuit breaker. Z.AI returns HTTP 429 for three
+  reaction** (`llm.py`): a `LeakyBucket` smoother (constant aggregate RPM),
+  **in-flight semaphores** (`MAX_INFLIGHT_CALLS` / `--llm-max-inflight` /
+  `BMF_LLM_MAX_INFLIGHT`, default 3, plus a stricter `FLASH_INFLIGHT_CALLS =
+  min(2, ·)` sub-cap for flash-family models), and a code-aware circuit
+  breaker. **Endpoint split** (`ZAI_FLASH_BASE_URL`, empty = AUTO): when the
+  primary is the coding endpoint, glm-4.x flash is routed to the PaaS
+  endpoint — measured 2026-08-28, the two endpoints' ~5-request ceilings are
+  INDEPENDENT (6 flash@PaaS + 6 glm-5.3@coding simultaneously left the
+  coding side at its solo baseline) and a coding-plan key calls glm-4.x flash
+  on PaaS for FREE (paid models 1113 there — no cash balance; glm-5.x flash
+  is not served on PaaS, 400/1210, so `_endpoint_for` keeps every glm-5.x
+  model on the primary). One pooled httpx client PER endpoint
+  (`_client` / `_flash_client`); `off`/`0` disables the split. The ENTIRE
+  rate machinery is per endpoint URL too — bucket, cascade cooldown,
+  429 escalation and the adaptive in-flight gate each live in per-URL state
+  (the primary's in the classic attributes, other URLs in `_ep_*` dicts;
+  `_bucket_for`/`_gate_for`/`_wait_cooldown(url)`/`_on_rate_limited(url)`/
+  `_on_success(url)` pick the right one), so pressure on the flash endpoint
+  never throttles the primary and vice versa. Only the model-family flash
+  sub-cap semaphore (`_flash_sem`) is cross-endpoint by design (it caps the
+  flash MODEL herd wherever it runs). The
+  semaphores exist because the coding plan admits only ~5
+  concurrent requests per ACCOUNT — Z.AI publishes no exact numbers (the
+  limits are tier-based, Max > Pro > Lite, and dynamic per
+  docs.z.ai/devpack/usage-policy); ~5 is the measured ceiling of one Pro-tier
+  evening (a 12-deep simultaneous spike drew 7× 429/1302 while serial calls
+  and a 6-deep burst passed; interactive clients — ZCode/chat — draw from the
+  same ceiling). The bucket spaces call STARTS but not DEPTH: with 10 workers
+  and multi-second reasoning calls, the fallback herd (flash dies → everyone
+  pivots to the paid model at once) blew past the ceiling, and the 1302
+  storms + metering chaos also surfaced as FALSE 1113 "insufficient balance"
+  with quota clearly left (docs.z.ai/devpack/faq officially acknowledges 1113
+  firing on a purchased coding package; the evening "1113 waves" were this
+  herd, not server-side metering outages). The flash sub-cap is the community
+  signal that the free pool's concurrency can be as low as 1 plus the fact
+  that a deep flash herd only feeds the 1305 storm; flash calls acquire the
+  flash semaphore INSIDE the global one (fixed order) so a flash wave cannot
+  squeeze the paid fallback out of the global slots. The GLOBAL gate is an
+  `_InflightGate` (semaphore with runtime-resizable capacity): external
+  clients on the same plan (ZCode/chat) are invisible to bmf, so their
+  ceiling pressure is OBSERVED — each 1302 / streak-tripped false 1113
+  yields one slot (floor 1, log `in-flight cap N -> N-1`; debounced to at
+  most one yield per _call, so a retry cascade cannot shrink repeatedly) and
+  INFLIGHT_RECOVER_SUCCESSES clean 200s earn it back; it is the depth
+  counterpart of the adaptive drip. Both semaphores are held
+  only around the HTTP request itself — cooldown waits and bucket acquires
+  stay outside them, or a parked fleet would deadlock on slots instead of
+  waiting on the clock. The HTTP layer is ONE shared pooled httpx.Client for
+  the whole run: keep-alive expiry 60 s (httpx's 5 s default would force a
+  TLS re-handshake after every 30 s balance pause), pool sized cap+2, read
+  timeout 180 s (the SDK's 600 s default would let one hung call squat a
+  scarce in-flight slot for ten minutes). Z.AI returns HTTP 429 for three
   different conditions (`docs.z.ai/api-reference/api-code`): **1302**
   "Rate limit reached for requests" — OUR rate tripped the RPM window →
   the escalating global cooldown (`_wait_cooldown` → `_on_rate_limited`,
@@ -274,10 +324,15 @@ src/book_meta_fix/
   runs, the per-book fallback chatter is debug-only and a once-a-minute
   "every model is paused" info line marks the (rare) fully-idle LLM stage.
   **1113** "Insufficient balance or no resource package" — also HTTP 429,
-  documented as a hard billing error BUT fires intermittently on the coding
-  endpoint in short metering bursts with quota left (verified against the
-  dashboard; concurrency and max_tokens both refuted by experiment); gets
-  the same transient streak treatment, never a run-long disable.
+  documented as a hard billing error BUT on the coding endpoint it fires as
+  a FALSE positive with quota left (dashboard-verified) when the account's
+  ~5-request concurrency ceiling is blown — i.e. it is a symptom of the
+  fallback herd storming, which the in-flight semaphore now prevents
+  (max_tokens and the call parameters were experimentally refuted: every
+  variant — streaming, no extra_body, small max_tokens, 6-deep parallel —
+  passes when the platform is calm). Rare leftovers keep the transient
+  streak treatment, never a run-long disable; if 1113 persists at
+  `--llm-max-inflight 1`, THEN suspect real billing.
   **1308** "Usage limit reached" — quota exhausted: `_disable_model` adds
   the model to `_disabled_models` (model → reason) and every later `_call`
   for it short-circuits without an API hit. The openai client is built with `max_retries=0` — SDK retries

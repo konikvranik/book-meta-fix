@@ -62,6 +62,15 @@ class Config:
 	# Override via ZAI_BASE_URL if you have a PaaS key.
 	zai_api_key: str | None = field(default=None)
 	zai_base_url: str = "https://api.z.ai/api/coding/paas/v4/"
+	# Separate endpoint for flash-family models (measured 2026-08-28: the
+	# coding endpoint's ~5-request concurrency ceiling and the PaaS endpoint's
+	# are independent, and a coding-plan key may call glm-4.x flash on PaaS
+	# for FREE — separate pool + zero coding credits; paid models 1113 on
+	# PaaS and glm-5.x flash is not served there, so those stay on the
+	# primary). None/empty = AUTO (split when the primary is the coding
+	# endpoint); a URL forces it; 'off'/'0' disables the split. Override via
+	# ZAI_FLASH_BASE_URL.
+	zai_flash_base_url: str | None = None
 	# Primary LLM model: first attempt of the self-correction loop, and the
 	# single-call model when the loop is off. None = resolved at provider
 	# construction: glm-4.7-flash (free) when the loop is on, the fallback
@@ -99,6 +108,16 @@ class Config:
 	# response speed. Lower (e.g. 1.0) on a higher tier; raise (e.g. 4.0) if you
 	# still hit 429.
 	llm_min_interval: float = 2.0
+	# Hard cap on LLM requests RUNNING at the same instant (across all
+	# workers/models/retries). The Z.AI coding plan admits only ~5 concurrent
+	# requests per account (measured: a 12-deep spike -> 7x 429/1302 while a
+	# 6-deep burst passed), and interactive clients (ZCode/chat) draw from the
+	# same ceiling — so the default keeps headroom. Unlike llm_min_interval
+	# (which spaces call STARTS), this caps in-flight DEPTH: with 10 workers
+	# and multi-second reasoning calls the fallback herd blows past the limit
+	# and the resulting storms also trigger false 1113 'insufficient balance'.
+	# Override via BMF_LLM_MAX_INFLIGHT.
+	llm_max_inflight: int = 3
 	# Global 429 cooldown knobs. When ANY worker sees a 429, ALL workers pause
 	# until this many seconds have passed (Z.AI's free tier cascade-throttles
 	# every model when one 429s, so per-worker throttling alone can't stop it).
@@ -169,6 +188,8 @@ class Config:
 			cfg.zai_api_key = v
 		if v := os.environ.get("ZAI_BASE_URL"):
 			cfg.zai_base_url = v
+		if (v := os.environ.get("ZAI_FLASH_BASE_URL")) is not None:
+			cfg.zai_flash_base_url = v.strip() or None
 		if v := os.environ.get("BMF_LLM_MODEL"):
 			cfg.llm_model = v.strip()
 		if v := os.environ.get("BMF_LLM_FALLBACK_MODEL"):
@@ -204,6 +225,11 @@ class Config:
 		if (v := os.environ.get("BMF_LLM_MIN_INTERVAL")) is not None:
 			try:
 				cfg.llm_min_interval = max(0.0, float(v))
+			except ValueError:
+				pass
+		if (v := os.environ.get("BMF_LLM_MAX_INFLIGHT")) is not None:
+			try:
+				cfg.llm_max_inflight = max(1, int(v))
 			except ValueError:
 				pass
 		if (v := os.environ.get("BMF_LLM_RATE_LIMIT_BASE")) is not None:
