@@ -2,11 +2,15 @@
 
 # Ladění běhu
 
-- **Zachráněno nevalidní JSON** — pokud vidíte `LLM JSON salvaged via json-repair
-  (unescaped quotes/control chars fixed)`, model vrátil mírně poškozený
-  JSON a ten byl zachráněn. Není potřeba žádná akce; toto nahrazuje dřívější
-  plýtvání 3 opakováními. Pokud vidíte `LLM returned invalid JSON` (bez řádku
-  o záchraně), nainstalujte extra `[llm]` (`json-repair`).
+- **Zachráněno nevalidní JSON** — pokud vidíte `LLM JSON salvaged via
+  json-repair (unescaped quotes/control chars fixed)` nebo `(leading object
+  of wrapped response)`, model vrátil mírně poškozený JSON a ten byl
+  zachráněn. Není potřeba žádná akce; toto nahrazuje dřívější plýtvání
+  3 opakováními. Pokud vidíte `LLM JSON extracted from commentary-wrapped
+  response`, model zabalil platný objekt do vysvětlující prózy (plus druhou
+  kopii v ohraničeném bloku) a první objekt byl vyříznut. Pokud vidíte
+  `LLM returned invalid JSON` (bez řádku o záchraně), nainstalujte extra
+  `[llm]` (`json-repair`).
 - **Rate limit** — `Z.AI rate-limited (429/1302 …); global cooldown Xs`
   znamená, že jistič (circuit breaker) dělá svou práci. Časté výskyty
   znamenají, že máte zvýšit hodnoty v

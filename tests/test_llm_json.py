@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 
 from book_meta_fix import llm as llm_mod
-from book_meta_fix.llm import _parse_llm_json, _repair_truncated_json, _sanitize_json
+from book_meta_fix.llm import _first_json_object, _parse_llm_json, _repair_truncated_json, _sanitize_json
 
 
 class TestSanitizeJson:
@@ -278,6 +278,108 @@ class TestJsonRepairSalvage:
 		result = _parse_llm_json(content)
 		assert result is not None
 		assert result.title == "X"
+
+
+class TestFirstJsonObject:
+	"""Unit checks of the commentary-carving helper."""
+
+	def test_returns_first_balanced_object(self) -> None:
+		assert _first_json_object('prose before {"a": 1} prose after') == '{"a": 1}'
+
+	def test_braces_inside_strings_are_ignored(self) -> None:
+		content = '{"reasoning": "nested {braces} and } too"} trailing'
+		assert _first_json_object(content) == '{"reasoning": "nested {braces} and } too"}'
+
+	def test_escaped_quote_does_not_end_string(self) -> None:
+		content = '{"title": "say \\"hi\\""} tail'
+		assert _first_json_object(content) == '{"title": "say \\"hi\\""}'
+
+	def test_truncated_object_returns_none(self) -> None:
+		# No balanced object — the truncation repair owns this case.
+		assert _first_json_object('{"title": "X", "genres": ["sc') is None
+
+	def test_no_object_returns_none(self) -> None:
+		assert _first_json_object("just prose, no braces") is None
+
+
+class TestWrappedJsonExtraction:
+	"""Responses that embed the JSON in commentary. Measured 2026-08-29
+	(glm-5.3): a valid object, then "Note: ..." prose and a second, fenced
+	copy — the whole-content parse died on "Extra data" and the retry budget
+	was spent. The first balanced object must be carved out and parsed even
+	without the optional json-repair extra (hence the monkeypatch)."""
+
+	def test_object_with_trailing_note_and_fenced_copy(self, monkeypatch, caplog) -> None:
+		import logging as _logging
+
+		monkeypatch.setattr(llm_mod, "json_repair", None)
+		content = (
+			'{"title": "Private Automobile Accident Report", "authors": null, '
+			'"genres": null, "confidence": "medium", "reasoning": "This is not a '
+			'published book but a blank automobile accident report form; no '
+			'author, ISBN, or publisher applies."}\n\n'
+			'Note: this appears to be a form/template document rather than a '
+			'book. Recommended fields:\n\n'
+			'```json\n{\n  "title": "Private Automobile Accident Report",\n'
+			'  "language": "eng",\n  "confidence": "medium",\n  "reasoning": '
+			'"The first page is a blank insurance accident report form."\n}\n```'
+		)
+		with caplog.at_level(_logging.WARNING, logger="book_meta_fix.llm"):
+			result = _parse_llm_json(content, model="glm-5.3")
+		assert result is not None
+		assert result.title == "Private Automobile Accident Report"
+		# The FIRST object won, not the fenced restatement (which carries
+		# language "eng" and would have set it).
+		assert result.language is None
+		assert "not a published book" in (result.reasoning or "")
+		warnings = [r.getMessage() for r in caplog.records if r.levelno >= _logging.WARNING]
+		assert any("commentary-wrapped" in w and "model=glm-5.3" in w for w in warnings)
+
+	def test_prose_before_fenced_json(self, monkeypatch) -> None:
+		monkeypatch.setattr(llm_mod, "json_repair", None)
+		content = 'Here is the corrected metadata:\n```json\n{"title": "X", "year": 2000}\n```'
+		result = _parse_llm_json(content)
+		assert result is not None
+		assert result.title == "X"
+		assert result.year == 2000
+
+	def test_clean_single_object_does_not_log_extraction(self, monkeypatch, caplog) -> None:
+		# The common case must go through the plain parse, no salvage noise.
+		import logging as _logging
+
+		monkeypatch.setattr(llm_mod, "json_repair", None)
+		with caplog.at_level(_logging.WARNING, logger="book_meta_fix.llm"):
+			result = _parse_llm_json('{"title": "X", "year": 2000}')
+		assert result is not None
+		assert result.title == "X"
+		assert not [r for r in caplog.records if r.levelno >= _logging.WARNING]
+
+
+@_json_repair_required
+class TestJsonRepairListSalvage:
+	"""json-repair on "object + prose + object" content returns BOTH objects
+	as a list: the first is the model's answer, the second its restated
+	"recommended fields" copy. The old isinstance(dict) guard rejected the
+	list and threw the salvage away (log 2026-08-29, glm-5.3) — the
+	take-first-dict fix must recover it."""
+
+	def test_list_result_yields_first_dict(self, caplog) -> None:
+		import logging as _logging
+
+		content = (
+			'{"title": "Private Automobile Accident Report", "authors": null}\n\n'
+			'Note: this appears to be a form/template document. Recommended fields:\n\n'
+			'```json\n{"title": "Private Automobile Accident Report", "language": "eng"}\n```'
+		)
+		with caplog.at_level(_logging.WARNING, logger="book_meta_fix.llm"):
+			result = _parse_llm_json(content, model="glm-5.3")
+		assert result is not None
+		assert result.title == "Private Automobile Accident Report"
+		# The FIRST object won, not the fenced restatement (which carries
+		# language "eng" and would have set it).
+		assert result.language is None
+		warnings = [r.getMessage() for r in caplog.records if r.levelno >= _logging.WARNING]
+		assert any("json-repair" in w and "leading object" in w for w in warnings)
 
 
 class TestRepairWarningNamesModel:

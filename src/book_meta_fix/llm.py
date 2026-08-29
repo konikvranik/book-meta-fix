@@ -1289,13 +1289,53 @@ def _repair_truncated_json(content: str) -> str | None:
 	return result + suffix
 
 
+def _first_json_object(content: str) -> str | None:
+	"""Extract the first balanced {...} object from mixed content.
+
+	Some responses embed the JSON in commentary: prose around it, or a valid
+	object followed by a "Note: ..." explanation and a second, fenced copy.
+	``json.loads`` on the whole content then dies with "Extra data" and the
+	truncation repair has nothing to close — this scans brace depth (string-
+	and escape-aware, so braces inside string values do not confuse it) and
+	returns the first complete object. Returns None when no balanced object
+	exists (plain prose, or truncation mid-object — the truncation repair
+	owns that case).
+	"""
+	start = content.find("{")
+	if start < 0:
+		return None
+	depth = 0
+	in_string = False
+	esc = False
+	for i, ch in enumerate(content[start:]):
+		if in_string:
+			if esc:
+				esc = False
+			elif ch == "\\":
+				esc = True
+			elif ch == '"':
+				in_string = False
+			continue
+		if ch == '"':
+			in_string = True
+		elif ch == "{":
+			depth += 1
+		elif ch == "}":
+			depth -= 1
+			if depth == 0:
+				return content[start : start + i + 1]
+	return None
+
+
 def _parse_llm_json(content: str, *, model: str | None = None) -> ReconciledMeta | None:
 	"""Parse the LLM's JSON response into a ReconciledMeta.
 
-	Tolerant of two common LLM failure modes (each previously caused a
+	Tolerant of three common LLM failure modes (each previously caused a
 	3-retry waste of API calls + an eventual give-up):
 	  1. Python literals (None/True/False) instead of JSON (null/true/false).
 	  2. Truncation at the token limit — closes open braces/arrays.
+	  3. JSON wrapped in commentary — the first balanced {...} object is
+	     carved out and parsed on its own.
 
 	*model* is diagnostics-only: the repair warnings name the model so the
 	log shows WHO truncates (flash and the paid reasoning model fail at
@@ -1308,51 +1348,82 @@ def _parse_llm_json(content: str, *, model: str | None = None) -> ReconciledMeta
 		# Remove first line (```json) and last line (```)
 		lines = [ln for ln in lines if not ln.strip().startswith("```")]
 		content = "\n".join(lines)
-	# Fix Python literals and trailing commas (cheap, always safe to apply).
-	sanitized = _sanitize_json(content)
-	# Try parsing directly, then the sanitized version, then a truncation repair.
-	for attempt_content, label in (
-		(content, "raw"),
-		(sanitized, "sanitized"),
-	):
-		try:
-			data = json.loads(attempt_content)
-			if label == "sanitized":
-				log.debug("JSON parsed after sanitization (Python literals fixed)")
-			break
-		except json.JSONDecodeError:
-			continue
-	else:
-		# Last resort: try repairing truncated JSON (sanitized version).
-		repaired = _repair_truncated_json(sanitized)
-		if repaired is not None:
+	# Candidates: the whole content first (the common case — one clean
+	# object), then the first balanced {...} object carved out of it. The
+	# models occasionally wrap their JSON in commentary (measured
+	# 2026-08-29: glm-5.3 answered with a valid object, then "Note: ..."
+	# prose and a second, fenced copy) — json.loads on the whole thing dies
+	# with "Extra data" although the answer sits right at the top.
+	candidates = [content]
+	extracted = _first_json_object(content)
+	if extracted is not None and extracted != content:
+		candidates.append(extracted)
+	data = None
+	used_extracted = False
+	for idx, candidate in enumerate(candidates):
+		# Fix Python literals and trailing commas (cheap, always safe to apply).
+		sanitized = _sanitize_json(candidate)
+		# Try parsing directly, then the sanitized version, then a truncation repair.
+		for attempt_content, label in (
+			(candidate, "raw"),
+			(sanitized, "sanitized"),
+		):
 			try:
-				data = json.loads(repaired)
-				log.warning("LLM JSON was truncated; repaired to parseable object (dropping incomplete trailing field) (model=%s)", model or "?")
+				data = json.loads(attempt_content)
+				if label == "sanitized":
+					log.debug("JSON parsed after sanitization (Python literals fixed)")
+				break
 			except json.JSONDecodeError:
-				# Truncation repair didn't yield valid JSON either. Fall through
-				# to the json-repair salvage below (handles the same content).
-				data = None
+				continue
 		else:
-			data = None
-		if data is None:
-			# Final salvage: json-repair recovers the two failure modes the
-			# cheap sanitizer cannot — unescaped quotes inside string values
-			# ("reasoning": "...contains "PROLOG"...") and raw control chars
-			# (newlines) inside strings. These are the most common GLM mistakes
-			# and previously cost 3 wasted retry API calls each. Only used when
-			# json-repair is installed (optional [llm] extra).
-			if json_repair is not None:
+			# Last resort: try repairing truncated JSON (sanitized version).
+			repaired = _repair_truncated_json(sanitized)
+			if repaired is not None:
 				try:
-					salvaged = json_repair.loads(content)
-				except Exception:  # noqa: BLE001 - third-party, never fatal
-					salvaged = None
-				if isinstance(salvaged, dict):
-					log.warning("LLM JSON salvaged via json-repair (unescaped quotes/control chars fixed) (model=%s)", model or "?")
-					data = salvaged
+					data = json.loads(repaired)
+					log.warning("LLM JSON was truncated; repaired to parseable object (dropping incomplete trailing field) (model=%s)", model or "?")
+				except json.JSONDecodeError:
+					# Truncation repair didn't yield valid JSON either. Fall through
+					# to the json-repair salvage below (handles the same content).
+					data = None
+			else:
+				data = None
 			if data is None:
-				log.warning("LLM returned invalid JSON; content: %s", content[:500])
-				return None
+				# Final salvage: json-repair recovers the failure modes the
+				# cheap sanitizer cannot — unescaped quotes inside string values
+				# ("reasoning": "...contains "PROLOG"...") and raw control chars
+				# (newlines) inside strings. These are the most common GLM mistakes
+				# and previously cost 3 wasted retry API calls each. Only used when
+				# json-repair is installed (optional [llm] extra).
+				if json_repair is not None:
+					try:
+						salvaged = json_repair.loads(candidate)
+					except Exception:  # noqa: BLE001 - third-party, never fatal
+						salvaged = None
+					salvage_reason = "unescaped quotes/control chars fixed"
+					if isinstance(salvaged, list):
+						# "object + prose + object" content makes json-repair
+						# return BOTH objects as a list — the first is the
+						# model's answer, the second its restated
+						# "recommended fields" copy.
+						if salvaged and isinstance(salvaged[0], dict):
+							salvaged = salvaged[0]
+							salvage_reason = "leading object of wrapped response"
+						else:
+							salvaged = None
+					if isinstance(salvaged, dict):
+						log.warning("LLM JSON salvaged via json-repair (%s) (model=%s)", salvage_reason, model or "?")
+						data = salvaged
+		if data is not None:
+			used_extracted = idx > 0
+			break
+	if data is None:
+		log.warning("LLM returned invalid JSON; content: %s", content[:500])
+		return None
+	if used_extracted:
+		# Logged like the truncation/json-repair warnings so this failure
+		# mode's frequency is visible per model too.
+		log.warning("LLM JSON extracted from commentary-wrapped response (model=%s)", model or "?")
 	# Normalize field names
 	def _str(k):
 		v = data.get(k)

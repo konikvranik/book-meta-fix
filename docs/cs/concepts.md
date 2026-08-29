@@ -136,10 +136,15 @@ modelu pro `1308 Usage limit reached` (kvóta vyčerpána do konce běhu).
 **Tolerantní JSON** — modely GLM často emitují nevalidní JSON: pythonové
 literály (`None`/`True`), koncové čárky, **neescapované dvojité uvozovky
 uvnitř řetězcových hodnot** (`"reasoning": "...contains "PROLOG"..."`),
-**surové řídicí znaky** (nové řádky) uvnitř řetězců a zkrácení na limitu
-tokenů. `_parse_llm_json` všechny zachraňuje: levný vestavěný sanitizér
-ošetří běžné případy a pak `json-repair` (extra `[llm]`) dorovná ty těžké,
-takže se téměř perfektní odpověď nikdy nevyhodí kvůli syntaktickému
+**surové řídicí znaky** (nové řádky) uvnitř řetězců, zkrácení na limitu
+tokenů a **JSON zabalený do komentářů** — platný objekt následovaný
+vysvětlující prózou a druhou kopií v ohraničeném bloku. `_parse_llm_json`
+všechny zachraňuje: levný vestavěný sanitizér ošetří běžné případy, pak
+`json-repair` (extra `[llm]`) dorovná ty těžší a ze zabalených odpovědí se
+vyřízne první vybalancovaný `{...}` objekt (sledováním hloubky závorek s
+respektem k řetězcům, takže to funguje i bez json-repair; výsledek json-repair
+typu seznam dá svůj první dict — odpověď modelu, ne její přepověděnou
+kopii), takže se téměř perfektní odpověď nikdy nevyhodí kvůli syntaktickému
 preklepu.
 
 ## Workflow review.yaml

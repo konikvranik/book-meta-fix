@@ -360,11 +360,15 @@ Praktické pokyny v [how-to/llm.md → Ladění omezení rychlosti LLM](docs/cs/
 
 **Záchrana neplatného JSON**: modely GLM často emitují lehce rozbitý JSON
 (literály Pythonu `None`/`True`, koncové čárky, **neescapované uvozovky
-uvnitř hodnot řetězců**, syrové řídicí znaky, zkrácení). `_parse_llm_json`
-všechny tyto případy zachrání — levný vestavěný sanizátor zvládne běžné
-případy, pak `json-repair` (extra `[llm]`) zachrání ty těžší — takže se
-téměř dokonalá odpověď nikdy nezahodí kvůli syntaktickému přeřeknutí. Když to
-nabere, uvidíte v logu `LLM JSON salvaged via json-repair …`.
+uvnitř hodnot řetězců**, syrové řídicí znaky, zkrácení, **JSON zabalený do
+komentářů** — platný objekt následovaný vysvětlující prózou a druhou kopií
+v ohraničeném bloku). `_parse_llm_json` všechny tyto případy zachrání —
+levný vestavěný sanizátor zvládne běžné případy, `json-repair`
+(extra `[llm]`) zachrání ty těžší a z odpovědí zabalených do komentářů se
+vyřízne první vybalancovaný objekt — takže se téměř dokonalá odpověď nikdy
+nezahodí kvůli syntaktickému přeřeknutí. Když to nabere, uvidíte v logu
+`LLM JSON salvaged via json-repair …` nebo `LLM JSON extracted from
+commentary-wrapped response …`.
 
 Přepínače:
 

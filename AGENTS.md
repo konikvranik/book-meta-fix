@@ -348,8 +348,13 @@ src/book_meta_fix/
   resets the escalation counter.
 - **LLM JSON is salvaged, not rejected.** `_parse_llm_json` tries the cheap
   built-in sanitizer first, then `json-repair` (the `[llm]` extra) recovers
-  unescaped quotes / control chars / truncation. The `json_repair` import is
-  graceful (None if absent) — keep it optional.
+  unescaped quotes / control chars / truncation. JSON wrapped in commentary
+  (a valid object followed by explanatory prose and a second fenced copy —
+  measured on glm-5.3) is salvaged by carving out the first balanced
+  `{...}` object (`_first_json_object`, works without json-repair); a
+  json-repair LIST result yields its first dict — the model's answer, not
+  its restated copy. The `json_repair` import is graceful (None if absent)
+  — keep it optional.
 - **`review.yaml` streams** (`review_writer.py`): one YAML document per book,
   appended as each finishes. `.bak` carry-over preserves prior user decisions,
   matched by the book's **uuid** (NOT calibre_id) so a decision survives an

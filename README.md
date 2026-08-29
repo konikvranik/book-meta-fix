@@ -354,11 +354,15 @@ for practical guidance.
 
 **Invalid-JSON salvage**: GLM models often emit slightly broken JSON
 (Python `None`/`True` literals, trailing commas, **unescaped quotes inside
-string values**, raw control characters, truncation). `_parse_llm_json`
-recovers all of these — a cheap built-in sanitizer handles the common cases,
-then `json-repair` (the `[llm]` extra) salvages the hard ones — so a
-near-perfect response is never thrown away over a syntax slip. You'll see
-`LLM JSON salvaged via json-repair …` in the log when this kicks in.
+string values**, raw control characters, truncation, **JSON wrapped in
+commentary** — a valid object followed by explanatory prose and a second
+fenced copy). `_parse_llm_json` recovers all of these — a cheap built-in
+sanitizer handles the common cases, `json-repair` (the `[llm]` extra)
+salvages the hard ones, and commentary-wrapped responses yield their first
+balanced object — so a near-perfect response is never thrown away over a
+syntax slip. You'll see `LLM JSON salvaged via json-repair …` or
+`LLM JSON extracted from commentary-wrapped response …` in the log when
+this kicks in.
 
 Toggles:
 

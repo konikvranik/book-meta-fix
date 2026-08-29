@@ -130,10 +130,15 @@ run).
 **Tolerant JSON** — GLM models frequently emit invalid JSON: Python literals
 (`None`/`True`), trailing commas, **unescaped double-quotes inside string
 values** (`"reasoning": "...contains "PROLOG"..."`), **raw control
-characters** (newlines) inside strings, and truncation at the token limit.
-`_parse_llm_json` salvages all of these: a cheap built-in sanitizer handles
-the common cases, then `json-repair` (the `[llm]` extra) recovers the hard
-ones so a near-perfect response is never thrown away over a syntax slip.
+characters** (newlines) inside strings, truncation at the token limit, and
+**commentary-wrapped JSON** — a valid object followed by explanatory prose
+and a second, fenced copy. `_parse_llm_json` salvages all of these: a cheap
+built-in sanitizer handles the common cases, then `json-repair` (the `[llm]`
+extra) recovers the hard ones, and wrapped responses yield their first
+balanced `{...}` object (carved out by a string-aware brace scan, so this
+works even without json-repair; a json-repair list result yields its first
+dict — the model's answer, not its restated copy) so a near-perfect response
+is never thrown away over a syntax slip.
 
 ## The review.yaml workflow
 

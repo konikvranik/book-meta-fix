@@ -3,10 +3,13 @@
 **English** | [Čeština](../cs/how-to/debugging.md)
 
 - **Invalid JSON salvaged** — if you see `LLM JSON salvaged via json-repair
-  (unescaped quotes/control chars fixed)`, the model returned slightly broken
-  JSON and it was recovered. No action needed; this replaces the old 3-retry
-  waste. If you see `LLM returned invalid JSON` (no salvage line), install the
-  `[llm]` extra (`json-repair`).
+  (unescaped quotes/control chars fixed)` or `(leading object of wrapped
+  response)`, the model returned slightly broken JSON and it was recovered.
+  No action needed; this replaces the old 3-retry waste. If you see
+  `LLM JSON extracted from commentary-wrapped response`, the model wrapped
+  a valid object in explanatory prose (plus a second, fenced copy) and the
+  first object was carved out. If you see `LLM returned invalid JSON` (no
+  salvage line), install the `[llm]` extra (`json-repair`).
 - **Rate-limited** — `Z.AI rate-limited (429/1302 …); global cooldown Xs` is
   the circuit breaker doing its job; frequent ones mean raise the knobs in
   [tuning the LLM rate limit](llm.md#tuning-the-llm-rate-limit).
