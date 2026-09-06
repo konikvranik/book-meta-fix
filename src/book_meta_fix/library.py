@@ -103,10 +103,14 @@ def _is_excluded(name: str, *, is_file: bool = False) -> bool:
 # ---------------------------------------------------------------------------
 
 
-class Cache:
-	"""SQLite cache of parsed BookMeta.
+class CacheError(RuntimeError):
+	"""Raised when the SQLite cache database cannot be opened or initialized."""
 
-	The primary key is the book's ``uuid`` (the stable identity that survives
+
+class Cache:
+	"""SQLite cache of parsed BookMeta records, keyed by folder path.
+
+	Records are kept by ABS UUID primary key (surviving outside-of-bmf
 	folder renames/moves), but the LOOKUP is by ``path`` — the only key
 	available cheaply from the directory walk, before any metadata is parsed.
 	On load, a folder whose (path, mtime, size) still matches the cache is
@@ -120,9 +124,21 @@ class Cache:
 
 	def __init__(self, db_path: Path):
 		self.db_path = Path(db_path)
-		self.conn = sqlite3.connect(str(self.db_path))
-		self.conn.execute("PRAGMA journal_mode=WAL")
-		self._init_schema()
+		try:
+			if not self.db_path.parent.exists():
+				try:
+					self.db_path.parent.mkdir(parents=True, exist_ok=True)
+				except OSError as e:
+					raise CacheError(
+						f"Cannot create directory for cache database '{self.db_path.parent}': {e}"
+					) from e
+			self.conn = sqlite3.connect(str(self.db_path))
+			self.conn.execute("PRAGMA journal_mode=WAL")
+			self._init_schema()
+		except (sqlite3.OperationalError, sqlite3.DatabaseError) as e:
+			raise CacheError(
+				f"Unable to open cache database '{self.db_path}': {e}"
+			) from e
 
 	def _init_schema(self) -> None:
 		self.conn.executescript(

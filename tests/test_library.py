@@ -228,3 +228,15 @@ class TestScanProgressCallback:
 		# Must not raise when progress_callback is omitted.
 		books = scan_library(tmp_path, use_cache=False)
 		assert len(books) == 1
+
+
+class TestCacheError:
+	def test_uncreatable_directory_raises_cache_error(self, tmp_path: Path) -> None:
+		from book_meta_fix.library import CacheError
+
+		blocker = tmp_path / "blocker"
+		blocker.write_text("file", encoding="utf-8")
+		bad_db = blocker / "cannot_create_dir" / "cache.db"
+
+		with pytest.raises(CacheError, match="Cannot create directory"):
+			Cache(bad_db)

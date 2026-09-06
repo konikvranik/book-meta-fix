@@ -27,10 +27,43 @@ from rich.table import Table
 from . import __version__
 from .config import Config
 from .i18n import SUPPORTED_LANGUAGES, _, init_language
-from .library import Cache, scan_library
+from .library import Cache, CacheError, scan_library
 
 console = Console()
 log = logging.getLogger(__name__)
+
+
+def _validate_library(library: Path) -> None:
+	"""Verify that library exists and is an accessible directory."""
+	try:
+		if not library.is_dir():
+			raise FileNotFoundError
+	except OSError as e:
+		msg = (
+			f"[bold red]{_('Error:')}[/bold red] "
+			f"{_('Library directory does not exist or is not accessible:')} [cyan]{library}[/cyan]\n"
+			f"[dim]{_('If this is a network share (NFS/SMB), please ensure it is mounted.')}[/dim]"
+		)
+		if str(e):
+			msg += f"\n[dim]{e}[/dim]"
+		console.print(msg)
+		sys.exit(1)
+
+
+def _open_cache(db_path: Path, no_cache: bool = False) -> Cache | None:
+	"""Safely instantiate Cache, handling unmounted/inaccessible paths gracefully."""
+	if no_cache:
+		return None
+	try:
+		return Cache(db_path)
+	except CacheError as e:
+		console.print(
+			f"[bold red]{_('Error:')}[/bold red] "
+			f"{_('Cannot open cache database:')} [cyan]{db_path}[/cyan]\n"
+			f"[dim]{_('Ensure the path exists, the network share is mounted, and you have write permissions.')}[/dim]\n"
+			f"[dim]{e}[/dim]"
+		)
+		sys.exit(1)
 
 # Initialize the translation catalog from the environment BEFORE the click
 # decorators below run: their `help=` texts are evaluated at import time, so
@@ -75,7 +108,7 @@ def main(verbose: bool) -> None:
 
 
 @main.command()
-@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help=_("Library root (default: $BMF_LIBRARY or ~/Books)"))
+@click.option("--library", "library", type=click.Path(file_okay=False, path_type=Path), help=_("Library root (default: $BMF_LIBRARY or ~/Books)"))
 @click.option("--no-cache", is_flag=True, help=_("Disable SQLite cache (force full re-parse)"))
 @click.option("--limit", type=int, default=None, help=_("Process only the first N books (for testing)"))
 def scan(library: Path | None, no_cache: bool, limit: int | None) -> None:
@@ -86,11 +119,10 @@ def scan(library: Path | None, no_cache: bool, limit: int | None) -> None:
 	if library is not None:
 		cfg.library = library
 
+	_validate_library(cfg.library)
 	console.print(f"[bold]Scanning[/bold] [cyan]{cfg.library}[/cyan]", highlight=False)
 
-	cache: Cache | None = None
-	if not no_cache:
-		cache = Cache(cfg.cache_db)
+	cache = _open_cache(cfg.cache_db, no_cache=no_cache)
 
 	# scan_library walks the tree once to learn the folder count, then reports
 	# (done, total) per folder — so the bar starts indeterminate and gains a
@@ -123,7 +155,7 @@ def scan(library: Path | None, no_cache: bool, limit: int | None) -> None:
 
 
 @main.command()
-@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help=_("Library root"))
+@click.option("--library", "library", type=click.Path(file_okay=False, path_type=Path), help=_("Library root"))
 @click.option("--no-cache", is_flag=True, help=_("Disable SQLite cache (force full re-parse)"))
 @click.option("--limit", type=int, default=None, help=_("Process only the first N books (for testing)"))
 @click.option("--category", default=None, help=_("Show only books in this category (C1..C10, MISSING_ISBN, ...)"))
@@ -146,9 +178,8 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 	if library is not None:
 		cfg.library = library
 
-	cache: Cache | None = None
-	if not no_cache:
-		cache = Cache(cfg.cache_db)
+	_validate_library(cfg.library)
+	cache = _open_cache(cfg.cache_db, no_cache=no_cache)
 
 	# Reading metadata for the whole library is I/O-heavy (especially on NFS);
 	# wrap it so there's no silent gap before the detect pass.
@@ -199,7 +230,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 
 
 @main.command()
-@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help=_("Library root"))
+@click.option("--library", "library", type=click.Path(file_okay=False, path_type=Path), help=_("Library root"))
 @click.option("--no-cache", is_flag=True, help=_("Disable SQLite cache (force full re-parse)"))
 @click.option("--limit", type=int, default=None, help=_("Process only the first N books (for testing)"))
 @click.option("--skip-enrich", is_flag=True, default=True, help=_("Skip online enrichment (offline mode)"))
@@ -237,6 +268,8 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 	cfg = Config.from_env()
 	if library is not None:
 		cfg.library = library
+	_validate_library(cfg.library)
+	cache = _open_cache(cfg.cache_db, no_cache=no_cache)
 	out = output or cfg.review_file
 
 	# --databazeknih turns enrichment on (and opts the CZ/SK scraper in).
@@ -257,10 +290,6 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 	if verify_ok:
 		strict = not no_strict_verify
 		console.print(f"  [cyan]--verify-ok[/cyan] {_('--verify-ok audit: OK books checked against content (strict={strict})').format(strict=strict)}")
-
-	cache: Cache | None = None
-	if not no_cache:
-		cache = Cache(cfg.cache_db)
 
 	# --recheck-ok: wipe the persistent `verified` flag off every book that
 	# carries it, so those user-confirmed books re-enter normal detection.
@@ -569,7 +598,7 @@ def _print_fix_source_summary(stats: dict) -> None:
 
 @main.command()
 @click.argument("review_file", required=False, type=click.Path(exists=True, dir_okay=False, path_type=Path))
-@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help=_("Library root"))
+@click.option("--library", "library", type=click.Path(file_okay=False, path_type=Path), help=_("Library root"))
 @click.option("--apply", "do_apply", is_flag=True, help=_("Actually write changes (default: dry-run)"))
 @click.option("--pattern", "pattern", default=None, help=_("Target path pattern for OK books (default: '{author}/{title} ({id})'). Applied books whose metadata is clean (or `verified`) move there; books with unresolved problems move to --needfix-dir."))
 @click.option("--needfix-dir", "needfix_dir", default=None, help=_("Folder for books that still have unresolved problems after apply (default: 'needfix'). A resolved book moves back out of it on the next apply."))
@@ -594,11 +623,19 @@ def apply(review_file: Path | None, library: Path | None, do_apply: bool, patter
 		# CWD default — same resolution as `analyze` and `gui`.
 		review_file = cfg.review_file
 
+	if not no_place:
+		_validate_library(cfg.library)
+
 	console.print(f"[bold]{_('Applying')}[/bold] {review_file} ({'WRITE' if do_apply else 'DRY-RUN'})", highlight=False)
 	# Open the books cache (if one exists) so we can invalidate the folders we
 	# rewrite — otherwise the next run may serve the pre-apply BookMeta, most
 	# painfully on NFS where the attribute cache masks the new mtime.
-	cache: Cache | None = Cache(cfg.cache_db) if cfg.cache_db.is_file() else None
+	cache: Cache | None = None
+	if cfg.cache_db.is_file():
+		try:
+			cache = Cache(cfg.cache_db)
+		except CacheError:
+			cache = None
 	progress = Progress(
 		SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
 		BarColumn(complete_style="green", finished_style="green", pulse_style="green"), TextColumn("{task.completed}/{task.total}"),
@@ -653,7 +690,7 @@ def apply(review_file: Path | None, library: Path | None, do_apply: bool, patter
 
 
 @main.command()
-@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help=_("Library root"))
+@click.option("--library", "library", type=click.Path(file_okay=False, path_type=Path), help=_("Library root"))
 @click.option("--review", "review_file", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None, help=_("review.yaml to edit (default: $BMF_REVIEW or review.yaml)"))
 def gui(library: Path | None, review_file: Path | None) -> None:
 	"""Launch the interactive Tkinter editor for review.yaml.
@@ -701,7 +738,7 @@ def organize(ctx: click.Context) -> None:
 
 
 @main.command()
-@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help=_("Library root"))
+@click.option("--library", "library", type=click.Path(file_okay=False, path_type=Path), help=_("Library root"))
 @click.option("--no-cache", is_flag=True, help=_("Disable SQLite cache"))
 @click.option("--limit", type=int, default=None, help=_("Process only the first N books"))
 @click.option("--apply", "do_apply", is_flag=True, help=_("Actually generate EPUBs (default: dry-run)"))
@@ -722,11 +759,10 @@ def epubgen(library: Path | None, no_cache: bool, limit: int | None, do_apply: b
 	if library is not None:
 		cfg.library = library
 
+	_validate_library(cfg.library)
 	console.print(f"[bold]{_('Generating EPUBs')}[/bold] {cfg.library} [{'WRITE' if do_apply else 'DRY-RUN'}]", highlight=False)
 
-	cache: Cache | None = None
-	if not no_cache:
-		cache = Cache(cfg.cache_db)
+	cache = _open_cache(cfg.cache_db, no_cache=no_cache)
 	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 
 	# Reading metadata for the whole library is the slow, silent gap before
@@ -817,7 +853,7 @@ def _print_epubgen_summary(results, skipped_not_ok: int, skipped_has_epub: int) 
 
 
 @main.command()
-@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help=_("Library root"))
+@click.option("--library", "library", type=click.Path(file_okay=False, path_type=Path), help=_("Library root"))
 @click.option("--no-cache", is_flag=True, help=_("Disable SQLite cache"))
 @click.option("--limit", type=int, default=None, help=_("Process only the first N books"))
 @click.option("--needfix-dir", default=None, help=_("Folder for quarantined rogues (default: 'needfix')"))
@@ -844,14 +880,14 @@ def crosscheck(library: Path | None, no_cache: bool, limit: int | None, needfix_
 	cfg = Config.from_env()
 	if library is not None:
 		cfg.library = library
+
+	_validate_library(cfg.library)
 	needfix = needfix_dir or DEFAULT_NEEDFIX_DIR
 
 	console.print(f"[bold]{_('Cross-checking formats')}[/bold] [cyan]{cfg.library}[/cyan] [{'WRITE' if do_apply else 'DRY-RUN'}]", highlight=False)
 	console.print(f"  {_('rogues go to')}:  [cyan]{needfix}/{CROSSCHECK_SUBDIR}/<origin> - <file>/[/cyan]")
 
-	cache: Cache | None = None
-	if not no_cache:
-		cache = Cache(cfg.cache_db)
+	cache = _open_cache(cfg.cache_db, no_cache=no_cache)
 	try:
 		# Reading metadata for the whole library is the slow, silent gap before
 		# cross-check — wrap it in a bar so it isn't a dead spot.
@@ -979,7 +1015,7 @@ def _print_crosscheck_summary(results, move_results, do_apply: bool) -> None:  #
 
 
 @main.command()
-@click.option("--library", "library", type=click.Path(exists=True, file_okay=False, path_type=Path), help=_("Library root"))
+@click.option("--library", "library", type=click.Path(file_okay=False, path_type=Path), help=_("Library root"))
 @click.option("--no-cache", is_flag=True, help=_("Disable SQLite cache"))
 @click.option("--limit", type=int, default=None, help=_("Process only the first N books"))
 @click.option("--apply", "do_apply", is_flag=True, help=_("Actually remove the covers (default: dry-run)"))
@@ -1001,11 +1037,10 @@ def strip_covers(library: Path | None, no_cache: bool, limit: int | None, do_app
 	if library is not None:
 		cfg.library = library
 
+	_validate_library(cfg.library)
 	console.print(f"[bold]{_('Stripping generated covers')}[/bold] [cyan]{cfg.library}[/cyan] [{'WRITE' if do_apply else 'DRY-RUN'}]", highlight=False)
 
-	cache: Cache | None = None
-	if not no_cache:
-		cache = Cache(cfg.cache_db)
+	cache = _open_cache(cfg.cache_db, no_cache=no_cache)
 	try:
 		with Progress(
 			SpinnerColumn(), TextColumn("[progress.description]{task.description}"),

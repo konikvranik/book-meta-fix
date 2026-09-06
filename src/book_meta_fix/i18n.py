@@ -43,9 +43,12 @@ def _normalize(code: str | None) -> str | None:
 def detect_language() -> str:
 	"""Pick the language from the environment / user locale. Never raises."""
 	for key in ("BMF_LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"):
-		base = _normalize(os.environ.get(key))
-		if base in SUPPORTED_LANGUAGES:
-			return base  # type: ignore[return-value]
+		val = os.environ.get(key)
+		if val:
+			base = _normalize(val)
+			if base in SUPPORTED_LANGUAGES:
+				return base  # type: ignore[return-value]
+			return "en"
 	try:
 		base = _normalize(locale.getlocale()[0] or locale.getdefaultlocale()[0])
 	except Exception:

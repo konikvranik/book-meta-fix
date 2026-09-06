@@ -1826,6 +1826,22 @@ msgstr ""
 #~ "hluboké fallback stádo dostává 429/1302 "
 #~ "bouře — a falešné 1113 „insufficient "
 #~ "balance“ — bez ohledu na to, jak"
-#~ " pomalý je drip. Workeři místo "
-#~ "odmítnutí čekají ve frontě tady."
+#: src/book_meta_fix/cli.py:38
+msgid "Error:"
+msgstr "Chyba:"
 
+#: src/book_meta_fix/cli.py:39
+msgid "Library directory does not exist or is not accessible:"
+msgstr "Adresář knihovny neexistuje nebo není přístupný:"
+
+#: src/book_meta_fix/cli.py:41
+msgid "If this is a network share (NFS/SMB), please ensure it is mounted."
+msgstr "Pokud se jedná o síťový disk (NFS/SMB), zkontrolujte, zda je připojen."
+
+#: src/book_meta_fix/cli.py:53
+msgid "Cannot open cache database:"
+msgstr "Nelze otevřít databázi cache:"
+
+#: src/book_meta_fix/cli.py:55
+msgid "Ensure the path exists, the network share is mounted, and you have write permissions."
+msgstr "Zkontrolujte, zda cesta existuje, síťový disk je připojen a máte oprávnění k zápisu."

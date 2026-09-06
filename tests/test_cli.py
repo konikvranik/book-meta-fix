@@ -115,3 +115,31 @@ class TestStripCovers:
 		# the clean book is untouched
 		assert (good / "cover.jpg").is_file()
 		assert epub_cover_image(good / "g.epub") is not None
+
+
+class TestPathValidation:
+	"""CLI commands gracefully report missing library or unopenable cache without traceback."""
+
+	def test_nonexistent_library_exits_with_error(self, tmp_path: Path) -> None:
+		nonexistent = tmp_path / "does_not_exist"
+		runner = CliRunner()
+		for cmd in ["scan", "report", "analyze"]:
+			result = runner.invoke(main, [cmd, "--library", str(nonexistent)])
+			assert result.exit_code != 0
+			assert "Library directory does not exist or is not accessible" in result.output
+			assert "Traceback" not in result.output
+
+	def test_unopenable_cache_exits_with_error(self, tmp_path: Path) -> None:
+		# Create a file where a directory would need to be created
+		blocker = tmp_path / "blocker"
+		blocker.write_text("not a dir", encoding="utf-8")
+		unopenable_cache = blocker / "sub" / "cache.db"
+
+		lib = tmp_path / "lib"
+		lib.mkdir()
+
+		runner = CliRunner()
+		result = runner.invoke(main, ["scan", "--library", str(lib)], env={"BMF_CACHE": str(unopenable_cache)})
+		assert result.exit_code != 0
+		assert "Cannot open cache database" in result.output
+		assert "Traceback" not in result.output
