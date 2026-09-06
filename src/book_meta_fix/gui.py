@@ -219,6 +219,41 @@ def action_value(action: str) -> str | None:
 	return action if action != "pending" else None
 
 
+# Fields a bulk edit makes sense for — both flat strings in review.yaml.
+BULK_FIELDS = ("author", "series")
+
+
+def apply_bulk_field(entries: list[dict], indices, field: str, value: str | None,
+                     *, delete: bool = False) -> int:
+	"""Merge one bulk-edited value into the selected entries' ``proposed``.
+
+	The bulk twin of the editor's per-field edit: a non-empty *value* (or
+	*delete* — the ∅ semantics, ``proposed[field]: null``) is merged over
+	each selected entry's proposal. A pending entry gains ``action:
+	accept``: a proposal without a decision is skipped by ``bmf apply``,
+	and a bulk edit IS the decision (the same rule the ∅ button follows);
+	existing decisions are never overridden. The series ORDER stays
+	per-book — only the name is touched, ``series_index`` is never merged.
+	The proposal dict is REBOUND, never mutated in place: a library-served
+	entry shares its ``proposed`` with the pristine index (search serves
+	shallow copies), which must stay untouched. Returns how many entries
+	were touched.
+	"""
+	v = None if delete else str(value or "").strip()
+	if not delete and not v:
+		return 0
+	n = 0
+	for i in indices:
+		if not (0 <= i < len(entries)):
+			continue
+		e = entries[i]
+		e["proposed"] = {**(e.get("proposed") or {}), field: v}
+		if not e.get("action"):
+			e["action"] = "accept"
+		n += 1
+	return n
+
+
 def render_review_text(entries: list[dict]) -> str:
 	"""Render raw entry dicts as a multi-doc review.yaml string.
 
@@ -447,6 +482,21 @@ def entry_series_label(e: dict) -> str:
 	if not name:
 		return f"#{idx}" if idx else ""
 	return f"{name} #{idx}" if idx else name
+
+
+def entry_author_label(e: dict) -> str:
+	"""Author shown in a list row — the decision-aware twin of
+	:func:`entry_series_label`. An ACCEPT/KEEP decision applies
+	``proposed`` like apply will, so the row shows the author the decision
+	leaves it (a bulk edit or a C1 swap is visible in the list at once,
+	not only after ``bmf apply``); pending and delete entries show
+	``current``. A ``null`` proposal (the ∅ mark) deletes the field → "".
+	"""
+	prop = (e or {}).get("proposed") or {}
+	if prop and e.get("action") in ("accept", "keep") and "author" in prop:
+		v = prop["author"]
+		return str(v) if v is not None else ""
+	return str(((e or {}).get("current") or {}).get("author") or "")
 
 
 def entry_search_haystack(e: dict, active: dict | None = None) -> str:
@@ -993,8 +1043,12 @@ class _BookList:
 	``values`` renders as its Tcl name (``pyimage1``), i.e. as text.
 
 	Exposes just the surface the editor uses (insert/delete/get_children/
-	selection_set/focus/see/exists/identify_row/bind/yview/configure), so
-	the rest of the GUI keeps talking to ``self.tree`` unchanged. Only the
+	selection_set/selection_get/selection_toggle/selection_extend/focus/
+	see/exists/identify_row/bind/yview/configure), so the rest of the GUI
+	keeps talking to ``self.tree`` unchanged. On top of the single focus
+	row there is a MULTI-selection (Ctrl+click toggles, Shift+click extends
+	from the anchor — the input of the bulk edit); rows selected beyond the
+	focus draw with a lighter tint. Only the
 	VISIBLE rows are drawn — the library holds ~5000 entries and thousands
 	of canvas items would make both rebuilds and scrolling crawl; the
 	scrollregion is virtual, derived from the row count.
@@ -1024,11 +1078,15 @@ class _BookList:
 		self._rows: list[dict] = []
 		self._by_iid: dict[str, dict] = {}
 		self._selected: str | None = None
+		# Multi-selection state: the selected iid list (focus included when
+		# it is selected) and the anchor row Shift+click extends from.
+		self._sel: list[str] = []
+		self._anchor: str | None = None
 		self._select_cb = None
 		self._draw_pending = False
 		self._pending_top: float | None = None
 		self._font, self._bold, self._italic = self._resolve_fonts(style)
-		self._bg, self._fg, self._sel_bg, self._sel_fg, self._border = self._resolve_colors(style)
+		self._bg, self._fg, self._sel_bg, self._sel_fg, self._sel_bg2, self._border = self._resolve_colors(style)
 		self.canvas = tk.Canvas(
 			parent, highlightthickness=0, background=self._bg, yscrollincrement=1,
 		)
@@ -1057,7 +1115,22 @@ class _BookList:
 		return font, bold, italic
 
 	@staticmethod
-	def _resolve_colors(style):
+	def _mix_hex(c1: str, c2: str, t: float) -> str:
+		"""Blend two ``#rrggbb`` colours (t=0 → c1, 1 → c2). *c1* on any parse
+		failure — a theme may hand us a colour name instead of hex."""
+		try:
+			r1, g1, b1 = (int(c1[i:i + 2], 16) for i in (1, 3, 5))
+			r2, g2, b2 = (int(c2[i:i + 2], 16) for i in (1, 3, 5))
+		except (TypeError, ValueError):
+			return c1
+		return "#{:02x}{:02x}{:02x}".format(
+			round(r1 + (r2 - r1) * t),
+			round(g1 + (g2 - g1) * t),
+			round(b1 + (b2 - b1) * t),
+		)
+
+	@classmethod
+	def _resolve_colors(cls, style):
 		try:
 			bg = style.lookup("Treeview", "background") or "#ffffff"
 			fg = style.lookup("Treeview", "foreground") or "#000000"
@@ -1076,7 +1149,10 @@ class _BookList:
 
 		sel_bg = _map_val("background", sel_bg)
 		sel_fg = _map_val("foreground", sel_fg)
-		return bg, fg, sel_bg, sel_fg, "#999999"
+		# The multi-selection tint: the selection blue washed toward the row
+		# background, so the focus row stays the strongest cue.
+		sel_bg2 = cls._mix_hex(sel_bg, bg, 0.6)
+		return bg, fg, sel_bg, sel_fg, sel_bg2, "#999999"
 
 	# -- Treeview-like API --------------------------------------------------
 
@@ -1112,6 +1188,9 @@ class _BookList:
 				self._rows.remove(row)
 		if self._selected not in self._by_iid:
 			self._selected = None
+		self._sel = [i for i in self._sel if i in self._by_iid]
+		if self._anchor not in self._by_iid:
+			self._anchor = None
 		self._update_scrollregion()
 		self._schedule_draw()
 
@@ -1122,8 +1201,70 @@ class _BookList:
 		return iid in self._by_iid
 
 	def selection_set(self, iid, *, silent: bool = False) -> None:
+		"""Plain click: single selection, focus and anchor move to *iid*."""
 		if iid not in self._by_iid:
 			return
+		self._sel = [iid]
+		self._anchor = iid
+		self._set_focus_iid(iid, silent=silent)
+
+	def selection_toggle(self, iid, *, silent: bool = False) -> None:
+		"""Ctrl+click: flip one row's membership; focus and anchor follow."""
+		if iid not in self._by_iid:
+			return
+		if iid in self._sel:
+			self._sel.remove(iid)
+		else:
+			self._sel.append(iid)
+		self._anchor = iid
+		self._set_focus_iid(iid, silent=silent)
+
+	def selection_extend(self, iid, *, silent: bool = False) -> None:
+		"""Shift+click: select the row range from the anchor to *iid*."""
+		if iid not in self._by_iid:
+			return
+		a = self._row_index(self._anchor) if self._anchor in self._by_iid else None
+		b = self._row_index(iid)
+		if a is None or b is None:
+			self.selection_set(iid, silent=silent)
+			return
+		lo, hi = min(a, b), max(a, b)
+		self._sel = [r["iid"] for r in self._rows[lo:hi + 1]]
+		self._set_focus_iid(iid, silent=silent)
+
+	def selection_get(self) -> tuple:
+		"""The selected iids (focus first, then the rest in pick order)."""
+		if self._selected and self._selected in self._sel:
+			return (self._selected, *(i for i in self._sel if i != self._selected))
+		return tuple(self._sel)
+
+	def preserve_selection(self, focus_iid: str, keep=()) -> None:
+		"""After a full rebuild (refresh_list): keep the selection that is
+		still VISIBLE.
+
+		Rows hidden by the list filter are rebuilt out of the widget, so
+		their iids leave the selection — what you SEE selected is what a
+		bulk edit gets. *keep* is the pre-rebuild selection banked by the
+		caller (delete() prunes against the interim empty widget). The
+		focus row is restored silently: firing <<TreeviewSelect>> on a
+		background refresh would reload the detail pane and wipe unsaved
+		field edits.
+		"""
+		merged = list(keep) + [i for i in self._sel if i not in keep]
+		self._sel = [i for i in merged if i in self._by_iid]
+		if self._anchor not in self._by_iid:
+			self._anchor = None
+		if focus_iid in self._by_iid:
+			self._selected = focus_iid
+			if focus_iid not in self._sel:
+				self._sel.append(focus_iid)
+		self._schedule_draw()
+
+	def _row_index(self, iid) -> int | None:
+		row = self._by_iid.get(iid)
+		return self._rows.index(row) if row is not None else None
+
+	def _set_focus_iid(self, iid, *, silent: bool = False) -> None:
 		changed = iid != self._selected
 		self._selected = iid
 		if changed:
@@ -1224,7 +1365,14 @@ class _BookList:
 	def _on_click(self, event):
 		iid = self.identify_row(event.y)
 		if iid:
-			self.selection_set(iid)
+			# Ctrl toggles one row into the multi-selection, Shift extends
+			# it from the anchor — the input side of the bulk edit.
+			if event.state & 0x0001 and self._anchor is not None:  # Shift
+				self.selection_extend(iid)
+			elif event.state & 0x0004:  # Control
+				self.selection_toggle(iid)
+			else:
+				self.selection_set(iid)
 		return "break"
 
 	def _on_wheel(self, event):
@@ -1271,9 +1419,11 @@ class _BookList:
 			y = self.HEADER_H + i * self.ROW_H
 			cy = y + self.ROW_H // 2
 			sel = row["iid"] == self._selected
-			if sel:
+			in_sel = not sel and row["iid"] in self._sel
+			if sel or in_sel:
 				c.create_rectangle(0, y, w, y + self.ROW_H,
-				                   fill=self._sel_bg, outline="")
+				                   fill=self._sel_bg if sel else self._sel_bg2,
+				                   outline="")
 			fg = self._sel_fg if sel else self._fg
 			# Line 1: title, bold, from the left edge. Line 2: author,
 			# italic, indented — the thumbnail already fixes the row height,
@@ -1314,8 +1464,8 @@ class _BookList:
 				c.create_image(thumb_x, y + (self.ROW_H - self.THUMB_H) // 2,
 				               anchor="nw", image=row["image"])
 			if i + 1 < len(self._rows):
-				c.create_line(0, y + self.ROW_H, w, y + self.ROW_H,
-				              fill=self._border if not sel else self._sel_bg)
+				line_bg = self._sel_bg if sel else (self._sel_bg2 if in_sel else self._border)
+				c.create_line(0, y + self.ROW_H, w, y + self.ROW_H, fill=line_bg)
 
 
 # ---------------------------------------------------------------------------
@@ -1579,6 +1729,17 @@ class ReviewEditorApp:
 		self.tree.bind("<Motion>", self._on_tree_motion, add="+")
 		self.tree.bind("<Leave>", self._on_tree_leave, add="+")
 		self.tree.bind("<Double-1>", self._on_tree_double, add="+")
+
+		# Bulk edit of the multi-selection (Ctrl/Shift+click) — see bulk_edit.
+		bulk = ttk.Frame(frame)
+		bulk.pack(fill="x", padx=6, pady=(0, 4))
+		self._bulk_btn = ttk.Button(bulk, text=_("Bulk edit (Ctrl+E)"), command=self.bulk_edit)
+		self._bulk_btn.pack(side="left")
+		_Tooltip(self._bulk_btn, _(
+			"Set the author or series for all selected books at once.\n"
+			"Select rows with Ctrl+click (toggle) and Shift+click (range);\n"
+			"the value lands in each book's proposal (a pending book becomes\n"
+			"accept, a decided one keeps its action)."))
 
 		parent.add(frame, weight=1)
 
@@ -2159,11 +2320,20 @@ class ReviewEditorApp:
 		k = (event.keysym or "").lower()
 		if k in _PASSTHROUGH:
 			return None  # keep native copy/paste/cut/undo/select-all
+		# A modal child holding the grab (the bulk-edit dialog) owns the
+		# keyboard — main-window shortcuts must not fire underneath it.
+		try:
+			grabbed = self.root.grab_current()
+		except Exception:  # noqa: BLE001
+			grabbed = None
+		if grabbed is not None and grabbed is not self.root:
+			return None
 		dispatch = {
 			"return": self.act_accept, "d": self.act_delete, "k": self.act_keep,
 			"o": self.toggle_verified,
 			"0": self.act_clear, "s": self.save, "q": self.quit_app,
 			"w": self.swap_fields, "f": self.copy_current_to_focused,
+			"e": self.bulk_edit,
 			"n": self.cover_new,
 			"b": self.cover_restore_bak, "p": self.cover_keep, "m": self.cover_delete_checked,
 			"t": self.content_toggle_view, "g": self.content_recode_toggle,
@@ -2238,6 +2408,7 @@ class ReviewEditorApp:
 			self._filter_category.set("all")
 
 		sel_iid = self.tree.focus()
+		sel_iids = self.tree.selection_get()  # banked BEFORE the rebuild
 		self.tree.delete(*self.tree.get_children())
 		idxs = self._filtered_indices()
 		for i in idxs:
@@ -2247,7 +2418,7 @@ class ReviewEditorApp:
 			# image=None corrupts ttk's option parsing and the next option's
 			# value (here the ``values`` list) is misread as an option name.
 			kw = dict(iid=str(i), text=self._entry_title(e),
-			          values=(self._action_label(e), self._entry_author(e),
+			          values=(self._action_label(e), entry_author_label(e),
 			                  bool(e.get("verified")), entry_series_label(e)))
 			img = self._thumb_photo_for(uuid)
 			if img is not None:
@@ -2259,9 +2430,11 @@ class ReviewEditorApp:
 		# _step's explicit see()). SILENT re-select: firing <<TreeviewSelect>>
 		# here would reload the detail pane of the book the user may be
 		# editing — wiping unsaved field edits and re-running the cover /
-		# content loaders on every background refresh.
+		# content loaders on every background refresh. The multi-selection
+		# survives the rebuild too, minus rows the filter hides — the bulk
+		# edit must act on what the user SEES selected.
 		if sel_iid and self.tree.exists(sel_iid):
-			self.tree.selection_set(sel_iid, silent=True)
+			self.tree.preserve_selection(sel_iid, sel_iids)
 		self._set_status()
 
 	def _filtered_indices(self) -> list[int]:
@@ -2306,11 +2479,6 @@ class ReviewEditorApp:
 	def _entry_title(e: dict) -> str:
 		cur = e.get("current") or {}
 		return cur.get("title") or "—"
-
-	@staticmethod
-	def _entry_author(e: dict) -> str:
-		cur = e.get("current") or {}
-		return cur.get("author") or ""
 
 	@staticmethod
 	def _action_label(e: dict) -> str:
@@ -2804,6 +2972,102 @@ class ReviewEditorApp:
 		else:
 			self._field_cleared_ui(f, False)
 			f["value"].set(f.get("pre_delete") or "")
+
+	# ------------------------------------------------------------------
+	# Bulk edit (multi-selection)
+	# ------------------------------------------------------------------
+
+	def _bulk_selection_indices(self) -> list[int]:
+		"""Entry indices of the list's multi-selection (sorted, deduplicated)."""
+		out = set()
+		for iid in self.tree.selection_get():
+			if iid.lstrip("-").isdigit():
+				i = int(iid)
+				if 0 <= i < len(self.entries):
+					out.add(i)
+		return sorted(out)
+
+	def bulk_edit(self) -> None:
+		"""Ctrl+E: set author / series for every SELECTED list row at once.
+
+		The multi-selection (Ctrl+click toggle, Shift+click range) lives in
+		the list; the detail pane keeps showing the focus row. The dialog's
+		value merges into each selected entry's ``proposed``
+		(:func:`apply_bulk_field`); pending entries become ``accept`` — a
+		proposal without a decision is skipped by apply. Save (Ctrl+S)
+		writes review.yaml as usual. The dialog holds a grab while open, so
+		the main window's shortcuts stay inert under it.
+		"""
+		idxs = self._bulk_selection_indices()
+		if not idxs:
+			self._flash(_("select books first (Ctrl+click, Shift+click)"))
+			return
+		# Bank the current form FIRST: its values would otherwise win over
+		# the bulk value at the next collect (the form still holds the old
+		# field text until the reload below).
+		self._collect_current()
+		win = tk.Toplevel(self.root)
+		win.title(_("Bulk edit"))
+		win.transient(self.root)
+		win.resizable(False, False)
+		ttk.Label(win, text=_("Apply to {n} selected books:").format(n=len(idxs)),
+		          anchor="w").pack(fill="x", padx=10, pady=(10, 4))
+		field_var = tk.StringVar(value="author")
+		frm = ttk.Frame(win)
+		frm.pack(fill="x", padx=10)
+		ttk.Radiobutton(frm, text=_("Author"), value="author",
+		                variable=field_var).pack(side="left", padx=(0, 12))
+		ttk.Radiobutton(frm, text=_("Series"), value="series",
+		                variable=field_var).pack(side="left")
+		value_var = tk.StringVar()
+		entry = ttk.Entry(win, textvariable=value_var, width=44)
+		entry.pack(fill="x", padx=10, pady=4)
+		# The same autocomplete as the field itself — the pool follows the
+		# radio, so switching to Series completes against series names.
+		_Autocomplete(entry, lambda: sorted(
+			self._vocab_authors if field_var.get() == "author" else self._vocab_series))
+		del_var = tk.BooleanVar(value=False)
+		ttk.Checkbutton(win, text=_("∅ apply as EMPTY (delete the field)"),
+		                variable=del_var).pack(anchor="w", padx=10, pady=2)
+		hint = ttk.Label(win, text="", foreground="#a00")
+		hint.pack(anchor="w", padx=10)
+
+		def _apply(_event=None):
+			v = value_var.get().strip()
+			if not v and not del_var.get():
+				hint.configure(text=_("enter a value or tick ∅"))
+				return
+			field = field_var.get()
+			n = apply_bulk_field(self.entries, idxs, field, v, delete=del_var.get())
+			if v and not del_var.get():
+				(self._vocab_authors if field == "author" else self._vocab_series).add(v)
+			self._mark_dirty()
+			# The current book's form may hold one of the just-overwritten
+			# values — reload it from the merged proposal.
+			if 0 <= self._cur < len(self.entries) and self._cur in idxs:
+				self._load_book(self._cur)
+			self.refresh_list()
+			self._flash(_("bulk edit: {n} books").format(n=n))
+			win.destroy()
+			return "break"
+
+		btns = ttk.Frame(win)
+		btns.pack(fill="x", padx=10, pady=10)
+		ttk.Button(btns, text=_("Apply"), command=_apply).pack(side="left", padx=2)
+		ttk.Button(btns, text=_("Cancel"), command=win.destroy).pack(side="left", padx=2)
+		# Return accepts the value (an open autocomplete popup consumes it
+		# first — its own Return binding runs on the Entry, closer in the
+		# bindtag chain than the toplevel).
+		win.bind("<Return>", _apply)
+		win.bind("<Escape>", lambda _e: (win.destroy(), "break")[1])
+		# Centre over the main window, then hand the keyboard to the dialog.
+		self.root.update_idletasks()
+		win.update_idletasks()
+		x = self.root.winfo_rootx() + (self.root.winfo_width() - win.winfo_width()) // 2
+		y = self.root.winfo_rooty() + (self.root.winfo_height() - win.winfo_height()) // 2
+		win.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+		win.grab_set()
+		entry.focus_set()
 
 	def _copy_current(self, role: str) -> None:
 		# Copies whatever the RO label currently DISPLAYS (mode-dependent).
@@ -3429,6 +3693,8 @@ class ReviewEditorApp:
 			("Ctrl+A", _("select all in the field")),
 			("Ctrl+Enter", "accept"),
 			("Ctrl+W", _("swap the author↔title field values (C1 helper)")),
+			("Ctrl/Shift+click", _("list: select multiple books (toggle one / extend a range)")),
+			("Ctrl+E", _("bulk edit: set the author or series for all selected books at once")),
 			("∅ / ↺", _("field button: apply the field as EMPTY (wrong proposal, correct value unknown)")),
 			("Ctrl+D", "delete"),
 			("Ctrl+K", _("keep (applies like accept; the entry stays in review)")),

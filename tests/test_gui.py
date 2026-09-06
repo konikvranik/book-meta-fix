@@ -13,6 +13,7 @@ from pathlib import Path
 import book_meta_fix.gui as gui
 from book_meta_fix.gui import (
 	action_value,
+	apply_bulk_field,
 	build_library_index,
 	collect_vocab_values,
 	compose_overlay,
@@ -20,6 +21,7 @@ from book_meta_fix.gui import (
 	delete_covers,
 	embedded_cover_thumb,
 	entries_to_write,
+	entry_author_label,
 	entry_matches_search,
 	entry_series_label,
 	extract_series_values,
@@ -121,6 +123,107 @@ class TestActionValue:
 	def test_decisions_pass_through(self):
 		for a in ("accept", "delete", "keep"):
 			assert action_value(a) == a
+
+
+class TestApplyBulkField:
+	"""The Ctrl+E bulk edit: one author/series value into many proposals."""
+
+	def test_merges_value_and_decides_pending(self):
+		entries = [
+			{"current": {"author": "A"}, "proposed": {"title": "T"}, "action": None},
+			{"current": {"author": "B"}, "proposed": None, "action": None},
+		]
+		assert apply_bulk_field(entries, [0, 1], "author", "Petr Vraník") == 2
+		# Existing proposal keys survive the merge.
+		assert entries[0]["proposed"] == {"title": "T", "author": "Petr Vraník"}
+		assert entries[1]["proposed"] == {"author": "Petr Vraník"}
+		# A proposal without a decision is skipped by apply — the bulk edit
+		# IS the decision (the same rule the ∅ button follows).
+		assert entries[0]["action"] == "accept"
+		assert entries[1]["action"] == "accept"
+
+	def test_existing_decision_kept(self):
+		entries = [{"current": {}, "proposed": None, "action": "keep"}]
+		apply_bulk_field(entries, [0], "series", "Nadace")
+		assert entries[0]["action"] == "keep"
+
+	def test_delete_stores_null(self):
+		entries = [{"current": {"series": "špatná"}, "proposed": None, "action": None}]
+		apply_bulk_field(entries, [0], "series", "", delete=True)
+		assert entries[0]["proposed"]["series"] is None
+		assert entries[0]["action"] == "accept"
+
+	def test_series_order_untouched(self):
+		# Only the NAME is touched — the per-book order (the C14 prefill
+		# included) stays as it was.
+		entries = [{"current": {"series": "Mark Stone #73"},
+		            "proposed": {"series": "Mark Stone", "series_index": "73"},
+		            "action": None}]
+		apply_bulk_field(entries, [0], "series", "Mark Stone (V)")
+		assert entries[0]["proposed"] == {"series": "Mark Stone (V)",
+		                                  "series_index": "73"}
+
+	def test_empty_value_without_delete_is_noop(self):
+		entries = [{"current": {}, "proposed": None, "action": None}]
+		assert apply_bulk_field(entries, [0], "author", "   ") == 0
+		assert entries[0]["proposed"] is None
+		assert entries[0]["action"] is None
+
+	def test_out_of_range_indices_skipped(self):
+		entries = [{"current": {}, "proposed": None, "action": None}]
+		assert apply_bulk_field(entries, [0, 5], "author", "X") == 1
+
+	def test_proposed_rebound_not_mutated(self):
+		# A library-served entry SHARES its `proposed` dict with the pristine
+		# index (search serves shallow copies) — the merge must rebind, never
+		# mutate the shared dict in place.
+		shared = {"series": "old"}
+		entries = [{"current": {}, "proposed": shared, "action": None}]
+		apply_bulk_field(entries, [0], "series", "new")
+		assert shared == {"series": "old"}
+		assert entries[0]["proposed"] == {"series": "new"}
+
+
+class TestEntryAuthorLabel:
+	"""The row's author follows the same decision-aware policy as the series
+	label: accept/keep shows the proposed author (a bulk edit or a C1 swap
+	is visible in the list immediately, not only after apply)."""
+
+	def test_current_when_pending(self):
+		e = {"current": {"author": "Old"}, "proposed": {"author": "New"}}
+		assert entry_author_label(e) == "Old"
+
+	def test_accepted_proposal_overlays_current(self):
+		for a in ("accept", "keep"):
+			e = {"action": a, "current": {"author": "Old"},
+			     "proposed": {"author": "New"}}
+			assert entry_author_label(e) == "New"
+
+	def test_accepted_without_author_proposal_shows_current(self):
+		e = {"action": "accept", "current": {"author": "Old"},
+		     "proposed": {"isbn": "X"}}
+		assert entry_author_label(e) == "Old"
+
+	def test_accepted_null_clears(self):
+		e = {"action": "accept", "current": {"author": "Old"},
+		     "proposed": {"author": None}}
+		assert entry_author_label(e) == ""
+
+	def test_missing_author_is_empty(self):
+		assert entry_author_label({}) == ""
+		assert entry_author_label({"current": {}}) == ""
+		assert entry_author_label(None) == ""
+
+
+class TestBulkSelectionIndices:
+	def test_parses_valid_indices_sorted_deduped(self):
+		import types
+
+		app = gui.ReviewEditorApp.__new__(gui.ReviewEditorApp)
+		app.entries = [{"uuid": "a"}, {"uuid": "b"}, {"uuid": "c"}]
+		app.tree = types.SimpleNamespace(
+			selection_get=lambda: ("2", "0", "bogus", "9"))
+		assert app._bulk_selection_indices() == [0, 2]
 
 
 class TestCoverPaths:
