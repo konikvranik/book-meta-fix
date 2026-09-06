@@ -124,7 +124,38 @@ src/book_meta_fix/
                   ORDER never touched; the dialog holds a grab and _on_ctrl_key ignores
                   shortcuts under any grab; the row's author/series labels are decision-aware
                   (entry_author_label/entry_series_label — accept/keep shows the proposed
-                  value, so a bulk edit is visible in the list at once)
+                  value, so a bulk edit is visible in the list at once) — plus the Shift
+                  bulk twins (dispatch: Shift combos are matched BEFORE the Ctrl passthrough
+                  set, so Ctrl+Shift+A wins over select-all): Ctrl+Shift+A bulk accept
+                  (apply_bulk_action — an explicit selection OVERRIDES decisions, unlike
+                  the field edit), Ctrl+Shift+O bulk verified toggle (apply_bulk_verified;
+                  clears when ALL selected carry the mark), Ctrl+Shift+M bulk cover delete
+                  (execute_bulk_cover_delete — sidecar cover.jpg/.bak + embedded EPUB strip,
+                  immediate like the single-book path, AND drops proposed.cover_url rebind-
+                  style: apply re-downloads it for C11/MISSING_COVER, so keeping the URL
+                  would undo the deletion), and Ctrl+J merge-selected (execute_merge +
+                  merge_selected dialog + _after_merge): the dialog picks the SURVIVOR
+                  (default = focus row; same_book mismatch only warns — the user decides,
+                  unlike the automatic placement merge) and every other selected book is
+                  folded in via mover.merge_folders (files move, metadata field-merged
+                  survivor-first, loser folders removed); merged losers leave self.entries
+                  (dropped by IDENTITY — uuid-less legacy entries cannot be keyed), the
+                  survivor's current is refreshed from disk (_build_current), _lib_uuids/
+                  _lib_index/thumb caches are pruned so "+ library" cannot re-serve ghosts,
+                  the SQLite cache rows are best-effort invalidated and review.yaml is saved
+                  IMMEDIATELY (disk and file must agree — a stale entry would fail the next
+                  apply with "folder not found"); the survivor keeps its action/proposal
+                  for apply to finish. The dialog ALSO carries a per-field grid (rows =
+                  MERGE_FIELDS, columns = selected books, one radio per cell): each cell
+                  shows merge_field_value — a DECIDED proposal counts as that book's value
+                  (the list-label convention), pending/library books show the disk value —
+                  and the picks (execute_merge values=) override the automatic merge:
+                  _apply_merge_choice writes them onto the merged metadata, merge_choice_
+                  proposal REBASES only CONFLICTING existing proposed keys (no proposal
+                  noise for clean fields; a stale analyzer suggestion cannot undo an
+                  explicit pick at the next apply); untouched defaults reproduce the
+                  automatic gap-fill (survivor's value, else first found), so confirming
+                  as-is loses nothing
   cli.py           click commands: scan, report, analyze, apply, epubgen, crosscheck,
                   strip-covers, gui
                   (organize is a deprecation stub — placement lives in apply)

@@ -16,8 +16,11 @@ import pytest
 
 import book_meta_fix.gui as gui
 from book_meta_fix.gui import (
+	MergeOutcome,
 	action_value,
+	apply_bulk_action,
 	apply_bulk_field,
+	apply_bulk_verified,
 	build_library_index,
 	collect_vocab_values,
 	compose_overlay,
@@ -26,14 +29,19 @@ from book_meta_fix.gui import (
 	embedded_cover_thumb,
 	entries_to_write,
 	entry_author_label,
+	entry_label,
 	entry_matches_search,
 	entry_series_label,
 	entry_series_pair,
 	entry_sort_key,
+	execute_bulk_cover_delete,
+	execute_merge,
 	extract_series_values,
 	library_entry_changed,
 	library_entry_from_meta,
 	list_format_files,
+	merge_cell_text,
+	merge_field_value,
 	open_folder_in_manager,
 	render_review_text,
 	restore_bak_cover,
@@ -230,6 +238,504 @@ class TestBulkSelectionIndices:
 		app.tree = types.SimpleNamespace(
 			selection_get=lambda: ("2", "0", "bogus", "9"))
 		assert app._bulk_selection_indices() == [0, 2]
+
+
+class TestApplyBulkAction:
+	"""Ctrl+Shift+A: an explicit selection IS the decision — unlike the bulk
+	field edit (which only decides pending entries) it OVERRIDES."""
+
+	def test_overrides_previous_decisions(self):
+		entries = [
+			{"current": {}, "action": None},
+			{"current": {}, "action": "keep"},
+			{"current": {}, "action": "delete"},
+		]
+		assert apply_bulk_action(entries, [0, 1, 2], "accept") == 3
+		assert [e["action"] for e in entries] == ["accept", "accept", "accept"]
+
+	def test_out_of_range_indices_skipped(self):
+		entries = [{"current": {}, "action": None}]
+		assert apply_bulk_action(entries, [0, 7], "accept") == 1
+
+
+class TestApplyBulkVerified:
+	"""Ctrl+Shift+O: the persistent OK mark en masse (set pops as None)."""
+
+	def test_set_and_clear(self):
+		entries = [{"uuid": "a"}, {"uuid": "b", "verified": True}, {"uuid": "c"}]
+		assert apply_bulk_verified(entries, [0, 1], True) == 2
+		assert entries[0].get("verified") is True
+		assert entries[1].get("verified") is True
+		assert apply_bulk_verified(entries, [0, 1, 9], False) == 2
+		assert "verified" not in entries[0]
+		assert "verified" not in entries[1]
+		assert "verified" not in entries[2]  # never touched
+
+
+class TestEntryLabel:
+	def test_title_and_author_from_current(self):
+		e = {"current": {"title": "Babička", "author": "Božena Němcová"}}
+		assert entry_label(e) == "Babička — Božena Němcová"
+
+	def test_falls_back_to_proposed_title(self):
+		e = {"current": {}, "proposed": {"title": "Saturnin"}}
+		assert entry_label(e).startswith("Saturnin —")
+
+	def test_empty_entry(self):
+		assert entry_label({}) == "? — "
+
+
+class TestBulkActionsApp:
+	"""The app methods drive the helpers + reload/refresh (bare app, no Tk)."""
+
+	def _bare_app(self, selection):
+		import types
+
+		app = gui.ReviewEditorApp.__new__(gui.ReviewEditorApp)
+		app.entries = [
+			{"uuid": "a", "current": {}, "action": None},
+			{"uuid": "b", "current": {}, "action": "keep"},
+		]
+		app.tree = types.SimpleNamespace(selection_get=lambda: selection)
+		app._cur = 1
+		app._loading = False
+		app._dirty = False
+		app._set_status = lambda extra="": None
+		app.calls = []
+		app._collect_current = lambda: app.calls.append("collect")
+		app._load_book = lambda idx: app.calls.append(("load", idx))
+		app.refresh_list = lambda: app.calls.append("refresh")
+		app.flashes = []
+		app._flash = lambda msg, seconds=None: app.flashes.append(msg)
+		return app
+
+	def test_bulk_accept_overrides_and_reloads_current(self):
+		app = self._bare_app(("0", "1"))
+		app.bulk_accept()
+		assert [e["action"] for e in app.entries] == ["accept", "accept"]
+		assert ("load", 1) in app.calls  # the current book was selected → reload
+		assert app.flashes == ["bulk accept: 2 books"]
+		assert app._dirty is True
+
+	def test_bulk_accept_without_selection_flashes(self):
+		app = self._bare_app(())
+		app.bulk_accept()
+		assert app.entries[1]["action"] == "keep"
+		assert app.flashes == ["select books first (Ctrl+click, Shift+click)"]
+
+	def test_bulk_toggle_verified_sets_then_clears(self):
+		app = self._bare_app(("0", "1"))
+		app.bulk_toggle_verified()
+		assert all(e.get("verified") for e in app.entries)
+		app.bulk_toggle_verified()  # ALL selected verified → clear
+		assert not any(e.get("verified") for e in app.entries)
+
+	def test_bulk_toggle_verified_partial_selection_still_sets(self):
+		app = self._bare_app(("0",))
+		app.entries[1]["verified"] = True  # verified but NOT selected → set
+		app.bulk_toggle_verified()
+		assert app.entries[0].get("verified") is True
+		assert app.entries[1].get("verified") is True
+
+
+class TestCtrlKeyDispatch:
+	"""Shift bulk shortcuts must win over the Ctrl passthrough set."""
+
+	def _bare_app(self):
+		import types
+
+		app = gui.ReviewEditorApp.__new__(gui.ReviewEditorApp)
+		app.root = types.SimpleNamespace(grab_current=lambda: None)
+		app.calls = []
+		for name in ("bulk_accept", "bulk_toggle_verified", "bulk_delete_covers",
+		             "merge_selected", "save"):
+			setattr(app, name, (lambda n: lambda: app.calls.append(n))(name))
+		return app
+
+	def test_shift_plus_a_dispatches_bulk_accept(self):
+		app = self._bare_app()
+		# Uppercase keysym is what X11 delivers with Shift held.
+		res = app._on_ctrl_key(type("E", (), {"keysym": "A", "state": 0x0001})())
+		assert res == "break"
+		assert app.calls == ["bulk_accept"]
+
+	def test_shift_unknown_letter_falls_through(self):
+		app = self._bare_app()
+		# Ctrl+Shift+C must keep its native meaning (copy in entries).
+		res = app._on_ctrl_key(type("E", (), {"keysym": "c", "state": 0x0001})())
+		assert res is None
+		assert app.calls == []
+
+	def test_plain_a_stays_passthrough(self):
+		app = self._bare_app()
+		res = app._on_ctrl_key(type("E", (), {"keysym": "a", "state": 0})())
+		assert res is None
+		assert app.calls == []
+
+	def test_j_dispatches_merge(self):
+		app = self._bare_app()
+		res = app._on_ctrl_key(type("E", (), {"keysym": "j", "state": 0})())
+		assert res == "break"
+		assert app.calls == ["merge_selected"]
+
+
+class TestExecuteBulkCoverDelete:
+	"""Ctrl+Shift+M: sidecar/embedded cover removal + the cover_url drop."""
+
+	def _lib(self, tmp_path):
+		folder = tmp_path / "Autor" / "Kniha (1)"
+		folder.mkdir(parents=True)
+		_make_jpeg(folder / "cover.jpg")
+		_make_jpeg(folder / "cover.jpg.bak")
+		(folder / "kniha.epub").write_bytes(b"not a real epub")
+		entries = [{"uuid": "u1", "path": "Autor/Kniha (1)",
+		            "proposed": {"cover_url": "https://x/cover.jpg", "title": "T"},
+		            "action": None}]
+		return folder, entries
+
+	def test_deletes_sidecars_and_drops_cover_url(self, tmp_path):
+		folder, entries = self._lib(tmp_path)
+		removed, _stripped = execute_bulk_cover_delete(
+			entries, [0], tmp_path, covers=True, baks=True)
+		assert removed == 2
+		assert not (folder / "cover.jpg").exists()
+		assert not (folder / "cover.jpg.bak").exists()
+		# apply re-downloads a proposed cover for C11/MISSING_COVER books —
+		# keeping the URL would undo the deletion on the next run.
+		assert "cover_url" not in entries[0]["proposed"]
+		assert entries[0]["proposed"]["title"] == "T"  # the rest survives
+
+	def test_proposed_rebound_not_mutated(self, tmp_path):
+		_folder, entries = self._lib(tmp_path)
+		shared = {"cover_url": "https://x/c.jpg"}
+		entries[0]["proposed"] = shared
+		execute_bulk_cover_delete(entries, [0], tmp_path, covers=True)
+		assert shared == {"cover_url": "https://x/c.jpg"}  # index copy untouched
+		assert entries[0]["proposed"] == {}
+
+	def test_bak_only_keeps_cover_url(self, tmp_path):
+		folder, entries = self._lib(tmp_path)
+		execute_bulk_cover_delete(entries, [0], tmp_path, covers=False, baks=True)
+		assert (folder / "cover.jpg").is_file()
+		assert not (folder / "cover.jpg.bak").exists()
+		# Only deleting the sidecar itself contradicts the proposal.
+		assert entries[0]["proposed"]["cover_url"] == "https://x/cover.jpg"
+
+	def test_embedded_strip_counts_only_successes(self, tmp_path):
+		folder, entries = self._lib(tmp_path)
+		removed, stripped = execute_bulk_cover_delete(
+			entries, [0], tmp_path, covers=False, embedded=True)
+		assert removed == 0
+		assert stripped == 0  # "not a real epub" cannot be stripped
+		assert (folder / "kniha.epub").is_file()  # the file itself stays
+
+	def test_missing_files_are_not_counted(self, tmp_path):
+		entries = [{"uuid": "u", "path": "Autor/Prázdné (2)"}]
+		removed, _stripped = execute_bulk_cover_delete(entries, [0], tmp_path)
+		assert removed == 0
+
+
+def _make_lib_book(lib: Path, rel: str, uuid: str, *, title: str, author: str,
+                   fmts: tuple[str, ...] = (".epub",),
+                   extra_meta: dict | None = None) -> Path:
+	"""Create <lib>/<rel>/ with metadata.json + dummy format files."""
+	import json
+
+	folder = lib / rel
+	folder.mkdir(parents=True)
+	md = {"title": title, "authors": [author], "uuid": uuid, **(extra_meta or {})}
+	(folder / "metadata.json").write_text(json.dumps(md), encoding="utf-8")
+	for ext in fmts:
+		(folder / f"{title} - {author}{ext}").write_bytes(f"{uuid}{ext}".encode())
+	return folder
+
+
+class TestExecuteMerge:
+	"""Ctrl+J: files move into the survivor, losers leave the list."""
+
+	def _setup(self, tmp_path):
+		w_folder = _make_lib_book(tmp_path, "A/Hlavní (1)", "uw",
+		                          title="Hlavní", author="A", fmts=(".epub",))
+		l_folder = _make_lib_book(tmp_path, "A/Hlavní (2)", "ul",
+		                          title="Hlavní", author="A", fmts=(".pdb",),
+		                          extra_meta={"isbn": "978-0-30-640615-7"})
+		entries = [
+			{"uuid": "uw", "path": "A/Hlavní (1)",
+			 "current": {"title": "Hlavní", "author": "A"},
+			 "proposed": {"language": "cs"}, "action": None},
+			{"uuid": "ul", "path": "A/Hlavní (2)",
+			 "current": {"title": "Hlavní", "author": "A"},
+			 "proposed": None, "action": "accept"},
+		]
+		return w_folder, l_folder, entries
+
+	def test_merges_files_drops_looser_keeps_winner(self, tmp_path):
+		w_folder, l_folder, entries = self._setup(tmp_path)
+		out = execute_merge(entries, 0, [1], tmp_path)
+		assert out.merged_count == 1
+		assert out.dropped_uuids == ["ul"]
+		assert out.failures == []
+		assert out.moved_files == 1
+		# The loser's format moved into the winner folder; loser folder gone.
+		assert (w_folder / "Hlavní - A.pdb").is_file()
+		assert (w_folder / "Hlavní - A.epub").is_file()
+		assert not l_folder.exists()
+		# Entry surgery: the loser left the list, the winner survived with its
+		# decision/proposal untouched (apply finishes it later).
+		assert len(entries) == 1
+		assert entries[0]["uuid"] == "uw"
+		assert entries[0]["action"] is None
+		assert entries[0]["proposed"] == {"language": "cs"}
+		assert out.winner is entries[0]
+		# The winner's current reflects the merged disk metadata (the isbn
+		# was filled from the loser — merge_meta unions the gaps; readers
+		# canonicalize it to bare digits).
+		assert entries[0]["current"]["isbn"] == "9780306406157"
+
+	def test_missing_loser_folder_reports_failure_and_stays(self, tmp_path):
+		_w, _l, entries = self._setup(tmp_path)
+		entries[1]["path"] = "A/Chybí (9)"
+		out = execute_merge(entries, 0, [1], tmp_path)
+		assert out.merged_count == 0
+		assert len(out.failures) == 1
+		assert "folder not found" in out.failures[0]
+		assert len(entries) == 2  # the failed loser stays in the list
+
+	def test_same_folder_guard(self, tmp_path):
+		w_folder, _l, entries = self._setup(tmp_path)
+		entries[1]["path"] = entries[0]["path"]
+		out = execute_merge(entries, 0, [1], tmp_path)
+		assert out.merged_count == 0
+		assert len(out.failures) == 1
+		assert w_folder.is_dir()  # nothing happened to the survivor
+
+	def test_out_of_range_loser_ignored(self, tmp_path):
+		_w, _l, entries = self._setup(tmp_path)
+		out = execute_merge(entries, 0, [1, 42], tmp_path)
+		assert out.merged_count == 1
+
+
+class TestMergeFieldValue:
+	"""The merge grid's effective value: a DECIDED proposal beats the disk
+	(the same convention the list labels follow — it is what apply writes)."""
+
+	def _meta(self, **kw):
+		from book_meta_fix.models import BookMeta
+
+		return BookMeta(**kw)
+
+	def test_decided_proposal_wins(self):
+		meta = self._meta(title="Disk", authors=["A"])
+		e = {"action": "accept", "proposed": {"title": "Fixed", "author": "B"}}
+		assert merge_field_value(e, meta, "title") == "Fixed"
+		assert merge_field_value(e, meta, "authors") == ["B"]
+
+	def test_pending_shows_disk_value(self):
+		meta = self._meta(title="Disk", authors=["A"])
+		e = {"action": None, "proposed": {"title": "Suggestion"}}
+		assert merge_field_value(e, meta, "title") == "Disk"
+		assert merge_field_value(e, meta, "authors") == ["A"]
+
+	def test_null_proposal_is_empty(self):
+		meta = self._meta(title="Disk")
+		e = {"action": "accept", "proposed": {"title": None}}
+		assert merge_field_value(e, meta, "title") is None
+
+	def test_series_from_proposal_and_disk(self):
+		meta = self._meta(series=[{"name": "Nadace", "index": "3"}])
+		e = {"action": "accept", "proposed": {"series": "Legie", "series_index": "7"}}
+		assert merge_field_value(e, meta, "series") == ("Legie", "7")
+		assert merge_field_value({"action": None}, meta, "series") == ("Nadace", "3")
+
+	def test_authors_proposal_list_scalar_and_null(self):
+		meta = self._meta(authors=["A"])
+		assert merge_field_value(
+			{"action": "keep", "proposed": {"authors": ["X", "Y"]}}, meta,
+			"authors") == ["X", "Y"]
+		assert merge_field_value(
+			{"action": "keep", "proposed": {"author": None}}, meta,
+			"authors") == []
+
+	def test_disk_fallbacks(self):
+		meta = self._meta(title="T", isbn="80-1", year=1984, publisher="P",
+		                  language="cs", genres=["g1"], description="d")
+		e = {"action": None}
+		assert merge_field_value(e, meta, "isbn") == "80-1"
+		assert merge_field_value(e, meta, "year") == 1984
+		assert merge_field_value(e, meta, "publisher") == "P"
+		assert merge_field_value(e, meta, "language") == "cs"
+		assert merge_field_value(e, meta, "genres") == ["g1"]
+		assert merge_field_value(e, meta, "description") == "d"
+
+
+class TestMergeCellText:
+	def test_empty_variants(self):
+		assert merge_cell_text("title", None) == "∅"
+		assert merge_cell_text("title", "") == "∅"
+		assert merge_cell_text("authors", []) == "∅"
+		assert merge_cell_text("series", ("", "3")) == "∅"
+
+	def test_series_pair_display(self):
+		assert merge_cell_text("series", ("Nadace", "3")) == "Nadace #3"
+		assert merge_cell_text("series", ("Legie", "")) == "Legie"
+
+	def test_list_joined_and_truncation(self):
+		assert merge_cell_text("authors", ["A", "B"]) == "A, B"
+		assert len(merge_cell_text("title", "x" * 100)) == 56
+		assert merge_cell_text("title", "x" * 100).endswith("…")
+
+
+class TestExecuteMergeChoices:
+	"""The dialog's per-field picks override the automatic field merge."""
+
+	def _setup(self, tmp_path):
+		w_folder = _make_lib_book(tmp_path, "A/Vítěz (1)", "uw",
+		                          title="Titul vítěze", author="A", fmts=(".epub",))
+		l_folder = _make_lib_book(tmp_path, "A/Poražený (2)", "ul",
+		                          title="Titul poraženého", author="B",
+		                          fmts=(".pdb",),
+		                          extra_meta={"publisher": "Albatros",
+		                                      "publishedYear": "1984",
+		                                      "isbn": "978-0-30-640615-7"})
+		entries = [
+			{"uuid": "uw", "path": "A/Vítěz (1)",
+			 "current": {"title": "Titul vítěze", "author": "A"},
+			 "proposed": {"title": "Starý návrh", "language": "cs"},
+			 "action": "accept"},
+			{"uuid": "ul", "path": "A/Poražený (2)",
+			 "current": {"title": "Titul poraženého", "author": "B"},
+			 "proposed": None, "action": None},
+		]
+		return w_folder, l_folder, entries
+
+	def test_choices_override_merged_metadata(self, tmp_path):
+		from book_meta_fix.readers import read_book_folder
+
+		w_folder, _l, entries = self._setup(tmp_path)
+		values = {
+			"title": "Titul poraženého",   # the loser's title wins
+			"authors": ["B"],
+			"publisher": "Albatros",
+			"year": 1984,
+			"series": ("Nadace", "3"),
+		}
+		out = execute_merge(entries, 0, [1], tmp_path, values=values)
+		assert out.merged_count == 1
+		meta = read_book_folder(w_folder)
+		assert meta.title == "Titul poraženého"
+		assert meta.authors == ["B"]
+		assert meta.publisher == "Albatros"
+		assert meta.year == 1984
+		name, idx = meta.series_pair()
+		assert (name, str(idx)) == ("Nadace", "3")
+		# The winner's current reflects the chosen values...
+		assert entries[0]["current"]["title"] == "Titul poraženého"
+		assert entries[0]["current"]["author"] == "B"
+		# ...a CONFLICTING proposed key is rebased to the choice (a stale
+		# proposal must not undo the pick at the next apply)...
+		assert entries[0]["proposed"]["title"] == "Titul poraženého"
+		# ...while untouched proposal keys survive.
+		assert entries[0]["proposed"]["language"] == "cs"
+
+	def test_no_proposal_invented_for_clean_fields(self, tmp_path):
+		_w, _l, entries = self._setup(tmp_path)
+		entries[0]["proposed"] = None
+		out = execute_merge(entries, 0, [1], tmp_path,
+		                    values={"title": "Titul poraženého"})
+		assert out.merged_count == 1
+		# No conflict existed — no proposal noise is invented for a clean book.
+		assert entries[0]["proposed"] is None
+
+	def test_series_pick_rebases_proposal_pair(self, tmp_path):
+		_w, _l, entries = self._setup(tmp_path)
+		entries[0]["proposed"] = {"series": "Stará", "series_index": "1"}
+		execute_merge(entries, 0, [1], tmp_path,
+		              values={"series": ("Nadace", "3")})
+		assert entries[0]["proposed"]["series"] == "Nadace"
+		assert entries[0]["proposed"]["series_index"] == "3"
+
+	def test_empty_pick_clears_field_and_rebases_proposal(self, tmp_path):
+		from book_meta_fix.readers import read_book_folder
+
+		w_folder, _l, entries = self._setup(tmp_path)
+		entries[0]["proposed"] = {"isbn": "80-1"}
+		# The automatic merge would FILL the isbn from the loser; the ∅ pick
+		# explicitly keeps the merged book without one.
+		execute_merge(entries, 0, [1], tmp_path, values={"isbn": None})
+		assert read_book_folder(w_folder).isbn is None
+		assert entries[0]["proposed"]["isbn"] is None  # ∅ delete-mark semantics
+
+	def test_choices_skipped_when_nothing_merged(self, tmp_path):
+		_w, _l, entries = self._setup(tmp_path)
+		entries[1]["path"] = "A/Chybí (9)"
+		out = execute_merge(entries, 0, [1], tmp_path, values={"title": "X"})
+		assert out.merged_count == 0
+		# Nothing merged → nothing decided; the winner stays untouched.
+		assert entries[0]["current"] == {"title": "Titul vítěze", "author": "A"}
+		assert entries[0]["proposed"]["title"] == "Starý návrh"
+
+
+class TestAfterMerge:
+	"""Post-merge cleanup: index/thumbs pruning, immediate save, selection."""
+
+	def _bare_app(self, entries, tmp_path):
+		import types
+
+		app = gui.ReviewEditorApp.__new__(gui.ReviewEditorApp)
+		app.entries = entries
+		app.library = tmp_path
+		app._lib_uuids = {"ul": "hay"}
+		app._lib_index = [({"uuid": "ul", "path": "x"}, "hay"),
+		                  ({"uuid": "other", "path": "y"}, "hay2")]
+		app._thumbs_pil = {"ul": object(), "other": object()}
+		app._thumbs_photo = {"ul": object()}
+		app._big_thumbs = {"ul": object()}
+		app.cfg = types.SimpleNamespace(cache_db=tmp_path / "cache.db")
+		app.saved = []
+		app._do_save = lambda: (app.saved.append(1), True)[1]
+		app._dirty = True
+		app.refreshed = []
+		app.refresh_list = lambda: app.refreshed.append(1)
+		app.picked = []
+		app.tree = types.SimpleNamespace(
+			selection_set=lambda iid, silent=False: app.picked.append(iid),
+			see=lambda iid: None)
+		app.loaded = []
+		app._load_book = lambda idx: app.loaded.append(idx)
+		app._reload_thumbs = lambda idxs: None
+		app.flashes = []
+		app._flash = lambda msg, seconds=None: app.flashes.append(msg)
+		return app
+
+	def test_prunes_saves_and_selects_winner(self, tmp_path):
+		w_folder, _l_folder, entries = TestExecuteMerge()._setup(tmp_path)
+		out = execute_merge(entries, 0, [1], tmp_path)
+		app = self._bare_app(entries, tmp_path)
+		app._cur = 1  # stale focus on the (now dropped) loser row
+		app._after_merge(out, str(w_folder), [str(tmp_path / "A" / "Hlavní (2)")])
+		# review.yaml must agree with the disk RIGHT NOW (losers are gone).
+		assert app.saved == [1]
+		assert app._dirty is False
+		assert app.picked == ["0"]
+		assert app.loaded == [0]
+		# _load_book alone does not move _cur — a stale one would crash
+		# _refresh_covers after the list shrank.
+		assert app._cur == 0
+		# The library index / thumb caches must not resurrect the loser.
+		assert "ul" not in app._lib_uuids
+		assert [e.get("uuid") for e, _h in app._lib_index] == ["other"]
+		assert "ul" not in app._thumbs_pil
+		assert "ul" not in app._big_thumbs
+		assert app.flashes == ["merged 1 books, 1 files moved"]
+
+	def test_nothing_merged_flashes_only(self, tmp_path):
+		_w, _l, entries = TestExecuteMerge()._setup(tmp_path)
+		app = self._bare_app(entries, tmp_path)
+		out = MergeOutcome(winner=entries[0], merged_count=0,
+		                   dropped_uuids=[], failures=[], moved_files=0)
+		app._after_merge(out, "/x", [])
+		assert app.flashes == ["nothing merged"]
+		assert app.saved == []  # no save, nothing changed
 
 
 class TestCoverPaths:

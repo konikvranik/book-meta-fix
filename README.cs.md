@@ -184,6 +184,32 @@ od knihy a výsledky zapíše obvyklé `Ctrl+S`. Přirozené doplnění hledán�
 `+ knihovna`: natáhnete všechny knihy rozbité série, vyberete je a opravíte
 název série jedním tahem.
 
+**Hromadné akce (`Ctrl+Shift+A/O/M`).** Tentýž vícenásobný výběr řídí tři
+další hromadné příkazy — shiftová varianta zkratky jedné knihy znamená
+„proveď to všem vybraným": `Ctrl+Shift+A` acceptuje všechny vybrané knihy
+(explicitní výběr přepisuje i dřívější rozhodnutí), `Ctrl+Shift+O`
+přepne značku verified u všech (a zruší ji, když už ji každá vybraná
+kniha nese) a `Ctrl+Shift+M` smaže jejich obálky (dialog zrcadlí
+zaškrtávací políčka jedné knihy: `cover.jpg`, její `.bak`, vložené obálky
+EPUB; navrhovaný `cover_url` se zahodí, aby příští apply znovu nestáhl,
+co jste právě odstranili).
+
+**Sloučení duplicit (`Ctrl+J`).** Vyberte dvě a více knih, které jsou totéž
+dílo v několika složkách, a stiskněte `Ctrl+J`. Dialog vybere survivor
+(standardně fokusaný řádek) a varuje, když je `same_book` nepovažuje za
+totéž dílo; mřížka po polích pak zobrazí každé metadatové pole každé
+vybrané knihy (rozhodnutý návrh se počítá jako hodnota té knihy) — jedna
+radiobuttonová buňka vybírá, kterou stranu sloučená kniha podrží, ∅ znamená
+„nechat pole prázdné". Nedotčené defaulty reprodukují automatické
+doplňování mezer (hodnota survivor, jinak první nalezená). Vybrané hodnoty
+se zapíšou přímo do sloučené knihy a přebasují konfliktní návrh, takže je
+zastaralý návrh analyzátoru nemůže vrátit při příštím apply. Soubory
+všech ostatních knih se přesunou do složky survivor, jejich složky se
+odstraní a jejich review záznamy vypadnou — review.yaml se uloží hned po
+sloučení, takže soubor souhlasí s diskem. Jde o explicitní, uživatelem
+řízený protějšek automatického slučování, které apply provede, když se dvě
+složky srazí na stejném cílovém místě.
+
 **Vyhledávání v celé knihovně (`+ knihovna`).** Pole `Hledat:` filtruje
 záznamy review; zaškrtněte vedle něj `+ knihovna` a tentýž dotaz projde
 i celou knihovnou — odpovídající knihy, které NEJSOU v review.yaml, se

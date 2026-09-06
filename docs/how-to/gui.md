@@ -102,6 +102,54 @@ usual. This is the natural companion to the `+ library` search: find
 every book of the broken series, select them, fix the series name in one
 stroke.
 
+## Bulk actions (accept / verified / covers)
+
+The same multi-selection drives three more bulk commands — the `Shift`
+variant of a single-book shortcut means "do it to all selected":
+
+- **`Ctrl+Shift+A`** accepts every selected book. Unlike the bulk field
+  edit (which only decides pending entries), an explicit selection
+  **overrides** any previous decision.
+- **`Ctrl+Shift+O`** toggles the verified mark on all selected books —
+  and clears it when every selected book already carries it.
+- **`Ctrl+Shift+M`** deletes their covers. The dialog mirrors the per-book
+  checkboxes: `cover.jpg` (default on), its `.bak`, and the covers
+  embedded in the EPUB files (the strip rewrites the e-books, so it asks
+  once with the file list first). A proposed `cover_url` is dropped from
+  the touched entries — apply re-downloads a proposed cover for a
+  C11/MISSING_COVER book, so keeping the URL would undo the deletion on
+  the next run. `Ctrl+S` writes the entry changes as usual.
+
+## Merge selected books (`Ctrl+J`)
+
+When one work lives in several folders (a duplicate, a split import),
+select them and press `Ctrl+J`. The dialog picks the **survivor**
+(default: the focused row — the detail pane shows it) and warns when
+`same_book` does not consider the selection the same work (a hint, not a
+block — here you decide, unlike the automatic placement merge).
+
+Below the survivor radios sits a **field-by-field grid**: one row per
+metadata field (title, authors, ISBN, year, publisher, language, series,
+genres, description), one column per selected book, one radio per cell.
+Each cell shows that book's effective value — a decided proposal
+(`accept`/`keep`) counts as the book's value, since that is what `apply`
+would write; undecided and library books show the stored value. Pick which
+side the merged book keeps; `∅` keeps the field empty. Defaults follow the
+survivor, and a field the survivor lacks takes the first value found — so
+confirming the dialog untouched reproduces the automatic gap-filling merge
+and loses nothing.
+
+On confirm, every other book's files move into the survivor's folder
+(collisions rename with the loser's calibre id), the picked values are
+written to the merged book's metadata, and the losers' folders are removed
+and their review entries dropped. A picked value also REBASES a
+conflicting proposal key on the survivor (a stale analyzer suggestion must
+not undo an explicit pick at the next apply); fields without a proposal
+stay clean. review.yaml is saved **right after** the merge — the losers'
+folders are gone, and the file must agree with the disk (a stale entry
+would fail the next apply with "folder not found"). The survivor keeps its
+review decision; `bmf apply` finishes it later as usual.
+
 ## Verified (the OK mark)
 
 Next to the action radios sits a **Verified** checkbox (`Ctrl+O` toggles

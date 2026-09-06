@@ -103,6 +103,54 @@ se jen název. Výsledky zapíše do review.yaml obvyklé `Ctrl+S`. Přirozené
 doplnění hledání `+ knihovna`: najdete všechny knihy rozbité série,
 vyberete je a opravíte název série jedním tahem.
 
+## Hromadné akce (accept / verified / obálky)
+
+Tentýž vícenásobný výběr řídí tři další hromadné příkazy — shiftová
+varianta zkratky jedné knihy znamená „proveď to všem vybraným":
+
+- **`Ctrl+Shift+A`** acceptuje všechny vybrané knihy. Na rozdíl od
+  hromadné úpravy pole (která rozhoduje jen nerozhodnuté záznamy)
+  explicitní výběr **přepisuje** i dřívější rozhodnutí.
+- **`Ctrl+Shift+O`** přepne značku verified u všech vybraných knih —
+  a zruší ji, když už ji každá vybraná kniha nese.
+- **`Ctrl+Shift+M`** smaže jejich obálky. Dialog zrcadlí zaškrtávací
+  políčka jedné knihy: `cover.jpg` (standardně zapnuto), jeho `.bak`
+  a obálky vložené v souborech EPUB (strip přepisuje e-knihy, takže se
+  nejdřív jednou zeptá se seznamem souborů). Navrhovaný `cover_url` se
+  z dotčených záznamů zahodí — apply u knihy C11/MISSING_COVER navrženou
+  obálku stahuje, takže ponechané URL by příští během smazání vrátilo.
+  Změny záznamů zapíše obvyklé `Ctrl+S`.
+
+## Sloučení vybraných knih (`Ctrl+J`)
+
+Když jedno dílo leží v několika složkách (duplikát, rozdělený import),
+vyberte je a stiskněte `Ctrl+J`. Dialog vybere **survivor** (standardně
+fokusaný řádek — detail ho zobrazuje) a varuje, když `same_book`
+nepovažuje výběr za totéž dílo (varování, ne blokace — tady rozhodujete
+vy, na rozdíl od automatického slučování při umísťování).
+
+Pod radiobuttony survivor je **mřížka po polích**: jeden řádek na
+metadatové pole (název, autoři, ISBN, rok, nakladatelství, jazyk, série,
+žánry, popis), jeden sloupec na vybranou knihu, jedna radiobuttonová buňka
+na hodnotu. Buňka ukazuje efektivní hodnotu knihy — rozhodnutý návrh
+(`accept`/`keep`) se počítá jako hodnota knihy, protože přesně to by
+`apply` zapsal; nerozhodnuté a knihovní knihy ukazují uloženou hodnotu.
+Vyberte, kterou stranu sloučená kniha podrží; `∅` nechá pole prázdné.
+Defaulty následují survivor a poli, které survivor nemá, se přiřadí první
+nalezená hodnota — potvrzení dialogu bez úprav tedy reprodukuje
+automatické doplňování mezer a nic se neztratí.
+
+Po potvrzení se soubory všech ostatních knih přesunou do složky survivor
+(kolize se přejmenují s calibre id poraženého), vybrané hodnoty se zapíšou
+do metadat sloučené knihy a složky poražených se odstraní i s jejich
+review záznamy. Vybraná hodnota navíc REBASUJE konfliktní klíč návrhu u
+survivor (zastaralý návrh analyzátoru nesmí vrátit explicitní volbu při
+příštím apply); pole bez návrhu zůstávají čistá. review.yaml se uloží
+**hned po** sloučení — složky poražených už neexistují a soubor musí
+souhlasit s diskem (zastaralý záznam by příští apply selhal na „folder not
+found"). Survivor si podrží své review rozhodnutí; `bmf apply` ho pak
+dokončí jako obvykle.
+
 ## Verified (značka OK)
 
 Vedle radiobuttonů akcí je checkbox **Verified** (přepíná `Ctrl+O`;

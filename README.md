@@ -181,6 +181,32 @@ and `Ctrl+S` writes the results as usual. Natural companion to the
 `+ library` search: pull in every book of a broken series, select them,
 fix the series name in one stroke.
 
+**Bulk actions (`Ctrl+Shift+A/O/M`).** The same multi-selection drives three
+more bulk commands — the Shift variant of the single-book shortcut means
+"do it to all selected": `Ctrl+Shift+A` accepts every selected book (an
+explicit selection overrides previous decisions), `Ctrl+Shift+O` toggles
+the verified mark on all of them (clears it when every selected book
+already carries it), and `Ctrl+Shift+M` deletes their covers (a dialog
+mirrors the per-book checkboxes: `cover.jpg`, its `.bak`, the embedded
+EPUB covers; a proposed `cover_url` is dropped so the next apply cannot
+re-download what you just removed).
+
+**Merge duplicates (`Ctrl+J`).** Select two or more books that are the same
+work in multiple folders and press `Ctrl+J`. The dialog picks the survivor
+(default: the focused row) and warns when `same_book` does not consider them
+the same work; a field-by-field grid then shows every metadata field of every
+selected book (a decided proposal counts as that book's value) — one radio
+per cell picks which side the merged book keeps, with ∅ meaning "keep the
+field empty". Untouched defaults reproduce the automatic gap-filling merge
+(the survivor's value, else the first found). The picks are written straight
+to the merged book and rebase a conflicting proposal, so a stale analyzer
+suggestion cannot undo them at the next apply. Every other book's files move
+into the survivor's folder, their folders are removed and their review
+entries dropped — review.yaml is saved right after the merge, so the file
+agrees with the disk. This is the explicit, user-driven counterpart of the
+automatic merge apply performs when two folders collide at the same
+placement target.
+
 **Whole-library search (`+ library`).** The `Search:` box filters review
 entries; tick `+ library` next to it and the same query also sweeps the
 whole library — matching books that are NOT in review.yaml join the list

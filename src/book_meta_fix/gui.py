@@ -42,6 +42,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
+from typing import NamedTuple
 from uuid import uuid4
 
 from .covers import (
@@ -55,10 +56,11 @@ from .detectors import split_series_index
 from .encoding import detect_double_decode, recode, recode_failure_reason, repair_chain
 from .extractors import extract
 from .i18n import _
-from .library import _META_FILES, _is_excluded, iter_book_folders
+from .library import _META_FILES, Cache, _is_excluded, iter_book_folders
+from .mover import merge_folders, same_book
 from .readers import EBOOK_EXTS, read_book_folder
 from .review import _build_current, _header, _load_raw_entries, _render_entry
-from .writers import ensure_uuid
+from .writers import ensure_uuid, write_book_meta
 
 log = logging.getLogger(__name__)
 
@@ -253,6 +255,286 @@ def apply_bulk_field(entries: list[dict], indices, field: str, value: str | None
 			e["action"] = "accept"
 		n += 1
 	return n
+
+
+def apply_bulk_action(entries: list[dict], indices, action: str) -> int:
+	"""Set the action on every selected entry (bulk Ctrl+Shift+A).
+
+	Unlike :func:`apply_bulk_field` — which only DECIDES pending entries,
+	because a field edit merely implies the decision — this is the explicit
+	"these selected books are accepted" command, so it overrides whatever
+	decision was there before. Returns how many entries were set.
+	"""
+	n = 0
+	for i in indices:
+		if not (0 <= i < len(entries)):
+			continue
+		entries[i]["action"] = action
+		n += 1
+	return n
+
+
+def apply_bulk_verified(entries: list[dict], indices, value: bool) -> int:
+	"""Set/clear the persistent OK mark on every selected entry (Ctrl+Shift+O).
+
+	The mark composes with any action ("accept + verified" = fix AND close);
+	``value=False`` pops the key so it serialises as absent, exactly like the
+	single-book checkbox. Returns how many entries were touched.
+	"""
+	n = 0
+	for i in indices:
+		if not (0 <= i < len(entries)):
+			continue
+		if value:
+			entries[i]["verified"] = True
+		else:
+			entries[i].pop("verified", None)
+		n += 1
+	return n
+
+
+def execute_bulk_cover_delete(entries: list[dict], indices, library: Path | str, *,
+                              covers: bool = True, baks: bool = False,
+                              embedded: bool = False) -> tuple[int, int]:
+	"""Delete covers on disk for every selected entry (bulk Ctrl+Shift+M).
+
+	The bulk twin of the per-book Delete-checked button: sidecar
+	``cover.jpg`` / ``cover.jpg.bak`` removal plus (opt-in) the embedded-cover
+	strip out of the EPUB files — immediate file operations, exactly like the
+	single-book path. When the sidecar itself is being deleted, a proposed
+	``cover_url`` is dropped from the touched entries (REBOUND, never mutated
+	in place — a library-served entry shares its proposal with the pristine
+	index): apply re-downloads a proposed cover for a C11/MISSING_COVER book,
+	so keeping the URL would undo the deletion on the next run. Returns
+	``(files_removed, epubs_stripped)``.
+	"""
+	library = Path(library)
+	removed = stripped = 0
+	for i in indices:
+		if not (0 <= i < len(entries)):
+			continue
+		e = entries[i]
+		paths = []
+		cover_path, bak_path = cover_paths(library, e.get("path", ""))
+		if covers:
+			paths.append(cover_path)
+		if baks:
+			paths.append(bak_path)
+		removed += delete_covers(paths)
+		if embedded:
+			for f in list_format_files(library / e.get("path", "")):
+				if strip_cover_from_book(f):
+					stripped += 1
+		if covers:
+			prop = e.get("proposed") or {}
+			if "cover_url" in prop:
+				e["proposed"] = {k: v for k, v in prop.items() if k != "cover_url"}
+	return removed, stripped
+
+
+class MergeOutcome(NamedTuple):
+	"""Result of :func:`execute_merge` (what moved, what left the list)."""
+
+	winner: dict          # the surviving entry (identity-stable across the list rebuild)
+	merged_count: int     # losers actually folded in (uuid-less legacy ones included)
+	dropped_uuids: list   # uuids removed from the list (library-index pruning)
+	failures: list        # "label: error" per loser that could not be merged
+	moved_files: int      # ebook/cover files moved into the winner folder
+
+
+# Fields the merge dialog offers for a per-book choice, in display order.
+# ``series`` travels as a ``(name, index)`` pair so one radio pick takes both
+# halves (splitting them would almost always be a mistake).
+MERGE_FIELDS: tuple[tuple[str, str], ...] = (
+	("title", _("Title")),
+	("authors", _("Authors (comma-separated)")),
+	("isbn", "ISBN"),
+	("year", _("Year")),
+	("publisher", _("Publisher")),
+	("language", _("Language")),
+	("series", _("Series")),
+	("genres", _("Genres (comma-separated)")),
+	("description", _("Description")),
+)
+
+
+def _merge_value_empty(v) -> bool:
+	"""True when a merge-field value carries nothing (an ∅ pick clears it)."""
+	if v is None:
+		return True
+	if isinstance(v, tuple):  # the series (name, index) pair
+		return not v[0]
+	if isinstance(v, (list, str)):
+		return not v
+	return False  # a bare 0/False year is still a value
+
+
+def merge_field_value(entry: dict | None, meta, field: str):
+	"""Effective per-field value for the merge dialog (raw, not display).
+
+	A DECIDED proposal (accept/keep) wins over the disk value — the same
+	decision-aware convention the list labels follow — because that is what
+	``bmf apply`` would write for that book; without a decision the entry
+	shows what is actually stored (an undecided proposal is still only a
+	suggestion, and library-served entries have none). The series field
+	returns a ``(name, index)`` pair, ``authors`` / ``genres`` lists.
+	"""
+	entry = entry or {}
+	prop = entry.get("proposed") or {}
+	decided = entry.get("action") in ("accept", "keep")
+	if field == "series":
+		if decided and ("series" in prop or "series_index" in prop):
+			return (prop.get("series") or "", str(prop.get("series_index") or ""))
+		name, idx = meta.series_pair()
+		return (name, str(idx or ""))
+	if field == "authors":
+		if decided and "authors" in prop:
+			v = prop["authors"]
+			return list(v) if isinstance(v, list) else ([v] if v else [])
+		if decided and "author" in prop:
+			v = prop["author"]
+			return [v] if isinstance(v, str) and v else []
+		return list(meta.authors)
+	if decided and field in prop:
+		return prop[field]
+	return {
+		"title": meta.title,
+		"isbn": meta.isbn,
+		"year": meta.year,
+		"publisher": meta.publisher,
+		"language": meta.language,
+		"genres": list(meta.genres),
+		"description": meta.description,
+	}.get(field)
+
+
+def merge_cell_text(field: str, value) -> str:
+	"""Short cell label for the merge dialog's field grid (∅ = pick as empty)."""
+	if _merge_value_empty(value):
+		return "∅"
+	if field == "series":
+		name, idx = value
+		return f"{name} #{idx}" if idx else name
+	if isinstance(value, list):
+		value = ", ".join(str(v) for v in value)
+	text = str(value)
+	return text if len(text) <= 56 else text[:55] + "…"
+
+
+def _apply_merge_choice(meta, field: str, value) -> None:
+	"""Write one merge-dialog choice onto the merged BookMeta (in place)."""
+	if field == "series":
+		name, idx = value if isinstance(value, tuple) else (value, "")
+		meta.series = [{"name": name, "index": idx}] if name else []
+	elif field in ("authors", "genres"):
+		setattr(meta, field, list(value or []))
+	elif field == "title":
+		meta.title = value or ""
+	else:  # isbn / year / publisher / language / description — None clears
+		setattr(meta, field, value or None)
+
+
+def merge_choice_proposal(field: str, value) -> dict:
+	"""``proposed`` overlay fragment for one merge choice.
+
+	Maps a dialog pick onto the review.yaml proposal vocabulary so
+	:func:`execute_merge` can rebase a conflicting stale proposal (see its
+	docstring); ``None`` values mirror the ∅ delete-mark semantics.
+	"""
+	if field == "series":
+		name, idx = value if isinstance(value, tuple) else (value, "")
+		out = {"series": name or None}
+		if idx:
+			out["series_index"] = idx
+		return out
+	if isinstance(value, list):  # authors / genres
+		return {field: list(value)}
+	return {field: value}
+
+
+def execute_merge(entries: list[dict], winner_idx: int, loser_idxs,
+                  library: Path | str, *, values: dict | None = None) -> MergeOutcome:
+	"""Merge the selected entries' folders into the WINNER's folder (Ctrl+J).
+
+	The user-driven counterpart of apply's placement merge (which only fires
+	when two folders collide at the same pattern target): each loser is folded
+	into the winner via :func:`mover.merge_folders` — ebook/cover files move
+	in (collisions rename with the loser's calibre id), metadata is
+	field-merged (winner wins, losers fill gaps), the loser folder is removed.
+	The winner's review entry survives (``bmf apply`` finishes it later);
+	successfully merged losers are REMOVED from *entries* in place — their
+	folders are gone, and a stale entry would fail the next apply with
+	"folder not found". The winner's ``current`` is refreshed from the merged
+	on-disk metadata so the editor (and the library-entry change detection)
+	shows the truth. Losers that fail (missing folder, IO error) stay in the
+	list and land in ``failures``.
+
+	*values* (the merge dialog's per-field picks, ``field → raw value`` as
+	produced by :func:`merge_field_value`) OVERRIDES the automatic field
+	merge: after the files move, the chosen values are written onto the
+	survivor's metadata on disk, and every EXISTING proposed key they conflict
+	with is rebased to the chosen value — a stale analyzer proposal must not
+	silently undo an explicit per-field decision at the next apply. Fields
+	without a proposal key are left alone: the disk already carries the
+	chosen value, and inventing proposal noise for a clean book buys nothing.
+	"""
+	library = Path(library)
+	winner = entries[winner_idx]
+	winner_folder = (library / winner.get("path", "")).resolve()
+	winner_meta = read_book_folder(winner_folder)
+	merged_losers: list[dict] = []
+	failures: list[str] = []
+	moved = 0
+	for i in loser_idxs:
+		if i == winner_idx or not (0 <= i < len(entries)):
+			continue
+		loser = entries[i]
+		loser_folder = (library / loser.get("path", "")).resolve()
+		try:
+			if loser_folder == winner_folder:
+				raise FileNotFoundError(_("same folder as the survivor"))
+			if not loser_folder.is_dir():
+				raise FileNotFoundError(_("folder not found"))
+			loser_meta = read_book_folder(loser_folder)
+			res = merge_folders(winner_folder, winner_meta, loser_meta,
+			                    dry_run=False, library=library)
+			if res.error:
+				raise RuntimeError(res.error)
+			moved += len(res.details or [])
+			# The merged write replaced the winner's metadata — re-read so the
+			# NEXT loser merges on top of the accumulated state.
+			winner_meta = read_book_folder(winner_folder)
+			merged_losers.append(loser)
+		except Exception as e:  # noqa: BLE001
+			failures.append(f"{entry_label(loser)}: {e}")
+	if merged_losers:
+		# Drop by IDENTITY, not uuid — a legacy uuid-less entry must not take
+		# every other uuid-less entry with it. ``entries[:] =`` keeps the list
+		# object (self.entries) intact.
+		entries[:] = [e for e in entries
+		              if not any(e is lo for lo in merged_losers)]
+		final_meta = read_book_folder(winner_folder)
+		if values:
+			for field, value in values.items():
+				_apply_merge_choice(final_meta, field, value)
+			write_book_meta(final_meta, dry_run=False, backup=True)
+			prop = dict(winner.get("proposed") or {})
+			rebased = False
+			for field, value in values.items():
+				for key, val in merge_choice_proposal(field, value).items():
+					if key in prop and prop[key] != val:
+						prop[key] = val
+						rebased = True
+			if rebased:  # a proposal-less book must not gain proposal noise
+				winner["proposed"] = prop
+		winner["current"] = _build_current(final_meta)
+	return MergeOutcome(
+		winner=winner,
+		merged_count=len(merged_losers),
+		dropped_uuids=[e.get("uuid") for e in merged_losers if e.get("uuid")],
+		failures=failures,
+		moved_files=moved,
+	)
 
 
 def render_review_text(entries: list[dict]) -> str:
@@ -539,6 +821,13 @@ def entry_author_label(e: dict) -> str:
 		v = prop["author"]
 		return str(v) if v is not None else ""
 	return str(((e or {}).get("current") or {}).get("author") or "")
+
+
+def entry_label(e: dict) -> str:
+	"""Short "title — author" label for bulk dialogs and failure reports."""
+	cur = (e or {}).get("current") or {}
+	title = cur.get("title") or ((e or {}).get("proposed") or {}).get("title") or "?"
+	return f"{title} — {entry_author_label(e)}"
 
 
 def entry_search_haystack(e: dict, active: dict | None = None) -> str:
@@ -2360,8 +2649,6 @@ class ReviewEditorApp:
 
 	def _on_ctrl_key(self, event) -> str | None:
 		k = (event.keysym or "").lower()
-		if k in _PASSTHROUGH:
-			return None  # keep native copy/paste/cut/undo/select-all
 		# A modal child holding the grab (the bulk-edit dialog) owns the
 		# keyboard — main-window shortcuts must not fire underneath it.
 		try:
@@ -2370,12 +2657,30 @@ class ReviewEditorApp:
 			grabbed = None
 		if grabbed is not None and grabbed is not self.root:
 			return None
+		# Shift variants of single-book shortcuts act on the whole
+		# multi-selection ("same key + Shift = all selected books"). They are
+		# matched BEFORE the passthrough set — Ctrl+Shift+A must not land in
+		# Ctrl+A's select-all passthrough — and unknown Shift combos still
+		# fall through untouched (Ctrl+Shift+C/V/X keep their native meaning).
+		if event.state & 0x0001:  # ShiftMask
+			shift_dispatch = {
+				"a": self.bulk_accept,
+				"o": self.bulk_toggle_verified,
+				"m": self.bulk_delete_covers,
+			}
+			handler = shift_dispatch.get(k)
+			if handler is not None:
+				handler()
+				return "break"
+			return None
+		if k in _PASSTHROUGH:
+			return None  # keep native copy/paste/cut/undo/select-all
 		dispatch = {
 			"return": self.act_accept, "d": self.act_delete, "k": self.act_keep,
 			"o": self.toggle_verified,
 			"0": self.act_clear, "s": self.save, "q": self.quit_app,
 			"w": self.swap_fields, "f": self.copy_current_to_focused,
-			"e": self.bulk_edit,
+			"e": self.bulk_edit, "j": self.merge_selected,
 			"n": self.cover_new,
 			"b": self.cover_restore_bak, "p": self.cover_keep, "m": self.cover_delete_checked,
 			"t": self.content_toggle_view, "g": self.content_recode_toggle,
@@ -3119,6 +3424,315 @@ class ReviewEditorApp:
 		win.grab_set()
 		entry.focus_set()
 
+	def _modal_over_main(self, win, focus=None) -> None:
+		"""Centre *win* over the main window, grab it, focus *focus*."""
+		self.root.update_idletasks()
+		win.update_idletasks()
+		x = self.root.winfo_rootx() + (self.root.winfo_width() - win.winfo_width()) // 2
+		y = self.root.winfo_rooty() + (self.root.winfo_height() - win.winfo_height()) // 2
+		win.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+		win.grab_set()
+		if focus is not None:
+			focus.focus_set()
+
+	def bulk_accept(self) -> None:
+		"""Ctrl+Shift+A: accept every SELECTED list row at once.
+
+		An explicit selection IS the decision — unlike a bulk field edit
+		(which only decides pending entries) this overrides any previous
+		decision on the selected books. Save (Ctrl+S) writes review.yaml as
+		usual; rows hidden by an active action filter drop out of the view,
+		exactly like a single-book accept.
+		"""
+		idxs = self._bulk_selection_indices()
+		if not idxs:
+			self._flash(_("select books first (Ctrl+click, Shift+click)"))
+			return
+		self._collect_current()
+		n = apply_bulk_action(self.entries, idxs, "accept")
+		self._mark_dirty()
+		if 0 <= self._cur < len(self.entries) and self._cur in idxs:
+			self._load_book(self._cur)
+		self.refresh_list()
+		self._flash(_("bulk accept: {n} books").format(n=n))
+
+	def bulk_toggle_verified(self) -> None:
+		"""Ctrl+Shift+O: flip the OK mark on every SELECTED list row.
+
+		Toggle semantics like the single-book Ctrl+O: sets the mark, and
+		clears it when EVERY selected book already carries it.
+		"""
+		idxs = self._bulk_selection_indices()
+		if not idxs:
+			self._flash(_("select books first (Ctrl+click, Shift+click)"))
+			return
+		self._collect_current()
+		sel = [self.entries[i] for i in idxs if 0 <= i < len(self.entries)]
+		value = not all(e.get("verified") for e in sel)
+		n = apply_bulk_verified(self.entries, idxs, value)
+		self._mark_dirty()
+		if 0 <= self._cur < len(self.entries) and self._cur in idxs:
+			self._load_book(self._cur)
+		self.refresh_list()
+		self._flash((_("bulk verified: {n} books") if value
+		             else _("bulk verify cleared: {n} books")).format(n=n))
+
+	def bulk_delete_covers(self) -> None:
+		"""Ctrl+Shift+M: delete the covers of every SELECTED list row at once.
+
+		A dialog mirroring the per-book Delete-checked button: the sidecar
+		cover.jpg (default on), its .bak, and the covers EMBEDDED in the EPUB
+		files. Immediate file operations exactly like the single-book path —
+		the embedded strip rewrites the ebooks, so it asks once with the file
+		list first. A proposed cover_url is dropped from the touched entries
+		so the next apply cannot re-download what was just removed.
+		"""
+		idxs = self._bulk_selection_indices()
+		if not idxs:
+			self._flash(_("select books first (Ctrl+click, Shift+click)"))
+			return
+		self._collect_current()
+		win = tk.Toplevel(self.root)
+		win.title(_("Bulk cover delete"))
+		win.transient(self.root)
+		win.resizable(False, False)
+		ttk.Label(win, text=_("Delete covers of {n} selected books:").format(n=len(idxs)),
+		          anchor="w").pack(fill="x", padx=10, pady=(10, 4))
+		cover_var = tk.BooleanVar(value=True)
+		bak_var = tk.BooleanVar(value=False)
+		emb_var = tk.BooleanVar(value=False)
+		ttk.Checkbutton(win, text=_("cover.jpg (current cover)"),
+		                variable=cover_var).pack(anchor="w", padx=14)
+		ttk.Checkbutton(win, text=_("cover.jpg.bak (backup cover)"),
+		                variable=bak_var).pack(anchor="w", padx=14)
+		ttk.Checkbutton(win, text=_("covers embedded in the ebook files (EPUB only)"),
+		                variable=emb_var).pack(anchor="w", padx=14)
+		hint = ttk.Label(win, text="", foreground="#a00")
+		hint.pack(anchor="w", padx=10)
+
+		def _apply(_event=None):
+			if not (cover_var.get() or bak_var.get() or emb_var.get()):
+				hint.configure(text=_("tick at least one option"))
+				return
+			fmt_files: list[Path] = []
+			if emb_var.get():
+				for i in idxs:
+					if 0 <= i < len(self.entries):
+						fmt_files.extend(list_format_files(
+							self.library / self.entries[i].get("path", "")))
+				if fmt_files and not messagebox.askyesno("bmf gui",
+						_("Strip the embedded cover from these ebooks?\n"
+						  "(the ebook files themselves stay)\n\n{files}").format(
+							files="\n".join(f"  • {p.name}" for p in fmt_files))):
+					return
+			removed, stripped = execute_bulk_cover_delete(
+				self.entries, idxs, self.library,
+				covers=cover_var.get(), baks=bak_var.get(), embedded=emb_var.get())
+			win.destroy()
+			self._mark_dirty()
+			self._reload_thumbs(idxs)
+			if 0 <= self._cur < len(self.entries) and self._cur in idxs:
+				self._refresh_covers()
+				self._refresh_formats()  # the format radios / embedded covers changed too
+			self.refresh_list()
+			msg = _("deleted {n}").format(n=removed) if (cover_var.get() or bak_var.get()) else ""
+			if emb_var.get():
+				part = _("covers stripped {stripped}/{total}").format(
+					stripped=stripped, total=len(fmt_files))
+				if stripped < len(fmt_files):
+					part += _(" (EPUB only)")
+				msg = f"{msg}; {part}" if msg else part
+			self._flash(msg)
+			return "break"
+
+		btns = ttk.Frame(win)
+		btns.pack(fill="x", padx=10, pady=10)
+		ttk.Button(btns, text=_("Delete"), command=_apply).pack(side="left", padx=2)
+		ttk.Button(btns, text=_("Cancel"), command=win.destroy).pack(side="left", padx=2)
+		win.bind("<Return>", _apply)
+		win.bind("<Escape>", lambda _e: (win.destroy(), "break")[1])
+		self._modal_over_main(win)
+
+	def merge_selected(self) -> None:
+		"""Ctrl+J: merge the SELECTED books into one folder / review entry.
+
+		The placement merge (apply) only fires when two folders happen to
+		collide at the same pattern target; this is the explicit "these are
+		the same work, join them" command. The dialog picks the SURVIVOR
+		(default: the focused row — the detail pane shows it) and shows a
+		per-FIELD grid: every metadata field of every selected book, one
+		radio per cell, so the merged book keeps exactly the values the user
+		picks from either side (:func:`merge_field_value` — a decided
+		proposal counts as that book's value). A same-work warning
+		(``mover.same_book``) flags a probably-wrong merge without blocking
+		it — here the user decides, unlike the automatic placement merge.
+		"""
+		idxs = self._bulk_selection_indices()
+		if len(idxs) < 2:
+			self._flash(_("select at least two books to merge"))
+			return
+		self._collect_current()
+		# Metas for the same-work warning and the field grid — a handful of
+		# metadata.json reads, cheap next to the merge itself (execute_merge
+		# re-reads anyway: each merged write replaces the survivor's metadata
+		# on disk).
+		metas = {}
+		for i in idxs:
+			try:
+				metas[i] = read_book_folder(self.library / self.entries[i].get("path", ""))
+			except Exception:  # noqa: BLE001
+				metas[i] = None
+		focus_iid = self.tree.focus()
+		focus_idx = int(focus_iid) if (focus_iid or "").lstrip("-").isdigit() else -1
+		if focus_idx not in idxs:
+			focus_idx = idxs[0]
+		win = tk.Toplevel(self.root)
+		win.title(_("Merge books"))
+		win.transient(self.root)
+		win.resizable(False, False)
+		ttk.Label(win, text=_("Merge {n} books into one — pick the survivor:").format(n=len(idxs)),
+		          anchor="w").pack(fill="x", padx=10, pady=(10, 4))
+		choice = tk.StringVar(value=str(focus_idx))
+		for i in idxs:
+			ttk.Radiobutton(win, text=entry_label(self.entries[i]), value=str(i),
+			                variable=choice).pack(anchor="w", padx=14)
+		warn = ttk.Label(win, text="", foreground="#a40000", wraplength=560, justify="left")
+		warn.pack(anchor="w", padx=10, pady=(4, 0))
+
+		def _check(*_args) -> None:
+			w = int(choice.get())
+			wm = metas.get(w)
+			bad = [entry_label(self.entries[i]) for i in idxs
+			       if i != w and wm is not None and metas.get(i) is not None
+			       and not same_book(wm, metas[i])]
+			warn.configure(text=(
+				_("⚠ does not look like the same work:\n{labels}").format(
+					labels="\n".join(bad)) if bad else ""))
+
+		choice.trace_add("write", _check)
+		_check()
+
+		# --- per-field grid: rows = fields, columns = books, one radio per cell
+		raw: dict[str, dict[int, object]] = {}
+		for field, _label in MERGE_FIELDS:
+			raw[field] = {i: (merge_field_value(self.entries[i], metas[i], field)
+			                  if metas.get(i) is not None else None)
+			              for i in idxs}
+		ttk.Label(win, text=_("Field-by-field: pick which book's value the merged book keeps"),
+		          anchor="w").pack(fill="x", padx=10, pady=(8, 2))
+		grid = ttk.Frame(win)
+		grid.pack(fill="x", padx=10)
+		ttk.Label(grid, text="").grid(row=0, column=0, sticky="w")
+		for c, i in enumerate(idxs):
+			ttk.Label(grid, foreground="#555",
+			          text=Path(self.entries[i].get("path", "")).name).grid(
+				row=0, column=c + 1, sticky="w", padx=8)
+		row_vars: dict[str, tk.StringVar] = {}
+		for r, (field, label) in enumerate(MERGE_FIELDS, start=1):
+			ttk.Label(grid, text=label).grid(row=r, column=0, sticky="w")
+			# Default: the survivor's value when it has one, else the first
+			# non-empty cell — the untouched grid reproduces the automatic
+			# merge's gap-filling, so confirming as-is loses nothing.
+			if not _merge_value_empty(raw[field].get(focus_idx)):
+				default = focus_idx
+			else:
+				default = next((i for i in idxs
+				                if not _merge_value_empty(raw[field].get(i))), focus_idx)
+			var = tk.StringVar(value=str(default))
+			row_vars[field] = var
+			for c, i in enumerate(idxs):
+				ttk.Radiobutton(grid, text=merge_cell_text(field, raw[field][i]),
+				                value=str(i), variable=var).grid(
+					row=r, column=c + 1, sticky="w", padx=8)
+		ttk.Label(win, text=_(
+			"Defaults follow the survivor; a field the survivor lacks takes the first "
+			"value found. ∅ = keep the field empty. Picked values are written to the "
+			"merged book and override a conflicting proposal."),
+			wraplength=560, justify="left", foreground="#555").pack(
+			fill="x", padx=10, pady=(6, 0))
+		ttk.Label(win, text=_(
+			"The survivor keeps its folder and review entry; the other books' files "
+			"move in and their folders are removed. review.yaml is saved right after "
+			"the merge."), wraplength=560, justify="left", foreground="#555").pack(
+			fill="x", padx=10, pady=(4, 0))
+
+		def _apply(_event=None):
+			w = int(choice.get())
+			if not messagebox.askyesno(
+					"bmf gui", _("Merge {n} books into {label}?").format(
+						n=len(idxs) - 1, label=entry_label(self.entries[w]))):
+				return
+			losers = [i for i in idxs if i != w]
+			values = {field: raw[field][int(var.get())]
+			          for field, var in row_vars.items()
+			          if not all(_merge_value_empty(raw[field].get(i)) for i in idxs)}
+			winner_path = str(self.library / self.entries[w].get("path", ""))
+			loser_paths = [str(self.library / self.entries[i].get("path", ""))
+			               for i in losers]
+			outcome = execute_merge(self.entries, w, losers, self.library,
+			                        values=values)
+			win.destroy()
+			self._after_merge(outcome, winner_path, loser_paths)
+			return "break"
+
+		btns = ttk.Frame(win)
+		btns.pack(fill="x", padx=10, pady=10)
+		ttk.Button(btns, text=_("Merge"), command=_apply).pack(side="left", padx=2)
+		ttk.Button(btns, text=_("Cancel"), command=win.destroy).pack(side="left", padx=2)
+		win.bind("<Return>", _apply)
+		win.bind("<Escape>", lambda _e: (win.destroy(), "break")[1])
+		self._modal_over_main(win)
+
+	def _after_merge(self, outcome: MergeOutcome, winner_path: str,
+	                 loser_paths: list[str]) -> None:
+		"""Post-merge cleanup: library index, thumbnails, selection, save.
+
+		The losers' folders are gone on disk, so review.yaml (and the
+		in-memory library index) must agree RIGHT NOW, not at the next
+		Ctrl+S — a stale entry would fail the next apply with "folder not
+		found", and the "+ library" search would re-serve a ghost.
+		"""
+		if not outcome.merged_count and not outcome.failures:
+			self._flash(_("nothing merged"))
+			return
+		for u in outcome.dropped_uuids:
+			self._lib_uuids.pop(u, None)
+			self._thumbs_pil.pop(u, None)
+			self._thumbs_photo.pop(u, None)
+			self._big_thumbs.pop(u, None)
+		if outcome.dropped_uuids:
+			drop = set(outcome.dropped_uuids)
+			self._lib_index = [(e, hay) for e, hay in self._lib_index
+			                   if e.get("uuid") not in drop]
+		# Best-effort cache drop, matching apply's merge (a stale row for a
+		# removed folder is only litter, but no reason to keep it).
+		try:
+			cache = Cache(self.cfg.cache_db)
+			try:
+				cache.invalidate_many([*loser_paths, winner_path])
+			finally:
+				cache.close()
+		except Exception:  # noqa: BLE001
+			log.debug("cache invalidation after merge failed", exc_info=True)
+		new_cur = next((i for i, e in enumerate(self.entries) if e is outcome.winner), 0)
+		if self._do_save():
+			self._dirty = False
+		self.refresh_list()
+		self.tree.selection_set(str(new_cur), silent=True)
+		self.tree.see(str(new_cur))
+		# _load_book alone does NOT move _cur (that is _select_index's job,
+		# with the collect-guard we do not want here) — and _refresh_covers
+		# indexes entries[_cur], so a stale _cur would crash after the list
+		# just shrank.
+		self._cur = new_cur
+		self._load_book(new_cur)
+		self._reload_thumbs([new_cur])  # the survivor may have gained a cover
+		if outcome.failures:
+			messagebox.showwarning("bmf gui", _("could not merge:\n{list}").format(
+				list="\n".join(outcome.failures)))
+		self._flash(_("merged {n} books, {m} files moved").format(
+			n=outcome.merged_count, m=outcome.moved_files))
+
 	def _copy_current(self, role: str) -> None:
 		# Copies whatever the RO label currently DISPLAYS (mode-dependent).
 		self._fields[role]["value"].set(self._fields[role]["current"].get())
@@ -3661,6 +4275,39 @@ class ReviewEditorApp:
 
 		threading.Thread(target=work, daemon=True).start()
 
+	def _reload_thumbs(self, idxs) -> None:
+		"""Reload several books' list thumbnails after a bulk cover change.
+
+		The multi-row twin of :meth:`_reload_list_thumb`: the caches are
+		dropped synchronously (an interim refresh_list must not paint the
+		stale image), the fresh thumbs load in ONE background sweep (a missing
+		cover → no thumbnail) and a single refresh_list repaints the rows
+		when they land.
+		"""
+		jobs = []
+		for i in idxs:
+			if not (0 <= i < len(self.entries)):
+				continue
+			e = self.entries[i]
+			uuid = e.get("uuid")
+			self._thumbs_pil.pop(uuid, None)
+			self._thumbs_photo.pop(uuid, None)
+			self._big_thumbs.pop(uuid, None)
+			cp, _ = cover_paths(self.library, e.get("path", ""))
+			jobs.append((uuid, cp))
+
+		def work():
+			loaded = [(uuid, load_thumb(cp, 32, 48) if cp.is_file() else None)
+			          for uuid, cp in jobs]
+			if self._alive:
+				def apply():
+					for uuid, pil in loaded:
+						self._thumbs_pil[uuid] = pil
+					self.refresh_list()
+				self._after(apply)
+
+		threading.Thread(target=work, daemon=True).start()
+
 	def _thumb_photo_for(self, uuid):
 		if uuid in self._thumbs_photo:
 			return self._thumbs_photo[uuid]
@@ -3745,6 +4392,10 @@ class ReviewEditorApp:
 			("Ctrl+W", _("swap the author↔title field values (C1 helper)")),
 			("Ctrl/Shift+click", _("list: select multiple books (toggle one / extend a range)")),
 			("Ctrl+E", _("bulk edit: set the author or series for all selected books at once")),
+			("Ctrl+Shift+A", _("bulk: accept all selected books")),
+			("Ctrl+Shift+O", _("bulk: verified on/off for all selected books")),
+			("Ctrl+Shift+M", _("bulk: delete covers of all selected books")),
+			("Ctrl+J", _("merge the selected books into one (files move to the survivor)")),
 			("∅ / ↺", _("field button: apply the field as EMPTY (wrong proposal, correct value unknown)")),
 			("Ctrl+D", "delete"),
 			("Ctrl+K", _("keep (applies like accept; the entry stays in review)")),
@@ -3753,8 +4404,7 @@ class ReviewEditorApp:
 			("+ library", _("checkbox above the list: the search also loads matching books from the whole library, not only review.yaml; a changed book is added to review.yaml on save")),
 			("Ctrl+S", _("save")),
 			("Ctrl+Q", _("quit")),
-			("Ctrl+F", _("focus search")),
-			("Ctrl+L", _("RO column → target (focused field)")),
+			("Ctrl+F", _("RO column → target (focused field)")),
 			("Ctrl+N", _("cover: apply new")),
 			("Ctrl+B", _("cover: restore .bak")),
 			("Ctrl+P", _("cover: keep")),
