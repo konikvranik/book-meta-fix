@@ -1747,3 +1747,80 @@ class TestOnWheelStringWidget:
 			assert app._on_wheel(_Ev()) is None
 		finally:
 			root.destroy()
+
+
+class TestDialogConfirmParent:
+	"""A confirm fired from inside a grabbed Toplevel must be its CHILD.
+
+	Regression: the merge and bulk-cover-delete confirmations called
+	``messagebox.askyesno`` without ``parent=``, so the box attached to the
+	default ROOT while the grabbed dialog stacked above it — the dialog looked
+	hung until the hidden box was found and dismissed.
+	"""
+
+	def _bare_app(self, root, library, entries, selection):
+		import types
+
+		app = gui.ReviewEditorApp.__new__(gui.ReviewEditorApp)
+		app.root = root
+		app.entries = entries
+		app.library = library
+		app.tree = types.SimpleNamespace(focus=lambda: str(selection[0]))
+		app._bulk_selection_indices = lambda: list(selection)
+		app._collect_current = lambda: None
+		self.wins = []
+		app._modal_over_main = lambda win, focus=None: self.wins.append(win)
+		return app
+
+	def _confirm_button(self, win):
+		# The LAST packed frame is the button row; its first child is the
+		# confirm button ("Merge" / "Delete").
+		frames = [w for w in win.winfo_children() if isinstance(w, gui.ttk.Frame)]
+		return frames[-1].winfo_children()[0]
+
+	def test_merge_confirm_parented_to_dialog(self, tmp_path, monkeypatch):
+		root = _tk_root()
+		try:
+			app = self._bare_app(root, tmp_path, [
+				{"uuid": "a", "path": "A/Kniha (1)", "current": {"title": "Kniha"}, "action": None},
+				{"uuid": "b", "path": "A/Kniha (2)", "current": {"title": "Kniha"}, "action": None},
+			], selection=(0, 1))
+			captured = {}
+
+			def _ask(_title, _message, **kw):
+				captured.update(kw)
+				return False  # decline → execute_merge never runs
+
+			monkeypatch.setattr(gui.messagebox, "askyesno", _ask)
+			app.merge_selected()
+			assert len(self.wins) == 1
+			self._confirm_button(self.wins[0]).invoke()
+			assert captured.get("parent") is self.wins[0]
+		finally:
+			root.destroy()
+
+	def test_bulk_cover_delete_confirm_parented_to_dialog(self, tmp_path, monkeypatch):
+		root = _tk_root()
+		try:
+			folder = tmp_path / "A" / "Kniha (1)"
+			folder.mkdir(parents=True)
+			(folder / "kniha.epub").write_bytes(b"x")  # an ebook → the strip confirm fires
+			app = self._bare_app(root, tmp_path, [
+				{"uuid": "a", "path": "A/Kniha (1)", "current": {"title": "Kniha"}, "action": None},
+			], selection=(0,))
+			captured = {}
+
+			def _ask(_title, _message, **kw):
+				captured.update(kw)
+				return False
+
+			monkeypatch.setattr(gui.messagebox, "askyesno", _ask)
+			app.bulk_delete_covers()
+			assert len(self.wins) == 1
+			win = self.wins[0]
+			checkboxes = [w for w in win.winfo_children() if isinstance(w, gui.ttk.Checkbutton)]
+			checkboxes[2].invoke()  # "covers embedded in the ebook files (EPUB only)"
+			self._confirm_button(win).invoke()
+			assert captured.get("parent") is win
+		finally:
+			root.destroy()

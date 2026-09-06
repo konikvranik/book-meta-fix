@@ -3531,7 +3531,8 @@ class ReviewEditorApp:
 				if fmt_files and not messagebox.askyesno("bmf gui",
 						_("Strip the embedded cover from these ebooks?\n"
 						  "(the ebook files themselves stay)\n\n{files}").format(
-							files="\n".join(f"  • {p.name}" for p in fmt_files))):
+						files="\n".join(f"  • {p.name}" for p in fmt_files)),
+						parent=win):
 					return
 			removed, stripped = execute_bulk_cover_delete(
 				self.entries, idxs, self.library,
@@ -3666,9 +3667,13 @@ class ReviewEditorApp:
 
 		def _apply(_event=None):
 			w = int(choice.get())
+			# parent=win: without it the confirm attaches to the ROOT and this
+			# grabbed dialog covers it — the merge looks hung until the hidden
+			# box is found and dismissed.
 			if not messagebox.askyesno(
 					"bmf gui", _("Merge {n} books into {label}?").format(
-						n=len(idxs) - 1, label=entry_label(self.entries[w]))):
+						n=len(idxs) - 1, label=entry_label(self.entries[w])),
+					parent=win):
 				return
 			losers = [i for i in idxs if i != w]
 			values = {field: raw[field][int(var.get())]
