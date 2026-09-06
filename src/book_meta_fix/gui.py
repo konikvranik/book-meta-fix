@@ -35,6 +35,7 @@ import bisect
 import io
 import json
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -433,20 +434,20 @@ def extract_series_values(src: object) -> list[str]:
 	return tokens
 
 
-def entry_series_label(e: dict) -> str:
-	"""Display label ``"Series #N"`` for an entry's series, "" if none.
+def entry_series_pair(e: dict) -> tuple[str, str]:
+	"""Decision-aware ``(name, order)`` pair for an entry's series.
 
-	An ACCEPT/KEEP decision applies ``proposed`` like apply will, so the
-	list shows the series as the decision leaves it (a ``null`` proposal
-	deletes the field — the same semantics ``_apply_fields`` uses); pending
-	and delete entries show ``current``. Composes the flat
-	``series`` / ``series_index`` pair (review.yaml shape); the raw ABS
-	shapes (a dict, a list of dicts with the legacy ``sequence`` key) are
-	tolerated the same way :func:`extract_series_values` tolerates them.
-	An order glued into the name ("Mark Stone #73", index empty) is
-	normalised through the C14 splitter so the label shows the split pair;
-	an index that DIFFERS from an embedded one is left alone (the
-	deliberate state C14 refuses to touch).
+	``("", "")`` when the book has no series. An ACCEPT/KEEP decision
+	applies ``proposed`` like apply will, so the pair reflects the series
+	as the decision leaves it (a ``null`` proposal deletes the field — the
+	same semantics ``_apply_fields`` uses); pending and delete entries show
+	``current``. Composes the flat ``series`` / ``series_index`` pair
+	(review.yaml shape); the raw ABS shapes (a dict, a list of dicts with
+	the legacy ``sequence`` key) are tolerated the same way
+	:func:`extract_series_values` tolerates them. An order glued into the
+	name ("Mark Stone #73", index empty) is normalised through the C14
+	splitter so the pair comes out split; an index that DIFFERS from an
+	embedded one is left alone (the deliberate state C14 refuses to touch).
 	"""
 	cur = (e or {}).get("current") or {}
 	prop = (e or {}).get("proposed") or {}
@@ -479,9 +480,50 @@ def entry_series_label(e: dict) -> str:
 	split = split_series_index(name) if name else None
 	if split is not None and (not idx or idx == split[1]):
 		name, idx = split
+	return name, idx
+
+
+def entry_series_label(e: dict) -> str:
+	"""Display label ``"Series #N"`` for an entry's series, "" if none.
+
+	Composed from :func:`entry_series_pair` (which carries the
+	decision-aware normalization this label shows).
+	"""
+	name, idx = entry_series_pair(e)
 	if not name:
 		return f"#{idx}" if idx else ""
 	return f"{name} #{idx}" if idx else name
+
+
+def entry_sort_key(e: dict) -> tuple:
+	"""Left-panel display order: series (name, then order in it), author, title.
+
+	Series books form blocks at the TOP of the list, each block ordered by
+	its series ORDER — a series run read in sequence is the unit of review
+	(C14 glued-order splits, `+ library` merges of a series the user just
+	searched); books without a series sort AFTER the blocks, by author then
+	title. The order sorts NUMERICALLY ("2" < "10", "1.5" between 1 and 2);
+	a missing or non-numeric order closes its block (books with a known
+	order come first, the rest by author/title). Series and author are the
+	decision-aware labels the row SHOWS (:func:`entry_series_pair`,
+	:func:`entry_author_label`); the title is the current one (the title
+	column shows current). Strings compare casefolded — a lowercase author
+	must not sink below "Z".
+	"""
+	name, idx = entry_series_pair(e)
+	try:
+		num = float(idx)
+		order: tuple = (num, "") if math.isfinite(num) else (math.inf, idx.casefold())
+	except ValueError:
+		order = (math.inf, idx.casefold())
+	title = str(((e or {}).get("current") or {}).get("title") or "")
+	return (
+		1 if not name else 0,
+		name.casefold(),
+		order,
+		entry_author_label(e).casefold(),
+		title.casefold(),
+	)
 
 
 def entry_author_label(e: dict) -> str:
@@ -864,8 +906,9 @@ class _Tooltip:
 			tip.geometry(f"+{x}+{y}")
 		except Exception:  # noqa: BLE001
 			pass
+		# ttk has no -padx/-pady; the padding option takes the pair instead.
 		ttk.Label(tip, text=self.text, justify="left", background="#ffffe0",
-		         relief="solid", borderwidth=1, padx=6, pady=3).pack()
+		         relief="solid", borderwidth=1, padding=(6, 3)).pack()
 		self._tip = tip
 
 	def _hide(self, _event=None) -> None:
@@ -1123,11 +1166,9 @@ class _BookList:
 			r2, g2, b2 = (int(c2[i:i + 2], 16) for i in (1, 3, 5))
 		except (TypeError, ValueError):
 			return c1
-		return "#{:02x}{:02x}{:02x}".format(
-			round(r1 + (r2 - r1) * t),
-			round(g1 + (g2 - g1) * t),
-			round(b1 + (b2 - b1) * t),
-		)
+		return (f"#{round(r1 + (r2 - r1) * t):02x}"
+		        f"{round(g1 + (g2 - g1) * t):02x}"
+		        f"{round(b1 + (b2 - b1) * t):02x}")
 
 	@classmethod
 	def _resolve_colors(cls, style):
@@ -2474,7 +2515,15 @@ class ReviewEditorApp:
 					if not entry_matches_search(needle, e, active=active_fields):
 						continue
 			out.append(i)
+		# Display order, NOT storage order: series blocks first (name, then
+		# order inside the series), the rest by author/title. Every consumer
+		# of this method sees the same order — the list build, the j/k
+		# stepping, the position counter — so they cannot disagree. The
+		# iids stay the ORIGINAL entry indices; self.entries (and thus the
+		# save order) is untouched.
+		out.sort(key=lambda i: entry_sort_key(self.entries[i]))
 		return out
+
 
 	@staticmethod
 	def _entry_title(e: dict) -> str:
@@ -3244,7 +3293,7 @@ class ReviewEditorApp:
 					_("Strip the embedded cover from {name} (the ebook file stays)").format(name=path.name)
 					if is_epub else
 					_("The embedded cover cannot be stripped from {ext} — EPUB only").format(
-						text=path.suffix or _("file"))
+						ext=path.suffix or _("file"))
 				),
 				check_enabled=is_epub,
 			)

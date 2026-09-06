@@ -172,6 +172,15 @@ focus stays on the same field when you change book. Actions: `Ctrl+Enter`
 accept, `Ctrl+D` delete, `Ctrl+K` keep, `Ctrl+G` recode content, `Ctrl+S`
 save. Press `F1` for the full shortcut overlay.
 
+**Bulk edit (`Ctrl+E`).** The list supports a multi-selection (`Ctrl+click`
+toggles a row, `Shift+click` selects a range); `Ctrl+E` opens a small dialog
+that sets the author or series — or, with `∅`, deletes the field — for
+every selected book at once. The value lands in each book's `proposed`
+block (a pending book becomes `accept`), the series order stays per-book,
+and `Ctrl+S` writes the results as usual. Natural companion to the
+`+ library` search: pull in every book of a broken series, select them,
+fix the series name in one stroke.
+
 **Whole-library search (`+ library`).** The `Search:` box filters review
 entries; tick `+ library` next to it and the same query also sweeps the
 whole library — matching books that are NOT in review.yaml join the list

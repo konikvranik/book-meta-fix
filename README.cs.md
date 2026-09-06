@@ -175,6 +175,15 @@ při změně knihy zůstává na témž poli. Akce: `Ctrl+Enter` accept, `Ctrl+D
 delete, `Ctrl+K` keep, `Ctrl+G` překódovat obsah, `Ctrl+S` uložit. Plný
 přehled zkratek zobrazí `F1`.
 
+**Hromadná úprava (`Ctrl+E`).** Seznam podporuje vícenásobný výběr
+(`Ctrl+klik` řádek přepíná, `Shift+klik` vybere rozsah); `Ctrl+E` otevře
+malý dialog, který jedním tahem nastaví autora nebo sérii — případně s `∅`
+pole smaže — všem vybraným knihám. Hodnota padne do bloku `proposed` každé
+knihy (nerozhodnutá kniha se stane `accept`), pořadí série zůstává knihu
+od knihy a výsledky zapíše obvyklé `Ctrl+S`. Přirozené doplnění hledání
+`+ knihovna`: natáhnete všechny knihy rozbité série, vyberete je a opravíte
+název série jedním tahem.
+
 **Vyhledávání v celé knihovně (`+ knihovna`).** Pole `Hledat:` filtruje
 záznamy review; zaškrtněte vedle něj `+ knihovna` a tentýž dotaz projde
 i celou knihovnou — odpovídající knihy, které NEJSOU v review.yaml, se

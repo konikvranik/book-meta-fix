@@ -115,7 +115,16 @@ src/book_meta_fix/
                   analyze's pre-filled accept). _filtered_indices exempts listed library entries
                   via their INDEX haystack keyed in _lib_uuids (uuid → hay) — the entry itself
                   lacks the description the index matched on, and a stale superset match hides
-                  when the needle narrows)
+                  when the needle narrows). Multi-select in the list (Ctrl+click toggle /
+                  Shift+click range, _BookList selection_toggle/selection_extend — focus row ≠
+                  selection: the detail pane follows the FOCUS; refresh_list banks+intersects
+                  the selection so rows hidden by a filter leave it) feeds the Ctrl+E bulk
+                  edit (apply_bulk_field + bulk_edit dialog): one author/series value (or ∅
+                  delete) into every selected entry's proposed, pending → accept, series
+                  ORDER never touched; the dialog holds a grab and _on_ctrl_key ignores
+                  shortcuts under any grab; the row's author/series labels are decision-aware
+                  (entry_author_label/entry_series_label — accept/keep shows the proposed
+                  value, so a bulk edit is visible in the list at once)
   cli.py           click commands: scan, report, analyze, apply, epubgen, crosscheck,
                   strip-covers, gui
                   (organize is a deprecation stub — placement lives in apply)

@@ -35,7 +35,10 @@ sérii, autoři, žánry (`Ctrl+A` vybere v poli vše). Seznam zobrazuje vlevo
 štítek, na pravém konci řádku s autorem sérii s pořadím (současné hodnoty;
 u záznamu s `accept`/`keep` navrženého autora a sérii — tedy ty, které
 `apply` zapíše) a v každém řádku vpravo přilepenou miniaturu obálky.
-Vyžaduje Tk
+Řádky se řadí série napřed: knihy jedné série tvoří jediný blok v pořadí
+čtení (pořadí se porovnává číselně, takže #2 před #10, a zalepené
+`Mark Stone #73` počítá jako 73), bloky následují názvy sérií a knihy
+bez série pak podle autora a názvu. Vyžaduje Tk
 bindings
 (`sudo apt install python3-tk` na Debianu/Ubuntu). Úpravy se zapisují
 zpět do `review.yaml` — potvrďte je příkazem `bmf apply` jako v
@@ -45,8 +48,10 @@ zpět do `review.yaml` — potvrďte je příkazem `bmf apply` jako v
 
 Pole `Hledat:` normálně filtruje jen záznamy review. Zaškrtněte vedle něj
 **`+ knihovna`** a tentýž dotaz projde i celou knihovnou: odpovídající
-knihy, které **nejsou** v review.yaml, se přidají do seznamu (seřazené
-podle autora, jejich hlavička říká „není v review.yaml"). Právě to je
+knihy, které **nejsou** v review.yaml, se přidají do seznamu (jejich
+hlavička říká „není v review.yaml"; řadí se do stejného pořadí série
+napřed jako vše ostatní, takže celá řada se seřadí do jediného bloku).
+Právě to je
 workflow pro sérii, o které víte, že je rozbitá — v Audiobookshelf uvidíte
 špatná metadata u knih „Mark Stone", vyhledáte sérii, zaškrtnete
 `+ knihovna` a zobrazí se všechny knihy Mark Stone, ať už jsou v review,

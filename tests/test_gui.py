@@ -1,14 +1,18 @@
 """Unit tests for the pure helpers in book_meta_fix.gui.
 
 These exercise the no-Tk, no-network logic (field composition, cover path &
-file handling, review.yaml round-trip rendering). The Tkinter UI itself is not
-tested headlessly — it is kept thin and delegates to these helpers.
+file handling, review.yaml round-trip rendering). The Tkinter UI itself is
+mostly untested headlessly — it is kept thin and delegates to these helpers —
+except for a few Tk-gated smoke tests (tooltip, per-format cover row) that
+skip when tkinter or a display is unavailable.
 """
 from __future__ import annotations
 
 import io
 import zipfile
 from pathlib import Path
+
+import pytest
 
 import book_meta_fix.gui as gui
 from book_meta_fix.gui import (
@@ -24,6 +28,8 @@ from book_meta_fix.gui import (
 	entry_author_label,
 	entry_matches_search,
 	entry_series_label,
+	entry_series_pair,
+	entry_sort_key,
 	extract_series_values,
 	library_entry_changed,
 	library_entry_from_meta,
@@ -550,6 +556,123 @@ class TestEntrySeriesLabel:
 		assert entry_series_label(e) == "Ráma #1"
 
 
+class TestEntrySeriesPair:
+	"""The (name, order) normalization behind the label and the sort key."""
+
+	def test_flat_pair(self):
+		assert entry_series_pair(
+			{"current": {"series": "Sága hadích válek", "series_index": "2"}}
+		) == ("Sága hadích válek", "2")
+
+	def test_no_series_is_empty_pair(self):
+		assert entry_series_pair({}) == ("", "")
+		assert entry_series_pair(None) == ("", "")
+
+	def test_glued_index_split_like_c14(self):
+		# The glued C14 form sorts INSIDE its series block at the split
+		# order — the pair comes out split even while the entry is pending.
+		assert entry_series_pair({"current": {"series": "Mark Stone #73"}}) == ("Mark Stone", "73")
+
+	def test_accepted_proposal_overlays_current(self):
+		e = {"action": "accept", "current": {"series": "Legion"},
+		     "proposed": {"series": "Legion", "series_index": "3"}}
+		assert entry_series_pair(e) == ("Legion", "3")
+
+
+class TestEntrySortKey:
+	"""Left-panel display order: series (name, order in it), author, title."""
+
+	def test_series_blocks_before_standalone_books(self):
+		series_book = {"current": {"author": "Žeber", "title": "A",
+		                           "series": "Mark Stone", "series_index": "73"}}
+		standalone = {"current": {"author": "Adams", "title": "B"}}
+		assert entry_sort_key(series_book) < entry_sort_key(standalone)
+
+	def test_within_series_numeric_not_lexicographic(self):
+		# "2" < "10" only when the order is compared as a NUMBER.
+		def k(i):
+			return entry_sort_key({"current": {"series": "Legion", "series_index": i}})
+
+		assert k("1") < k("1.5") < k("2") < k("10")
+		# A missing order closes its block: the numbered books come first.
+		assert k("3") < k("")
+
+	def test_blocks_ordered_by_series_name(self):
+		def k(name):
+			return entry_sort_key({"current": {"series": name, "series_index": "1"}})
+
+		assert k("Legion") < k("Mark Stone") < k("Nadace")
+
+	def test_standalone_by_author_then_title(self):
+		def k(author, title):
+			return entry_sort_key({"current": {"author": author, "title": title}})
+
+		assert k("Adams", "Zulu") < k("Brown", "Alpha")
+		assert k("Adams", "Alpha") < k("Adams", "Beta")
+
+	def test_casefolded_strings(self):
+		# A lowercase author sorts under its letter, not below "Z".
+		def k(author):
+			return entry_sort_key({"current": {"author": author, "title": "x"}})
+
+		assert k("adams") < k("Brown")
+
+	def test_glued_c14_sorts_into_its_series_at_split_order(self):
+		glued = {"current": {"series": "Mark Stone #73"}}
+		split = {"current": {"series": "Mark Stone", "series_index": "72"}}
+		assert entry_sort_key(split) < entry_sort_key(glued)  # 72 before the glued 73
+		before = {"current": {"series": "Mark Stone", "series_index": "74"}}
+		assert entry_sort_key(glued) < entry_sort_key(before)
+
+	def test_decision_aware_series_and_author(self):
+		# An accepted proposal moves the book into the series/author block
+		# the decision leaves it in — the row shows the projected values.
+		decided = {"action": "accept", "current": {"author": "Špatný, Autorský"},
+		           "proposed": {"author": "Správný, Autorský",
+		                        "series": "Legion", "series_index": "1"}}
+		pending = {"current": {"author": "A Autor", "title": "x",
+		                       "series": "Legion", "series_index": "2"}}
+		assert entry_sort_key(decided) < entry_sort_key(pending)  # Legion #1 before #2
+
+	def test_title_sorts_by_current_value(self):
+		# The title column shows CURRENT — the sort follows the display.
+		e = {"current": {"title": "Buch"}, "proposed": {"title": "Alespoň"}}
+		other = {"current": {"title": "Chata"}}
+		assert entry_sort_key(e) < entry_sort_key(other)
+
+
+class TestListDisplayOrder:
+	"""_filtered_indices returns DISPLAY-sorted indices (series first), while
+	self.entries keeps its storage order — the iids stay stable."""
+
+	def _bare_app(self):
+		import types
+
+		app = gui.ReviewEditorApp.__new__(gui.ReviewEditorApp)
+		app._filter_action = types.SimpleNamespace(get=lambda: "all")
+		app._filter_category = types.SimpleNamespace(get=lambda: "all")
+		app._search = types.SimpleNamespace(get=lambda: "")
+		app._cur = -1
+		app._fields = {}
+		app._lib_uuids = {}
+		return app
+
+	def test_indices_sorted_series_first_author_title(self):
+		app = self._bare_app()
+		app.entries = [
+			{"uuid": "a", "current": {"author": "Novák", "title": "Osamocená"}},
+			{"uuid": "b", "current": {"author": "X", "title": "Náhradník",
+			                          "series": "Legion", "series_index": "10"}},
+			{"uuid": "c", "current": {"author": "Y", "title": "První",
+			                          "series": "Legion", "series_index": "2"}},
+			{"uuid": "d", "current": {"author": "Adams", "title": "Druhá"}},
+		]
+		# Legion block in numeric order (2 before 10), then standalone books
+		# by author. The list, j/k stepping and the position counter all read
+		# this one order.
+		assert app._filtered_indices() == [2, 1, 3, 0]
+
+
 class TestEntryMatchesSearch:
 	"""The GUI search must reach series, not just author/title."""
 
@@ -1003,3 +1126,90 @@ class TestLibHaystackFilterExemption:
 			 "action": None},
 		]
 		assert app._filtered_indices() == [0]  # not in _lib_uuids → normal path
+
+
+def _tk_root():
+	"""A real Tk root for widget-level smoke tests, or a skip.
+
+	These tests exist to catch ttk option misuse and format-string breaks
+	that only surface when Tk actually builds the widget.
+	"""
+	if gui.ttk is None:
+		pytest.skip("tkinter unavailable")
+	try:
+		return gui.tk.Tk()
+	except Exception:  # noqa: BLE001
+		pytest.skip("no display")
+
+
+class TestTooltipShow:
+	"""_show must build its tip with ttk-valid options.
+
+	Regression: the ttk alignment left ``padx``/``pady`` on the ttk.Label,
+	so every hover raised ``TclError: unknown option "-padx"``.
+	"""
+
+	def test_show_creates_tip_without_tcl_error(self):
+		root = _tk_root()
+		try:
+			lbl = gui.ttk.Label(root, text="x")
+			tip = gui._Tooltip(lbl, "hover text")
+			tip._show()
+			assert tip._tip is not None
+			tip._hide()
+			assert tip._tip is None
+		finally:
+			root.destroy()
+
+
+class TestApplyFmtCovers:
+	"""Painting the per-format embedded-cover row must not raise for any format.
+
+	Regression: the non-EPUB tooltip called ``.format(text=…)`` against the
+	``{ext}`` msgid placeholder, so every MOBI/AZW3/PRC cover cell raised
+	``KeyError: 'ext'`` and the row died mid-loop.
+	"""
+
+	def _bare_app(self, root):
+		app = gui.ReviewEditorApp.__new__(gui.ReviewEditorApp)
+		app.root = root
+		app._alive = True
+		app._cur = 0
+		app._field_bg = "#ffffff"
+		app._cover_photos = {}
+		app._del_formats = {}
+		app._fmt_cover_row = gui.ttk.Frame(root)
+		return app
+
+	def test_non_epub_cell_paints_without_keyerror(self):
+		from PIL import Image
+
+		root = _tk_root()
+		try:
+			app = self._bare_app(root)
+			app._apply_fmt_covers(0, [(Path("/lib/A/B (1)/book.mobi"), Image.new("RGB", (60, 80)))])
+			# The cell was built (checkbox present but disabled → var tracked, unchecked).
+			assert app._fmt_cover_row.winfo_children()
+			assert app._del_formats[str(Path("/lib/A/B (1)/book.mobi"))].get() is False
+		finally:
+			root.destroy()
+
+	def test_epub_cell_registers_strip_var(self):
+		from PIL import Image
+
+		root = _tk_root()
+		try:
+			app = self._bare_app(root)
+			app._apply_fmt_covers(0, [(Path("/lib/A/B (1)/book.epub"), Image.new("RGB", (60, 80)))])
+			assert list(app._del_formats) == [str(Path("/lib/A/B (1)/book.epub"))]
+		finally:
+			root.destroy()
+
+	def test_empty_row_shows_placeholder(self):
+		root = _tk_root()
+		try:
+			app = self._bare_app(root)
+			app._apply_fmt_covers(0, [])
+			assert app._del_formats == {}
+		finally:
+			root.destroy()

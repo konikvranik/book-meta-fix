@@ -33,7 +33,11 @@ label on the left, the series + order at the right end of the author's
 line (the current values; an `accept`/`keep` entry shows the proposed
 author and series, i.e. the ones `apply` will write), and the cover
 thumbnail flush
-right on every row. Requires the Tk
+right on every row. Rows sort series-first: the books of one series form
+a single block in reading order (the order compares numerically, so #2
+comes before #10, and a glued `Mark Stone #73` counts as 73), the blocks
+follow their series names, and books without a series come after them,
+by author then title. Requires the Tk
 bindings
 (`sudo apt install python3-tk` on Debian/Ubuntu). Edits are written back to
 `review.yaml` — commit them with `bmf apply` as in [edit + apply](edit-and-apply.md).
@@ -42,8 +46,10 @@ bindings
 
 The `Search:` box normally filters review entries only. Tick **`+ library`**
 next to it and the same query also sweeps the whole library: matching books
-that are **not** in review.yaml join the list (sorted by author, their
-header says "not in review.yaml"). This is the workflow for a series you
+that are **not** in review.yaml join the list (their header says "not in
+review.yaml"; they sort into the same series-first order as everything
+else, so the whole run lines up in one block). This is the workflow for a
+series you
 know is broken — you spot bad metadata for the "Mark Stone" books in
 Audiobookshelf, search the series, tick `+ library`, and every Mark Stone
 book shows up, in review or not, ready to edit.
