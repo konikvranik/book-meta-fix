@@ -72,7 +72,7 @@ try:  # pragma: no cover - exercised only when Tk is present
 
 	from PIL import ImageTk
 except ImportError:  # pragma: no cover
-	tk = None  # type: ignore[assignment]
+	ttk = None  # type: ignore[assignment]
 
 
 # Editable target fields, in Tab-traversal order. ``authors`` / ``genres`` are
@@ -254,8 +254,7 @@ def load_thumb(source: Path | str | bytes, max_w: int, max_h: int):
 	"""Return a PIL thumbnail (RGB, fitted into max_w/max_h) or None.
 
 	*source* is a path or raw image bytes. Never raises — a missing/corrupt
-	cover yields None, which the UI renders as a placeholder.
-	"""
+	cover yields None, which the UI renders as a placeholder."""
 	try:
 		from PIL import Image
 	except ImportError:
@@ -346,6 +345,115 @@ def embedded_cover_thumb(book_path: Path | str, max_w: int = 240, max_h: int = 3
 			log.warning("could not remove temp cover %s", tmp, exc_info=True)
 
 
+def extract_series_values(src: object) -> list[str]:
+	"""Extract searchable series strings (names, indices, pairs) from a container.
+
+	Handles:
+	- A container dict with "series" and/or "series_index" keys (like current/proposed/edited)
+	- Raw series values: str, dict ({"name", "index"/"sequence"}), or list thereof
+	"""
+	if not src:
+		return []
+	tokens: list[str] = []
+
+	def _add_pair(name: object, idx: object = None) -> None:
+		name_s = str(name).strip() if name is not None else ""
+		if name_s:
+			tokens.append(name_s)
+		idx_s = str(idx).strip() if idx is not None else ""
+		if idx_s:
+			tokens.append(idx_s)
+		if name_s and idx_s:
+			tokens.append(f"{name_s} {idx_s}")
+			tokens.append(f"{name_s} #{idx_s}")
+
+	if isinstance(src, dict) and ("series" in src or "series_index" in src):
+		s_val = src.get("series")
+		s_idx = src.get("series_index")
+		items = [s_val] if isinstance(s_val, (str, dict)) else (s_val if isinstance(s_val, list) else [])
+		if not items and s_idx is not None:
+			_add_pair(None, s_idx)
+		for item in items:
+			if isinstance(item, str):
+				_add_pair(item, s_idx)
+			elif isinstance(item, dict):
+				name = item.get("name")
+				idx = item.get("index") if item.get("index") is not None else item.get("sequence")
+				if idx is None:
+					idx = s_idx
+				_add_pair(name, idx)
+	elif isinstance(src, str):
+		_add_pair(src, None)
+	elif isinstance(src, dict):
+		name = src.get("name")
+		idx = src.get("index") if src.get("index") is not None else src.get("sequence")
+		_add_pair(name, idx)
+	elif isinstance(src, list):
+		for item in src:
+			tokens.extend(extract_series_values(item))
+
+	return tokens
+
+
+def entry_search_haystack(e: dict, active: dict | None = None) -> str:
+	"""Build a lowercase space-separated string of searchable fields for an entry."""
+	if not e:
+		return ""
+	parts: list[str] = []
+	for k in ("path", "uuid", "action"):
+		v = e.get(k)
+		if v:
+			parts.append(str(v))
+	diag = e.get("diagnosis") or {}
+	if isinstance(diag, dict):
+		c = diag.get("category")
+		if c:
+			parts.append(str(c))
+
+	sources = [e.get("current"), e.get("proposed"), e.get("edited")]
+	if active:
+		sources.append(active)
+
+	for src in sources:
+		if not isinstance(src, dict):
+			continue
+		for field in ("title", "author", "isbn"):
+			v = src.get(field)
+			if v:
+				parts.append(str(v))
+		authors = src.get("authors")
+		if isinstance(authors, list):
+			for a in authors:
+				if a:
+					parts.append(str(a))
+		genres = src.get("genres")
+		if isinstance(genres, list):
+			for g in genres:
+				if g:
+					parts.append(str(g))
+		parts.extend(extract_series_values(src))
+
+	return " ".join(parts).lower()
+
+
+def entry_matches_search(needle: str, entry: dict, active: dict | None = None) -> bool:
+	"""Check whether *entry* matches search query *needle*.
+
+	Matches case-insensitively against entry metadata including author, title,
+	series (name, index, and compound pairs), path, category, and action.
+	Supports exact substring match as well as multi-term queries where every word
+	in *needle* must appear in the entry's searchable fields.
+	"""
+	n = needle.strip().lower()
+	if not n:
+		return True
+	hay = entry_search_haystack(entry, active=active)
+	if n in hay:
+		return True
+	words = n.split()
+	return all(w in hay for w in words)
+
+
 # ---------------------------------------------------------------------------
 # Small Tk helpers (only used when Tk is available; bodies reference tk lazily)
 # ---------------------------------------------------------------------------
@@ -401,7 +509,7 @@ class _Tooltip:
 			tip.geometry(f"+{x}+{y}")
 		except Exception:  # noqa: BLE001
 			pass
-		tk.Label(tip, text=self.text, justify="left", background="#ffffe0",
+		ttk.Label(tip, text=self.text, justify="left", background="#ffffe0",
 		         relief="solid", borderwidth=1, padx=6, pady=3).pack()
 		self._tip = tip
 
@@ -957,7 +1065,7 @@ class ReviewEditorApp:
 					if isinstance(x, str) and x.strip():
 						self._vocab_authors.add(x.strip())
 				s = src.get("series")
-				items = [s] if isinstance(s, str) else (s if isinstance(s, list) else [])
+				items = [s] if isinstance(s, (str, dict)) else (s if isinstance(s, list) else [])
 				for item in items:
 					name = item.get("name") if isinstance(item, dict) else item
 					if isinstance(name, str) and name.strip():
@@ -1405,7 +1513,7 @@ class ReviewEditorApp:
 		rec = ttk.Frame(box)
 		rec.pack(fill="x", padx=6, pady=(2, 4))
 		self._recode_chk = ttk.Checkbutton(
-			rec, text=_("↻ Recode (Ctrl+G)"), variable=self._recode_var,
+			rec, text=_("↺ Recode (Ctrl+G)"), variable=self._recode_var,
 			command=self._apply_content_text, state="disabled",
 		)
 		self._recode_chk.pack(side="left")
@@ -1428,8 +1536,8 @@ class ReviewEditorApp:
 		swap_btn = ttk.Button(rec, text="⇄", width=3, command=self._swap_recode_codecs)
 		swap_btn.pack(side="left")
 		_recode_tip = _(
-			"Double-encoding repair: “read as” = the codec the text was originally "
-			"mis-read through (typically cp1250); “actually is” = the real encoding "
+			"Double-encoding repair: „read as“ = the codec the text was originally "
+			"mis-read through (typically cp1250); „actually is“ = the real encoding "
 			"of the bytes (almost always utf-8). The preview is always UTF-8."
 		)
 		_Tooltip(swap_btn, _("Swap conversion direction (read as ↔ actually is)"))
@@ -1442,14 +1550,14 @@ class ReviewEditorApp:
 		self._recode_hint.bind("<Button-1>", self._on_recode_hint_click)
 		self._recode_from.trace_add("write", lambda *_: self._recode_changed())
 		self._recode_to.trace_add("write", lambda *_: self._recode_changed())
-		body = ttk.Frame(box)
-		body.pack(fill="both", expand=True, padx=6, pady=0)
-		self._content_body = body
+		tbody = ttk.Frame(box)
+		tbody.pack(fill="both", expand=True, padx=6, pady=0)
+		self._content_body = tbody
 		self._content_txt = self._style_text(
-			tk.Text(body, wrap="word", state="disabled", height=12)
+			tk.Text(tbody, wrap="word", state="disabled", height=12)
 		)
 		self._content_txt.pack(side="left", fill="both", expand=True)
-		vsb = ttk.Scrollbar(body, orient="vertical", command=self._content_txt.yview)
+		vsb = ttk.Scrollbar(tbody, orient="vertical", command=self._content_txt.yview)
 		self._content_txt.configure(yscrollcommand=vsb.set)
 		vsb.pack(side="right", fill="y")
 		# Pixel-continuous height: a Text's own height option is quantized to
@@ -1457,7 +1565,7 @@ class ReviewEditorApp:
 		# propagation is turned off and body's -height — pixels — rules; the
 		# Text and scrollbar just fill it. Horizontal sizing is unaffected
 		# (body is packed fill="both").
-		body.pack_propagate(False)
+		tbody.pack_propagate(False)
 		try:
 			ls = max(1, int(self.root.tk.call(
 				"font", "metrics", self._content_txt.cget("font"), "-linespace",
@@ -1466,7 +1574,7 @@ class ReviewEditorApp:
 			ls = 16  # typical 10pt line; resize still works
 		self._content_linespace = ls
 		self._preview_h_default = 12 * ls + 8  # ~the old 12-line height
-		body.configure(height=self._preview_h_default)
+		tbody.configure(height=self._preview_h_default)
 		# Drag-to-resize grip flush with the preview's bottom edge. Inside the
 		# scrollable column the Text's height IN LINES is the only geometry
 		# knob that matters (the inner frame grows, _on_inner_configure
@@ -1801,9 +1909,10 @@ class ReviewEditorApp:
 			if cat != "all" and ec != cat:
 				continue
 			if needle:
-				cur = e.get("current") or {}
-				hay = " ".join(str(x) for x in [e.get("path"), cur.get("author"), cur.get("title"), ea, ec] if x).lower()
-				if needle not in hay:
+				active_fields = None
+				if i == self._cur and hasattr(self, "_fields") and self._fields:
+					active_fields = {r: f["value"].get() for r, f in self._fields.items() if not f.get("cleared")}
+				if not entry_matches_search(needle, e, active=active_fields):
 					continue
 			out.append(i)
 		return out
@@ -1927,7 +2036,7 @@ class ReviewEditorApp:
 			popup.geometry(f"+{x}+{y}")
 		except Exception:  # noqa: BLE001
 			pass
-		tk.Label(popup, image=photo, borderwidth=2, relief="solid").pack()
+		ttk.Label(popup, image=photo, borderwidth=2, relief="solid").pack()
 		self._cover_popup = popup
 
 	def _hide_cover_popup(self) -> None:
@@ -1937,7 +2046,7 @@ class ReviewEditorApp:
 			except Exception:  # noqa: BLE001
 				pass
 			self._cover_popup = None
-		self._cover_popup_photo = None
+			self._cover_popup_photo = None
 
 	# ------------------------------------------------------------------
 	# Book load / collect (in-memory model)
@@ -2395,7 +2504,7 @@ class ReviewEditorApp:
 					_("Strip the embedded cover from {name} (the ebook file stays)").format(name=path.name)
 					if is_epub else
 					_("The embedded cover cannot be stripped from {ext} — EPUB only").format(
-						ext=path.suffix or _("file"))
+						text=path.suffix or _("file"))
 				),
 				check_enabled=is_epub,
 			)
@@ -2549,7 +2658,7 @@ class ReviewEditorApp:
 			self._recode_hint.configure(text=_("⚠ double encoding detected"))
 			self._recode_from.set("cp1250")
 			self._recode_to.set("utf-8")
-		self._recompute_recode()
+			self._recompute_recode()
 		# Two-layer mojibake (wild sample: cp1250 CZ text mis-read as cp1251,
 		# re-saved utf-8, mis-read as cp1250, re-saved utf-8): a single z/do
 		# pair only reaches the Cyrillic middle layer. repair_chain searches
@@ -2813,7 +2922,7 @@ class ReviewEditorApp:
 			("Ctrl+P", _("cover: keep")),
 			("Ctrl+M", _("cover: delete checked cover/.bak, strip embedded covers")),
 			("Ctrl+T", _("content: first page / broader text")),
-			("Ctrl+G", _("content: recode (“read as” = the wrong read, “actually is” = the real encoding; result always UTF-8)")),
+			("Ctrl+G", _("content: recode („read as“ = the wrong read, „actually is“ = the real encoding; result always UTF-8)")),
 			("↑ ↓ / Enter / Tab", _("author & series: autocomplete from the library (arrows pick, Enter/Tab insert)")),
 			("", _("(click on a cover = ☑; click on path / double-click in the list = open folder)")),
 			("", _("(wheel: widget under the mouse, at its edge the form; cover in the list → hover popup)")),
