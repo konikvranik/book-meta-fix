@@ -33,8 +33,9 @@ upravitelná
 pole — autor, název, ISBN, rok, vydavatel, jazyk, série, pořadí v
 sérii, autoři, žánry (`Ctrl+A` vybere v poli vše). Seznam zobrazuje vlevo
 štítek, na pravém konci řádku s autorem sérii s pořadím (současné hodnoty;
-u záznamu s `accept`/`keep` navrženou sérii — tedy tu, kterou `apply`
-zapíše) a v každém řádku vpravo přilepenou miniaturu obálky. Vyžaduje Tk
+u záznamu s `accept`/`keep` navrženého autora a sérii — tedy ty, které
+`apply` zapíše) a v každém řádku vpravo přilepenou miniaturu obálky.
+Vyžaduje Tk
 bindings
 (`sudo apt install python3-tk` na Debianu/Ubuntu). Úpravy se zapisují
 zpět do `review.yaml` — potvrďte je příkazem `bmf apply` jako v
@@ -80,6 +81,22 @@ metadaty odpoví, i když sérii zmíňuje jen název složky nebo anotace
 leží pod složkami skutečných autorů). Kniha, která dosud nemá uuid, ji
 dostane vytvořenou při indexování (stejná líná identita jako při skenu),
 protože celý review workflow je klíčovaný uuid.
+
+## Hromadná úprava (autor / série)
+
+Seznam podporuje vícenásobný výběr: `Ctrl+klik` řádek přepíná,
+`Shift+klik` vybere rozsah (řádek s fokusem má silnější zvýraznění; řádky
+skryté filtrem z výběru vypadávají). `Ctrl+E` — nebo tlačítko **Hromadná
+úprava** pod seznamem — otevře malý dialog, který jedním tahem nastaví
+jedno pole, autora nebo sérii (se stejným našeptávačem jako samotné pole),
+všem vybraným knihám; `∅` pole naopak použije jako PRÁZDNÉ (smaže ho —
+stejná značka, jakou nastavuje tlačítko `∅` u pole). Hodnota padne do
+bloku `proposed` každé knihy; nerozhodnutá kniha se stane `accept`
+(návrh bez rozhodnutí by byl `bmf apply` přeskočen), u už rozhodnuté
+knihy její akce zůstává. Pořadí série zůstává knihu od knihy — nastavuje
+se jen název. Výsledky zapíše do review.yaml obvyklé `Ctrl+S`. Přirozené
+doplnění hledání `+ knihovna`: najdete všechny knihy rozbité série,
+vyberete je a opravíte název série jedním tahem.
 
 ## Verified (značka OK)
 

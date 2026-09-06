@@ -1254,10 +1254,11 @@ class _BookList:
 		self._sel = [i for i in merged if i in self._by_iid]
 		if self._anchor not in self._by_iid:
 			self._anchor = None
+		# The focus is NOT force-added to the selection: a row the user
+		# Ctrl+clicked OFF stays out — the focus only says which book the
+		# detail pane shows.
 		if focus_iid in self._by_iid:
 			self._selected = focus_iid
-			if focus_iid not in self._sel:
-				self._sel.append(focus_iid)
 		self._schedule_draw()
 
 	def _row_index(self, iid) -> int | None:

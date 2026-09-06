@@ -31,7 +31,8 @@ fields — author, title, ISBN, year, publisher, language, série, pořadí v
 sérii, autoři, žánry (`Ctrl+A` selects all in a field). The list shows the
 label on the left, the series + order at the right end of the author's
 line (the current values; an `accept`/`keep` entry shows the proposed
-series, i.e. the one `apply` will write), and the cover thumbnail flush
+author and series, i.e. the ones `apply` will write), and the cover
+thumbnail flush
 right on every row. Requires the Tk
 bindings
 (`sudo apt install python3-tk` on Debian/Ubuntu). Edits are written back to
@@ -77,6 +78,23 @@ matches when only its folder name or its annotation mentions the series
 live under the real writers' folders). A book that has no uuid yet gets
 one minted during indexing (the same lazy identity augmentation a scan
 performs), because the review workflow is uuid-keyed.
+
+## Bulk edit (author / series)
+
+The list supports a multi-selection: `Ctrl+click` toggles a row,
+`Shift+click` selects a range (the focus row keeps the stronger highlight;
+rows hidden by a filter leave the selection). `Ctrl+E` — or the
+**Bulk edit** button under the list — opens a small dialog that sets one
+field, author or series (with the same autocomplete as the field itself),
+for every selected book at once; `∅` applies the field as EMPTY instead
+(deletes it — the same mark the per-field `∅` button sets). The value
+lands in each book's `proposed` block; a pending book becomes `accept`
+(a proposal without a decision would be skipped by `bmf apply`), an
+already decided book keeps its action. The series ORDER stays per-book —
+only the name is set. `Ctrl+S` writes the results into review.yaml as
+usual. This is the natural companion to the `+ library` search: find
+every book of the broken series, select them, fix the series name in one
+stroke.
 
 ## Verified (the OK mark)
 

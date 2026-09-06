@@ -7,16 +7,16 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-09-06 16:55+0200\n"
+"POT-Creation-Date: 2026-09-06 17:37+0200\n"
 "PO-Revision-Date: 2026-08-15 10:28+0200\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: cs\n"
 "Language-Team: cs <LL@li.org>\n"
-"Plural-Forms: nplurals=3; plural=((n==1) ? 0 : (n>=2 && n<=4) ? 1 : 2)\n"
+"Plural-Forms: nplurals=3; plural=((n==1) ? 0 : (n>=2 && n<=4) ? 1 : 2);\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Generated-By: Babel 2.8.0\n"
+"Generated-By: Babel 2.18.0\n"
 
 #: src/book_meta_fix/cli.py:99
 msgid "Enable debug logging"
@@ -105,7 +105,7 @@ msgstr "Načítám knihovnu"
 msgid "Classifying"
 msgstr "Klasifikuji"
 
-#: src/book_meta_fix/cli.py:225
+#: src/book_meta_fix/cli.py:226
 #, python-brace-format
 msgid ""
 "{identified} book(s) identified (accepted): MISSING_* with author+title "
@@ -536,7 +536,7 @@ msgstr "Bez užitečného výsledku"
 msgid "LLM errors"
 msgstr "Chyby LLM"
 
-#: src/book_meta_fix/cli.py:588 src/book_meta_fix/gui.py:1767
+#: src/book_meta_fix/cli.py:588 src/book_meta_fix/gui.py:1992
 msgid "Covers"
 msgstr "Obálky"
 
@@ -644,7 +644,7 @@ msgstr "Chyby:"
 msgid "review.yaml to edit (default: $BMF_REVIEW or review.yaml)"
 msgstr "review.yaml k úpravě (výchozí: $BMF_REVIEW nebo review.yaml)"
 
-#: src/book_meta_fix/cli.py:732
+#: src/book_meta_fix/cli.py:733
 msgid ""
 "`bmf organize` was merged into `bmf apply`. Run `bmf analyze` (it flags "
 "misplaced books with a move proposal), review in `bmf gui` if needed, "
@@ -955,7 +955,7 @@ msgid "Author folder"
 msgstr "Složka autora"
 
 #: src/book_meta_fix/cli.py:1225 src/book_meta_fix/gui.py:85
-#: src/book_meta_fix/gui.py:1210
+#: src/book_meta_fix/gui.py:1412
 msgid "Title"
 msgstr "Název"
 
@@ -967,7 +967,7 @@ msgstr "Zapsat skript do souboru místo na stdout."
 msgid "Fish loads it automatically from ~/.config/fish/completions/"
 msgstr "Fish ho automaticky načítá z ~/.config/fish/completions/"
 
-#: src/book_meta_fix/gui.py:86
+#: src/book_meta_fix/gui.py:86 src/book_meta_fix/gui.py:3019
 msgid "Author"
 msgstr "Autor"
 
@@ -983,7 +983,7 @@ msgstr "Vydavatel"
 msgid "Language"
 msgstr "Jazyk"
 
-#: src/book_meta_fix/gui.py:91
+#: src/book_meta_fix/gui.py:91 src/book_meta_fix/gui.py:3021
 msgid "Series"
 msgstr "Série"
 
@@ -999,22 +999,22 @@ msgstr "Autoři (oddělení čárkou)"
 msgid "Genres (comma-separated)"
 msgstr "Žánry (oddělené čárkou)"
 
-#: src/book_meta_fix/gui.py:307
+#: src/book_meta_fix/gui.py:342
 #, python-brace-format
 msgid "folder does not exist: {folder}"
 msgstr "složka neexistuje: {folder}"
 
-#: src/book_meta_fix/gui.py:310
+#: src/book_meta_fix/gui.py:345
 #, python-brace-format
 msgid "tool '{opener}' not found"
 msgstr "nástroj '{opener}' nenalezen"
 
-#: src/book_meta_fix/gui.py:314
+#: src/book_meta_fix/gui.py:349
 #, python-brace-format
 msgid "opening failed: {exc}"
 msgstr "otevření selhalo: {exc}"
 
-#: src/book_meta_fix/gui.py:1318
+#: src/book_meta_fix/gui.py:1532
 #, python-brace-format
 msgid ""
 "review file not found:\n"
@@ -1023,7 +1023,7 @@ msgstr ""
 "kontrolní soubor review.yaml nenalezen:\n"
 "{path}"
 
-#: src/book_meta_fix/gui.py:1324
+#: src/book_meta_fix/gui.py:1538
 #, python-brace-format
 msgid ""
 "failed to parse {path}:\n"
@@ -1032,27 +1032,27 @@ msgstr ""
 "nepodařilo se naparsovat {path}:\n"
 "{err}"
 
-#: src/book_meta_fix/gui.py:1467
+#: src/book_meta_fix/gui.py:1681
 msgid "List"
 msgstr "Seznam"
 
-#: src/book_meta_fix/gui.py:1471 src/book_meta_fix/gui.py:1677
+#: src/book_meta_fix/gui.py:1685 src/book_meta_fix/gui.py:1902
 msgid "Action:"
 msgstr "Akce:"
 
-#: src/book_meta_fix/gui.py:1478
+#: src/book_meta_fix/gui.py:1692
 msgid "Category:"
 msgstr "Kategorie:"
 
-#: src/book_meta_fix/gui.py:1484
+#: src/book_meta_fix/gui.py:1698
 msgid "Search:"
 msgstr "Hledat:"
 
-#: src/book_meta_fix/gui.py:1490
+#: src/book_meta_fix/gui.py:1704
 msgid "+ library"
 msgstr "+ knihovna"
 
-#: src/book_meta_fix/gui.py:1492
+#: src/book_meta_fix/gui.py:1707
 msgid ""
 "Search the whole library too, not only review.yaml: books matching the "
 "search (author, title, series, folder path, annotation) that are not in "
@@ -1064,33 +1064,46 @@ msgid ""
 msgstr ""
 "Hledat i v celé knihovně, ne jen v review.yaml: knihy odpovídající "
 "hledání (autor, název, série, cesta ke složce, anotace), které nejsou v "
-"review, se objeví v seznamu — jejich hlavička říká „není v review.yaml“."
-" Knihu, kterou změníte nebo o ní rozhodnete, přidá uložení do "
-"review.yaml (bmf apply ji pak zpracuje); nezměněné se neukládají. Hned "
-"při startu se na pozadí staví fulltext index knihovny (postup ve "
-"stavovém řádku); hotový index odpovídá na hledání okamžitě."
+"review, se objeví v seznamu — jejich hlavička říká „není v review.yaml“. "
+"Knihu, kterou změníte nebo o ní rozhodnete, přidá uložení do review.yaml "
+"(bmf apply ji pak zpracuje); nezměněné se neukládají. Hned při startu se "
+"na pozadí staví fulltext index knihovny (postup ve stavovém řádku); "
+"hotový index odpovídá na hledání okamžitě."
 
-#: src/book_meta_fix/gui.py:1554
+#: src/book_meta_fix/gui.py:1737
+#, fuzzy
+msgid "Bulk edit (Ctrl+E)"
+msgstr "Ponechat (Ctrl+P)"
+
+#: src/book_meta_fix/gui.py:1740
+msgid ""
+"Set the author or series for all selected books at once.\n"
+"Select rows with Ctrl+click (toggle) and Shift+click (range);\n"
+"the value lands in each book's proposal (a pending book becomes\n"
+"accept, a decided one keeps its action)."
+msgstr ""
+
+#: src/book_meta_fix/gui.py:1779
 msgid "Open the book's folder in the file manager"
 msgstr "Otevřít složku knihy ve správci souborů"
 
-#: src/book_meta_fix/gui.py:1589
+#: src/book_meta_fix/gui.py:1814
 msgid "Fields"
 msgstr "Pole"
 
-#: src/book_meta_fix/gui.py:1599
+#: src/book_meta_fix/gui.py:1824
 msgid "Read-only column:"
 msgstr "Sloupec jen pro čtení:"
 
-#: src/book_meta_fix/gui.py:1600
+#: src/book_meta_fix/gui.py:1825
 msgid "Original"
 msgstr "Původní"
 
-#: src/book_meta_fix/gui.py:1602
+#: src/book_meta_fix/gui.py:1827
 msgid "Proposed"
 msgstr "Návrh"
 
-#: src/book_meta_fix/gui.py:1635
+#: src/book_meta_fix/gui.py:1861
 msgid ""
 "∅ mark: the field is applied as EMPTY (a proposal that is wrong while the"
 " correct value is unknown). Click again to restore editing."
@@ -1098,19 +1111,19 @@ msgstr ""
 "Značka ∅: pole se při aplikaci zapíše jako PRÁZDNÉ (návrh je chybný a "
 "správná hodnota není známa). Opětovným kliknutím se vrátíte k editaci."
 
-#: src/book_meta_fix/gui.py:1644
+#: src/book_meta_fix/gui.py:1869
 msgid "Swap author and title  (Ctrl+W)"
 msgstr "Prohodit autora a název  (Ctrl+W)"
 
-#: src/book_meta_fix/gui.py:1670
+#: src/book_meta_fix/gui.py:1895
 msgid "Target folder:"
 msgstr "Cílová složka:"
 
-#: src/book_meta_fix/gui.py:1682
+#: src/book_meta_fix/gui.py:1907
 msgid "Verified"
 msgstr "Verified"
 
-#: src/book_meta_fix/gui.py:1684
+#: src/book_meta_fix/gui.py:1910
 msgid ""
 "Mark the book as OK: apply writes `verified: true` into metadata.json, "
 "later analyze runs skip the book entirely, and apply places it on the "
@@ -1120,99 +1133,99 @@ msgstr ""
 "další běhy analyze knihu úplně přeskočí a apply ji umístí na cílovou "
 "cestu, i když nějaké problémy zůstávají. Přepíná Ctrl+O."
 
-#: src/book_meta_fix/gui.py:1688
+#: src/book_meta_fix/gui.py:1913
 msgid "Note:"
 msgstr "Poznámka:"
 
-#: src/book_meta_fix/gui.py:1695
+#: src/book_meta_fix/gui.py:1920
 msgid "◀ Previous (PgUp)"
 msgstr "◀ Předchozí (PgUp)"
 
-#: src/book_meta_fix/gui.py:1696
+#: src/book_meta_fix/gui.py:1921
 msgid "Save (Ctrl+S)"
 msgstr "Uložit (Ctrl+S)"
 
-#: src/book_meta_fix/gui.py:1697
+#: src/book_meta_fix/gui.py:1922
 msgid "Next (PgDn) ▶"
 msgstr "Další (PgDn) ▶"
 
-#: src/book_meta_fix/gui.py:1724 src/book_meta_fix/gui.py:3032
+#: src/book_meta_fix/gui.py:1949 src/book_meta_fix/gui.py:3361
 msgid "(loading…)"
 msgstr "(načítá se…)"
 
-#: src/book_meta_fix/gui.py:1778
+#: src/book_meta_fix/gui.py:2003
 msgid "Current"
 msgstr "Současná"
 
-#: src/book_meta_fix/gui.py:1778
+#: src/book_meta_fix/gui.py:2003
 msgid "Delete cover.jpg (on Delete checked)"
 msgstr "Smazat cover.jpg (při zaškrtnutém Delete)"
 
-#: src/book_meta_fix/gui.py:1779 src/book_meta_fix/gui.py:2886
+#: src/book_meta_fix/gui.py:2004 src/book_meta_fix/gui.py:3215
 msgid ".bak backup"
 msgstr "záloha .bak"
 
-#: src/book_meta_fix/gui.py:1779
+#: src/book_meta_fix/gui.py:2004
 msgid "Delete cover.jpg.bak (on Delete checked)"
 msgstr "Smazat cover.jpg.bak (při zaškrtnutém Delete)"
 
-#: src/book_meta_fix/gui.py:1780
+#: src/book_meta_fix/gui.py:2005
 msgid "Recommended"
 msgstr "Doporučená"
 
-#: src/book_meta_fix/gui.py:1789
+#: src/book_meta_fix/gui.py:2014
 msgid "Embedded covers per format (☐ = strip from the ebook):"
 msgstr "Vložené obálky podle formátu (☐ = odstranit z e-knihy):"
 
-#: src/book_meta_fix/gui.py:1797
+#: src/book_meta_fix/gui.py:2022
 msgid "Keep (Ctrl+P)"
 msgstr "Ponechat (Ctrl+P)"
 
-#: src/book_meta_fix/gui.py:1798
+#: src/book_meta_fix/gui.py:2023
 msgid "Restore .bak (Ctrl+B)"
 msgstr "Obnovit .bak (Ctrl+B)"
 
-#: src/book_meta_fix/gui.py:1799
+#: src/book_meta_fix/gui.py:2024
 msgid "Apply new (Ctrl+N)"
 msgstr "Aplikovat novou (Ctrl+N)"
 
-#: src/book_meta_fix/gui.py:1800
+#: src/book_meta_fix/gui.py:2025
 msgid "Delete checked (Ctrl+M)"
 msgstr "Smazat zaškrtnuté (Ctrl+M)"
 
-#: src/book_meta_fix/gui.py:1803
+#: src/book_meta_fix/gui.py:2028
 msgid "Content"
 msgstr "Obsah"
 
-#: src/book_meta_fix/gui.py:1807
+#: src/book_meta_fix/gui.py:2032
 msgid "Format:"
 msgstr "Formát:"
 
-#: src/book_meta_fix/gui.py:1812
+#: src/book_meta_fix/gui.py:2037
 msgid "View:"
 msgstr "Zobrazení:"
 
-#: src/book_meta_fix/gui.py:1813
+#: src/book_meta_fix/gui.py:2038
 msgid "first page"
 msgstr "první strana"
 
-#: src/book_meta_fix/gui.py:1814
+#: src/book_meta_fix/gui.py:2039
 msgid "broader text"
 msgstr "širší text"
 
-#: src/book_meta_fix/gui.py:1819
+#: src/book_meta_fix/gui.py:2044
 msgid "↺ Recode (Ctrl+G)"
 msgstr "↺ Překódovat (Ctrl+G)"
 
-#: src/book_meta_fix/gui.py:1827
+#: src/book_meta_fix/gui.py:2052
 msgid "  read as:"
 msgstr "  přečteno jako:"
 
-#: src/book_meta_fix/gui.py:1833
+#: src/book_meta_fix/gui.py:2058
 msgid "actually is:"
 msgstr "skutečně je:"
 
-#: src/book_meta_fix/gui.py:1841
+#: src/book_meta_fix/gui.py:2067
 msgid ""
 "Double-encoding repair: „read as“ = the codec the text was originally "
 "mis-read through (typically cp1250); „actually is“ = the real encoding of"
@@ -1222,42 +1235,42 @@ msgstr ""
 "kdysi chybně přečten (typicky cp1250); „skutečně je“ = skutečné kódování "
 "bajtů (téměř vždy utf-8). Náhled je vždy UTF-8."
 
-#: src/book_meta_fix/gui.py:1846
+#: src/book_meta_fix/gui.py:2071
 msgid "Swap conversion direction (read as ↔ actually is)"
 msgstr "Prohodit směr převodu (přečteno jako ↔ skutečně je)"
 
-#: src/book_meta_fix/gui.py:1903
+#: src/book_meta_fix/gui.py:2128
 msgid "Drag up/down to change the preview height (double-click = default height)"
 msgstr "Tahem nahoru/dolů změníte výšku náhledu (dvojklik = výchozí výška)"
 
-#: src/book_meta_fix/gui.py:2289
+#: src/book_meta_fix/gui.py:2522
 msgid "type a search to load matching library books"
 msgstr "napište, co hledat, a načtou se odpovídající knihy z knihovny"
 
-#: src/book_meta_fix/gui.py:2327
+#: src/book_meta_fix/gui.py:2560
 msgid "indexing library…"
 msgstr "indexuji knihovnu…"
 
-#: src/book_meta_fix/gui.py:2343
+#: src/book_meta_fix/gui.py:2576
 #, python-brace-format
 msgid "library: +{n} books"
 msgstr "knihovna: +{n} knih"
 
-#: src/book_meta_fix/gui.py:2389
+#: src/book_meta_fix/gui.py:2622
 #, python-brace-format
 msgid "opened: {folder}"
 msgstr "otevřeno: {folder}"
 
-#: src/book_meta_fix/gui.py:2519
+#: src/book_meta_fix/gui.py:2752
 #, python-brace-format
 msgid "  (+{n} more)"
 msgstr "  (+{n} dalších)"
 
-#: src/book_meta_fix/gui.py:2525
+#: src/book_meta_fix/gui.py:2759
 msgid "not in review.yaml — deciding or editing it adds it to review on save"
 msgstr "není v review.yaml — rozhodnutí či úprava ho při uložení přidá do review"
 
-#: src/book_meta_fix/gui.py:2528
+#: src/book_meta_fix/gui.py:2761
 #, python-brace-format
 msgid ""
 "Entry {i}/{n}   uuid: {uuid}\n"
@@ -1266,95 +1279,131 @@ msgstr ""
 "Položka {i}/{n}   uuid: {uuid}\n"
 "diagnóza: {cat} – {reason} [{conf}]{extra}"
 
-#: src/book_meta_fix/gui.py:2534
+#: src/book_meta_fix/gui.py:2767
 msgid "(no path)"
 msgstr "(žádná cesta)"
 
-#: src/book_meta_fix/gui.py:2795
+#: src/book_meta_fix/gui.py:3004
+msgid "select books first (Ctrl+click, Shift+click)"
+msgstr ""
+
+#: src/book_meta_fix/gui.py:3011
+#, fuzzy
+msgid "Bulk edit"
+msgstr "Skupina"
+
+#: src/book_meta_fix/gui.py:3014
+#, python-brace-format
+msgid "Apply to {n} selected books:"
+msgstr ""
+
+#: src/book_meta_fix/gui.py:3031
+msgid "∅ apply as EMPTY (delete the field)"
+msgstr ""
+
+#: src/book_meta_fix/gui.py:3039
+msgid "enter a value or tick ∅"
+msgstr ""
+
+#: src/book_meta_fix/gui.py:3051
+#, fuzzy, python-brace-format
+msgid "bulk edit: {n} books"
+msgstr "knihovna: +{n} knih"
+
+#: src/book_meta_fix/gui.py:3057
+#, fuzzy
+msgid "Apply"
+msgstr "Aplikuji"
+
+#: src/book_meta_fix/gui.py:3058
+msgid "Cancel"
+msgstr ""
+
+#: src/book_meta_fix/gui.py:3124
 #, python-brace-format
 msgid "saved → {path}"
 msgstr "uloženo → {path}"
 
-#: src/book_meta_fix/gui.py:2809
+#: src/book_meta_fix/gui.py:3138
 #, python-brace-format
 msgid "save failed: {err}"
 msgstr "uložení selhalo: {err}"
 
-#: src/book_meta_fix/gui.py:2815
+#: src/book_meta_fix/gui.py:3144
 msgid "Save changes before quitting?"
 msgstr "Uložit změny před ukončením?"
 
-#: src/book_meta_fix/gui.py:2885
+#: src/book_meta_fix/gui.py:3214
 msgid "generated"
 msgstr "generovaná"
 
-#: src/book_meta_fix/gui.py:2885
+#: src/book_meta_fix/gui.py:3214
 msgid "ok"
 msgstr "ok"
 
-#: src/book_meta_fix/gui.py:2885
+#: src/book_meta_fix/gui.py:3214
 msgid "missing"
 msgstr "chybějící"
 
-#: src/book_meta_fix/gui.py:2887
+#: src/book_meta_fix/gui.py:3216
 msgid "recommended"
 msgstr "doporučená"
 
-#: src/book_meta_fix/gui.py:2887
+#: src/book_meta_fix/gui.py:3216
 msgid "no URL"
 msgstr "bez URL"
 
-#: src/book_meta_fix/gui.py:2895
+#: src/book_meta_fix/gui.py:3224
 msgid "(no preview)"
 msgstr "(žádný náhled)"
 
-#: src/book_meta_fix/gui.py:2907
+#: src/book_meta_fix/gui.py:3236
 msgid "(none / calibre unavailable)"
 msgstr "(žádná / calibre nedostupné)"
 
-#: src/book_meta_fix/gui.py:2915
+#: src/book_meta_fix/gui.py:3244
 #, python-brace-format
 msgid "Strip the embedded cover from {name} (the ebook file stays)"
 msgstr "Odstranit vloženou obálku z {name} (soubor e-knihy zůstává)"
 
-#: src/book_meta_fix/gui.py:2917
+#: src/book_meta_fix/gui.py:3246
 #, python-brace-format
 msgid "The embedded cover cannot be stripped from {ext} — EPUB only"
 msgstr "Vloženou obálku nelze z {ext} odstranit — jen EPUB"
 
-#: src/book_meta_fix/gui.py:2918
+#: src/book_meta_fix/gui.py:3247
 msgid "file"
 msgstr "soubor"
 
-#: src/book_meta_fix/gui.py:2937
+#: src/book_meta_fix/gui.py:3266
 msgid "no recommended cover (cover_url)"
 msgstr "žádná doporučená obálka (cover_url)"
 
-#: src/book_meta_fix/gui.py:2941
+#: src/book_meta_fix/gui.py:3270
 msgid "cover applied"
 msgstr "obálka aplikována"
 
-#: src/book_meta_fix/gui.py:2943
+#: src/book_meta_fix/gui.py:3272
 msgid "cover download failed"
 msgstr "stažení obálky selhalo"
 
-#: src/book_meta_fix/gui.py:2951
+#: src/book_meta_fix/gui.py:3280
 msgid "restored from .bak"
 msgstr "obnoveno z .bak"
 
-#: src/book_meta_fix/gui.py:2953
+#: src/book_meta_fix/gui.py:3282
 msgid ".bak does not exist"
 msgstr ".bak neexistuje"
 
-#: src/book_meta_fix/gui.py:2958
+#: src/book_meta_fix/gui.py:3287
 msgid "kept"
 msgstr "ponecháno"
 
-#: src/book_meta_fix/gui.py:2972
+#: src/book_meta_fix/gui.py:3301
 msgid "nothing checked"
 msgstr "nic není zaškrtnuto"
 
-#: src/book_meta_fix/gui.py:2978
+#: src/book_meta_fix/gui.py:3307
 #, python-brace-format
 msgid ""
 "Strip the embedded cover from these ebooks?\n"
@@ -1367,106 +1416,114 @@ msgstr ""
 "\n"
 "{files}"
 
-#: src/book_meta_fix/gui.py:2989
+#: src/book_meta_fix/gui.py:3318
 #, python-brace-format
 msgid "deleted {n}"
 msgstr "smazáno {n}"
 
-#: src/book_meta_fix/gui.py:2991
+#: src/book_meta_fix/gui.py:3320
 #, python-brace-format
 msgid "covers stripped {stripped}/{total}"
 msgstr "odstraněných obálek {stripped}/{total}"
 
-#: src/book_meta_fix/gui.py:2993
+#: src/book_meta_fix/gui.py:3322
 msgid " (EPUB only)"
 msgstr " (jen EPUB)"
 
-#: src/book_meta_fix/gui.py:3013
+#: src/book_meta_fix/gui.py:3342
 msgid "(no formats / folder not found)"
 msgstr "(žádné formáty / složka nenalezena)"
 
-#: src/book_meta_fix/gui.py:3057
+#: src/book_meta_fix/gui.py:3386
 #, python-brace-format
 msgid "(extraction failed: {err})"
 msgstr "(extrakce selhala: {err})"
 
-#: src/book_meta_fix/gui.py:3059
+#: src/book_meta_fix/gui.py:3388
 msgid "(no text)"
 msgstr "(žádný text)"
 
-#: src/book_meta_fix/gui.py:3069
+#: src/book_meta_fix/gui.py:3398
 msgid "⚠ double encoding detected"
 msgstr "⚠ zjištěno dvojité kódování"
 
-#: src/book_meta_fix/gui.py:3086
+#: src/book_meta_fix/gui.py:3415
 #, python-brace-format
 msgid "⚠ multiple recoding layers ({desc})"
 msgstr "⚠ vícero vrstev překódování ({desc})"
 
-#: src/book_meta_fix/gui.py:3107
+#: src/book_meta_fix/gui.py:3436
 msgid "unknown reason"
 msgstr "neznámý důvod"
 
-#: src/book_meta_fix/gui.py:3108
+#: src/book_meta_fix/gui.py:3437
 #, python-brace-format
 msgid "⚠ {frm} → {to} failed: {reason}"
 msgstr "⚠ {frm} → {to} selhalo: {reason}"
 
-#: src/book_meta_fix/gui.py:3112
+#: src/book_meta_fix/gui.py:3441
 #, python-brace-format
 msgid " — the reverse ({to} → {frm}) works, click here"
 msgstr " — obrácený směr ({to} → {frm}) funguje, klikněte sem"
 
-#: src/book_meta_fix/gui.py:3146
+#: src/book_meta_fix/gui.py:3475
 #, python-brace-format
 msgid "{frm} → {to} ✓"
 msgstr "{frm} → {to} ✓"
 
-#: src/book_meta_fix/gui.py:3163
+#: src/book_meta_fix/gui.py:3492
 msgid "no double encoding to repair"
 msgstr "žádné dvojité kódování k opravě"
 
-#: src/book_meta_fix/gui.py:3205
+#: src/book_meta_fix/gui.py:3534
 #, python-brace-format
 msgid "indexing library… {done}/{total}"
 msgstr "indexuji knihovnu… {done}/{total}"
 
-#: src/book_meta_fix/gui.py:3226
+#: src/book_meta_fix/gui.py:3555
 #, python-brace-format
 msgid "library indexed: {n} books"
 msgstr "knihovna zaindexována: {n} knih"
 
-#: src/book_meta_fix/gui.py:3348
+#: src/book_meta_fix/gui.py:3677
 #, python-brace-format
 msgid "{n} entries"
 msgstr "{n} položek"
 
-#: src/book_meta_fix/gui.py:3350
+#: src/book_meta_fix/gui.py:3679
 #, python-brace-format
 msgid " (of {total})"
 msgstr " (z {total})"
 
-#: src/book_meta_fix/gui.py:3359
+#: src/book_meta_fix/gui.py:3688
 msgid "Keyboard shortcuts (F1)"
 msgstr "Klávesové zkratky (F1)"
 
-#: src/book_meta_fix/gui.py:3363
+#: src/book_meta_fix/gui.py:3692
 msgid "next / previous book"
 msgstr "další / předchozí kniha"
 
-#: src/book_meta_fix/gui.py:3364
+#: src/book_meta_fix/gui.py:3693
 msgid "next / previous edit field (fields only)"
 msgstr "další / předchozí editační pole (jen pole)"
 
-#: src/book_meta_fix/gui.py:3365
+#: src/book_meta_fix/gui.py:3694
 msgid "select all in the field"
 msgstr "vybrat vše v poli"
 
-#: src/book_meta_fix/gui.py:3367
+#: src/book_meta_fix/gui.py:3696
 msgid "swap the author↔title field values (C1 helper)"
 msgstr "prohodit hodnoty polí autor↔název (pomocník pro C1)"
 
-#: src/book_meta_fix/gui.py:3368
+#: src/book_meta_fix/gui.py:3697
+msgid "list: select multiple books (toggle one / extend a range)"
+msgstr ""
+
+#: src/book_meta_fix/gui.py:3698
+msgid "bulk edit: set the author or series for all selected books at once"
+msgstr ""
+
+#: src/book_meta_fix/gui.py:3699
 msgid ""
 "field button: apply the field as EMPTY (wrong proposal, correct value "
 "unknown)"
@@ -1474,11 +1531,11 @@ msgstr ""
 "tlačítko u pole: zapsat pole jako PRÁZDNÉ (chybný návrh, správná hodnota "
 "neznámá)"
 
-#: src/book_meta_fix/gui.py:3370
+#: src/book_meta_fix/gui.py:3701
 msgid "keep (applies like accept; the entry stays in review)"
 msgstr "keep (aplikuje jako accept; položka zůstává v review)"
 
-#: src/book_meta_fix/gui.py:3371
+#: src/book_meta_fix/gui.py:3702
 msgid ""
 "verified — mark the book OK: apply stores the flag in metadata.json, "
 "analyze skips the book, apply places it on the target path"
@@ -1486,11 +1543,11 @@ msgstr ""
 "verified — označit knihu jako OK: apply uloží příznak do metadata.json, "
 "analyze knihu přeskočí, apply ji umístí na cílovou cestu"
 
-#: src/book_meta_fix/gui.py:3372
+#: src/book_meta_fix/gui.py:3703
 msgid "clear → pending"
 msgstr "vymazat → čeká"
 
-#: src/book_meta_fix/gui.py:3373
+#: src/book_meta_fix/gui.py:3704
 msgid ""
 "checkbox above the list: the search also loads matching books from the "
 "whole library, not only review.yaml; a changed book is added to "
@@ -1500,43 +1557,43 @@ msgstr ""
 "knihovny, ne jen z review.yaml; změněná kniha se při uložení přidá do "
 "review.yaml"
 
-#: src/book_meta_fix/gui.py:3374
+#: src/book_meta_fix/gui.py:3705
 msgid "save"
 msgstr "uložit"
 
-#: src/book_meta_fix/gui.py:3375
+#: src/book_meta_fix/gui.py:3706
 msgid "quit"
 msgstr "ukončit"
 
-#: src/book_meta_fix/gui.py:3376
+#: src/book_meta_fix/gui.py:3707
 msgid "focus search"
 msgstr "fokus na hledání"
 
-#: src/book_meta_fix/gui.py:3377
+#: src/book_meta_fix/gui.py:3708
 msgid "RO column → target (focused field)"
 msgstr "RO sloupec → cíl (fokusované pole)"
 
-#: src/book_meta_fix/gui.py:3378
+#: src/book_meta_fix/gui.py:3709
 msgid "cover: apply new"
 msgstr "obálka: aplikovat novou"
 
-#: src/book_meta_fix/gui.py:3379
+#: src/book_meta_fix/gui.py:3710
 msgid "cover: restore .bak"
 msgstr "obálka: obnovit .bak"
 
-#: src/book_meta_fix/gui.py:3380
+#: src/book_meta_fix/gui.py:3711
 msgid "cover: keep"
 msgstr "obálka: ponechat"
 
-#: src/book_meta_fix/gui.py:3381
+#: src/book_meta_fix/gui.py:3712
 msgid "cover: delete checked cover/.bak, strip embedded covers"
 msgstr "obálka: smazat zaškrtnuté cover/.bak, odstranit vložené obálky"
 
-#: src/book_meta_fix/gui.py:3382
+#: src/book_meta_fix/gui.py:3713
 msgid "content: first page / broader text"
 msgstr "obsah: první strana / širší text"
 
-#: src/book_meta_fix/gui.py:3383
+#: src/book_meta_fix/gui.py:3714
 msgid ""
 "content: recode („read as“ = the wrong read, „actually is“ = the real "
 "encoding; result always UTF-8)"
@@ -1544,7 +1601,7 @@ msgstr ""
 "obsah: překódování („přečteno jako“ = chybné přečtení, „skutečně je“ = "
 "skutečné kódování; výsledek je vždy UTF-8)"
 
-#: src/book_meta_fix/gui.py:3384
+#: src/book_meta_fix/gui.py:3715
 msgid ""
 "author & series: autocomplete from the library (arrows pick, Enter "
 "inserts; Tab inserts only after an arrow pick — otherwise it leaves your "
@@ -1553,13 +1610,13 @@ msgstr ""
 "autor & série: našeptávač z knihovny (šipky vybírají, Enter vloží; Tab "
 "vloží jen po výběru šipkou — jinak nechá váš text)"
 
-#: src/book_meta_fix/gui.py:3385
+#: src/book_meta_fix/gui.py:3716
 msgid ""
 "(click on a cover = ☑; click on path / double-click in the list = open "
 "folder)"
 msgstr "(klik na obálku = ☑; klik na cestu / dvojklik v seznamu = otevřít složku)"
 
-#: src/book_meta_fix/gui.py:3386
+#: src/book_meta_fix/gui.py:3717
 msgid ""
 "(wheel: widget under the mouse, at its edge the form; cover in the list →"
 " hover popup)"
@@ -1567,7 +1624,7 @@ msgstr ""
 "kolečko: widget pod myší, na jeho okraji formulář; obálka v seznamu → "
 "popup při najetí)"
 
-#: src/book_meta_fix/review.py:69
+#: src/book_meta_fix/review.py:70
 #, python-brace-format
 msgid ""
 "Auto-generated by book-meta-fix on {date}\n"
