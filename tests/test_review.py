@@ -406,3 +406,43 @@ class TestLocationAndVerified:
 
 	def test_header_documents_verified(self):
 		assert "verified" in _header(0)
+
+
+class TestC14SeriesSplitProposal:
+	"""C14 (series order glued into the name): the split rides along even
+	when C14 is only an ADDITIONAL diagnosis — only the primary's
+	diag.proposed extras are merged by _entry_dict."""
+
+	def test_c14_primary_proposes_split(self):
+		from book_meta_fix.detectors import rule_c14_series_index_in_name
+
+		meta = _meta(1)
+		meta.series = ["Mark Stone #73"]
+		diag = rule_c14_series_index_in_name(meta)
+		proposed = _build_proposed(meta, None, None, diag)
+		assert proposed["series"] == "Mark Stone"
+		assert proposed["series_index"] == "73"
+		assert "split" in proposed["source"]
+
+	def test_c14_additional_under_c2_primary_still_proposed(self):
+		from book_meta_fix.detectors import detect
+
+		meta = _meta(1, title="soubor_epub.epub")  # C2 fires
+		meta.series = ["Mark Stone #73"]
+		primary = detect(meta)
+		assert primary.category == "C2"
+		assert primary.additional and primary.additional[0].category == "C14"
+		proposed = _build_proposed(meta, None, None, primary)
+		assert proposed["series"] == "Mark Stone"
+		assert proposed["series_index"] == "73"
+
+	def test_enricher_series_beats_the_mechanical_split(self):
+		from book_meta_fix.detectors import rule_c14_series_index_in_name
+
+		meta = _meta(1)
+		meta.series = ["Mark Stone #73"]
+		diag = rule_c14_series_index_in_name(meta)
+		enriched = EnrichedMeta(source="databazeknih", series="Mark Stone", series_index="73")
+		proposed = _build_proposed(meta, None, enriched, diag)
+		assert proposed["series"] == "Mark Stone"
+		assert "databazeknih" in proposed["source"]

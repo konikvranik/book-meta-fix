@@ -28,11 +28,55 @@ resets). The
 detail column scrolls; every action has a `Ctrl+letter` shortcut (`F1` lists
 them); `PgUp`/`PgDn` move between books and `Tab` cycles only the editable
 fields — author, title, ISBN, year, publisher, language, série, pořadí v
-sérii, autoři, žánry (`Ctrl+A` selects all in a field). The list shows the label on the
-left and the cover thumbnail flush right on every row. Requires the Tk
+sérii, autoři, žánry (`Ctrl+A` selects all in a field). The list shows the
+label on the left, the series + order at the right end of the author's
+line (the current values; an `accept`/`keep` entry shows the proposed
+series, i.e. the one `apply` will write), and the cover thumbnail flush
+right on every row. Requires the Tk
 bindings
 (`sudo apt install python3-tk` on Debian/Ubuntu). Edits are written back to
 `review.yaml` — commit them with `bmf apply` as in [edit + apply](edit-and-apply.md).
+
+## Whole-library search (`+ library`)
+
+The `Search:` box normally filters review entries only. Tick **`+ library`**
+next to it and the same query also sweeps the whole library: matching books
+that are **not** in review.yaml join the list (sorted by author, their
+header says "not in review.yaml"). This is the workflow for a series you
+know is broken — you spot bad metadata for the "Mark Stone" books in
+Audiobookshelf, search the series, tick `+ library`, and every Mark Stone
+book shows up, in review or not, ready to edit.
+
+A fresh book behaves exactly like a review entry (fields, covers, content
+view, actions). The one difference: `Ctrl+S` writes it into review.yaml
+only once you **decide or edit** it (an action, the verified mark, a
+proposal that differs from the current values) — untouched books never
+flood the file. The additions stay in the list for the rest of the
+session: editing a book, saving or unticking the box does not remove
+them, and re-searching is idempotent (a book is never listed twice).
+`bmf apply` then processes the saved ones like any other entry.
+
+A book whose series order is glued into the series name (`Mark Stone
+#73`) arrives with the C14 split pre-filled in the target fields (bare
+series + order) — the same proposal `bmf analyze` would emit — so the
+fix is one `Ctrl+Enter` per book instead of retyping. The untouched
+pre-fill alone does not write the book into review.yaml; the mass fix
+is analyze's pre-filled accept.
+
+A fulltext index of the library is built by a background sweep the
+moment the editor opens (progress in the status line; well under a
+minute for ~5k books on NFS, folder reads parallelized — the same sweep
+feeds the author/series autocomplete). Every `+ library` search is then
+an instant in-memory filter, no waiting; a query typed before the index
+is ready is answered automatically the moment it lands. The index
+matches the same fields as the search box — author, title, series, the
+folder path — plus the manifest-only fields review entries never carry
+(annotation, publisher, tags), so a book with broken metadata still
+matches when only its folder name or its annotation mentions the series
+(typical for house-pseudonym series like Mark Stone, where most books
+live under the real writers' folders). A book that has no uuid yet gets
+one minted during indexing (the same lazy identity augmentation a scan
+performs), because the review workflow is uuid-keyed.
 
 ## Verified (the OK mark)
 

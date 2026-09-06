@@ -167,6 +167,29 @@ byly vyřešeny, se stejnou cestou vrací zpět do kořenového stromu.
 
 **Verdikt:** AUTO_FIXABLE (přesun)
 
+## C14 — Pořadí série zalepené v názvu série
+
+Název série nese pořadí knihy — třeba `Mark Stone #73` jako název s
+PRÁZDNOU hodnotou pořadí. Importery ABS/calibre občas uloží celý řetězec
+„Název #N" do pole názvu; GUI pak zobrazuje rozbitou sérii, vyhledávání
+podle série seskupuje podle znečištěného názvu a vzor umístění `{series}`
+by zapsal „#N" i do názvu složky. Průzkum knihovny našel 353 takových
+knih (Asterion, Agent JFK, Mark Stone, …).
+
+Dělí se jen explicitní přípona `#N` — koncové holé číslo („MR-362
+Espace 4") může být součástí skutečného názvu a záměrně se nedotýká.
+Uložené pořadí, které NESOULASÍ s číslem v názvu, je vědomý stav a
+pravidlo pak nevyhodnotí (shodné pořadí ano — špatný je tehdy jen název).
+
+Oprava je deterministická a bezztrátová: holý název + `series_index`
+(„Mark Stone" + 73). Položka v review dostane předvyplněné
+`action: accept` a když je rozdělení jediným problémem knihy, i
+`verified: true` — analyze + apply opraví celou knihovnu hromadně. GUI
+v režimu `+ knihovna` navíc předvyplní tentýž návrh u knih, které
+vyhledávání přineslo mimo review.
+
+**Verdikt:** AUTO_FIXABLE (rozdělení)
+
 ## EMPTY_BOOK — Mrtvý záznam (knižní soubor chybí)
 
 Složka obsahuje jen metadata, jejich zálohy a případně obálku — žádný

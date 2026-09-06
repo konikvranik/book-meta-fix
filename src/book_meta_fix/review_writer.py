@@ -404,6 +404,9 @@ class ReviewWriter:
 		#     waits unresolved in needfix/ the location rule stays the primary
 		#     on every run (a real library had ~600 C13+C11 books cycling in
 		#     review with zero progress).
+		#   - C14 (series order glued into the series name): a deterministic,
+		#     identity-preserving split — the same class of fix as the move
+		#     itself (_proposal_preserves_identity still guards the gate).
 		# A real metadata problem (C2, C12, …) still stays action: null, and
 		# so does a proposal that changes title/author — a mere-move accept
 		# must not sneak an unconfirmed identity change through.
@@ -415,7 +418,7 @@ class ReviewWriter:
 		if action is None and diag.category in ("C13", "EMPTY_BOOK") and (
 			diag.category == "EMPTY_BOOK"
 			or all(
-				d.category in ("C13", *_COVER_CATEGORIES)
+				d.category in ("C13", "C14", *_COVER_CATEGORIES)
 				or d.verdict == Verdict.OK
 				or d.category in ("MISSING_ISBN", "MISSING_YEAR", "MISSING_COVER")
 				for d in all_diagnoses(diag)

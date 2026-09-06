@@ -41,6 +41,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
+from uuid import uuid4
 
 from .covers import (
 	analyze_cover,
@@ -49,12 +50,14 @@ from .covers import (
 	extract_cover_from_book,
 	strip_cover_from_book,
 )
+from .detectors import split_series_index
 from .encoding import detect_double_decode, recode, recode_failure_reason, repair_chain
 from .extractors import extract
 from .i18n import _
-from .library import iter_book_folders
-from .readers import EBOOK_EXTS
-from .review import _header, _load_raw_entries, _render_entry
+from .library import _META_FILES, _is_excluded, iter_book_folders
+from .readers import EBOOK_EXTS, read_book_folder
+from .review import _build_current, _header, _load_raw_entries, _render_entry
+from .writers import ensure_uuid
 
 log = logging.getLogger(__name__)
 
@@ -395,6 +398,57 @@ def extract_series_values(src: object) -> list[str]:
 	return tokens
 
 
+def entry_series_label(e: dict) -> str:
+	"""Display label ``"Series #N"`` for an entry's series, "" if none.
+
+	An ACCEPT/KEEP decision applies ``proposed`` like apply will, so the
+	list shows the series as the decision leaves it (a ``null`` proposal
+	deletes the field — the same semantics ``_apply_fields`` uses); pending
+	and delete entries show ``current``. Composes the flat
+	``series`` / ``series_index`` pair (review.yaml shape); the raw ABS
+	shapes (a dict, a list of dicts with the legacy ``sequence`` key) are
+	tolerated the same way :func:`extract_series_values` tolerates them.
+	An order glued into the name ("Mark Stone #73", index empty) is
+	normalised through the C14 splitter so the label shows the split pair;
+	an index that DIFFERS from an embedded one is left alone (the
+	deliberate state C14 refuses to touch).
+	"""
+	cur = (e or {}).get("current") or {}
+	prop = (e or {}).get("proposed") or {}
+	if prop and e.get("action") in ("accept", "keep"):
+		cur = dict(cur)
+		for k in ("series", "series_index"):
+			if k in prop:
+				if prop[k] is None:
+					cur.pop(k, None)
+				else:
+					cur[k] = prop[k]
+	name, idx = "", ""
+	s = cur.get("series")
+	if isinstance(s, list):
+		s = s[0] if s else None
+	if isinstance(s, dict):
+		raw = s.get("name")
+		name = str(raw).strip() if raw is not None else ""
+		raw = s.get("index")
+		if raw is None:
+			raw = s.get("sequence")
+		idx = "" if raw is None else str(raw).strip()
+	elif isinstance(s, str):
+		name = s.strip()
+	# A flat series_index beats whatever the raw shape carried — in the
+	# normal review shape the two never coexist as different sources.
+	si = cur.get("series_index")
+	if si is not None:
+		idx = str(si).strip()
+	split = split_series_index(name) if name else None
+	if split is not None and (not idx or idx == split[1]):
+		name, idx = split
+	if not name:
+		return f"#{idx}" if idx else ""
+	return f"{name} #{idx}" if idx else name
+
+
 def entry_search_haystack(e: dict, active: dict | None = None) -> str:
 	"""Build a lowercase space-separated string of searchable fields for an entry."""
 	if not e:
@@ -436,22 +490,273 @@ def entry_search_haystack(e: dict, active: dict | None = None) -> str:
 	return " ".join(parts).lower()
 
 
-def entry_matches_search(needle: str, entry: dict, active: dict | None = None) -> bool:
+def entry_matches_search(needle: str, entry: dict, active: dict | None = None,
+                         extra_hay: str = "") -> bool:
 	"""Check whether *entry* matches search query *needle*.
 
 	Matches case-insensitively against entry metadata including author, title,
 	series (name, index, and compound pairs), path, category, and action.
 	Supports exact substring match as well as multi-term queries where every word
-	in *needle* must appear in the entry's searchable fields.
+	in *needle* must appear in the entry's searchable fields. *extra_hay* is
+	concatenated into the haystack — the library scan passes the description
+	there (review entries never carry it, a full manifest does).
 	"""
 	n = needle.strip().lower()
 	if not n:
 		return True
 	hay = entry_search_haystack(entry, active=active)
+	if extra_hay:
+		hay = f"{hay} {extra_hay}".lower()
 	if n in hay:
 		return True
 	words = n.split()
 	return all(w in hay for w in words)
+
+
+# `proposed` keys that carry no user decision about a metadata field (they are
+# analyzer bookkeeping: provenance, LLM reasoning, the informational C13 move
+# preview, and cover recovery that only fires for C11/MISSING_COVER diagnoses
+# — a library-loaded entry has none, so a cover_url there does nothing).
+_LIB_NOISE_KEYS = frozenset({"source", "reasoning", "location", "cover_url"})
+
+
+def library_entry_changed(e: dict) -> bool:
+	"""Did the user actually decide something about a library-loaded entry?
+
+	Only such entries are written into review.yaml on save. A decision is an
+	``action``, the ``verified`` mark, a note — or a proposed value that
+	DIFFERS from ``current``. Equality is not a change: merely browsing a
+	book merges its prefilled field values into ``proposed``
+	(see ``_collect_current`` / ``compose_overlay``), and a viewed book must
+	not silently turn into a review entry. The C14 series-split prefill
+	(``library_entry_from_meta``) is likewise not a change — a search that
+	sweeps in hundreds of "#N" books must not flood review.yaml with
+	pending entries; the mass fix is analyze's pre-filled accept.
+	"""
+	if e.get("action"):
+		return True
+	if e.get("verified"):
+		return True
+	if e.get("notes"):
+		return True
+	prop = e.get("proposed") or {}
+	if _is_pure_series_prefill(prop, e.get("current") or {}):
+		return False
+	cur = e.get("current") or {}
+	for k, v in prop.items():
+		if k in _LIB_NOISE_KEYS:
+			continue
+		if k not in cur or v != cur.get(k):
+			return True
+	return False
+
+
+def _is_pure_series_prefill(prop: dict, cur: dict) -> bool:
+	"""Is *prop* exactly the untouched C14 split of the current series?
+
+	``{"series": bare, "series_index": N}`` matching
+	``split_series_index(cur["series"])`` — i.e. nobody touched the fields
+	since the index built the entry. Anything else (an edited value, a null
+	delete, extra keys) is a real change.
+	"""
+	if set(prop) != {"series", "series_index"}:
+		return False
+	split = split_series_index(str(cur.get("series") or ""))
+	return (
+		split is not None
+		and prop.get("series") == split[0]
+		and str(prop.get("series_index")) == split[1]
+	)
+
+
+def entries_to_write(entries: list[dict], lib_uuids) -> list[dict]:
+	"""Which entry dicts a GUI save writes into review.yaml.
+
+	Review entries always; library-loaded ones (tracked by *lib_uuids*, a
+	uuid-keyed collection) only when the user changed them (see
+	:func:`library_entry_changed`) — an untouched book pulled in by a
+	library search must not flood the review file.
+	"""
+	return [
+		e for e in entries
+		if e.get("uuid") not in lib_uuids or library_entry_changed(e)
+	]
+
+
+def library_entry_from_meta(meta, library: Path | str) -> dict:
+	"""Build a review-shaped entry dict for a library book outside review.yaml.
+
+	Shape-compatible with an analyze entry (id/uuid/path/current/proposed/
+	action) but WITHOUT a diagnosis — no rule flagged the book, the user's
+	search pulled it in. ``action`` starts pending; once the user decides or
+	edits, the entry is written into review.yaml on save and ``bmf apply``
+	processes it like any other (placement re-detects on the final metadata,
+	so the missing diagnosis costs nothing there).
+
+	A series whose ORDER is glued into the name ("Mark Stone #73", index
+	empty) gets the deterministic C14 split pre-filled as ``proposed``
+	(the same :func:`detectors.split_series_index` the analyzer uses), so
+	the user accepts the obvious fix instead of retyping it per book. The
+	action stays pending — bulk pre-accept is analyze's job, the GUI
+	proposal just saves the typing.
+	"""
+	library = Path(library)
+	try:
+		rel = str(Path(meta.path).relative_to(library))
+	except ValueError:
+		rel = str(Path(meta.path))
+	entry = {
+		"id": meta.calibre_id,
+		"uuid": meta.uuid,
+		"path": rel,
+		"current": _build_current(meta),
+		"proposed": None,
+		"action": None,
+	}
+	name, idx = meta.series_pair()
+	split = split_series_index(name)
+	if split is not None and (not idx or idx.strip() == split[1]):
+		entry["proposed"] = {"series": split[0], "series_index": split[1]}
+	return entry
+
+
+def _library_extra_hay(meta) -> str:
+	"""Haystack fields only the full manifest carries (lowercased).
+
+	The library scan reads the book's own metadata.json, so — unlike the
+	review-entry search — it can also match against the description,
+	tags, publisher and subtitle. That matters in practice: a series book
+	may carry an empty ``series`` and mention the series only in its
+	annotation (measured: ~70 "Mark Stone" books, most under other authors'
+	folders, several with the name ONLY in the description).
+	"""
+	parts = [meta.description, meta.publisher, meta.subtitle]
+	parts.extend(meta.tags or [])
+	return " ".join(str(x) for x in parts if x).lower()
+
+
+def _library_book_folders(library: Path, workers: int) -> list[Path]:
+	"""All book folders under *library*, the tree walk parallelized per
+	top-level directory.
+
+	``iter_book_folders`` alone costs tens of seconds on the real library
+	(measured: 38 s for 5339 folders over NFS v3 — each directory entry
+	probes for a metadata sidecar, one RPC round trip each). Splitting the
+	walk by top-level folder and running the subtrees in the same pool as
+	the reads cuts that to a few seconds. Exclusions are applied to the
+	top level manually (iter_book_folders applies them only below it).
+	"""
+	try:
+		tops = sorted(
+			d for d in library.iterdir()
+			if d.is_dir() and not _is_excluded(d.name)
+		)
+	except OSError:
+		return []
+	from concurrent.futures import ThreadPoolExecutor
+
+	def _walk(top: Path) -> list[Path]:
+		# A top-level directory may itself be a BOOK folder (a book sitting
+		# directly in the library root) — iter_book_folders treats its
+		# argument as a container, so test the top itself first and don't
+		# descend into it (the same rule the walk applies below the root).
+		if any((top / mf).is_file() for mf in _META_FILES):
+			return [top]
+		return list(iter_book_folders(top))
+
+	with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+		parts = list(ex.map(_walk, tops))
+	return [f for part in parts for f in part]
+
+
+def build_library_index(
+	library: Path | str, *, progress=None, workers: int = 12,
+) -> list[tuple[dict, str]]:
+	"""One background sweep of the whole library → ``(entry, haystack)`` pairs.
+
+	Called ONCE per GUI session (at startup, off the Tk thread — this is
+	the fulltext index the "+ library" search queries instantly, so no
+	search ever sweeps the library itself). Each pair holds a review-shaped
+	entry (see :func:`library_entry_from_meta`, including the C14
+	series-split prefill) and its PRE-LOWERED full-text haystack:
+	:func:`entry_search_haystack` (author/title/series/path/...) plus the
+	manifest-only fields (:func:`_library_extra_hay` — description,
+	publisher, tags, subtitle).
+
+	Folders are read via the canonical reader (json > opf > path, mojibake
+	repair included) in a thread pool — the library typically lives on NFS
+	where each read costs a few RPC round trips. A book without a uuid gets
+	one minted and persisted here (:func:`writers.ensure_uuid`, the same
+	lazy identity augmentation a cache-miss scan performs; after the first
+	indexed run the library is fully keyed — the review workflow is
+	uuid-keyed). Unreadable folders are skipped. *progress* is called as
+	``progress(done, total)`` every ~100 folders (from the calling thread —
+	marshal to Tk yourself). Returns pairs sorted by (author, title).
+	"""
+	library = Path(library)
+	folders = _library_book_folders(library, workers)
+	total = len(folders)
+
+	def _one(folder: Path) -> tuple[dict, str] | None:
+		try:
+			meta = read_book_folder(folder)
+		except Exception:  # noqa: BLE001 - unreadable folder is skipped, not fatal
+			return None
+		if meta.uuid is None:
+			try:
+				ensure_uuid(meta)
+			except Exception:  # noqa: BLE001
+				meta.uuid = str(uuid4())  # in-memory only; apply re-mints on disk
+		entry = library_entry_from_meta(meta, library)
+		hay = f"{entry_search_haystack(entry)} {_library_extra_hay(meta)}".lower()
+		return entry, hay
+
+	out: list[tuple[dict, str]] = []
+	done = 0
+	next_report = 50
+	from concurrent.futures import ThreadPoolExecutor
+
+	with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+		for pair in ex.map(_one, folders):
+			done += 1
+			if progress is not None and done >= next_report:
+				progress(done, total)
+				next_report = done + 100
+			if pair is not None:
+				out.append(pair)
+	if progress is not None and total:
+		progress(total, total)
+	out.sort(key=lambda p: ((p[0].get("current") or {}).get("author") or "",
+	                        (p[0].get("current") or {}).get("title") or ""))
+	return out
+
+
+def search_library_index(
+	index: list, needle: str, skip_paths: set[str], skip_uuids: set[str],
+) -> list[tuple[dict, str]]:
+	"""Instant multi-word search over :func:`build_library_index` output.
+
+	Every word of *needle* must appear in a book's haystack (the same
+	AND semantics as the list's search box). Books already covered by the
+	current entry list are skipped (by path OR uuid). Returns SHALLOW
+	COPIES of the stored entries plus their haystacks — the GUI mutates
+	served entries (``action`` / ``proposed``) and the index must stay
+	pristine for later searches. Empty needle → ``[]``.
+	"""
+	n = needle.strip().lower()
+	if not n:
+		return []
+	words = n.split()
+	out: list[tuple[dict, str]] = []
+	for entry, hay in index:
+		if str(Path(entry.get("path") or "")) in skip_paths:
+			continue
+		u = entry.get("uuid")
+		if u and u in skip_uuids:
+			continue
+		if all(w in hay for w in words):
+			out.append((dict(entry), hay))
+	return out
 
 
 # ---------------------------------------------------------------------------
@@ -529,10 +834,12 @@ class _Autocomplete:
 	Keyboard-first, matching the editor's philosophy: the popup NEVER takes
 	focus (the Entry keeps it — that is also why a ttk.Combobox was not used;
 	swapping the widget class would disturb the Tab trap and the field
-	widget bookkeeping). Up/Down move the popup selection, Return/Tab accept,
-	Escape closes. The value pool is polled via ``values()`` on every
-	keystroke, so it can back onto a mutable app-level set that grows as the
-	user types in new names.
+	widget bookkeeping). Up/Down move the popup selection, Return accepts
+	the highlighted row, Escape closes. Tab accepts ONLY after a deliberate
+	arrow pick (see :attr:`has_user_pick`) — tabbing away from a merely
+	open popup closes it and keeps the typed text. The value pool is polled
+	via ``values()`` on every keystroke, so it can back onto a mutable
+	app-level set that grows as the user types in new names.
 	"""
 
 	MAX_SHOWN = 12
@@ -548,6 +855,13 @@ class _Autocomplete:
 		self.popup = None
 		self.listbox = None
 		self._matches: list[str] = []
+		# Has the user actually NAVIGATED the popup (arrows)? The auto-
+		# highlighted first row is not a pick — Tab must not silently accept
+		# it, or tabbing away from the field rewrites the typed value with
+		# whatever the pool happens to start with (real complaint: fixing a
+		# series name, Tab, and the field jumps to a longer suggestion that
+		# merely shares the prefix).
+		self._picked = False
 		entry.bind("<KeyRelease>", self._on_key, add="+")
 		entry.bind("<Down>", self._on_arrow, add="+")
 		entry.bind("<Up>", self._on_arrow, add="+")
@@ -569,6 +883,16 @@ class _Autocomplete:
 	def is_open(self) -> bool:
 		return self.popup is not None
 
+	@property
+	def has_user_pick(self) -> bool:
+		"""Did the user deliberately navigate the popup (arrow keys)?
+
+		Tab accepts the highlighted row ONLY then; without a pick the popup
+		is just closed, leaving the typed value intact. Return and a click
+		accept unconditionally — they ARE the explicit confirmation.
+		"""
+		return self._picked
+
 	def _on_key(self, event) -> None:
 		if (event.keysym or "") in self._NAV_KEYS or event.state & 0x4:  # Ctrl held
 			return
@@ -579,6 +903,7 @@ class _Autocomplete:
 		if not text:
 			self.hide()
 			return
+		self._picked = False  # rebuilt list: the row-0 highlight is not a pick
 		self._matches = [
 			v for v in self.values()
 			if v.lower().startswith(text) and v.lower() != text
@@ -615,6 +940,7 @@ class _Autocomplete:
 	def _on_arrow(self, event) -> str | None:
 		if self.popup is None or self.listbox is None or not self._matches:
 			return None
+		self._picked = True  # a deliberate move through the suggestions
 		delta = 1 if event.keysym == "Down" else -1
 		n = len(self._matches)
 		i = self.listbox.index("active")
@@ -646,6 +972,7 @@ class _Autocomplete:
 		self.hide()
 
 	def hide(self) -> None:
+		self._picked = False
 		if self.popup is not None:
 			try:
 				self.popup.destroy()
@@ -755,13 +1082,15 @@ class _BookList:
 
 	def insert(self, _parent, _index, *, iid=None, text="", values=(), image=None):
 		# Two-line row: *text* is the TITLE (bold, first line); values are
-		# (action, author, verified) — the author renders italic + indented
-		# below, verified draws a blue ✓ under the action glyph.
+		# (action, author, verified, series) — the author renders italic +
+		# indented below with the series + order right-aligned beside it,
+		# verified draws a blue ✓ under the action glyph.
 		row = {
 			"iid": str(iid), "title": text,
 			"action": values[0] if values else "",
 			"author": values[1] if len(values) > 1 else "",
 			"verified": bool(values[2]) if len(values) > 2 else False,
+			"series": values[3] if len(values) > 3 else "",
 			"image": image,
 		}
 		self._rows.append(row)
@@ -948,14 +1277,24 @@ class _BookList:
 			fg = self._sel_fg if sel else self._fg
 			# Line 1: title, bold, from the left edge. Line 2: author,
 			# italic, indented — the thumbnail already fixes the row height,
-			# so two lines fit at no cost.
+			# so two lines fit at no cost. A present series + order shares
+			# line 2 from the RIGHT (before the action column): the author
+			# budget shrinks by its width, and the series is itself capped
+			# at half the line so it can never erase the author.
 			c.create_text(self.PAD, y + 6, anchor="nw",
 			              text=self._elide(row["title"], text_w, self._bold),
 			              font=self._bold, fill=fg)
-			c.create_text(self.PAD + self.AUTHOR_INDENT, y + self.ROW_H - 6,
-			              anchor="sw",
+			line2_x = self.PAD + self.AUTHOR_INDENT
+			line2_end = ax - 10
+			if row["series"]:
+				s_text = self._elide(row["series"],
+				                     (line2_end - line2_x) // 2, self._font)
+				c.create_text(line2_end, y + self.ROW_H - 6, anchor="se",
+				              text=s_text, font=self._font, fill=fg)
+				line2_end -= self._font.measure(s_text) + 12
+			c.create_text(line2_x, y + self.ROW_H - 6, anchor="sw",
 			              text=self._elide(row["author"] or "—",
-			                               text_w - self.AUTHOR_INDENT, self._italic),
+			                               line2_end - line2_x, self._italic),
 			              font=self._italic, fill=fg)
 			# Action: coloured glyph (colour stays even when selected — it
 			# is the orientation cue, and the Tango colours read fine on
@@ -1050,8 +1389,8 @@ class ReviewEditorApp:
 			return
 
 		# Autocomplete pools for author/series: seeded synchronously from the
-		# review entries themselves (instant), then widened off-thread by a
-		# full-library scan (see _start_vocab_loader). New names the user
+		# review entries themselves (instant), then widened by the startup
+		# library index sweep (see _finish_lib_index). New names the user
 		# types are learned back into the pools (see _vocab_learn).
 		self._vocab_authors: set[str] = set()
 		self._vocab_series: set[str] = set()
@@ -1075,7 +1414,21 @@ class ReviewEditorApp:
 		self._filter_action = tk.StringVar(value="all")
 		self._filter_category = tk.StringVar(value="all")
 		self._search = tk.StringVar()
-		self._search.trace_add("write", lambda *_: self.refresh_list())
+		self._search.trace_add("write", lambda *_: self._on_search_changed())
+		# "+ library" mode: the search also matches the WHOLE library (books
+		# outside review.yaml merge into the list). One background sweep at
+		# startup builds a fulltext index (_lib_index: (entry, haystack)
+		# pairs) so every search is an instant in-memory filter — no NFS per
+		# search. Merged entries (tracked in _lib_uuids: uuid → its haystack,
+		# used by the list filter's exemption) stay in memory for the whole
+		# session; only CHANGED ones are written into review.yaml on save.
+		self._lib_mode = tk.BooleanVar(value=False)
+		self._lib_mode.trace_add("write", lambda *_: self._on_lib_mode_changed())
+		self._lib_uuids: dict = {}
+		self._lib_index: list = []
+		self._lib_index_done = False
+		self._lib_indexing = False
+		self._lib_search_after = None  # pending debounced serve (after id)
 
 		# Action / notes / verified state.
 		self._action_var = tk.StringVar(value="pending")
@@ -1122,7 +1475,7 @@ class ReviewEditorApp:
 		self._bind_shortcuts()
 		self.refresh_list()
 		self._start_thumb_loader()
-		self._start_vocab_loader()
+		self._start_lib_index()
 
 		# Load the first book and focus its first field (start focus rule).
 		if self.entries:
@@ -1195,6 +1548,19 @@ class ReviewEditorApp:
 		self._search_entry = ttk.Entry(filt, textvariable=self._search, width=22)
 		self._search_entry.pack(side="left", fill="x", expand=True)
 		self._bind_select_all(self._search_entry)
+		# "+ library": extend the search to the whole library (see
+		# _on_lib_mode_changed) — books outside review.yaml join the list.
+		self._lib_chk = ttk.Checkbutton(filt, text=_("+ library"), variable=self._lib_mode)
+		self._lib_chk.pack(side="left", padx=(8, 0))
+		_Tooltip(self._lib_chk, _(
+			"Search the whole library too, not only review.yaml: books matching "
+			"the search (author, title, series, folder path, annotation) that "
+			"are not in review appear in the list — their header says 'not in "
+			"review.yaml'. A book you change or decide is added into "
+			"review.yaml on save (bmf apply then processes it); unchanged "
+			"ones are not saved. A fulltext index of the library is built in "
+			"the background at startup (progress in the status line); the "
+			"search answers instantly once it is ready."))
 
 		# Book list — canvas-rendered (_BookList), NOT ttk.Treeview: the
 		# wanted row layout is label left + cover flush right, and Treeview
@@ -1772,11 +2138,17 @@ class ReviewEditorApp:
 		w = self.focus_get_safe()
 		if w not in self._editable_widgets:
 			return None
-		# Tab with an autocomplete dropdown open first accepts the highlighted
-		# suggestion, THEN moves on — the usual "pick and continue" flow.
+		# An open autocomplete dropdown: Tab accepts the highlighted row
+		# ONLY after a deliberate arrow pick — an untouched popup (the user
+		# merely typed their own value) is just closed, otherwise tabbing
+		# away would silently rewrite the field with the first suggestion
+		# that happens to share the prefix.
 		ac = self._acs.get(w)
 		if ac is not None and ac.is_open:
-			ac.accept()
+			if ac.has_user_pick:
+				ac.accept()
+			else:
+				ac.hide()
 		# Direction: the Shift modifier (Windows/macOS <Shift-Tab>) or the X11
 		# keysym itself (ISO_Left_Tab arrives as its own keysym).
 		shift = bool(event.state & 0x1) or (event.keysym or "") == "ISO_Left_Tab"
@@ -1875,7 +2247,8 @@ class ReviewEditorApp:
 			# image=None corrupts ttk's option parsing and the next option's
 			# value (here the ``values`` list) is misread as an option name.
 			kw = dict(iid=str(i), text=self._entry_title(e),
-			          values=(self._action_label(e), self._entry_author(e), bool(e.get("verified"))))
+			          values=(self._action_label(e), self._entry_author(e),
+			                  bool(e.get("verified")), entry_series_label(e)))
 			img = self._thumb_photo_for(uuid)
 			if img is not None:
 				kw["image"] = img
@@ -1909,11 +2282,23 @@ class ReviewEditorApp:
 			if cat != "all" and ec != cat:
 				continue
 			if needle:
-				active_fields = None
-				if i == self._cur and hasattr(self, "_fields") and self._fields:
-					active_fields = {r: f["value"].get() for r, f in self._fields.items() if not f.get("cleared")}
-				if not entry_matches_search(needle, e, active=active_fields):
-					continue
+				# A library-loaded entry is exempt from the ENTRY haystack —
+				# the index matched it against the FULL manifest (description
+				# included), which the entry itself does not carry. The exact
+				# index haystack is kept per uuid, so the exemption hides a
+				# stale superset match when the needle narrows.
+				u = e.get("uuid")
+				lib_hay = self._lib_uuids.get(u) if u else None
+				if lib_hay is not None:
+					words = needle.lower().split()
+					if not all(w in lib_hay for w in words):
+						continue
+				else:
+					active_fields = None
+					if i == self._cur and hasattr(self, "_fields") and self._fields:
+						active_fields = {r: f["value"].get() for r, f in self._fields.items() if not f.get("cleared")}
+					if not entry_matches_search(needle, e, active=active_fields):
+						continue
 			out.append(i)
 		return out
 
@@ -1939,6 +2324,87 @@ class ReviewEditorApp:
 		idx = int(iid)
 		if 0 <= idx < len(self.entries):
 			self._select_index(idx, keep_focus=True)
+
+	# ------------------------------------------------------------------
+	# Library search ("+ library" mode)
+	# ------------------------------------------------------------------
+
+	def _on_search_changed(self, *_args) -> None:
+		"""Search box changed: refilter the list and (in library mode)
+		schedule the debounced index serve."""
+		self.refresh_list()
+		self._schedule_lib_search()
+
+	def _on_lib_mode_changed(self) -> None:
+		"""The ``+ library`` checkbox was toggled.
+
+		ON with a filled search serves it from the in-memory index right
+		away; ON with an empty search only hints — merging all ~5k books
+		would be meaningless, the whole point is the filter. OFF does
+		nothing to the list: merged entries stay for the rest of the
+		session (an accidental toggle — Tab falls through to the checkbox
+		from non-field widgets, Space then activates it — must not throw
+		the work away), and searches are instant anyway.
+		"""
+		if self._lib_mode.get():
+			if self._search.get().strip():
+				self._apply_lib_search()
+			else:
+				self._flash(_("type a search to load matching library books"))
+
+	def _schedule_lib_search(self) -> None:
+		"""Debounce serving behind the search box (400 ms after the last
+		keystroke).
+
+		The serve itself is an instant in-memory filter, but each settled
+		PARTIAL needle still merges its (superset) matches into the list —
+		typing through "mar" → "mark" → "mark stone" must not merge three
+		waves while the keys are still moving.
+		"""
+		if self._lib_search_after is not None:
+			try:
+				self.root.after_cancel(self._lib_search_after)
+			except Exception:  # noqa: BLE001
+				pass
+			self._lib_search_after = None
+		if not self._lib_mode.get() or not self._search.get().strip():
+			return
+		self._lib_search_after = self.root.after(400, self._apply_lib_search)
+
+	def _apply_lib_search(self) -> None:
+		"""Merge index matches of the current needle into the list (Tk thread).
+
+		Additive only — nothing already in the list is ever removed: library
+		additions live in the editor's memory for the whole session, and
+		only CHANGED ones are written to review.yaml on save
+		(entries_to_write). If the startup index is still building, the
+		query waits (the progress line shows it) and is re-applied
+		automatically when the index lands.
+		"""
+		self._lib_search_after = None
+		if not self._alive or not self._lib_mode.get():
+			return
+		needle = self._search.get().strip()
+		if not needle:
+			return
+		if not self._lib_index_done:
+			self._flash(_("indexing library…"))
+			return  # _finish_lib_index re-applies the pending query
+		skip_paths = {str(Path(e.get("path") or "")) for e in self.entries if e.get("path")}
+		skip_uuids = {e.get("uuid") for e in self.entries if e.get("uuid")}
+		found = search_library_index(self._lib_index, needle, skip_paths, skip_uuids)
+		added = 0
+		for e, hay in found:
+			self.entries.append(e)  # append: review-entry indices stay stable
+			if e.get("uuid"):
+				# The haystack feeds the list filter's exemption (the entry
+				# itself carries no description, which the index matched on).
+				self._lib_uuids[e["uuid"]] = hay
+			added += 1
+		self.refresh_list()
+		if added:
+			self._start_thumb_loader()  # thumbnails for the new rows
+		self._flash(_("library: +{n} books").format(n=added))
 
 	# ------------------------------------------------------------------
 	# List cover hover popup
@@ -2115,12 +2581,19 @@ class ReviewEditorApp:
 			path = e.get("path") or ""
 			all_d = e.get("diagnoses") or [diag]
 			extra = _("  (+{n} more)").format(n=len(all_d) - 1) if len(all_d) > 1 else ""
+			# A library-loaded book (the "+ library" search) is not in
+			# review.yaml yet — say so where the diagnosis line would carry
+			# the context for review entries.
+			lib_note = ""
+			if e.get("uuid") and e["uuid"] in self._lib_uuids:
+				lib_note = "\n" + _(
+					"not in review.yaml — deciding or editing it adds it to review on save")
 			self._header_lbl.configure(
 				text=_("Entry {i}/{n}   uuid: {uuid}\n"
 				       "diagnosis: {cat} – {reason} [{conf}]{extra}").format(
 					i=idx + 1, n=len(self.entries), uuid=uuid,
 					cat=diag.get("category", "—"), reason=diag.get("reason", ""),
-					conf=diag.get("confidence", "—"), extra=extra),
+					conf=diag.get("confidence", "—"), extra=extra) + lib_note,
 			)
 			self._path_link.configure(text=path or _("(no path)"))
 			# Fields. Entries prefill proposed > current; the RO column
@@ -2386,7 +2859,9 @@ class ReviewEditorApp:
 		self._flash(_("saved → {path}").format(path=self.review_path), seconds=4)
 
 	def _do_save(self) -> bool:
-		text = render_review_text(self.entries)
+		# Library-loaded entries ride along only when the user changed them —
+		# untouched books pulled in by a search are view-only.
+		text = render_review_text(entries_to_write(self.entries, self._lib_uuids))
 		tmp = self.review_path.with_suffix(self.review_path.suffix + ".tmp")
 		bak = self.review_path.with_suffix(self.review_path.suffix + ".bak")
 		try:
@@ -2764,36 +3239,82 @@ class ReviewEditorApp:
 	# Thumbnail loader (left panel)
 	# ------------------------------------------------------------------
 
-	def _start_vocab_loader(self) -> None:
-		"""Widen the autocomplete pools with a full-library scan (off-thread).
+	def _start_lib_index(self) -> None:
+		"""Build the library fulltext index in ONE background sweep (startup).
 
-		~5k tiny metadata.json reads — a second or two on disk cache, but far
-		too slow to run on the Tk main loop before the window becomes usable.
+		Answers both "why doesn't it start right away" and the per-search
+		NFS cost: the sweep begins the moment the window opens (the GUI is
+		usable the whole time; progress shows in the status line), and every
+		"+ library" search is then an instant in-memory filter — no 40-second
+		rescan per query. The same sweep replaces the old separate vocab
+		loader: the indexed entries feed the autocomplete pools (better
+		quality, too — read_book_folder repairs mojibake before the names
+		land in the pool). A query made before the index is ready waits and
+		is re-applied automatically when it lands.
 		"""
+		if self._lib_indexing:
+			return
+		self._lib_indexing = True
+
 		def work():
-			authors, series = collect_vocab_values(self.library)
+			index = build_library_index(self.library, progress=self._lib_index_progress)
 			if self._alive:
-				def apply():
-					self._vocab_authors.update(authors)
-					self._vocab_series.update(series)
-				self._after(apply)
+				self._after(lambda: self._finish_lib_index(index))
 
 		threading.Thread(target=work, daemon=True).start()
 
+	def _lib_index_progress(self, done: int, total: int) -> None:
+		"""Index progress for the status line (worker thread → Tk via _after)."""
+		self._after(lambda: self._flash(
+			_("indexing library… {done}/{total}").format(done=done, total=total)))
+
+	def _finish_lib_index(self, index: list) -> None:
+		"""Store the index, widen the autocomplete pools, answer pending
+		queries (Tk thread, via _after)."""
+		self._lib_indexing = False
+		if not self._alive:
+			return
+		self._lib_index = index
+		self._lib_index_done = True
+		for entry, _hay in index:
+			c = entry.get("current") or {}
+			a = c.get("author")
+			if isinstance(a, str) and a.strip():
+				self._vocab_authors.add(a.strip())
+			for x in c.get("authors") or []:
+				if isinstance(x, str) and x.strip():
+					self._vocab_authors.add(x.strip())
+			s = c.get("series")
+			if isinstance(s, str) and s.strip():
+				self._vocab_series.add(s.strip())
+		self._flash(_("library indexed: {n} books").format(n=len(index)))
+		if self._lib_mode.get() and self._search.get().strip():
+			self._apply_lib_search()  # a query made while indexing now answers
+
 	def _start_thumb_loader(self) -> None:
+		# Re-entrant: a library scan merging new rows wants their thumbnails
+		# too. One loader at a time — the live `for` picks up entries
+		# appended while it walks, so a second thread adds nothing but races.
+		if getattr(self, "_thumb_loading", False):
+			return
+		self._thumb_loading = True
+
 		def work():
-			for i, e in enumerate(self.entries):
-				if not self._alive:
-					return
-				uuid = e.get("uuid")
-				if uuid in self._thumbs_pil:
-					continue
-				cp, _ = cover_paths(self.library, e.get("path", ""))
-				self._thumbs_pil[uuid] = load_thumb(cp, 32, 48) if cp.is_file() else None
-				if (i + 1) % 25 == 0 and self._alive:
+			try:
+				for i, e in enumerate(self.entries):
+					if not self._alive:
+						return
+					uuid = e.get("uuid")
+					if uuid in self._thumbs_pil:
+						continue
+					cp, _ = cover_paths(self.library, e.get("path", ""))
+					self._thumbs_pil[uuid] = load_thumb(cp, 32, 48) if cp.is_file() else None
+					if (i + 1) % 25 == 0 and self._alive:
+						self._after(self.refresh_list)
+				if self._alive:
 					self._after(self.refresh_list)
-			if self._alive:
-				self._after(self.refresh_list)
+			finally:
+				self._thumb_loading = False
 
 		threading.Thread(target=work, daemon=True).start()
 
@@ -2913,6 +3434,7 @@ class ReviewEditorApp:
 			("Ctrl+K", _("keep (applies like accept; the entry stays in review)")),
 			("Ctrl+O", _("verified — mark the book OK: apply stores the flag in metadata.json, analyze skips the book, apply places it on the target path")),
 			("Ctrl+0", _("clear → pending")),
+			("+ library", _("checkbox above the list: the search also loads matching books from the whole library, not only review.yaml; a changed book is added to review.yaml on save")),
 			("Ctrl+S", _("save")),
 			("Ctrl+Q", _("quit")),
 			("Ctrl+F", _("focus search")),
@@ -2923,7 +3445,7 @@ class ReviewEditorApp:
 			("Ctrl+M", _("cover: delete checked cover/.bak, strip embedded covers")),
 			("Ctrl+T", _("content: first page / broader text")),
 			("Ctrl+G", _("content: recode („read as“ = the wrong read, „actually is“ = the real encoding; result always UTF-8)")),
-			("↑ ↓ / Enter / Tab", _("author & series: autocomplete from the library (arrows pick, Enter/Tab insert)")),
+			("↑ ↓ / Enter", _("author & series: autocomplete from the library (arrows pick, Enter inserts; Tab inserts only after an arrow pick — otherwise it leaves your text)")),
 			("", _("(click on a cover = ☑; click on path / double-click in the list = open folder)")),
 			("", _("(wheel: widget under the mouse, at its edge the form; cover in the list → hover popup)")),
 		]

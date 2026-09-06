@@ -73,8 +73,10 @@ src/book_meta_fix/
   i18n.py          gettext wrapper: _() with English msgids, cs catalog, locale detect
   readers.py       parse metadata.json (primary) / metadata.opf (fallback) / path
   library.py       traverse library tree + SQLite cache
-  detectors.py     rules C1–C13 → Diagnosis (C13 = location mismatch; exists only
-                   when detect() gets library_root/pattern kwargs)
+  detectors.py     rules C1–C14 → Diagnosis (C13 = location mismatch; exists only
+                   when detect() gets library_root/pattern kwargs; C14 = series
+                   order glued into the series NAME "Mark Stone #73" →
+                   split_series_index + pre-filled accept, lossless split)
   extractors.py    per-format content extraction → ExtractedMeta
   text_meta.py     offline page-text mining (1st stage of fix cascade)
   encoding.py      mojibake detection + repair
@@ -98,7 +100,22 @@ src/book_meta_fix/
                   entry dicts, writes via review._header + review._render_entry; scrollable detail
                   column, Tab-trap bindtag, per-format embedded covers, Ctrl+G double-decode recode,
                   clickable path link / list double-click = open folder via open_folder_in_manager;
-                  Verified checkbox (Ctrl+O) = the persistent user-OK mark)
+                  Verified checkbox (Ctrl+O) = the persistent user-OK mark; "+ library" search
+                  matches the whole library via a fulltext index built by ONE background sweep at
+                  startup (build_library_index: parallel NFS-aware walk+read with progress; the
+                  same sweep feeds the author/series autocomplete pools; haystack = entry search
+                  + manifest-only fields description/publisher/tags/subtitle, so a book matching
+                  only via its annotation is found; uuid minted via ensure_uuid at index time).
+                  Searches (search_library_index) are instant in-memory multi-word filters that
+                  serve SHALLOW COPIES (the GUI mutates served entries; the index stays pristine);
+                  merged entries stay in memory for the whole session (no drop on toggle-off —
+                  Tab+Space can accidentally toggle the checkbox), only CHANGED ones are written
+                  on save: entries_to_write/library_entry_changed (a pure C14 series-split
+                  prefill does NOT count as a change — _is_pure_series_prefill; the mass fix is
+                  analyze's pre-filled accept). _filtered_indices exempts listed library entries
+                  via their INDEX haystack keyed in _lib_uuids (uuid → hay) — the entry itself
+                  lacks the description the index matched on, and a stale superset match hides
+                  when the needle narrows)
   cli.py           click commands: scan, report, analyze, apply, epubgen, crosscheck,
                   strip-covers, gui
                   (organize is a deprecation stub — placement lives in apply)

@@ -827,3 +827,49 @@ class TestIdentityVerified:
 		assert parsed[0].action == "accept"
 		assert parsed[0].verified is False
 		assert summary["verified_prefilled"] == 0
+
+
+class TestC14PrefillAndTolerance:
+	"""C14 (series order glued into the name): pre-fills accept via
+	diag.proposed (the C6 mechanism), and is tolerated as a C13 extra
+	(identity-preserving split, same class of fix as the move itself)."""
+
+	def _c14_result(self, calibre_id: int):
+		meta = _meta(calibre_id)
+		meta.series = ["Mark Stone #73"]
+		diag = Diagnosis(
+			category="C14", reason="series carries its order in the name",
+			confidence=Confidence.HIGH, verdict=Verdict.AUTO_FIXABLE,
+			proposed={"action": "accept", "series": "Mark Stone", "series_index": "73"},
+		)
+		return (meta, diag, None, None)
+
+	def test_c14_prefills_accept_with_split(self, tmp_path):
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		_submit_all_and_finish(w, [self._c14_result(1)])
+		parsed = parse_review(out)
+		assert parsed[0].action == "accept"
+		assert parsed[0].proposed["series"] == "Mark Stone"
+		assert parsed[0].proposed["series_index"] == "73"
+
+	def test_c13_primary_with_c14_extra_prefills_accept(self, tmp_path):
+		meta = _meta(1)
+		meta.series = ["Mark Stone #73"]
+		c13 = Diagnosis(
+			category="C13", reason="umístění", confidence=Confidence.HIGH,
+			verdict=Verdict.AUTO_FIXABLE, proposed={"location": "A/T (1)"},
+			additional=[Diagnosis(
+				category="C14", reason="series carries its order in the name",
+				confidence=Confidence.HIGH, verdict=Verdict.AUTO_FIXABLE,
+				proposed={"action": "accept", "series": "Mark Stone", "series_index": "73"},
+			)],
+		)
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		_submit_all_and_finish(w, [(meta, c13, None, None)])
+		parsed = parse_review(out)
+		# The move AND the mechanical series split are both bulk-approvable;
+		# the split proposal rides along (it does not change title/author).
+		assert parsed[0].action == "accept"
+		assert parsed[0].proposed["series"] == "Mark Stone"

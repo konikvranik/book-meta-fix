@@ -22,13 +22,17 @@ Corruption categories (from empirical study of the library):
 	C10 long comma-separated author list    NEEDS_REVIEW (mostly real multi-author)
 	C11 generated cover (calibre placeholder) NEEDS_REVIEW (download replacement)
 	C12 author slug/artefact pollution      NEEDS_REVIEW (lost capitalization,
-	    leading _ or *, etc. — author recoverable from content/online)
+	                                          leading _ or *, etc. — author
+	                                          recoverable from content/online)
 	C13 location ≠ metadata                 AUTO_FIXABLE (move to the pattern
-	    path; the proposal is informational — apply recomputes the target from
-	    the FINAL metadata after field fixes are applied)
+	                                          path; the proposal is informational —
+	                                          apply recomputes the target from the
+	                                          FINAL metadata after field fixes)
+	C14 series order glued into the series  AUTO_FIXABLE (deterministic split:
+	NAME ("Mark Stone #73")                 bare name + series_index)
 	EMPTY_BOOK dead record (only metadata/  AUTO_FIXABLE (move to
-	    backups/cover — the book file is    needfix/empty/)
-	    gone; nothing to extract or verify)
+	backups/cover — the book file is gone;  needfix/empty/)
+	nothing to extract or verify)
 	EXTRA: missing ISBN / year              AUTO_FIXABLE (enrichable)
 	EXTRA: missing cover / generated cover  AUTO_FIXABLE / NEEDS_REVIEW (download)
 """
@@ -555,6 +559,62 @@ def rule_c9_anonym(meta: BookMeta) -> Diagnosis | None:
 	)
 
 
+# Series index glued into the series NAME: "Mark Stone #73" stored as the name
+# with an empty index. Only the explicit "#N" form is unambiguous — a trailing
+# bare number ("MR-362 Espace 4") can be part of a real name and is
+# deliberately NOT split (library survey 2026-09: 353 "#N"-with-empty-index
+# books vs 2 trailing-number ones that are genuine names).
+_SERIES_IDX_IN_NAME_RE = re.compile(r"\s*#\s*(\d+(?:[.,]\d+)?)\s*$")
+
+
+def split_series_index(name: str) -> tuple[str, str] | None:
+	"""Split a trailing ``… #N`` order off a series name → ``(bare, index)``.
+
+	Returns None when the name carries no trailing ``#N`` (or the bare rest
+	would be empty). Shared by the C14 detector and the GUI's library scan,
+	so a GUI-sourced proposal is byte-identical to what analyze would emit.
+	The index is normalized to a dot decimal ("3,5" → "3.5").
+	"""
+	if not name:
+		return None
+	m = _SERIES_IDX_IN_NAME_RE.search(name)
+	if not m:
+		return None
+	bare = name[: m.start()].rstrip()
+	idx = m.group(1).replace(",", ".")
+	if not bare or not idx:
+		return None
+	return bare, idx
+
+
+def rule_c14_series_index_in_name(meta: BookMeta) -> Diagnosis | None:
+	"""C14: series order glued into the series NAME ("Mark Stone #73").
+
+	ABS/Calibre importers occasionally store the whole ``Name #N`` string as
+	the series name with an empty index — the GUI then shows a broken series,
+	series-based search groups by the polluted name, and a ``{series}``
+	placement pattern would embed the "#N" into the folder name. The fix is a
+	deterministic, lossless split: bare name + ``series_index``. Not fired
+	when the stored index DIFFERS from the embedded one (that combination is
+	a deliberate state, not an obvious glitch — none found in the library);
+	an equal index still fires (only the name is wrong then).
+	"""
+	name, idx = meta.series_pair()
+	split = split_series_index(name)
+	if split is None:
+		return None
+	bare, embedded = split
+	if idx and idx.strip() != embedded:
+		return None
+	return Diagnosis(
+		category="C14",
+		reason=f"series '{name}' carries its order in the name (#{embedded})",
+		confidence=Confidence.HIGH,
+		verdict=Verdict.AUTO_FIXABLE,
+		proposed={"action": "accept", "series": bare, "series_index": embedded},
+	)
+
+
 def rule_missing_isbn(meta: BookMeta) -> Diagnosis | None:
 	"""Missing ISBN — auto-fixable via online lookup (obalkyknih / Google Books)."""
 	if not meta.isbn:
@@ -697,6 +757,7 @@ RULES: list[Rule] = [
 	rule_c3_series_as_author,
 	rule_c8_translator,
 	rule_c9_anonym,
+	rule_c14_series_index_in_name,  # last: the least severe structural problem
 ]
 
 # Enrichment rules — applied to books that passed all structural rules as OK

@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-28 21:21+0200\n"
+"POT-Creation-Date: 2026-09-06 16:55+0200\n"
 "PO-Revision-Date: 2026-08-15 10:28+0200\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: cs\n"
@@ -18,54 +18,54 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Generated-By: Babel 2.8.0\n"
 
-#: src/book_meta_fix/cli.py:66
+#: src/book_meta_fix/cli.py:99
 msgid "Enable debug logging"
 msgstr "Zapnout ladicí výpis (debug)"
 
-#: src/book_meta_fix/cli.py:70
+#: src/book_meta_fix/cli.py:103
 msgid ""
 "Interface language (default: auto-detect from your locale; also "
 "BMF_LANGUAGE)"
 msgstr "Jazyk rozhraní (výchozí: automaticky z locale; případně BMF_LANGUAGE)"
 
-#: src/book_meta_fix/cli.py:78
+#: src/book_meta_fix/cli.py:111
 msgid "Library root (default: $BMF_LIBRARY or ~/Books)"
 msgstr "Kořen knihovny (výchozí: $BMF_LIBRARY nebo ~/Books)"
 
-#: src/book_meta_fix/cli.py:79 src/book_meta_fix/cli.py:127
-#: src/book_meta_fix/cli.py:203
+#: src/book_meta_fix/cli.py:112 src/book_meta_fix/cli.py:159
+#: src/book_meta_fix/cli.py:234
 msgid "Disable SQLite cache (force full re-parse)"
 msgstr "Vypnout SQLite cache (vynutit úplné znovunačtení)"
 
-#: src/book_meta_fix/cli.py:80 src/book_meta_fix/cli.py:128
-#: src/book_meta_fix/cli.py:204
+#: src/book_meta_fix/cli.py:113 src/book_meta_fix/cli.py:160
+#: src/book_meta_fix/cli.py:235
 msgid "Process only the first N books (for testing)"
 msgstr "Zpracovat jen prvních N knih (pro testování)"
 
-#: src/book_meta_fix/cli.py:103
+#: src/book_meta_fix/cli.py:135
 msgid "Scanning"
 msgstr "Skenuji"
 
-#: src/book_meta_fix/cli.py:116 src/book_meta_fix/cli.py:171
+#: src/book_meta_fix/cli.py:148 src/book_meta_fix/cli.py:202
 msgid "No books found."
 msgstr "Nenalezeny žádné knihy."
 
-#: src/book_meta_fix/cli.py:126 src/book_meta_fix/cli.py:202
-#: src/book_meta_fix/cli.py:571 src/book_meta_fix/cli.py:655
-#: src/book_meta_fix/cli.py:703 src/book_meta_fix/cli.py:819
-#: src/book_meta_fix/cli.py:981
+#: src/book_meta_fix/cli.py:158 src/book_meta_fix/cli.py:233
+#: src/book_meta_fix/cli.py:601 src/book_meta_fix/cli.py:693
+#: src/book_meta_fix/cli.py:741 src/book_meta_fix/cli.py:856
+#: src/book_meta_fix/cli.py:1018
 msgid "Library root"
 msgstr "Kořen knihovny"
 
-#: src/book_meta_fix/cli.py:129
+#: src/book_meta_fix/cli.py:161
 msgid "Show only books in this category (C1..C10, MISSING_ISBN, ...)"
 msgstr "Zobrazit jen knihy v této kategorii (C1..C10, MISSING_ISBN, ...)"
 
-#: src/book_meta_fix/cli.py:130
+#: src/book_meta_fix/cli.py:162
 msgid "Number of sample books to show per category"
 msgstr "Počet ukázkových knih zobrazených na kategorii"
 
-#: src/book_meta_fix/cli.py:131
+#: src/book_meta_fix/cli.py:163
 msgid ""
 "Apply the identity gate: a MISSING_ISBN/YEAR/COVER book whose "
 "author+title are confirmed against its content counts as OK (not broken)."
@@ -78,7 +78,7 @@ msgstr ""
 "accept-missing ponechá čistý verdikt detektorů (žádné čtení obsahu; "
 "historický rychlý report)."
 
-#: src/book_meta_fix/cli.py:132
+#: src/book_meta_fix/cli.py:164
 msgid ""
 "Audit: also verify books the detectors marked OK against their content. "
 "Reads every OK book's file (slower). A MISMATCH (or UNCERTAIN, see --no-"
@@ -88,7 +88,7 @@ msgstr ""
 "Načte soubor každé OK knihy (pomalejší). MISMATCH (nebo UNCERTAIN, viz "
 "--no-strict-verify) se pak počítá jako poškozená."
 
-#: src/book_meta_fix/cli.py:133
+#: src/book_meta_fix/cli.py:165
 msgid ""
 "With --verify-ok: only treat a clear MISMATCH as broken. By default "
 "UNCERTAIN is too."
@@ -96,16 +96,16 @@ msgstr ""
 "S --verify-ok: jako poškozenou brát jen jednoznačný MISMATCH. Jinak se "
 "výchozí počítá i UNCERTAIN."
 
-#: src/book_meta_fix/cli.py:160 src/book_meta_fix/cli.py:738
-#: src/book_meta_fix/cli.py:862 src/book_meta_fix/cli.py:1014
+#: src/book_meta_fix/cli.py:191 src/book_meta_fix/cli.py:775
+#: src/book_meta_fix/cli.py:899 src/book_meta_fix/cli.py:1050
 msgid "Reading library"
 msgstr "Načítám knihovnu"
 
-#: src/book_meta_fix/cli.py:182
+#: src/book_meta_fix/cli.py:213
 msgid "Classifying"
 msgstr "Klasifikuji"
 
-#: src/book_meta_fix/cli.py:194
+#: src/book_meta_fix/cli.py:225
 #, python-brace-format
 msgid ""
 "{identified} book(s) identified (accepted): MISSING_* with author+title "
@@ -114,11 +114,11 @@ msgstr ""
 "Identifikováno (přijato) knih: {identified}: MISSING_* s autorem+názvem "
 "potvrzenými proti obsahu — tyto míří do OK, ne do needfix."
 
-#: src/book_meta_fix/cli.py:205
+#: src/book_meta_fix/cli.py:236
 msgid "Skip online enrichment (offline mode)"
 msgstr "Přeskočit online obohacení (offline režim)"
 
-#: src/book_meta_fix/cli.py:206
+#: src/book_meta_fix/cli.py:237
 msgid ""
 "Enable databazeknih.cz lookup (CZ/SK genres + metadata). Implies --no-"
 "skip-enrich."
@@ -126,7 +126,7 @@ msgstr ""
 "Zapnout dotaz na databazeknih.cz (CZ/SK žánry + metadata). Implikuje "
 "--no-skip-enrich."
 
-#: src/book_meta_fix/cli.py:207
+#: src/book_meta_fix/cli.py:238
 msgid ""
 "Enable legie.info lookup (CZ/SK sci-fi/fantasy — short stories & series "
 "databazeknih misses). Implies --no-skip-enrich."
@@ -134,11 +134,11 @@ msgstr ""
 "Zapnout dotaz na legie.info (CZ/SK sci-fi/fantasy — povídky a série, "
 "které databazeknih přehlíží). Implikuje --no-skip-enrich."
 
-#: src/book_meta_fix/cli.py:208
+#: src/book_meta_fix/cli.py:239
 msgid "Skip content verification"
 msgstr "Přeskočit ověření obsahem"
 
-#: src/book_meta_fix/cli.py:209
+#: src/book_meta_fix/cli.py:240
 msgid ""
 "Audit: also verify books the detectors marked OK against their content. "
 "Reads every OK book's file (slower). A MISMATCH reclassifies it to "
@@ -150,7 +150,7 @@ msgstr ""
 "NEEDS_REVIEW a hledá opravu (obohacení + LLM). Spouštějte pravidelně, "
 "abyste odhalili poškození, která strukturální detektory přehlédnou."
 
-#: src/book_meta_fix/cli.py:210
+#: src/book_meta_fix/cli.py:241
 msgid ""
 "With --verify-ok: only reclassify a clear MISMATCH (fuzzy title < 0.5). "
 "By default (without this flag) UNCERTAIN (0.5–0.8) is also reclassified."
@@ -159,7 +159,7 @@ msgstr ""
 "0,5). Výchozí (bez tohoto přepínače) se překlasifikuje i UNCERTAIN "
 "(0,5–0,8)."
 
-#: src/book_meta_fix/cli.py:211
+#: src/book_meta_fix/cli.py:242
 msgid ""
 "Auto-accept MISSING_ISBN/YEAR/COVER books whose author+title were "
 "confirmed against the book's content (pre-filled action: accept in "
@@ -171,7 +171,7 @@ msgstr ""
 "review.yaml; `bmf apply` je proředí, bezpečný no-op). Výchozí zapnuto. "
 "Použijte --no-accept-missing, chcete-li je ponechat k ručnímu schválení."
 
-#: src/book_meta_fix/cli.py:212
+#: src/book_meta_fix/cli.py:243
 #, python-brace-format
 msgid ""
 "Target path pattern for OK books (default: '{author}/{title} ({id})'). "
@@ -182,13 +182,13 @@ msgstr ""
 " detektor C13: kniha, která nesedí na své vzorové cestě, jde do review s "
 "návrhem na přesun, který provede `bmf apply`."
 
-#: src/book_meta_fix/cli.py:213
+#: src/book_meta_fix/cli.py:244
 msgid ""
 "Skip the C13 location check (analyze metadata only, no placement "
 "proposals)."
 msgstr "Přeskočit kontrolu umístění C13 (pouze metadata, bez návrhů na přesun)."
 
-#: src/book_meta_fix/cli.py:214
+#: src/book_meta_fix/cli.py:245
 msgid ""
 "Clear the `verified` flag (see review.yaml / the GUI checkbox) from every"
 " book, returning user-confirmed books to normal detection. Undo of a too-"
@@ -198,15 +198,15 @@ msgstr ""
 "knih a vrátit uživatelem potvrzené knihy do normální detekce. Odvolání "
 "ukvapeného OK."
 
-#: src/book_meta_fix/cli.py:215
+#: src/book_meta_fix/cli.py:246
 msgid "Output review file (default: review.yaml)"
 msgstr "Výstupní kontrolní soubor review.yaml (výchozí: review.yaml)"
 
-#: src/book_meta_fix/cli.py:216
+#: src/book_meta_fix/cli.py:247
 msgid "Enable LLM reconciliation (needs ZAI_API_KEY or BMF_LLM_MOCK=1)"
 msgstr "Zapnout LLM usmiřování (vyžaduje ZAI_API_KEY nebo BMF_LLM_MOCK=1)"
 
-#: src/book_meta_fix/cli.py:217
+#: src/book_meta_fix/cli.py:248
 msgid ""
 "Comma-separated categories to send to LLM, or 'ALL' (default). ALL = "
 "every category except C9 (legitimate anonyms like the Bible, where an "
@@ -219,11 +219,11 @@ msgstr ""
 "který vrátí všechna pole najednou, takže cena je za knihu, ne za "
 "kategorii."
 
-#: src/book_meta_fix/cli.py:218
+#: src/book_meta_fix/cli.py:249
 msgid "Parallel workers for I/O (extract/LLM/enrich). Default 10."
 msgstr "Paralelních workerů pro I/O (extrakce/LLM/obohacení). Výchozí 10."
 
-#: src/book_meta_fix/cli.py:219
+#: src/book_meta_fix/cli.py:250
 msgid ""
 "Minimum seconds between LLM requests (RPM throttle, default 2.0 = ~30 "
 "RPM). Decoupled from --workers: cheap I/O still runs at full worker "
@@ -235,7 +235,7 @@ msgstr ""
 "workerů. Snižte (např. 1,0 = 60 RPM) na vyšším Z.AI tarifu; zvyšte (např."
 " 4,0 = 15 RPM), pokud stále narážíte na 429."
 
-#: src/book_meta_fix/cli.py:220
+#: src/book_meta_fix/cli.py:251
 msgid ""
 "Primary model for the LLM loop (default glm-4.7-flash, the free first "
 "attempt; with --no-llm-loop the fallback-quality model instead). "
@@ -248,7 +248,7 @@ msgstr ""
 "glm-4.5-air, glm-4.5-flash. Viz README 'LLM model choice' pro poměr "
 "tokeny/kvalita změřený scripts/llm_experiment.py."
 
-#: src/book_meta_fix/cli.py:221
+#: src/book_meta_fix/cli.py:252
 #, python-format
 msgid ""
 "reasoning_effort for GLM-5.x models: low (default) | medium | max. Lower "
@@ -259,7 +259,7 @@ msgstr ""
 "ušetří ~60%% reasoning tokenů oproti max. GLM-4.x ignoruje (použijte "
 "--llm-thinking)."
 
-#: src/book_meta_fix/cli.py:222
+#: src/book_meta_fix/cli.py:253
 msgid ""
 "thinking toggle for GLM-4.x models: disabled (default) | enabled. "
 "'disabled' turns off chain-of-thought (3-4x fewer output tokens). Ignored"
@@ -269,7 +269,7 @@ msgstr ""
 "'disabled' vypne chain-of-thought (3-4x méně výstupních tokenů). GLM-5.x "
 "ignoruje (použijte --llm-reasoning-effort)."
 
-#: src/book_meta_fix/cli.py:223
+#: src/book_meta_fix/cli.py:254
 msgid ""
 "Disable the self-correction loop. Default: loop on — try the free loop "
 "model first (with verify feedback), then the paid fallback model. With "
@@ -281,7 +281,7 @@ msgstr ""
 "tímto přepínačem se použije jediné volání LLM (--llm-model, výchozí model"
 " záložní kvality)."
 
-#: src/book_meta_fix/cli.py:224
+#: src/book_meta_fix/cli.py:255
 msgid ""
 "Paid high-quality fallback model (default glm-5.3). Used when the loop "
 "model fails verify or is rate-limited; also the default single-call model"
@@ -291,7 +291,7 @@ msgstr ""
 "model smyčky neprojde verify nebo narazí na rate limit; též výchozí model"
 " pro jediné volání, když je smyčka vypnutá."
 
-#: src/book_meta_fix/cli.py:225
+#: src/book_meta_fix/cli.py:256
 msgid ""
 "Leaky-bucket burst capacity: how many LLM calls may start inside one "
 "interval (default 1 = pure even drip, no bunching — one call every --llm-"
@@ -307,7 +307,7 @@ msgstr ""
 " >1 vystřelí více volání ve stejné sekundě a naruší dynamický RPM limit "
 "Z.AI (429)."
 
-#: src/book_meta_fix/cli.py:226
+#: src/book_meta_fix/cli.py:257
 msgid ""
 "Base seconds of the global cooldown applied when a 429 is seen (default "
 "5). When ANY worker hits a 429, ALL workers pause this long; the cooldown"
@@ -321,7 +321,7 @@ msgstr ""
 "respektuje delší serverové Retry-After a je omezen stropem --llm-rate-"
 "limit-max. Vyšší = bezpečnější, ale pomalejší; nižší = větší riziko 429."
 
-#: src/book_meta_fix/cli.py:227
+#: src/book_meta_fix/cli.py:258
 msgid ""
 "Cap (seconds) on the escalating 429 cooldown (default 60). Prevents a "
 "sustained outage from parking workers indefinitely."
@@ -329,7 +329,7 @@ msgstr ""
 "Strop (sekundy) eskalujícího 429 cooldownu (výchozí 60). Zabraňuje, aby "
 "trvalý výpadek zaparkoval workery na neurčito."
 
-#: src/book_meta_fix/cli.py:228
+#: src/book_meta_fix/cli.py:259
 msgid ""
 "Hard cap on LLM requests running at the same instant (default 3). The "
 "Z.AI coding plan admits only ~5 concurrent requests per account "
@@ -340,223 +340,223 @@ msgid ""
 msgstr ""
 "Tvrdý strop LLM požadavků běžících ve stejný okamžik (výchozí 3). Coding "
 "plan Z.AI připouští jen ~5 souběžných požadavků na účet (interaktivní "
-"klienti čerpají ze stejného stropu), takže hluboké fallback stádo dostává "
-"429/1302 bouře — a falešné 1113 „insufficient balance“ — bez ohledu na "
+"klienti čerpají ze stejného stropu), takže hluboké fallback stádo dostává"
+" 429/1302 bouře — a falešné 1113 „insufficient balance“ — bez ohledu na "
 "to, jak pomalý je drip. Workeři místo odmítnutí čekají ve frontě tady. "
 "Flash-modely dostávají přísnější sub-strop min(2, tato hodnota)."
 
-#: src/book_meta_fix/cli.py:253
+#: src/book_meta_fix/cli.py:286
 msgid "lookup enabled (genres + metadata)"
 msgstr "dotaz zapnut (žánry + metadata)"
 
-#: src/book_meta_fix/cli.py:254
+#: src/book_meta_fix/cli.py:287
 msgid "cover replacement"
 msgstr "náhrada obálky"
 
-#: src/book_meta_fix/cli.py:254
+#: src/book_meta_fix/cli.py:287
 msgid "enabled (C11 generated / MISSING_COVER → databazeknih cover_url)"
 msgstr "zapnuto (C11 generovaná / MISSING_COVER → databazeknih cover_url)"
 
-#: src/book_meta_fix/cli.py:256
+#: src/book_meta_fix/cli.py:289
 msgid "lookup enabled (sci-fi/fantasy — short stories & series)"
 msgstr "dotaz zapnut (sci-fi/fantasy — povídky a série)"
 
-#: src/book_meta_fix/cli.py:283
+#: src/book_meta_fix/cli.py:312
 #, python-brace-format
 msgid "cleared the verified flag on {count} book(s)"
 msgstr "vymazán příznak verified u {count} knih(y)"
 
-#: src/book_meta_fix/cli.py:321
+#: src/book_meta_fix/cli.py:350
 msgid "--llm given but no provider available (set ZAI_API_KEY or BMF_LLM_MOCK=1)"
 msgstr ""
 "--llm zadáno, ale není dostupný žádný poskytovatel (nastavte ZAI_API_KEY "
 "nebo BMF_LLM_MOCK=1)"
 
-#: src/book_meta_fix/cli.py:357
+#: src/book_meta_fix/cli.py:387
 msgid "processing"
 msgstr "zpracovávám"
 
-#: src/book_meta_fix/cli.py:393
+#: src/book_meta_fix/cli.py:423
 msgid "Interrupted (Ctrl-C). Finalizing review file with partial results…"
 msgstr "Přerušeno (Ctrl-C). Dokončuji review soubor s částečnými výsledky…"
 
-#: src/book_meta_fix/cli.py:415
+#: src/book_meta_fix/cli.py:445
 msgid "Edit the file, set `action` for each entry, then run:"
 msgstr "Upravte soubor, nastavte `action` u každé položky a spusťte:"
 
-#: src/book_meta_fix/cli.py:459
+#: src/book_meta_fix/cli.py:489
 msgid "Pipeline summary"
 msgstr "Souhrn pipeline"
 
-#: src/book_meta_fix/cli.py:460
+#: src/book_meta_fix/cli.py:490
 msgid "Bucket"
 msgstr "Skupina"
 
-#: src/book_meta_fix/cli.py:461 src/book_meta_fix/cli.py:478
-#: src/book_meta_fix/cli.py:529 src/book_meta_fix/cli.py:545
-#: src/book_meta_fix/cli.py:560 src/book_meta_fix/cli.py:628
-#: src/book_meta_fix/cli.py:786 src/book_meta_fix/cli.py:800
-#: src/book_meta_fix/cli.py:920 src/book_meta_fix/cli.py:972
-#: src/book_meta_fix/cli.py:1057 src/book_meta_fix/cli.py:1114
-#: src/book_meta_fix/cli.py:1127 src/book_meta_fix/cli.py:1169
+#: src/book_meta_fix/cli.py:491 src/book_meta_fix/cli.py:508
+#: src/book_meta_fix/cli.py:559 src/book_meta_fix/cli.py:575
+#: src/book_meta_fix/cli.py:590 src/book_meta_fix/cli.py:666
+#: src/book_meta_fix/cli.py:823 src/book_meta_fix/cli.py:837
+#: src/book_meta_fix/cli.py:957 src/book_meta_fix/cli.py:1009
+#: src/book_meta_fix/cli.py:1093 src/book_meta_fix/cli.py:1150
+#: src/book_meta_fix/cli.py:1163 src/book_meta_fix/cli.py:1205
 msgid "Count"
 msgstr "Počet"
 
-#: src/book_meta_fix/cli.py:462
+#: src/book_meta_fix/cli.py:492
 msgid "OK (already correct — nothing to do)"
 msgstr "OK (už v pořádku — není co dělat)"
 
-#: src/book_meta_fix/cli.py:463
+#: src/book_meta_fix/cli.py:493
 msgid "Auto-fix (action: accept → `bmf apply`)"
 msgstr "Automatická oprava (action: accept → `bmf apply`)"
 
-#: src/book_meta_fix/cli.py:465
+#: src/book_meta_fix/cli.py:495
 msgid "Auto-verified (identity confirmed vs content + online source)"
 msgstr "Auto-verifikováno (identita potvrzena proti obsahu + online zdroji)"
 
-#: src/book_meta_fix/cli.py:466
+#: src/book_meta_fix/cli.py:496
 msgid "Manual review (action: null)"
 msgstr "Ruční kontrola (action: null)"
 
-#: src/book_meta_fix/cli.py:468
+#: src/book_meta_fix/cli.py:498
 msgid "Other action (delete/keep)"
 msgstr "Jiná akce (delete/keep)"
 
-#: src/book_meta_fix/cli.py:470
+#: src/book_meta_fix/cli.py:500
 msgid "Skipped (already decided earlier)"
 msgstr "Přeskočeno (už rozhodnuto dříve)"
 
-#: src/book_meta_fix/cli.py:472
+#: src/book_meta_fix/cli.py:502
 msgid "Written to review.yaml"
 msgstr "Zapsáno do review.yaml"
 
-#: src/book_meta_fix/cli.py:473 src/book_meta_fix/cli.py:1116
+#: src/book_meta_fix/cli.py:503 src/book_meta_fix/cli.py:1152
 msgid "Total books"
 msgstr "Knih celkem"
 
-#: src/book_meta_fix/cli.py:476
+#: src/book_meta_fix/cli.py:506
 msgid "Verification results"
 msgstr "Výsledky ověření"
 
-#: src/book_meta_fix/cli.py:477
+#: src/book_meta_fix/cli.py:507
 msgid "Result"
 msgstr "Výsledek"
 
-#: src/book_meta_fix/cli.py:501
+#: src/book_meta_fix/cli.py:531
 msgid "Offline fixes"
 msgstr "Offline opravy"
 
-#: src/book_meta_fix/cli.py:502
+#: src/book_meta_fix/cli.py:532
 msgid "  └ text-mined (content)"
 msgstr "  └ vytěžené z textu (obsah)"
 
-#: src/book_meta_fix/cli.py:503
+#: src/book_meta_fix/cli.py:533
 msgid "  └ embedded OPF"
 msgstr "  └ vložené OPF"
 
-#: src/book_meta_fix/cli.py:504
+#: src/book_meta_fix/cli.py:534
 msgid "Online fixes"
 msgstr "Online opravy"
 
-#: src/book_meta_fix/cli.py:505
+#: src/book_meta_fix/cli.py:535
 msgid "  └ databazeknih.cz"
 msgstr "  └ databazeknih.cz"
 
-#: src/book_meta_fix/cli.py:506
+#: src/book_meta_fix/cli.py:536
 msgid "  └ legie.info"
 msgstr "  └ legie.info"
 
-#: src/book_meta_fix/cli.py:507
+#: src/book_meta_fix/cli.py:537
 msgid "  └ openlibrary.org"
 msgstr "  └ openlibrary.org"
 
-#: src/book_meta_fix/cli.py:508
+#: src/book_meta_fix/cli.py:538
 msgid "  └ Google Books"
 msgstr "  └ Google Books"
 
-#: src/book_meta_fix/cli.py:509
+#: src/book_meta_fix/cli.py:539
 msgid "LLM fixes"
 msgstr "LLM opravy"
 
-#: src/book_meta_fix/cli.py:510
+#: src/book_meta_fix/cli.py:540
 msgid "  └ fast model (flash)"
 msgstr "  └ rychlý model (flash)"
 
-#: src/book_meta_fix/cli.py:511
+#: src/book_meta_fix/cli.py:541
 msgid "  └ fallback model"
 msgstr "  └ fallback model"
 
-#: src/book_meta_fix/cli.py:512
+#: src/book_meta_fix/cli.py:542
 msgid "  └ low confidence"
 msgstr "  └ nízká jistota"
 
-#: src/book_meta_fix/cli.py:527
+#: src/book_meta_fix/cli.py:557
 msgid "Fix sources (how NEEDS_REVIEW books were resolved)"
 msgstr "Zdroje oprav (jak byly knihy NEEDS_REVIEW vyřešeny)"
 
-#: src/book_meta_fix/cli.py:528 src/book_meta_fix/cli.py:1126
+#: src/book_meta_fix/cli.py:558 src/book_meta_fix/cli.py:1162
 msgid "Source"
 msgstr "Zdroj"
 
-#: src/book_meta_fix/cli.py:533
+#: src/book_meta_fix/cli.py:563
 msgid "Proposed (any source)"
 msgstr "Navrženo (libovolný zdroj)"
 
-#: src/book_meta_fix/cli.py:534
+#: src/book_meta_fix/cli.py:564
 msgid "Unfixed (no proposal found)"
 msgstr "Neopraveno (nenalezen žádný návrh)"
 
-#: src/book_meta_fix/cli.py:535
+#: src/book_meta_fix/cli.py:565
 msgid "Accepted (identity OK, field missing)"
 msgstr "Přijato (identita OK, pole chybí)"
 
-#: src/book_meta_fix/cli.py:543
+#: src/book_meta_fix/cli.py:573
 msgid "LLM usage"
 msgstr "Využití LLM"
 
-#: src/book_meta_fix/cli.py:544 src/book_meta_fix/cli.py:627
-#: src/book_meta_fix/cli.py:785 src/book_meta_fix/cli.py:1056
-#: src/book_meta_fix/cli.py:1113
+#: src/book_meta_fix/cli.py:574 src/book_meta_fix/cli.py:665
+#: src/book_meta_fix/cli.py:822 src/book_meta_fix/cli.py:1092
+#: src/book_meta_fix/cli.py:1149
 msgid "Metric"
 msgstr "Metrika"
 
-#: src/book_meta_fix/cli.py:546
+#: src/book_meta_fix/cli.py:576
 msgid "LLM calls made"
 msgstr "Provedených LLM volání"
 
-#: src/book_meta_fix/cli.py:547
+#: src/book_meta_fix/cli.py:577
 msgid "Skipped (no usable text)"
 msgstr "Přeskočeno (není použitelný text)"
 
-#: src/book_meta_fix/cli.py:548
+#: src/book_meta_fix/cli.py:578
 msgid "No useful result"
 msgstr "Bez užitečného výsledku"
 
-#: src/book_meta_fix/cli.py:550
+#: src/book_meta_fix/cli.py:580
 msgid "LLM errors"
 msgstr "Chyby LLM"
 
-#: src/book_meta_fix/cli.py:558 src/book_meta_fix/gui.py:1356
+#: src/book_meta_fix/cli.py:588 src/book_meta_fix/gui.py:1767
 msgid "Covers"
 msgstr "Obálky"
 
-#: src/book_meta_fix/cli.py:559 src/book_meta_fix/cli.py:1168
+#: src/book_meta_fix/cli.py:589 src/book_meta_fix/cli.py:1204
 msgid "Category"
 msgstr "Kategorie"
 
-#: src/book_meta_fix/cli.py:561
+#: src/book_meta_fix/cli.py:591
 msgid "Generated (calibre placeholder)"
 msgstr "Generovaná (zástupná calibre)"
 
-#: src/book_meta_fix/cli.py:562
+#: src/book_meta_fix/cli.py:592
 msgid "Missing cover"
 msgstr "Chybějící obálka"
 
-#: src/book_meta_fix/cli.py:572
+#: src/book_meta_fix/cli.py:602
 msgid "Actually write changes (default: dry-run)"
 msgstr "Skutečně zapsat změny (výchozí: dry-run)"
 
-#: src/book_meta_fix/cli.py:573
+#: src/book_meta_fix/cli.py:603
 #, python-brace-format
 msgid ""
 "Target path pattern for OK books (default: '{author}/{title} ({id})'). "
@@ -567,7 +567,7 @@ msgstr ""
 "Aplikované knihy s čistými metadaty (nebo `verified`) se přesunou tam; "
 "knihy s nevyřešenými problémy do --needfix-dir."
 
-#: src/book_meta_fix/cli.py:574
+#: src/book_meta_fix/cli.py:604
 msgid ""
 "Folder for books that still have unresolved problems after apply "
 "(default: 'needfix'). A resolved book moves back out of it on the next "
@@ -576,75 +576,75 @@ msgstr ""
 "Složka pro knihy, které mají po apply stále nevyřešené problémy (výchozí:"
 " 'needfix'). Vyřešená kniha se při příštím apply vrátí zpět ven."
 
-#: src/book_meta_fix/cli.py:575
+#: src/book_meta_fix/cli.py:605
 msgid "Write metadata only; do not move folders (placement off)."
 msgstr "Zapsat pouze metadata; složky nepřesouvat (umísťování vypnuto)."
 
-#: src/book_meta_fix/cli.py:606
+#: src/book_meta_fix/cli.py:644
 msgid "Applying"
 msgstr "Aplikuji"
 
-#: src/book_meta_fix/cli.py:626
+#: src/book_meta_fix/cli.py:664
 msgid "Apply summary"
 msgstr "Souhrn aplikování"
 
-#: src/book_meta_fix/cli.py:629
+#: src/book_meta_fix/cli.py:667
 msgid "Mode"
 msgstr "Režim"
 
-#: src/book_meta_fix/cli.py:630
+#: src/book_meta_fix/cli.py:668
 msgid "Applied"
 msgstr "Aplikováno"
 
-#: src/book_meta_fix/cli.py:631
+#: src/book_meta_fix/cli.py:669
 msgid "Kept"
 msgstr "Ponecháno"
 
-#: src/book_meta_fix/cli.py:632
+#: src/book_meta_fix/cli.py:670
 msgid "Deleted"
 msgstr "Smazáno"
 
-#: src/book_meta_fix/cli.py:634
+#: src/book_meta_fix/cli.py:672
 msgid "Deletion snapshot"
 msgstr "Záloha před smazáním"
 
-#: src/book_meta_fix/cli.py:636
+#: src/book_meta_fix/cli.py:674
 msgid "Placed on target path"
 msgstr "Umístěno na cílovou cestu"
 
-#: src/book_meta_fix/cli.py:638
+#: src/book_meta_fix/cli.py:676
 msgid "Merged into same-work folder"
 msgstr "Sloučeno do složky stejného díla"
 
-#: src/book_meta_fix/cli.py:639
+#: src/book_meta_fix/cli.py:677
 msgid "Already on target path"
 msgstr "Již na cílové cestě"
 
-#: src/book_meta_fix/cli.py:641
+#: src/book_meta_fix/cli.py:679
 msgid "Moved to needfix"
 msgstr "Přesunuto do needfix"
 
-#: src/book_meta_fix/cli.py:643
+#: src/book_meta_fix/cli.py:681
 msgid "Pruned from review"
 msgstr "Proředěno z review"
 
-#: src/book_meta_fix/cli.py:644
+#: src/book_meta_fix/cli.py:682
 msgid "Remaining in review"
 msgstr "Zbývá ve review"
 
-#: src/book_meta_fix/cli.py:645
+#: src/book_meta_fix/cli.py:683
 msgid "Errors"
 msgstr "Chyby"
 
-#: src/book_meta_fix/cli.py:649
+#: src/book_meta_fix/cli.py:687
 msgid "Errors:"
 msgstr "Chyby:"
 
-#: src/book_meta_fix/cli.py:656
+#: src/book_meta_fix/cli.py:694
 msgid "review.yaml to edit (default: $BMF_REVIEW or review.yaml)"
 msgstr "review.yaml k úpravě (výchozí: $BMF_REVIEW nebo review.yaml)"
 
-#: src/book_meta_fix/cli.py:694
+#: src/book_meta_fix/cli.py:732
 msgid ""
 "`bmf organize` was merged into `bmf apply`. Run `bmf analyze` (it flags "
 "misplaced books with a move proposal), review in `bmf gui` if needed, "
@@ -656,21 +656,21 @@ msgstr ""
 " pak `bmf apply --apply` — aplikované knihy se umístí na cílovou cestu "
 "(nevyřešené do needfix/)."
 
-#: src/book_meta_fix/cli.py:704 src/book_meta_fix/cli.py:820
-#: src/book_meta_fix/cli.py:982
+#: src/book_meta_fix/cli.py:742 src/book_meta_fix/cli.py:857
+#: src/book_meta_fix/cli.py:1019
 msgid "Disable SQLite cache"
 msgstr "Vypnout SQLite cache"
 
-#: src/book_meta_fix/cli.py:705 src/book_meta_fix/cli.py:821
-#: src/book_meta_fix/cli.py:983
+#: src/book_meta_fix/cli.py:743 src/book_meta_fix/cli.py:858
+#: src/book_meta_fix/cli.py:1020
 msgid "Process only the first N books"
 msgstr "Zpracovat jen prvních N knih"
 
-#: src/book_meta_fix/cli.py:706
+#: src/book_meta_fix/cli.py:744
 msgid "Actually generate EPUBs (default: dry-run)"
 msgstr "Skutečně generovat EPUBy (výchozí: dry-run)"
 
-#: src/book_meta_fix/cli.py:707
+#: src/book_meta_fix/cli.py:745
 msgid ""
 "Apply the identity gate (same as organize/report): an identified "
 "MISSING_* book (author+title confirmed against content) is treated as OK "
@@ -680,7 +680,7 @@ msgstr ""
 "kniha MISSING_* (autor+název potvrzeny proti obsahu) se bere jako OK a "
 "dostane EPUB. Výchozí zapnuto."
 
-#: src/book_meta_fix/cli.py:708
+#: src/book_meta_fix/cli.py:746
 msgid ""
 "Audit: verify OK books against their content before generating. Off by "
 "default (consistent with organize/report). A MISMATCH (or UNCERTAIN, see "
@@ -690,7 +690,7 @@ msgstr ""
 "vypnuto (konzistentní s organize/report). MISMATCH (nebo UNCERTAIN, viz "
 "--no-strict-verify) generování přeskočí."
 
-#: src/book_meta_fix/cli.py:709
+#: src/book_meta_fix/cli.py:747
 msgid ""
 "With --verify-ok: only a clear MISMATCH skips generation. By default "
 "UNCERTAIN does too."
@@ -698,68 +698,68 @@ msgstr ""
 "S --verify-ok: generování přeskočí jen jednoznačný MISMATCH. Jinak se "
 "výchozí počítá i UNCERTAIN."
 
-#: src/book_meta_fix/cli.py:760
+#: src/book_meta_fix/cli.py:797
 msgid "Generating EPUBs"
 msgstr "Generuji EPUBy"
 
-#: src/book_meta_fix/cli.py:784
+#: src/book_meta_fix/cli.py:821
 msgid "EPUB generation summary"
 msgstr "Souhrn generování EPUB"
 
-#: src/book_meta_fix/cli.py:787
+#: src/book_meta_fix/cli.py:824
 msgid "Skipped (not OK)"
 msgstr "Přeskočeno (není OK)"
 
-#: src/book_meta_fix/cli.py:788
+#: src/book_meta_fix/cli.py:825
 msgid "Skipped (already has epub)"
 msgstr "Přeskočeno (už má epub)"
 
-#: src/book_meta_fix/cli.py:789
+#: src/book_meta_fix/cli.py:826
 msgid "To generate"
 msgstr "K vygenerování"
 
-#: src/book_meta_fix/cli.py:798
+#: src/book_meta_fix/cli.py:835
 msgid "By source format"
 msgstr "Podle zdrojového formátu"
 
-#: src/book_meta_fix/cli.py:799 src/book_meta_fix/cli.py:1134
+#: src/book_meta_fix/cli.py:836 src/book_meta_fix/cli.py:1170
 msgid "Format"
 msgstr "Formát"
 
-#: src/book_meta_fix/cli.py:807
+#: src/book_meta_fix/cli.py:844
 msgid "Sample (first 10)"
 msgstr "Ukázka (prvních 10)"
 
-#: src/book_meta_fix/cli.py:808 src/book_meta_fix/cli.py:937
-#: src/book_meta_fix/cli.py:959 src/book_meta_fix/cli.py:1187
+#: src/book_meta_fix/cli.py:845 src/book_meta_fix/cli.py:974
+#: src/book_meta_fix/cli.py:996 src/book_meta_fix/cli.py:1223
 msgid "ID"
 msgstr "ID"
 
-#: src/book_meta_fix/cli.py:809
+#: src/book_meta_fix/cli.py:846
 msgid "Source file"
 msgstr "Zdrojový soubor"
 
-#: src/book_meta_fix/cli.py:810
+#: src/book_meta_fix/cli.py:847
 msgid "Tool"
 msgstr "Nástroj"
 
-#: src/book_meta_fix/cli.py:811
+#: src/book_meta_fix/cli.py:848
 msgid "Output / Error"
 msgstr "Výstup / Chyba"
 
-#: src/book_meta_fix/cli.py:822
+#: src/book_meta_fix/cli.py:859
 msgid "Folder for quarantined rogues (default: 'needfix')"
 msgstr "Složka pro karanténu dezertérů (výchozí: 'needfix')"
 
-#: src/book_meta_fix/cli.py:823
+#: src/book_meta_fix/cli.py:860
 msgid "Actually move rogues (default: dry-run)"
 msgstr "Skutečně přesunout dezerty (výchozí: dry-run)"
 
-#: src/book_meta_fix/cli.py:824
+#: src/book_meta_fix/cli.py:861
 msgid "Fuzzy title ratio at/above which a format AGREES (default 0.8)"
 msgstr "Fuzzy podobnost názvu, od níž formát SOUHLASÍ (výchozí 0,8)"
 
-#: src/book_meta_fix/cli.py:825
+#: src/book_meta_fix/cli.py:862
 msgid ""
 "Fuzzy title ratio below which a format DISAGREES (default 0.5). Between "
 "weak and strong = UNCERTAIN (never moved)."
@@ -767,56 +767,56 @@ msgstr ""
 "Poměr fuzzy podobnosti názvu, pod kterým formát NESOUHLASÍ (výchozí 0,5)."
 " Mezi slabým a silným = UNCERTAIN (nikdy se nepřesouvá)."
 
-#: src/book_meta_fix/cli.py:879
+#: src/book_meta_fix/cli.py:916
 msgid "Cross-checking formats"
 msgstr "Křížově kontroluji formáty"
 
-#: src/book_meta_fix/cli.py:897
+#: src/book_meta_fix/cli.py:934
 msgid "Quarantining rogues"
 msgstr "Karanténuji dezerty"
 
-#: src/book_meta_fix/cli.py:918
+#: src/book_meta_fix/cli.py:955
 msgid "Crosscheck summary"
 msgstr "Souhrn křížové kontroly"
 
-#: src/book_meta_fix/cli.py:919
+#: src/book_meta_fix/cli.py:956
 msgid "Decision"
 msgstr "Rozhodnutí"
 
-#: src/book_meta_fix/cli.py:923
+#: src/book_meta_fix/cli.py:960
 msgid "checked (≥2 formats)"
 msgstr "zkontrolováno (≥2 formáty)"
 
-#: src/book_meta_fix/cli.py:924
+#: src/book_meta_fix/cli.py:961
 msgid "clean"
 msgstr "čisté"
 
-#: src/book_meta_fix/cli.py:925
+#: src/book_meta_fix/cli.py:962
 msgid "quarantine"
 msgstr "karanténa"
 
-#: src/book_meta_fix/cli.py:926
+#: src/book_meta_fix/cli.py:963
 msgid "ambiguous"
 msgstr "nejednoznačné"
 
-#: src/book_meta_fix/cli.py:927
+#: src/book_meta_fix/cli.py:964
 msgid "skipped (<2 formats)"
 msgstr "přeskočeno (<2 formáty)"
 
-#: src/book_meta_fix/cli.py:938 src/book_meta_fix/cli.py:960
-#: src/book_meta_fix/cli.py:1068
+#: src/book_meta_fix/cli.py:975 src/book_meta_fix/cli.py:997
+#: src/book_meta_fix/cli.py:1104
 msgid "Book folder"
 msgstr "Složka knihy"
 
-#: src/book_meta_fix/cli.py:939
+#: src/book_meta_fix/cli.py:976
 msgid "File"
 msgstr "Soubor"
 
-#: src/book_meta_fix/cli.py:940 src/book_meta_fix/cli.py:1190
+#: src/book_meta_fix/cli.py:977 src/book_meta_fix/cli.py:1226
 msgid "Reason"
 msgstr "Důvod"
 
-#: src/book_meta_fix/cli.py:957
+#: src/book_meta_fix/cli.py:994
 msgid ""
 "— formats disagree with metadata but no format corroborates it; not moved"
 " (review manually)."
@@ -824,71 +824,71 @@ msgstr ""
 "— formáty nesouhlasí s metadaty, ale žádný formát je nepodporuje; "
 "nepřesunuto (zkontrolujte ručně)."
 
-#: src/book_meta_fix/cli.py:958
+#: src/book_meta_fix/cli.py:995
 msgid "Ambiguous (not moved)"
 msgstr "Nejednoznačné (nepřesunuto)"
 
-#: src/book_meta_fix/cli.py:961
+#: src/book_meta_fix/cli.py:998
 msgid "Disagreeing files"
 msgstr "Nesouhlasící soubory"
 
-#: src/book_meta_fix/cli.py:971
+#: src/book_meta_fix/cli.py:1008
 msgid "Action"
 msgstr "Akce"
 
-#: src/book_meta_fix/cli.py:977
+#: src/book_meta_fix/cli.py:1014
 msgid "Dry-run: nothing moved. Re-run with --apply to quarantine the rogues."
 msgstr ""
 "Dry-run: nic nebylo přesunuto. Spusť znovu s --apply a podezřelé dej do "
 "karantény."
 
-#: src/book_meta_fix/cli.py:984
+#: src/book_meta_fix/cli.py:1021
 msgid "Actually remove the covers (default: dry-run)"
 msgstr "Opravdu odstranit obálky (výchozí: dry-run)"
 
-#: src/book_meta_fix/cli.py:1031
+#: src/book_meta_fix/cli.py:1067
 msgid "Stripping generated covers"
 msgstr "Odstraňování vygenerovaných obálek"
 
-#: src/book_meta_fix/cli.py:1055
+#: src/book_meta_fix/cli.py:1091
 msgid "Cover strip summary"
 msgstr "Souhrn odstranění obálek"
 
-#: src/book_meta_fix/cli.py:1058
+#: src/book_meta_fix/cli.py:1094
 msgid "books scanned"
 msgstr "prohledaných knih"
 
-#: src/book_meta_fix/cli.py:1059
+#: src/book_meta_fix/cli.py:1095
 msgid "cover.jpg renamed to .bak"
 msgstr "cover.jpg přejmenováno na .bak"
 
-#: src/book_meta_fix/cli.py:1060
+#: src/book_meta_fix/cli.py:1096
 msgid "embedded EPUB covers stripped"
 msgstr "odstraněných embedded obálek EPUB"
 
-#: src/book_meta_fix/cli.py:1061
+#: src/book_meta_fix/cli.py:1097
 msgid "strip failures"
 msgstr "selhání odstranění"
 
-#: src/book_meta_fix/cli.py:1067
+#: src/book_meta_fix/cli.py:1103
 msgid "Affected books (first 25)"
 msgstr "Postižené knihy (prvních 25)"
 
-#: src/book_meta_fix/cli.py:1069
+#: src/book_meta_fix/cli.py:1105
 msgid "Actions"
 msgstr "Akce"
 
-#: src/book_meta_fix/cli.py:1075
+#: src/book_meta_fix/cli.py:1111
 #, python-brace-format
 msgid "stripped: {files}"
 msgstr "odstraněno: {files}"
 
-#: src/book_meta_fix/cli.py:1077
+#: src/book_meta_fix/cli.py:1113
 #, python-brace-format
 msgid "strip failed: {files}"
 msgstr "odstranění selhalo: {files}"
 
-#: src/book_meta_fix/cli.py:1083
+#: src/book_meta_fix/cli.py:1119
 msgid ""
 "Some EPUB covers probed as generated but could not be stripped (corrupt "
 "zip / unparseable OPF); see the list above."
@@ -896,125 +896,125 @@ msgstr ""
 "Některé embedded obálky EPUB vypadají jako vygenerované, ale nepodařilo "
 "se je odstranit (poškozený zip / neparsovatelné OPF); viz seznam výše."
 
-#: src/book_meta_fix/cli.py:1085
+#: src/book_meta_fix/cli.py:1121
 msgid "Dry-run: nothing removed. Re-run with --apply to strip the covers."
 msgstr ""
 "Dry-run: nic nebylo odstraněno. Spusť znovu s --apply pro odstranění "
 "obálek."
 
-#: src/book_meta_fix/cli.py:1112
+#: src/book_meta_fix/cli.py:1148
 msgid "Scan summary"
 msgstr "Souhrn skenu"
 
-#: src/book_meta_fix/cli.py:1115
+#: src/book_meta_fix/cli.py:1151
 msgid "%"
 msgstr "%"
 
-#: src/book_meta_fix/cli.py:1117
+#: src/book_meta_fix/cli.py:1153
 msgid "With metadata.json"
 msgstr "S metadata.json"
 
-#: src/book_meta_fix/cli.py:1118
+#: src/book_meta_fix/cli.py:1154
 msgid "With ISBN (valid)"
 msgstr "S ISBN (platné)"
 
-#: src/book_meta_fix/cli.py:1119
+#: src/book_meta_fix/cli.py:1155
 msgid "With publication year"
 msgstr "S rokem vydání"
 
-#: src/book_meta_fix/cli.py:1120
+#: src/book_meta_fix/cli.py:1156
 msgid "Mojibake repaired"
 msgstr "Opravené rozsypané kódování (mojibake)"
 
-#: src/book_meta_fix/cli.py:1121
+#: src/book_meta_fix/cli.py:1157
 msgid "Mojibake unrepairable"
 msgstr "Neopravitelné mojibake"
 
-#: src/book_meta_fix/cli.py:1125
+#: src/book_meta_fix/cli.py:1161
 msgid "Metadata source"
 msgstr "Zdroj metadat"
 
-#: src/book_meta_fix/cli.py:1133
+#: src/book_meta_fix/cli.py:1169
 msgid "File formats present"
 msgstr "Přítomné formáty souborů"
 
-#: src/book_meta_fix/cli.py:1135
+#: src/book_meta_fix/cli.py:1171
 msgid "Books"
 msgstr "Knihy"
 
-#: src/book_meta_fix/cli.py:1167
+#: src/book_meta_fix/cli.py:1203
 msgid "Detection summary"
 msgstr "Souhrn detekce"
 
-#: src/book_meta_fix/cli.py:1170
+#: src/book_meta_fix/cli.py:1206
 msgid "Verdict"
 msgstr "Verdikt"
 
-#: src/book_meta_fix/cli.py:1188
+#: src/book_meta_fix/cli.py:1224
 msgid "Author folder"
 msgstr "Složka autora"
 
-#: src/book_meta_fix/cli.py:1189 src/book_meta_fix/gui.py:82
-#: src/book_meta_fix/gui.py:826
+#: src/book_meta_fix/cli.py:1225 src/book_meta_fix/gui.py:85
+#: src/book_meta_fix/gui.py:1210
 msgid "Title"
 msgstr "Název"
 
-#: src/book_meta_fix/cli.py:1218
+#: src/book_meta_fix/cli.py:1254
 msgid "Write the script to a file instead of stdout."
 msgstr "Zapsat skript do souboru místo na stdout."
 
-#: src/book_meta_fix/cli.py:1260
+#: src/book_meta_fix/cli.py:1296
 msgid "Fish loads it automatically from ~/.config/fish/completions/"
 msgstr "Fish ho automaticky načítá z ~/.config/fish/completions/"
 
-#: src/book_meta_fix/gui.py:83
+#: src/book_meta_fix/gui.py:86
 msgid "Author"
 msgstr "Autor"
 
-#: src/book_meta_fix/gui.py:85
+#: src/book_meta_fix/gui.py:88
 msgid "Year"
 msgstr "Rok"
 
-#: src/book_meta_fix/gui.py:86
+#: src/book_meta_fix/gui.py:89
 msgid "Publisher"
 msgstr "Vydavatel"
 
-#: src/book_meta_fix/gui.py:87
+#: src/book_meta_fix/gui.py:90
 msgid "Language"
 msgstr "Jazyk"
 
-#: src/book_meta_fix/gui.py:88
+#: src/book_meta_fix/gui.py:91
 msgid "Series"
 msgstr "Série"
 
-#: src/book_meta_fix/gui.py:89
+#: src/book_meta_fix/gui.py:92
 msgid "Series order"
 msgstr "Pořadí v sérii"
 
-#: src/book_meta_fix/gui.py:90
+#: src/book_meta_fix/gui.py:93
 msgid "Authors (comma-separated)"
 msgstr "Autoři (oddělení čárkou)"
 
-#: src/book_meta_fix/gui.py:91
+#: src/book_meta_fix/gui.py:94
 msgid "Genres (comma-separated)"
 msgstr "Žánry (oddělené čárkou)"
 
-#: src/book_meta_fix/gui.py:305
+#: src/book_meta_fix/gui.py:307
 #, python-brace-format
 msgid "folder does not exist: {folder}"
 msgstr "složka neexistuje: {folder}"
 
-#: src/book_meta_fix/gui.py:308
+#: src/book_meta_fix/gui.py:310
 #, python-brace-format
 msgid "tool '{opener}' not found"
 msgstr "nástroj '{opener}' nenalezen"
 
-#: src/book_meta_fix/gui.py:312
+#: src/book_meta_fix/gui.py:314
 #, python-brace-format
 msgid "opening failed: {exc}"
 msgstr "otevření selhalo: {exc}"
 
-#: src/book_meta_fix/gui.py:934
+#: src/book_meta_fix/gui.py:1318
 #, python-brace-format
 msgid ""
 "review file not found:\n"
@@ -1023,7 +1023,7 @@ msgstr ""
 "kontrolní soubor review.yaml nenalezen:\n"
 "{path}"
 
-#: src/book_meta_fix/gui.py:940
+#: src/book_meta_fix/gui.py:1324
 #, python-brace-format
 msgid ""
 "failed to parse {path}:\n"
@@ -1032,43 +1032,65 @@ msgstr ""
 "nepodařilo se naparsovat {path}:\n"
 "{err}"
 
-#: src/book_meta_fix/gui.py:1069
+#: src/book_meta_fix/gui.py:1467
 msgid "List"
 msgstr "Seznam"
 
-#: src/book_meta_fix/gui.py:1073 src/book_meta_fix/gui.py:1266
+#: src/book_meta_fix/gui.py:1471 src/book_meta_fix/gui.py:1677
 msgid "Action:"
 msgstr "Akce:"
 
-#: src/book_meta_fix/gui.py:1080
+#: src/book_meta_fix/gui.py:1478
 msgid "Category:"
 msgstr "Kategorie:"
 
-#: src/book_meta_fix/gui.py:1086
+#: src/book_meta_fix/gui.py:1484
 msgid "Search:"
 msgstr "Hledat:"
 
-#: src/book_meta_fix/gui.py:1143
+#: src/book_meta_fix/gui.py:1490
+msgid "+ library"
+msgstr "+ knihovna"
+
+#: src/book_meta_fix/gui.py:1492
+msgid ""
+"Search the whole library too, not only review.yaml: books matching the "
+"search (author, title, series, folder path, annotation) that are not in "
+"review appear in the list — their header says 'not in review.yaml'. A "
+"book you change or decide is added into review.yaml on save (bmf apply "
+"then processes it); unchanged ones are not saved. A fulltext index of the"
+" library is built in the background at startup (progress in the status "
+"line); the search answers instantly once it is ready."
+msgstr ""
+"Hledat i v celé knihovně, ne jen v review.yaml: knihy odpovídající "
+"hledání (autor, název, série, cesta ke složce, anotace), které nejsou v "
+"review, se objeví v seznamu — jejich hlavička říká „není v review.yaml“."
+" Knihu, kterou změníte nebo o ní rozhodnete, přidá uložení do "
+"review.yaml (bmf apply ji pak zpracuje); nezměněné se neukládají. Hned "
+"při startu se na pozadí staví fulltext index knihovny (postup ve "
+"stavovém řádku); hotový index odpovídá na hledání okamžitě."
+
+#: src/book_meta_fix/gui.py:1554
 msgid "Open the book's folder in the file manager"
 msgstr "Otevřít složku knihy ve správci souborů"
 
-#: src/book_meta_fix/gui.py:1178
+#: src/book_meta_fix/gui.py:1589
 msgid "Fields"
 msgstr "Pole"
 
-#: src/book_meta_fix/gui.py:1188
+#: src/book_meta_fix/gui.py:1599
 msgid "Read-only column:"
 msgstr "Sloupec jen pro čtení:"
 
-#: src/book_meta_fix/gui.py:1189
+#: src/book_meta_fix/gui.py:1600
 msgid "Original"
 msgstr "Původní"
 
-#: src/book_meta_fix/gui.py:1191
+#: src/book_meta_fix/gui.py:1602
 msgid "Proposed"
 msgstr "Návrh"
 
-#: src/book_meta_fix/gui.py:1224
+#: src/book_meta_fix/gui.py:1635
 msgid ""
 "∅ mark: the field is applied as EMPTY (a proposal that is wrong while the"
 " correct value is unknown). Click again to restore editing."
@@ -1076,19 +1098,19 @@ msgstr ""
 "Značka ∅: pole se při aplikaci zapíše jako PRÁZDNÉ (návrh je chybný a "
 "správná hodnota není známa). Opětovným kliknutím se vrátíte k editaci."
 
-#: src/book_meta_fix/gui.py:1233
+#: src/book_meta_fix/gui.py:1644
 msgid "Swap author and title  (Ctrl+W)"
 msgstr "Prohodit autora a název  (Ctrl+W)"
 
-#: src/book_meta_fix/gui.py:1259
+#: src/book_meta_fix/gui.py:1670
 msgid "Target folder:"
 msgstr "Cílová složka:"
 
-#: src/book_meta_fix/gui.py:1271
+#: src/book_meta_fix/gui.py:1682
 msgid "Verified"
 msgstr "Verified"
 
-#: src/book_meta_fix/gui.py:1273
+#: src/book_meta_fix/gui.py:1684
 msgid ""
 "Mark the book as OK: apply writes `verified: true` into metadata.json, "
 "later analyze runs skip the book entirely, and apply places it on the "
@@ -1098,127 +1120,144 @@ msgstr ""
 "další běhy analyze knihu úplně přeskočí a apply ji umístí na cílovou "
 "cestu, i když nějaké problémy zůstávají. Přepíná Ctrl+O."
 
-#: src/book_meta_fix/gui.py:1277
+#: src/book_meta_fix/gui.py:1688
 msgid "Note:"
 msgstr "Poznámka:"
 
-#: src/book_meta_fix/gui.py:1284
+#: src/book_meta_fix/gui.py:1695
 msgid "◀ Previous (PgUp)"
 msgstr "◀ Předchozí (PgUp)"
 
-#: src/book_meta_fix/gui.py:1285
+#: src/book_meta_fix/gui.py:1696
 msgid "Save (Ctrl+S)"
 msgstr "Uložit (Ctrl+S)"
 
-#: src/book_meta_fix/gui.py:1286
+#: src/book_meta_fix/gui.py:1697
 msgid "Next (PgDn) ▶"
 msgstr "Další (PgDn) ▶"
 
-#: src/book_meta_fix/gui.py:1313 src/book_meta_fix/gui.py:2512
+#: src/book_meta_fix/gui.py:1724 src/book_meta_fix/gui.py:3032
 msgid "(loading…)"
 msgstr "(načítá se…)"
 
-#: src/book_meta_fix/gui.py:1367
+#: src/book_meta_fix/gui.py:1778
 msgid "Current"
 msgstr "Současná"
 
-#: src/book_meta_fix/gui.py:1367
+#: src/book_meta_fix/gui.py:1778
 msgid "Delete cover.jpg (on Delete checked)"
 msgstr "Smazat cover.jpg (při zaškrtnutém Delete)"
 
-#: src/book_meta_fix/gui.py:1368 src/book_meta_fix/gui.py:2366
+#: src/book_meta_fix/gui.py:1779 src/book_meta_fix/gui.py:2886
 msgid ".bak backup"
 msgstr "záloha .bak"
 
-#: src/book_meta_fix/gui.py:1368
+#: src/book_meta_fix/gui.py:1779
 msgid "Delete cover.jpg.bak (on Delete checked)"
 msgstr "Smazat cover.jpg.bak (při zaškrtnutém Delete)"
 
-#: src/book_meta_fix/gui.py:1369
+#: src/book_meta_fix/gui.py:1780
 msgid "Recommended"
 msgstr "Doporučená"
 
-#: src/book_meta_fix/gui.py:1378
+#: src/book_meta_fix/gui.py:1789
 msgid "Embedded covers per format (☐ = strip from the ebook):"
 msgstr "Vložené obálky podle formátu (☐ = odstranit z e-knihy):"
 
-#: src/book_meta_fix/gui.py:1386
+#: src/book_meta_fix/gui.py:1797
 msgid "Keep (Ctrl+P)"
 msgstr "Ponechat (Ctrl+P)"
 
-#: src/book_meta_fix/gui.py:1387
+#: src/book_meta_fix/gui.py:1798
 msgid "Restore .bak (Ctrl+B)"
 msgstr "Obnovit .bak (Ctrl+B)"
 
-#: src/book_meta_fix/gui.py:1388
+#: src/book_meta_fix/gui.py:1799
 msgid "Apply new (Ctrl+N)"
 msgstr "Aplikovat novou (Ctrl+N)"
 
-#: src/book_meta_fix/gui.py:1389
+#: src/book_meta_fix/gui.py:1800
 msgid "Delete checked (Ctrl+M)"
 msgstr "Smazat zaškrtnuté (Ctrl+M)"
 
-#: src/book_meta_fix/gui.py:1392
+#: src/book_meta_fix/gui.py:1803
 msgid "Content"
 msgstr "Obsah"
 
-#: src/book_meta_fix/gui.py:1396
+#: src/book_meta_fix/gui.py:1807
 msgid "Format:"
 msgstr "Formát:"
 
-#: src/book_meta_fix/gui.py:1401
+#: src/book_meta_fix/gui.py:1812
 msgid "View:"
 msgstr "Zobrazení:"
 
-#: src/book_meta_fix/gui.py:1402
+#: src/book_meta_fix/gui.py:1813
 msgid "first page"
 msgstr "první strana"
 
-#: src/book_meta_fix/gui.py:1403
+#: src/book_meta_fix/gui.py:1814
 msgid "broader text"
 msgstr "širší text"
 
-#: src/book_meta_fix/gui.py:1408
-msgid "↻ Recode (Ctrl+G)"
-msgstr "↻ Překódovat (Ctrl+G)"
+#: src/book_meta_fix/gui.py:1819
+msgid "↺ Recode (Ctrl+G)"
+msgstr "↺ Překódovat (Ctrl+G)"
 
-#: src/book_meta_fix/gui.py:1416
+#: src/book_meta_fix/gui.py:1827
 msgid "  read as:"
 msgstr "  přečteno jako:"
 
-#: src/book_meta_fix/gui.py:1422
+#: src/book_meta_fix/gui.py:1833
 msgid "actually is:"
 msgstr "skutečně je:"
 
-#: src/book_meta_fix/gui.py:1430
+#: src/book_meta_fix/gui.py:1841
 msgid ""
-"Double-encoding repair: “read as” = the codec the text was originally "
-"mis-read through (typically cp1250); “actually is” = the real encoding of"
+"Double-encoding repair: „read as“ = the codec the text was originally "
+"mis-read through (typically cp1250); „actually is“ = the real encoding of"
 " the bytes (almost always utf-8). The preview is always UTF-8."
 msgstr ""
-"Oprava dvojitého kódování: „přečteno jako“ = kodek, kterým byl text "
-"původně chybně přečten (typicky cp1250); „skutečně je“ = reálné kódování "
-"bytů (téměř vždy utf-8). Náhled je vždy UTF-8."
+"Oprava dvojitého kódování: „přečteno jako“ = kódování, kterým byl text "
+"kdysi chybně přečten (typicky cp1250); „skutečně je“ = skutečné kódování "
+"bajtů (téměř vždy utf-8). Náhled je vždy UTF-8."
 
-#: src/book_meta_fix/gui.py:1435
+#: src/book_meta_fix/gui.py:1846
 msgid "Swap conversion direction (read as ↔ actually is)"
 msgstr "Prohodit směr převodu (přečteno jako ↔ skutečně je)"
 
-#: src/book_meta_fix/gui.py:1492
+#: src/book_meta_fix/gui.py:1903
 msgid "Drag up/down to change the preview height (double-click = default height)"
 msgstr "Tahem nahoru/dolů změníte výšku náhledu (dvojklik = výchozí výška)"
 
-#: src/book_meta_fix/gui.py:1878
+#: src/book_meta_fix/gui.py:2289
+msgid "type a search to load matching library books"
+msgstr "napište, co hledat, a načtou se odpovídající knihy z knihovny"
+
+#: src/book_meta_fix/gui.py:2327
+msgid "indexing library…"
+msgstr "indexuji knihovnu…"
+
+#: src/book_meta_fix/gui.py:2343
+#, python-brace-format
+msgid "library: +{n} books"
+msgstr "knihovna: +{n} knih"
+
+#: src/book_meta_fix/gui.py:2389
 #, python-brace-format
 msgid "opened: {folder}"
 msgstr "otevřeno: {folder}"
 
-#: src/book_meta_fix/gui.py:2008
+#: src/book_meta_fix/gui.py:2519
 #, python-brace-format
 msgid "  (+{n} more)"
 msgstr "  (+{n} dalších)"
 
-#: src/book_meta_fix/gui.py:2010
+#: src/book_meta_fix/gui.py:2525
+msgid "not in review.yaml — deciding or editing it adds it to review on save"
+msgstr "není v review.yaml — rozhodnutí či úprava ho při uložení přidá do review"
+
+#: src/book_meta_fix/gui.py:2528
 #, python-brace-format
 msgid ""
 "Entry {i}/{n}   uuid: {uuid}\n"
@@ -1227,95 +1266,95 @@ msgstr ""
 "Položka {i}/{n}   uuid: {uuid}\n"
 "diagnóza: {cat} – {reason} [{conf}]{extra}"
 
-#: src/book_meta_fix/gui.py:2016
+#: src/book_meta_fix/gui.py:2534
 msgid "(no path)"
 msgstr "(žádná cesta)"
 
-#: src/book_meta_fix/gui.py:2277
+#: src/book_meta_fix/gui.py:2795
 #, python-brace-format
 msgid "saved → {path}"
 msgstr "uloženo → {path}"
 
-#: src/book_meta_fix/gui.py:2289
+#: src/book_meta_fix/gui.py:2809
 #, python-brace-format
 msgid "save failed: {err}"
 msgstr "uložení selhalo: {err}"
 
-#: src/book_meta_fix/gui.py:2295
+#: src/book_meta_fix/gui.py:2815
 msgid "Save changes before quitting?"
 msgstr "Uložit změny před ukončením?"
 
-#: src/book_meta_fix/gui.py:2365
+#: src/book_meta_fix/gui.py:2885
 msgid "generated"
 msgstr "generovaná"
 
-#: src/book_meta_fix/gui.py:2365
+#: src/book_meta_fix/gui.py:2885
 msgid "ok"
 msgstr "ok"
 
-#: src/book_meta_fix/gui.py:2365
+#: src/book_meta_fix/gui.py:2885
 msgid "missing"
 msgstr "chybějící"
 
-#: src/book_meta_fix/gui.py:2367
+#: src/book_meta_fix/gui.py:2887
 msgid "recommended"
 msgstr "doporučená"
 
-#: src/book_meta_fix/gui.py:2367
+#: src/book_meta_fix/gui.py:2887
 msgid "no URL"
 msgstr "bez URL"
 
-#: src/book_meta_fix/gui.py:2375
+#: src/book_meta_fix/gui.py:2895
 msgid "(no preview)"
 msgstr "(žádný náhled)"
 
-#: src/book_meta_fix/gui.py:2387
+#: src/book_meta_fix/gui.py:2907
 msgid "(none / calibre unavailable)"
 msgstr "(žádná / calibre nedostupné)"
 
-#: src/book_meta_fix/gui.py:2395
+#: src/book_meta_fix/gui.py:2915
 #, python-brace-format
 msgid "Strip the embedded cover from {name} (the ebook file stays)"
 msgstr "Odstranit vloženou obálku z {name} (soubor e-knihy zůstává)"
 
-#: src/book_meta_fix/gui.py:2397
+#: src/book_meta_fix/gui.py:2917
 #, python-brace-format
 msgid "The embedded cover cannot be stripped from {ext} — EPUB only"
 msgstr "Vloženou obálku nelze z {ext} odstranit — jen EPUB"
 
-#: src/book_meta_fix/gui.py:2398
+#: src/book_meta_fix/gui.py:2918
 msgid "file"
 msgstr "soubor"
 
-#: src/book_meta_fix/gui.py:2417
+#: src/book_meta_fix/gui.py:2937
 msgid "no recommended cover (cover_url)"
 msgstr "žádná doporučená obálka (cover_url)"
 
-#: src/book_meta_fix/gui.py:2421
+#: src/book_meta_fix/gui.py:2941
 msgid "cover applied"
 msgstr "obálka aplikována"
 
-#: src/book_meta_fix/gui.py:2423
+#: src/book_meta_fix/gui.py:2943
 msgid "cover download failed"
 msgstr "stažení obálky selhalo"
 
-#: src/book_meta_fix/gui.py:2431
+#: src/book_meta_fix/gui.py:2951
 msgid "restored from .bak"
 msgstr "obnoveno z .bak"
 
-#: src/book_meta_fix/gui.py:2433
+#: src/book_meta_fix/gui.py:2953
 msgid ".bak does not exist"
 msgstr ".bak neexistuje"
 
-#: src/book_meta_fix/gui.py:2438
+#: src/book_meta_fix/gui.py:2958
 msgid "kept"
 msgstr "ponecháno"
 
-#: src/book_meta_fix/gui.py:2452
+#: src/book_meta_fix/gui.py:2972
 msgid "nothing checked"
 msgstr "nic není zaškrtnuto"
 
-#: src/book_meta_fix/gui.py:2458
+#: src/book_meta_fix/gui.py:2978
 #, python-brace-format
 msgid ""
 "Strip the embedded cover from these ebooks?\n"
@@ -1328,96 +1367,106 @@ msgstr ""
 "\n"
 "{files}"
 
-#: src/book_meta_fix/gui.py:2469
+#: src/book_meta_fix/gui.py:2989
 #, python-brace-format
 msgid "deleted {n}"
 msgstr "smazáno {n}"
 
-#: src/book_meta_fix/gui.py:2471
+#: src/book_meta_fix/gui.py:2991
 #, python-brace-format
 msgid "covers stripped {stripped}/{total}"
 msgstr "odstraněných obálek {stripped}/{total}"
 
-#: src/book_meta_fix/gui.py:2473
+#: src/book_meta_fix/gui.py:2993
 msgid " (EPUB only)"
 msgstr " (jen EPUB)"
 
-#: src/book_meta_fix/gui.py:2493
+#: src/book_meta_fix/gui.py:3013
 msgid "(no formats / folder not found)"
 msgstr "(žádné formáty / složka nenalezena)"
 
-#: src/book_meta_fix/gui.py:2537
+#: src/book_meta_fix/gui.py:3057
 #, python-brace-format
 msgid "(extraction failed: {err})"
 msgstr "(extrakce selhala: {err})"
 
-#: src/book_meta_fix/gui.py:2539
+#: src/book_meta_fix/gui.py:3059
 msgid "(no text)"
 msgstr "(žádný text)"
 
-#: src/book_meta_fix/gui.py:2549
+#: src/book_meta_fix/gui.py:3069
 msgid "⚠ double encoding detected"
 msgstr "⚠ zjištěno dvojité kódování"
 
-#: src/book_meta_fix/gui.py:2566
+#: src/book_meta_fix/gui.py:3086
 #, python-brace-format
 msgid "⚠ multiple recoding layers ({desc})"
 msgstr "⚠ vícero vrstev překódování ({desc})"
 
-#: src/book_meta_fix/gui.py:2587
+#: src/book_meta_fix/gui.py:3107
 msgid "unknown reason"
 msgstr "neznámý důvod"
 
-#: src/book_meta_fix/gui.py:2588
+#: src/book_meta_fix/gui.py:3108
 #, python-brace-format
 msgid "⚠ {frm} → {to} failed: {reason}"
 msgstr "⚠ {frm} → {to} selhalo: {reason}"
 
-#: src/book_meta_fix/gui.py:2592
+#: src/book_meta_fix/gui.py:3112
 #, python-brace-format
 msgid " — the reverse ({to} → {frm}) works, click here"
 msgstr " — obrácený směr ({to} → {frm}) funguje, klikněte sem"
 
-#: src/book_meta_fix/gui.py:2626
+#: src/book_meta_fix/gui.py:3146
 #, python-brace-format
 msgid "{frm} → {to} ✓"
 msgstr "{frm} → {to} ✓"
 
-#: src/book_meta_fix/gui.py:2643
+#: src/book_meta_fix/gui.py:3163
 msgid "no double encoding to repair"
 msgstr "žádné dvojité kódování k opravě"
 
-#: src/book_meta_fix/gui.py:2782
+#: src/book_meta_fix/gui.py:3205
+#, python-brace-format
+msgid "indexing library… {done}/{total}"
+msgstr "indexuji knihovnu… {done}/{total}"
+
+#: src/book_meta_fix/gui.py:3226
+#, python-brace-format
+msgid "library indexed: {n} books"
+msgstr "knihovna zaindexována: {n} knih"
+
+#: src/book_meta_fix/gui.py:3348
 #, python-brace-format
 msgid "{n} entries"
 msgstr "{n} položek"
 
-#: src/book_meta_fix/gui.py:2784
+#: src/book_meta_fix/gui.py:3350
 #, python-brace-format
 msgid " (of {total})"
 msgstr " (z {total})"
 
-#: src/book_meta_fix/gui.py:2793
+#: src/book_meta_fix/gui.py:3359
 msgid "Keyboard shortcuts (F1)"
 msgstr "Klávesové zkratky (F1)"
 
-#: src/book_meta_fix/gui.py:2797
+#: src/book_meta_fix/gui.py:3363
 msgid "next / previous book"
 msgstr "další / předchozí kniha"
 
-#: src/book_meta_fix/gui.py:2798
+#: src/book_meta_fix/gui.py:3364
 msgid "next / previous edit field (fields only)"
 msgstr "další / předchozí editační pole (jen pole)"
 
-#: src/book_meta_fix/gui.py:2799
+#: src/book_meta_fix/gui.py:3365
 msgid "select all in the field"
 msgstr "vybrat vše v poli"
 
-#: src/book_meta_fix/gui.py:2801
+#: src/book_meta_fix/gui.py:3367
 msgid "swap the author↔title field values (C1 helper)"
 msgstr "prohodit hodnoty polí autor↔název (pomocník pro C1)"
 
-#: src/book_meta_fix/gui.py:2802
+#: src/book_meta_fix/gui.py:3368
 msgid ""
 "field button: apply the field as EMPTY (wrong proposal, correct value "
 "unknown)"
@@ -1425,11 +1474,11 @@ msgstr ""
 "tlačítko u pole: zapsat pole jako PRÁZDNÉ (chybný návrh, správná hodnota "
 "neznámá)"
 
-#: src/book_meta_fix/gui.py:2804
+#: src/book_meta_fix/gui.py:3370
 msgid "keep (applies like accept; the entry stays in review)"
 msgstr "keep (aplikuje jako accept; položka zůstává v review)"
 
-#: src/book_meta_fix/gui.py:2805
+#: src/book_meta_fix/gui.py:3371
 msgid ""
 "verified — mark the book OK: apply stores the flag in metadata.json, "
 "analyze skips the book, apply places it on the target path"
@@ -1437,67 +1486,80 @@ msgstr ""
 "verified — označit knihu jako OK: apply uloží příznak do metadata.json, "
 "analyze knihu přeskočí, apply ji umístí na cílovou cestu"
 
-#: src/book_meta_fix/gui.py:2806
+#: src/book_meta_fix/gui.py:3372
 msgid "clear → pending"
 msgstr "vymazat → čeká"
 
-#: src/book_meta_fix/gui.py:2807
+#: src/book_meta_fix/gui.py:3373
+msgid ""
+"checkbox above the list: the search also loads matching books from the "
+"whole library, not only review.yaml; a changed book is added to "
+"review.yaml on save"
+msgstr ""
+"zaškrtávací pole nad seznamem: hledání načte odpovídající knihy z celé "
+"knihovny, ne jen z review.yaml; změněná kniha se při uložení přidá do "
+"review.yaml"
+
+#: src/book_meta_fix/gui.py:3374
 msgid "save"
 msgstr "uložit"
 
-#: src/book_meta_fix/gui.py:2808
+#: src/book_meta_fix/gui.py:3375
 msgid "quit"
 msgstr "ukončit"
 
-#: src/book_meta_fix/gui.py:2809
+#: src/book_meta_fix/gui.py:3376
 msgid "focus search"
 msgstr "fokus na hledání"
 
-#: src/book_meta_fix/gui.py:2810
+#: src/book_meta_fix/gui.py:3377
 msgid "RO column → target (focused field)"
 msgstr "RO sloupec → cíl (fokusované pole)"
 
-#: src/book_meta_fix/gui.py:2811
+#: src/book_meta_fix/gui.py:3378
 msgid "cover: apply new"
 msgstr "obálka: aplikovat novou"
 
-#: src/book_meta_fix/gui.py:2812
+#: src/book_meta_fix/gui.py:3379
 msgid "cover: restore .bak"
 msgstr "obálka: obnovit .bak"
 
-#: src/book_meta_fix/gui.py:2813
+#: src/book_meta_fix/gui.py:3380
 msgid "cover: keep"
 msgstr "obálka: ponechat"
 
-#: src/book_meta_fix/gui.py:2814
+#: src/book_meta_fix/gui.py:3381
 msgid "cover: delete checked cover/.bak, strip embedded covers"
 msgstr "obálka: smazat zaškrtnuté cover/.bak, odstranit vložené obálky"
 
-#: src/book_meta_fix/gui.py:2815
+#: src/book_meta_fix/gui.py:3382
 msgid "content: first page / broader text"
 msgstr "obsah: první strana / širší text"
 
-#: src/book_meta_fix/gui.py:2816
+#: src/book_meta_fix/gui.py:3383
 msgid ""
-"content: recode (“read as” = the wrong read, “actually is” = the real "
+"content: recode („read as“ = the wrong read, „actually is“ = the real "
 "encoding; result always UTF-8)"
 msgstr ""
-"obsah: překódování („přečteno jako“ = chybné čtení, „skutečně je“ = "
-"reálné kódování; výsledek vždy UTF-8)"
+"obsah: překódování („přečteno jako“ = chybné přečtení, „skutečně je“ = "
+"skutečné kódování; výsledek je vždy UTF-8)"
 
-#: src/book_meta_fix/gui.py:2817
+#: src/book_meta_fix/gui.py:3384
 msgid ""
-"author & series: autocomplete from the library (arrows pick, Enter/Tab "
-"insert)"
-msgstr "autor a série: našeptávač z knihovny (šipky vyberou, Enter/Tab vloží)"
+"author & series: autocomplete from the library (arrows pick, Enter "
+"inserts; Tab inserts only after an arrow pick — otherwise it leaves your "
+"text)"
+msgstr ""
+"autor & série: našeptávač z knihovny (šipky vybírají, Enter vloží; Tab "
+"vloží jen po výběru šipkou — jinak nechá váš text)"
 
-#: src/book_meta_fix/gui.py:2818
+#: src/book_meta_fix/gui.py:3385
 msgid ""
 "(click on a cover = ☑; click on path / double-click in the list = open "
 "folder)"
 msgstr "(klik na obálku = ☑; klik na cestu / dvojklik v seznamu = otevřít složku)"
 
-#: src/book_meta_fix/gui.py:2819
+#: src/book_meta_fix/gui.py:3386
 msgid ""
 "(wheel: widget under the mouse, at its edge the form; cover in the list →"
 " hover popup)"
@@ -1826,22 +1888,108 @@ msgstr ""
 #~ "hluboké fallback stádo dostává 429/1302 "
 #~ "bouře — a falešné 1113 „insufficient "
 #~ "balance“ — bez ohledu na to, jak"
-#: src/book_meta_fix/cli.py:38
-msgid "Error:"
-msgstr "Chyba:"
 
-#: src/book_meta_fix/cli.py:39
-msgid "Library directory does not exist or is not accessible:"
-msgstr "Adresář knihovny neexistuje nebo není přístupný:"
+#~ msgid "↻ Recode (Ctrl+G)"
+#~ msgstr "↻ Překódovat (Ctrl+G)"
 
-#: src/book_meta_fix/cli.py:41
-msgid "If this is a network share (NFS/SMB), please ensure it is mounted."
-msgstr "Pokud se jedná o síťový disk (NFS/SMB), zkontrolujte, zda je připojen."
+#~ msgid ""
+#~ "Double-encoding repair: “read as” = "
+#~ "the codec the text was originally "
+#~ "mis-read through (typically cp1250); "
+#~ "“actually is” = the real encoding "
+#~ "of the bytes (almost always utf-8). "
+#~ "The preview is always UTF-8."
+#~ msgstr ""
+#~ "Oprava dvojitého kódování: „přečteno jako“ "
+#~ "= kodek, kterým byl text původně "
+#~ "chybně přečten (typicky cp1250); „skutečně "
+#~ "je“ = reálné kódování bytů (téměř "
+#~ "vždy utf-8). Náhled je vždy UTF-8."
 
-#: src/book_meta_fix/cli.py:53
-msgid "Cannot open cache database:"
-msgstr "Nelze otevřít databázi cache:"
+#~ msgid ""
+#~ "content: recode (“read as” = the "
+#~ "wrong read, “actually is” = the "
+#~ "real encoding; result always UTF-8)"
+#~ msgstr ""
+#~ "obsah: překódování („přečteno jako“ = "
+#~ "chybné čtení, „skutečně je“ = reálné "
+#~ "kódování; výsledek vždy UTF-8)"
 
-#: src/book_meta_fix/cli.py:55
-msgid "Ensure the path exists, the network share is mounted, and you have write permissions."
-msgstr "Zkontrolujte, zda cesta existuje, síťový disk je připojen a máte oprávnění k zápisu."
+#~ msgid "Error:"
+#~ msgstr "Chyba:"
+
+#~ msgid "Library directory does not exist or is not accessible:"
+#~ msgstr "Adresář knihovny neexistuje nebo není přístupný:"
+
+#~ msgid "If this is a network share (NFS/SMB), please ensure it is mounted."
+#~ msgstr "Pokud se jedná o síťový disk (NFS/SMB), zkontrolujte, zda je připojen."
+
+#~ msgid "Cannot open cache database:"
+#~ msgstr "Nelze otevřít databázi cache:"
+
+#~ msgid ""
+#~ "Ensure the path exists, the network "
+#~ "share is mounted, and you have "
+#~ "write permissions."
+#~ msgstr ""
+#~ "Zkontrolujte, zda cesta existuje, síťový "
+#~ "disk je připojen a máte oprávnění "
+#~ "k zápisu."
+
+#~ msgid ""
+#~ "Search the whole library too, not "
+#~ "only review.yaml: books matching the "
+#~ "search that are not in review "
+#~ "appear in the list (their header "
+#~ "says 'not in review.yaml'). A book "
+#~ "you change or decide is added into"
+#~ " review.yaml on save (bmf apply then"
+#~ " processes it); unchanged ones are "
+#~ "not saved."
+#~ msgstr ""
+#~ "Hledat i v celé knihovně, ne jen"
+#~ " v review.yaml: knihy odpovídající hledání,"
+#~ " které nejsou v review, se objeví "
+#~ "v seznamu (jejich hlavička říká „není"
+#~ " v review.yaml“). Knihu, kterou změníte "
+#~ "nebo o ní rozhodnete, přidá uložení "
+#~ "do review.yaml (bmf apply ji pak "
+#~ "zpracuje); nezměněné se neukládají."
+
+#~ msgid ""
+#~ "author & series: autocomplete from the"
+#~ " library (arrows pick, Enter/Tab insert)"
+#~ msgstr "autor a série: našeptávač z knihovny (šipky vyberou, Enter/Tab vloží)"
+
+#~ msgid "scanning library…"
+#~ msgstr "prohledávám knihovnu…"
+
+#~ msgid "scanning library… {done}/{total}"
+#~ msgstr "prohledávám knihovnu… {done}/{total}"
+
+#~ msgid ""
+#~ "Search the whole library too, not "
+#~ "only review.yaml: books matching the "
+#~ "search (author, title, series, folder "
+#~ "path, annotation) that are not in "
+#~ "review appear in the list — their"
+#~ " header says 'not in review.yaml'. A"
+#~ " book you change or decide is "
+#~ "added into review.yaml on save (bmf "
+#~ "apply then processes it); unchanged ones"
+#~ " are not saved. The scan runs "
+#~ "in the background and reports progress"
+#~ " in the status line."
+#~ msgstr ""
+#~ "Hledat i v celé knihovně, ne jen"
+#~ " v review.yaml: knihy odpovídající hledání"
+#~ " (autor, název, série, cesta ke "
+#~ "složce, anotace), které nejsou v review,"
+#~ " se objeví v seznamu — jejich "
+#~ "hlavička říká „není v review.yaml“. "
+#~ "Knihu, kterou změníte nebo o ní "
+#~ "rozhodnete, přidá uložení do review.yaml "
+#~ "(bmf apply ji pak zpracuje); nezměněné"
+#~ " se neukládají. Sken běží na pozadí"
+#~ " a postup hlásí ve stavovém řádku."
+

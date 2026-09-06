@@ -162,6 +162,30 @@ moves back out to the root tree the same way.
 
 **Verdict:** AUTO_FIXABLE (move)
 
+## C14 — Series order glued into the series name
+
+The series name carries the book's order — e.g. `Mark Stone #73` as the
+name with an EMPTY index. ABS/Calibre importers occasionally store the
+whole "Name #N" string in the name field; the GUI then shows a broken
+series, series search groups by the polluted name, and a `{series}`
+placement pattern would embed the "#N" into the folder name. A library
+survey found 353 such books (Asterion, Agent JFK, Mark Stone, …).
+
+Only the explicit `#N` suffix is split — a trailing bare number
+("MR-362 Espace 4") can be part of a real name and is deliberately left
+alone. A stored index that DIFFERS from the embedded number is a
+deliberate state and the rule does not fire (an equal index does — only
+the name is wrong then).
+
+The fix is deterministic and lossless: bare name + `series_index`
+("Mark Stone" + 73). The review entry is pre-filled `action: accept` and,
+when the split is the book's only problem, also `verified: true` —
+analyze + apply repair the whole library in bulk. The GUI's `+ library`
+mode additionally pre-fills the same proposal for books its search pulls
+in from outside review.
+
+**Verdict:** AUTO_FIXABLE (split)
+
 ## EMPTY_BOOK — Dead record (the book file is gone)
 
 The folder holds only metadata sidecars, their backups and/or a cover —

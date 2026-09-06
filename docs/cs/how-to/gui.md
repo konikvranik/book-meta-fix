@@ -32,11 +32,54 @@ vypíše); `PgUp`/`PgDn` přecházejí mezi knihami a `Tab` prochází jen
 upravitelná
 pole — autor, název, ISBN, rok, vydavatel, jazyk, série, pořadí v
 sérii, autoři, žánry (`Ctrl+A` vybere v poli vše). Seznam zobrazuje vlevo
-štítek a v každém řádku vpravo přilepenou miniaturu obálky. Vyžaduje Tk
+štítek, na pravém konci řádku s autorem sérii s pořadím (současné hodnoty;
+u záznamu s `accept`/`keep` navrženou sérii — tedy tu, kterou `apply`
+zapíše) a v každém řádku vpravo přilepenou miniaturu obálky. Vyžaduje Tk
 bindings
 (`sudo apt install python3-tk` na Debianu/Ubuntu). Úpravy se zapisují
 zpět do `review.yaml` — potvrďte je příkazem `bmf apply` jako v
 [úprava + aplikování](edit-and-apply.md).
+
+## Vyhledávání v celé knihovně (`+ knihovna`)
+
+Pole `Hledat:` normálně filtruje jen záznamy review. Zaškrtněte vedle něj
+**`+ knihovna`** a tentýž dotaz projde i celou knihovnou: odpovídající
+knihy, které **nejsou** v review.yaml, se přidají do seznamu (seřazené
+podle autora, jejich hlavička říká „není v review.yaml"). Právě to je
+workflow pro sérii, o které víte, že je rozbitá — v Audiobookshelf uvidíte
+špatná metadata u knih „Mark Stone", vyhledáte sérii, zaškrtnete
+`+ knihovna` a zobrazí se všechny knihy Mark Stone, ať už jsou v review,
+nebo ne, připravené k úpravě.
+
+Nová kniha se chová úplně stejně jako záznam review (pole, obálky,
+zobrazení obsahu, akce). Jediný rozdíl: `Ctrl+S` ji zapíše do review.yaml
+až ve chvíli, kdy ji **rozhodnete nebo upravíte** (akce, značka verified,
+návrh lišící se od aktuálních hodnot) — nedotčené knihy soubor nezaplaví.
+Přírustky v seznamu zůstávají po celou session: úprava knihy, uložení ani
+odškrtnutí pole je neodstraní a opakované hledání je idempotentní (žádná
+kniha se nevypíše dvakrát). `bmf apply` pak uložené zpracuje jako každý
+jiný záznam.
+
+Kniha, jejíž pořadí série je zalepené v názvu (`Mark Stone #73`), přijde
+s předvyplněným C14 rozdělením v cílových polích (holá série + pořadí) —
+se stejným návrhem, jaký by vyslal `bmf analyze` — takže oprava je jedno
+`Ctrl+Enter` na knihu místo přepisování. Samotný nedotčený předvyplněný
+návrh knihu do review.yaml nezapisuje; hromadnou opravu dělá analyze se
+předvyplněným accept.
+
+Fulltext index knihovny se staví background sweep hned při otevření
+editoru (postup ve stavovém řádku; na NFS necelá minuta pro ~5 tisíc
+knih, čtení složek paralelně — tentýž sweep plní i našeptávače
+autora/série). Každé hledání `+ knihovna` je pak okamžitý filtr v paměti,
+bez čekání; dotaz zadaný před dostavěním indexu se odpoví automaticky,
+jakmile index dopadne. Index porovnává stejná pole jako vyhledávací box
+— autora, název, sérii, cestu ke složce — plus pole, která záznamy review
+nikdy nenesou (anotaci, nakladatele, tagy), takže kniha s rozbitými
+metadaty odpoví, i když sérii zmíňuje jen název složky nebo anotace
+(typické pro série pod pseudonymem typu Mark Stone, kde většina knih
+leží pod složkami skutečných autorů). Kniha, která dosud nemá uuid, ji
+dostane vytvořenou při indexování (stejná líná identita jako při skenu),
+protože celý review workflow je klíčovaný uuid.
 
 ## Verified (značka OK)
 

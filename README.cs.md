@@ -18,13 +18,13 @@ při opětovném prohledání.
 | [docs/cs/architecture.md](docs/cs/architecture.md) | Mapa modulů, tok dat, model souběžnosti, cache, atomicita |
 | [docs/cs/concepts.md](docs/cs/concepts.md) | Skupiny verdiktů, filozofie verifikace, kaskáda oprav, smyčka LLM, formát review.yaml |
 | [docs/cs/how-to/](docs/cs/how-to/index.md) | Návody krok za krokem (spustit dávku, vyladit rate limit, ladit, …) |
-| [docs/cs/corruption-catalog.md](docs/cs/corruption-catalog.md) | Kategorie C1–C13 s reálnými příklady |
+| [docs/cs/corruption-catalog.md](docs/cs/corruption-catalog.md) | Kategorie C1–C14 s reálnými příklady |
 | [AGENTS.md](AGENTS.md) | Průvodce pro AI agenty upravující tento kód (konvence, rozložení, zádrhele) |
 
 ## Stav
 
 - [x] Skenování (`bmf scan`)
-- [x] Detekce (`bmf report`) — pravidla C1–C13
+- [x] Detekce (`bmf report`) — pravidla C1–C14
 - [x] Verifikace (kaskáda obsah vs metadata)
 - [x] Obohacení (scraping databazeknih.cz pro CZ/SK žánry + metadata; legie.info pro sci-fi/fantasy povídky a série; OpenLibrary + Google Books jako fallback)
 - [x] Analýza + YAML revize (`bmf analyze`, `bmf apply`)
@@ -95,7 +95,7 @@ zůstane zachován, abyste mohli obnovit stav před během.
 | Příkaz | Co dělá |
 |---|---|
 | `bmf scan` | Prochází knihovnu, parsuje metadata, vypisuje souhrnné statistiky |
-| `bmf report` | Spustí detektorová pravidla C1–C13, zobrazí rozdělení do kategorií + ukázky |
+| `bmf report` | Spustí detektorová pravidla C1–C14, zobrazí rozdělení do kategorií + ukázky |
 | `bmf analyze` | Úplná pipeline (sken+detekce+extrakce+verifikace+obohacení) → vygeneruje `review.yaml` |
 | `bmf apply <file>` | Aplikuje schválené změny z review.yaml (ve výchozím nastavení dry-run) |
 | `bmf apply --apply <file>` | Skutečně zapíše `metadata.json` + `metadata.opf` |
@@ -174,6 +174,36 @@ polí): `PgUp`/`PgDn` přesun mezi knihami, `Tab` cyklí jen editovatelná pole
 při změně knihy zůstává na témž poli. Akce: `Ctrl+Enter` accept, `Ctrl+D`
 delete, `Ctrl+K` keep, `Ctrl+G` překódovat obsah, `Ctrl+S` uložit. Plný
 přehled zkratek zobrazí `F1`.
+
+**Vyhledávání v celé knihovně (`+ knihovna`).** Pole `Hledat:` filtruje
+záznamy review; zaškrtněte vedle něj `+ knihovna` a tentýž dotaz projde
+i celou knihovnou — odpovídající knihy, které NEJSOU v review.yaml, se
+přidají do seznamu (seřazené podle autora, jejich hlavička říká „není v
+review.yaml"). Právě to je workflow pro sérii, o které víte, že je
+rozbitá (v Audiobookshelf uvidíte špatná metadata u knih „Mark Stone" →
+vyhledáte sérii, zaškrtnete `+ knihovna` a zobrazí se všechny knihy Mark
+Stone, ať už jsou v review, nebo ne — připravené k úpravě). Nová kniha se
+chová úplně stejně jako záznam review (pole, obálky, zobrazení obsahu,
+akce); jediný rozdíl: `Ctrl+S` ji zapíše do `review.yaml` až ve chvíli,
+kdy ji rozhodnete nebo upravíte (akce, značka verified, návrh lišící se
+od current), takže nedotčené knihy soubor nezaplaví. Přírustky v seznamu
+zůstávají po celou session — úprava knihy, uložení ani odškrtnutí pole je
+neodstraní — a opakované hledání je idempotentní (žádná kniha se nevypíše
+dvakrát). `bmf apply` je pak zpracuje jako každý jiný záznam.
+
+Fulltext index celé knihovny se staví background sweep hned při otevření
+editoru (postup ve stavovém řádku; na NFS necelá minuta pro ~5 tisíc knih
+— čtení složek je paralelní a tentýž sweep plní i našeptávače
+autora/série). Každé hledání `+ knihovna` je pak okamžitý filtr v
+paměti: žádný sweep knihovny při hledání, žádné čekání; dotaz zadaný
+před dostavěním indexu se odpoví automaticky, jakmile index dopadne.
+Index porovnává stejná pole jako vyhledávací box — autora, název, sérii,
+cestu ke složce — plus pole, která záznamy review nikdy nenesou (anotaci,
+nakladatele, tagy), takže kniha s rozbitými metadaty odpoví, i když sérii
+zmíňuje jen název složky nebo anotace (typické pro série pod pseudonymem
+typu Mark Stone, kde většina knih leží pod složkami skutečných autorů).
+Kniha bez uuid ji dostane vytvořenou při indexování (stejná líná
+identita jako při skenu).
 
 **Akce `keep`** aplikuje návrh stejně jako `accept`, ale záznam v `review.yaml`
 **zůstává** (neprořezává se) a `bmf analyze` knihu při příštím běhu
@@ -490,7 +520,7 @@ $EDITOR src/book_meta_fix/locales/cs/LC_MESSAGES/bmf.po
 make i18n-compile   # .po -> .mo
 ```
 
-## Kategorie poškození (C1–C13)
+## Kategorie poškození (C1–C14)
 
 Úplný katalog s reálnými příklady najdete v
 [`docs/cs/corruption-catalog.md`](docs/cs/corruption-catalog.md). Souhrn:
@@ -510,6 +540,7 @@ make i18n-compile   # .po -> .mo
 | C11 | generovaná obálka (zástupná z Calibre) detekovaná pixelovou analýzou | NEEDS_REVIEW |
 | C12 | znečištění autora (ztracená kapitalizace, úvodní `_`/`*`) | NEEDS_REVIEW |
 | C13 | nesouhlas umístění (složka ≠ vzorová cílová cesta) | AUTO_FIXABLE (přesun) |
+| C14 | pořadí série zalepené v názvu série (`Mark Stone #73`) | AUTO_FIXABLE (rozdělení) |
 | — | EMPTY_BOOK (jen metadata/zálohy/obálka — knižní soubor chybí) | AUTO_FIXABLE (`needfix/empty/`) |
 | — | MISSING_ISBN / MISSING_YEAR | AUTO_FIXABLE (obohacení) |
 | — | MISSING_COVER (chybí přiložený `cover.jpg`) | AUTO_FIXABLE (stažení) |

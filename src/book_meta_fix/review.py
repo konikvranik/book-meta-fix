@@ -327,6 +327,20 @@ def _build_proposed(
 			if "author" not in proposed:
 				proposed["author"] = meta.title
 				source_parts.append("swap")
+	# C14 (series order glued into the series NAME, "Mark Stone #73"): the
+	# split proposal rides along even when C14 is only an ADDITIONAL
+	# diagnosis — only the primary's diag.proposed extras are merged by
+	# _entry_dict / ReviewWriter._build_entry, and a C2-primary book must
+	# still get its series fixed in the same pass. setdefault: an
+	# enricher's series (a properly named one) is better data than the
+	# mechanical split of the broken string.
+	if diag is not None:
+		for d in all_diagnoses(diag):
+			if d.category == "C14" and d.proposed:
+				for k, v in d.proposed.items():
+					if k != "action" and k not in proposed:
+						proposed[k] = v
+				source_parts.append("split")
 	# C13 (location mismatch): surface the target folder computed by the
 	# detector. INFORMATIONAL only — apply recomputes the destination from
 	# the FINAL metadata (the user may fix author/title in the same pass),

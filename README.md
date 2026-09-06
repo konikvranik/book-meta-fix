@@ -17,13 +17,13 @@ Audiobookshelf and Kavita pick up the fixes on rescan.
 | [docs/architecture.md](docs/architecture.md) | Module map, data flow, concurrency model, caching, atomicity |
 | [docs/concepts.md](docs/concepts.md) | Verdict buckets, verification philosophy, fix cascade, LLM loop, review.yaml format |
 | [docs/how-to/](docs/how-to/index.md) | Step-by-step recipes (run a batch, tune the rate limit, debug, …) |
-| [docs/corruption-catalog.md](docs/corruption-catalog.md) | The C1–C13 categories with real examples |
+| [docs/corruption-catalog.md](docs/corruption-catalog.md) | The C1–C14 categories with real examples |
 | [AGENTS.md](AGENTS.md) | Guide for AI agents editing this codebase (conventions, layout, gotchas) |
 
 ## Status
 
 - [x] Scan (`bmf scan`)
-- [x] Detect (`bmf report`) — C1–C13 rules
+- [x] Detect (`bmf report`) — C1–C14 rules
 - [x] Verify (content vs metadata cascade)
 - [x] Enrich (databazeknih.cz scraping for CZ/SK genres + metadata; legie.info for sci-fi/fantasy short stories & series; OpenLibrary + Google Books fallback)
 - [x] Analyze + YAML review (`bmf analyze`, `bmf apply`)
@@ -93,7 +93,7 @@ can recover the pre-run state.
 | Command | What it does |
 |---|---|
 | `bmf scan` | Traverse library, parse metadata, print summary stats |
-| `bmf report` | Run C1–C13 detector rules, show category breakdown + samples |
+| `bmf report` | Run C1–C14 detector rules, show category breakdown + samples |
 | `bmf analyze` | Full pipeline (scan+detect+extract+verify+enrich+location check) → generate `review.yaml` |
 | `bmf apply <file>` | Apply approved changes from a review.yaml (dry-run by default) |
 | `bmf apply --apply <file>` | Write `metadata.json` + `metadata.opf` AND place each book: clean/`verified` → target pattern path, unresolved → `needfix/`, dead records → `needfix/empty/` |
@@ -171,6 +171,37 @@ fields (never buttons or read-only labels), `Ctrl+A` selects all in a field,
 focus stays on the same field when you change book. Actions: `Ctrl+Enter`
 accept, `Ctrl+D` delete, `Ctrl+K` keep, `Ctrl+G` recode content, `Ctrl+S`
 save. Press `F1` for the full shortcut overlay.
+
+**Whole-library search (`+ library`).** The `Search:` box filters review
+entries; tick `+ library` next to it and the same query also sweeps the
+whole library — matching books that are NOT in review.yaml join the list
+(sorted by author, their header says "not in review.yaml"). That's the
+workflow for a series you know is broken (you spot bad metadata for the
+"Mark Stone" books in Audiobookshelf → search the series, tick
+`+ library`, and every Mark Stone book shows up, in review or not, ready
+to edit). A fresh book behaves exactly like a review entry (fields,
+covers, content view, actions); the only difference: `Ctrl+S` writes it
+into `review.yaml` only once you decide or edit it (an action, the
+verified mark, a proposal differing from current), so untouched books
+never flood the file. The additions stay in the list for the rest of the
+session — editing a book, saving or unticking the box does not throw
+them away — and re-searching is idempotent (a book is never listed
+twice). `bmf apply` then processes them like any other entry.
+
+A fulltext index of the whole library is built by a background sweep the
+moment the editor opens (progress in the status line; well under a minute
+for ~5k books on NFS — the folder reads are parallelized, and the same
+sweep feeds the author/series autocomplete). Every `+ library` search is
+then an instant in-memory filter: no per-search library sweep, no
+waiting; a query typed before the index is ready is answered automatically
+the moment it lands. The index matches the same fields as the search box —
+author, title, series, the folder path — plus the manifest-only fields
+review entries never carry (annotation, publisher, tags), so a book with
+broken metadata still matches when only its folder name or its annotation
+mentions the series (typical for house-pseudonym series like Mark Stone,
+where most books live under the real writers' folders). A book without a
+uuid gets one minted during indexing (the same lazy identity augmentation
+a scan performs).
 
 **The `keep` action** applies the proposal like `accept`, but the entry is
 **retained** in `review.yaml` (not pruned) and `bmf analyze` **skips** the
@@ -481,7 +512,7 @@ $EDITOR src/book_meta_fix/locales/cs/LC_MESSAGES/bmf.po
 make i18n-compile   # .po -> .mo
 ```
 
-## Corruption categories (C1–C13)
+## Corruption categories (C1–C14)
 
 See [`docs/corruption-catalog.md`](docs/corruption-catalog.md) for the full
 catalog with real examples. Summary:
@@ -501,6 +532,7 @@ catalog with real examples. Summary:
 | C11 | generated cover (Calibre placeholder) detected by pixel analysis | NEEDS_REVIEW |
 | C12 | author slug/artefact pollution (lost capitalization, leading `_`/`*`) | NEEDS_REVIEW |
 | C13 | location mismatch (folder ≠ pattern-derived target) | AUTO_FIXABLE (move) |
+| C14 | series order glued into the series name (`Mark Stone #73`) | AUTO_FIXABLE (split) |
 | — | EMPTY_BOOK (only metadata/backups/cover — the book file is gone) | AUTO_FIXABLE (`needfix/empty/`) |
 | — | MISSING_ISBN / MISSING_YEAR | AUTO_FIXABLE (enrich) |
 | — | MISSING_COVER (no `cover.jpg` sidecar) | AUTO_FIXABLE (download) |

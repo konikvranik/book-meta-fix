@@ -512,3 +512,77 @@ class TestEmptyBook:
 		m = self._meta_at(folder, title="soubor_epub.epub", isbn="9788020403114", year=2001)
 		d = detect(m, library_root=tmp_path)
 		assert d.category == "EMPTY_BOOK"
+
+
+class TestC14SeriesIndexInName:
+	"""Series order glued into the series NAME ("Mark Stone #73") — the fix
+	is a deterministic split into bare name + series_index."""
+
+	def test_fires_on_hash_with_empty_index(self):
+		from book_meta_fix.detectors import rule_c14_series_index_in_name
+
+		m = _meta(series=[{"name": "Mark Stone #73", "index": ""}])
+		d = rule_c14_series_index_in_name(m)
+		assert d is not None and d.category == "C14"
+		assert d.verdict.value == "AUTO_FIXABLE"
+		assert d.proposed["series"] == "Mark Stone"
+		assert d.proposed["series_index"] == "73"
+		assert d.proposed["action"] == "accept"  # lossless split → bulk-approvable
+
+	def test_fires_on_plain_string_series(self):
+		# The wild shape: series stored as a plain string with the #N inside.
+		from book_meta_fix.detectors import rule_c14_series_index_in_name
+
+		m = _meta(series=["Mark Stone - Kapitán Služby #77"])
+		d = rule_c14_series_index_in_name(m)
+		assert d is not None
+		assert d.proposed["series"] == "Mark Stone - Kapitán Služby"
+		assert d.proposed["series_index"] == "77"
+
+	def test_decimal_index_normalized(self):
+		from book_meta_fix.detectors import split_series_index
+
+		assert split_series_index("Nadace #3,5") == ("Nadace", "3.5")
+		assert split_series_index("Nadace # 12") == ("Nadace", "12")
+		assert split_series_index("Nadace#7") == ("Nadace", "7")
+
+	def test_equal_index_still_fires_name_only_wrong(self):
+		from book_meta_fix.detectors import rule_c14_series_index_in_name
+
+		m = _meta(series=[{"name": "Asterion #1", "index": "1"}])
+		d = rule_c14_series_index_in_name(m)
+		assert d is not None
+		assert d.proposed["series"] == "Asterion"
+
+	def test_differing_index_does_not_fire(self):
+		# An explicit index that DISAGREES with the embedded one is a
+		# deliberate state, not an obvious glitch — leave it to the human.
+		from book_meta_fix.detectors import rule_c14_series_index_in_name
+
+		m = _meta(series=[{"name": "Asterion #1", "index": "7"}])
+		assert rule_c14_series_index_in_name(m) is None
+
+	def test_healthy_series_does_not_fire(self):
+		from book_meta_fix.detectors import rule_c14_series_index_in_name
+
+		assert rule_c14_series_index_in_name(_meta(series=[{"name": "Nadace", "index": "3"}])) is None
+		assert rule_c14_series_index_in_name(_meta(series=[])) is None
+
+	def test_trailing_bare_number_not_split(self):
+		# "MR-362 Espace 4" is a real series name — only the explicit "#N"
+		# form is unambiguous (library survey: 353 #N vs 2 such names).
+		from book_meta_fix.detectors import rule_c14_series_index_in_name, split_series_index
+
+		assert split_series_index("MR-362 Espace 4") is None
+		assert rule_c14_series_index_in_name(_meta(series=["MR-362 Espace 4"])) is None
+
+	def test_bare_only_hash_is_not_a_series(self):
+		from book_meta_fix.detectors import split_series_index
+
+		assert split_series_index("#73") is None  # nothing would remain
+		assert split_series_index("") is None
+
+	def test_detect_routes_c14_as_primary(self):
+		m = _meta(series=[{"name": "Mark Stone #73", "index": ""}])
+		d = detect(m)
+		assert d.category == "C14"
