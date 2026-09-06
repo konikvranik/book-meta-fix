@@ -2590,6 +2590,14 @@ class ReviewEditorApp:
 		else:
 			up = (event.delta or 0) > 0
 		node = event.widget
+		# A Tcl-internal widget (e.g. the ttk.Combobox popdown of the
+		# Action/Category filter) has no Python wrapper: tkinter's
+		# _substitute then leaves event.widget as the raw pathname STRING,
+		# not a widget. Not ours to route — the popdown's own class binding
+		# (which runs before "all") has already scrolled it, and the form
+		# must stay put while a dropdown is open.
+		if isinstance(node, str):
+			return None
 		while node is not None and node is not self.root:
 			if node is self.canvas:
 				self._scroll_canvas(up)

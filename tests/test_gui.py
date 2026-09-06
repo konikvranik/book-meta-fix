@@ -1719,3 +1719,31 @@ class TestApplyFmtCovers:
 			assert app._del_formats == {}
 		finally:
 			root.destroy()
+
+
+class TestOnWheelStringWidget:
+	"""The wheel router must survive a wrapper-less event target.
+
+	Regression: scrolling over an open ttk.Combobox popdown (the Action/
+	Category filter) delivers event.widget as the raw pathname STRING —
+	tkinter's _substitute falls back to %W when _nametowidget misses the
+	Tcl-internal popdown — so _on_wheel raised AttributeError on every
+	wheel tick over the dropdown.
+	"""
+
+	def test_string_widget_returns_none(self):
+		root = _tk_root()
+		try:
+			app = gui.ReviewEditorApp.__new__(gui.ReviewEditorApp)
+			app.root = root
+			app.canvas = gui.tk.Canvas(root)
+			app.tree = object()  # only identity-compared, never reached
+
+			class _Ev:
+				num = 4  # X11 wheel-up
+				delta = 0
+				widget = ".!combobox.popdown.f.l"
+
+			assert app._on_wheel(_Ev()) is None
+		finally:
+			root.destroy()
