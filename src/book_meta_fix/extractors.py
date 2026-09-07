@@ -21,6 +21,7 @@ The dispatch function `extract()` picks the right extractor by file extension.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -92,6 +93,12 @@ def extract_epub(path: str | Path) -> ExtractedMeta:
 
 	EPUB is a ZIP; META-INF/container.xml points to the OPF, which holds
 	dc:title / dc:creator / dc:identifier (ISBN).
+
+	I/O note: every ``zf.read`` is a seek+read round trip (NFS!) plus an
+	OPF re-parse, so the OPF is read ONCE and every spine-member text is
+	extracted ONCE into a per-call cache that all three windows (first
+	page, ISBN scan, broader) slice — the pre-refactor code re-parsed the
+	OPF 4x and re-read the first spine items 3x per extraction.
 	"""
 	result = ExtractedMeta(source_format="epub")
 	try:
@@ -112,7 +119,8 @@ def extract_epub(path: str | Path) -> ExtractedMeta:
 				result.error = "empty full-path"
 				return result
 
-			# 2. Parse the OPF
+			# 2. Parse the OPF (the ONE read — helpers below work on the parsed
+			#    tree, they never re-fetch it).
 			try:
 				opf = etree.fromstring(zf.read(opf_path))
 			except KeyError:
@@ -165,19 +173,30 @@ def extract_epub(path: str | Path) -> ExtractedMeta:
 			#    the text for an ISBN (even when the embedded OPF carried one),
 			#    because the embedded ISBN may be the wrong one calibre wrote
 			#    back — the text-scan is independent and can flag the mismatch.
-			result.first_page_text = _epub_first_page_text(zf, opf_path)
-			if result.first_page_text:
-				# Scan first + last spine items for ISBN (copyright/colophon page
-				# is often at the end of the spine, not in the first 3000 chars).
-				result.isbn_from_text = extract_isbn(_epub_isbn_scan_text(zf, opf_path))
-				# Broader window (first ~15 spine items) for the LLM retry path.
-				try:
-					b_hrefs = _epub_spine_hrefs(zf, opf_path)[:15]
-					broader = _epub_text_from_hrefs(zf, b_hrefs)
+			# Any failure here only loses the text windows — never the OPF
+			# metadata already extracted above (the pre-refactor contract).
+			try:
+				hrefs = _spine_hrefs_from_opf(opf, opf_path)
+				texts = _epub_member_texts(zf, hrefs)
+
+				def _window(sel: list[str]) -> str | None:
+					return _join_member_texts(texts, sel)
+
+				first_text = _window(hrefs[:8])
+				result.first_page_text = first_text[:8000] if first_text else None
+				if result.first_page_text:
+					# Scan first + last spine items for ISBN (copyright/colophon
+					# page is often at the end of the spine, not in the first
+					# 3000 chars).
+					scan_text = _window(hrefs if len(hrefs) <= 10 else hrefs[:5] + hrefs[-5:]) or ""
+					result.isbn_from_text = extract_isbn(scan_text)
+					# Broader window (first ~15 spine items) for the LLM retry path.
+					broader = _window(hrefs[:15])
 					if broader and len(broader) > len(result.first_page_text):
 						result.broader_text = broader[:30000]
-				except Exception:  # noqa: BLE001
-					pass
+			except Exception:  # noqa: BLE001
+				result.first_page_text = None
+			if result.first_page_text:
 				# Mine title/authors/publisher/year from the page text. These are
 				# independent of the OPF block above and feed the pipeline's
 				# deterministic fix stage.
@@ -199,10 +218,9 @@ def extract_epub(path: str | Path) -> ExtractedMeta:
 	return result
 
 
-def _epub_spine_hrefs(zf: zipfile.ZipFile, opf_path: str) -> list[str]:
-	"""Ordered list of EPUB spine item hrefs (manifest-resolved, zip-internal)."""
+def _spine_hrefs_from_opf(opf, opf_path: str) -> list[str]:
+	"""Ordered list of EPUB spine item hrefs from an ALREADY-PARSED OPF tree."""
 	opf_dir = opf_path.rsplit("/", 1)[0] + "/" if "/" in opf_path else ""
-	opf = etree.fromstring(zf.read(opf_path))
 	manifest: dict[str, str] = {}
 	for item in opf.iter("{http://www.idpf.org/2007/opf}item"):
 		item_id = item.get("id")
@@ -219,32 +237,45 @@ def _epub_spine_hrefs(zf: zipfile.ZipFile, opf_path: str) -> list[str]:
 	return hrefs
 
 
-def _epub_text_from_hrefs(zf: zipfile.ZipFile, hrefs: list[str]) -> str | None:
-	"""Concatenate the stripped text of the given spine hrefs (>5 chars each)."""
-	chunks: list[str] = []
+def _epub_member_texts(zf: zipfile.ZipFile, hrefs: list[str]) -> dict[str, str | None]:
+	"""Stripped text per href, each zip member read at most once.
+
+	Hrefs whose read or strip fails (or yield <= 5 chars of content — the
+	same filter ``_epub_text_from_hrefs`` always applied) map to None so
+	every window can share the cache.
+	"""
+	texts: dict[str, str | None] = {}
 	for full in hrefs:
+		if full in texts:
+			continue
 		try:
 			raw = zf.read(full)
-		except KeyError:
+			text = _strip_html(raw)
+		except Exception:  # noqa: BLE001 - unreadable member is skipped, as before
+			texts[full] = None
 			continue
-		text = _strip_html(raw)
-		if text and len(text.strip()) > 5:
-			chunks.append(text)
+		texts[full] = text if text and len(text.strip()) > 5 else None
+	return texts
+
+
+def _join_member_texts(texts: dict[str, str | None], sel: list[str]) -> str | None:
+	"""Concatenate the cached stripped texts of *sel* hrefs (' | '-joined)."""
+	chunks = [texts[h] for h in sel if texts.get(h)]
 	return " | ".join(chunks) if chunks else None
 
 
-def _epub_first_page_text(zf: zipfile.ZipFile, opf_path: str) -> str | None:
-	"""Text of the first ~8 reading-order spine items (≤8000 chars).
+def _epub_spine_hrefs(zf: zipfile.ZipFile, opf_path: str) -> list[str]:
+	"""Ordered list of EPUB spine item hrefs (manifest-resolved, zip-internal).
 
-	Many EPUBs have an image-only cover page, so the real title/author appear
-	only on the 2nd/3rd spine item — hence several items, not just the first.
+	Standalone helper (reads + parses the OPF itself) — extract_epub uses
+	:func:`_spine_hrefs_from_opf` on its single parsed copy instead.
 	"""
-	try:
-		hrefs = _epub_spine_hrefs(zf, opf_path)
-		text = _epub_text_from_hrefs(zf, hrefs[:8])
-		return text[:8000] if text else None
-	except Exception:  # noqa: BLE001
-		return None
+	return _spine_hrefs_from_opf(etree.fromstring(zf.read(opf_path)), opf_path)
+
+
+def _epub_text_from_hrefs(zf: zipfile.ZipFile, hrefs: list[str]) -> str | None:
+	"""Concatenate the stripped text of the given spine hrefs (>5 chars each)."""
+	return _join_member_texts(_epub_member_texts(zf, hrefs), hrefs)
 
 
 def _epub_isbn_scan_text(zf: zipfile.ZipFile, opf_path: str) -> str:
@@ -665,39 +696,45 @@ def extract_txt(path: str | Path) -> ExtractedMeta:
 	"""TXT files have no embedded metadata. Read first/last lines for ISBN + title hints."""
 	result = ExtractedMeta(source_format="txt")
 	try:
-		# Try utf-8, then cp1250/iso-8859-2 for CZ content
-		raw = Path(path).read_bytes()[:15000]
-		text = None
-		for enc in ("utf-8", "cp1250", "iso-8859-2"):
-			try:
-				text = raw.decode(enc)
-				break
-			except UnicodeDecodeError:
-				continue
-		if text is None:
-			text = raw.decode("utf-8", errors="replace")
-		result.first_page_text = text[:5000]
-		if len(text) > 5000:
-			result.broader_text = text[:15000]
-		result.isbn_from_text = extract_isbn(text[:5000])
-		# If no ISBN in the head, scan the tail too (colophon at the end).
-		if not result.isbn_from_text:
-			try:
-				size = Path(path).stat().st_size
-				if size > 8000:
-					tail = Path(path).read_bytes()[size - 5000:]
-					tail_text = None
-					for enc in ("utf-8", "cp1250", "iso-8859-2"):
-						try:
-							tail_text = tail.decode(enc)
-							break
-						except UnicodeDecodeError:
-							continue
-					if tail_text is None:
-						tail_text = tail.decode("utf-8", errors="replace")
-					result.isbn_from_text = extract_isbn(tail_text)
-			except OSError:
-				pass
+		# Read ONLY the bounded windows (15 KB head, 5 KB tail) — the file can
+		# be many MB and it lives on NFS, where read_bytes() would drag the
+		# whole thing over the network twice (head + tail) for 20 KB of use.
+		with open(path, "rb") as fh:
+			raw = fh.read(15000)
+			text = None
+			for enc in ("utf-8", "cp1250", "iso-8859-2"):
+				try:
+					text = raw.decode(enc)
+					break
+				except UnicodeDecodeError:
+					continue
+			if text is None:
+				text = raw.decode("utf-8", errors="replace")
+			result.first_page_text = text[:5000]
+			if len(text) > 5000:
+				result.broader_text = text[:15000]
+			result.isbn_from_text = extract_isbn(text[:5000])
+			# If no ISBN in the head, scan the tail too (colophon at the end).
+			# A tail read failure only skips the tail scan (head results stand).
+			if not result.isbn_from_text:
+				try:
+					fh.seek(0, os.SEEK_END)
+					size = fh.tell()
+					if size > 8000:
+						fh.seek(size - 5000)
+						tail = fh.read(5000)
+						tail_text = None
+						for enc in ("utf-8", "cp1250", "iso-8859-2"):
+							try:
+								tail_text = tail.decode(enc)
+								break
+							except UnicodeDecodeError:
+								continue
+						if tail_text is None:
+							tail_text = tail.decode("utf-8", errors="replace")
+						result.isbn_from_text = extract_isbn(tail_text)
+				except OSError:
+					pass
 	except OSError as e:
 		result.error = f"txt read error: {e}"
 	return result

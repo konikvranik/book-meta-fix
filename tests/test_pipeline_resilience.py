@@ -35,7 +35,7 @@ class TestPipelineResilience:
 		# safe_extract to raise for it.
 		from book_meta_fix import pipeline as pmod
 
-		def fake_scan(library, cache=None, progress_callback=None):
+		def fake_scan(library, cache=None, progress_callback=None, workers=8):
 			return books
 
 		def fake_detect(meta):
@@ -80,7 +80,7 @@ class TestPipelineResilience:
 
 		from book_meta_fix import pipeline as pmod
 
-		def fake_scan(library, cache=None, progress_callback=None):
+		def fake_scan(library, cache=None, progress_callback=None, workers=8):
 			return books
 
 		def fake_detect(meta):
@@ -119,7 +119,7 @@ class TestPipelineResilience:
 
 		from book_meta_fix import pipeline as pmod
 
-		def fake_scan(library, cache=None, progress_callback=None):
+		def fake_scan(library, cache=None, progress_callback=None, workers=8):
 			return books
 
 		def fake_detect(meta):
@@ -150,7 +150,7 @@ class TestInterruptHandling:
 		books = [_make_book(i, f"B{i}") for i in range(1, 6)]  # ids 1..5
 		from book_meta_fix import pipeline as pmod
 
-		def fake_scan(library, cache=None, progress_callback=None):
+		def fake_scan(library, cache=None, progress_callback=None, workers=8):
 			return books
 
 		def fake_detect(meta):
@@ -183,7 +183,7 @@ class TestInterruptHandling:
 		books = [_make_book(i, f"B{i}") for i in range(1, 6)]
 		from book_meta_fix import pipeline as pmod
 
-		def fake_scan(library, cache=None, progress_callback=None):
+		def fake_scan(library, cache=None, progress_callback=None, workers=8):
 			return books
 
 		def fake_detect(meta):
@@ -220,6 +220,10 @@ class TestInterruptHandling:
 				self._counter += 1
 				return FakeFuture(meta, fail_with_keyboard_interrupt=(self._counter == 3))
 
+			def map(self, fn, iterable):
+				# The OK-filter fan-out: serial synchronous execution is fine.
+				return [fn(b) for b in iterable]
+
 			def __enter__(self):
 				return self
 
@@ -248,7 +252,7 @@ class TestInterruptHandling:
 		from book_meta_fix import pipeline as pmod
 		books = [_make_book(1, "B1")]
 
-		def fake_scan(library, cache=None, progress_callback=None):
+		def fake_scan(library, cache=None, progress_callback=None, workers=8):
 			return books
 
 		def fake_detect(meta):

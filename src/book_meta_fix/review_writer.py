@@ -49,6 +49,13 @@ log = logging.getLogger(__name__)
 # Sentinel pushed onto the queue to tell the writer thread to stop after drain.
 _SENTINEL: Any = object()
 
+# fsync pacing for the streaming writer (see ReviewWriter._append_entry):
+# entries are flushed to the OS as they are written, but the expensive sync
+# (an NFS COMMIT RPC per call) runs at most this often mid-run; finish()
+# always syncs once more before closing.
+_FSYNC_MIN_ENTRIES = 25
+_FSYNC_MIN_SEC = 5.0
+
 # Enricher sources that are online bibliographic databases. Only a hit from
 # one of these confirms an identity "against an online source" — the LLM
 # (llm:*) reasons from memory, and the content/embedded proposals never left
@@ -115,6 +122,9 @@ class ReviewWriter:
 		# online source) rather than a fully detector-clean projection —
 		# surfaced in the analyze summary so the effect is visible.
 		self._verified_prefilled = 0
+		# fsync() pacing (see _append_entry): last time/count we synced.
+		self._last_fsync_at = 0.0
+		self._last_fsync_written = 0
 		output.write_text(_header(0), encoding="utf-8")
 
 		# 4. Writer thread + queue. The file is opened in append-binary mode and
@@ -470,16 +480,33 @@ class ReviewWriter:
 		return entry
 
 	def _append_entry(self, entry: dict) -> None:
-		"""Append one entry's multi-doc YAML chunk to the file (thread-safe)."""
+		"""Append one entry's multi-doc YAML chunk to the file (thread-safe).
+
+		Every entry IS flushed (pushed to the OS / over the wire), but fsync is
+		paced — at most every _FSYNC_MIN_SEC seconds or _FSYNC_MIN_ENTRIES
+		entries, plus once in finish() before close. On NFS an fsync is a
+		synchronous COMMIT RPC to the server; one per entry meant thousands
+		of round trips per run for durability nothing needs (an interrupted
+		run already keeps its partial results by design — only the very last
+		batch, at most a few seconds, could be lost to a hard crash).
+		"""
 		chunk = _render_entry(entry)
 		# Ensure trailing newline so the next --- starts on its own line.
 		if not chunk.endswith("\n"):
 			chunk += "\n"
+		import time as _time
+
 		with self._write_lock:
 			self._fh.write(chunk)
 			self._fh.flush()
-			os.fsync(self._fh.fileno())
-		self._written += 1
+			self._written += 1
+			if (
+				self._written - self._last_fsync_written >= _FSYNC_MIN_ENTRIES
+				or _time.monotonic() - self._last_fsync_at >= _FSYNC_MIN_SEC
+			):
+				os.fsync(self._fh.fileno())
+				self._last_fsync_at = _time.monotonic()
+				self._last_fsync_written = self._written
 
 	@staticmethod
 	def _proposal_preserves_identity(proposed: dict, meta: Any) -> bool:
@@ -536,8 +563,14 @@ class ReviewWriter:
 		except Exception:  # noqa: BLE001
 			log.debug("could not update review header count", exc_info=True)
 
-		# Close the file handle.
+		# Close the file handle — fsync FIRST so the final state is durable
+		# (mid-run fsyncs are paced; this one is unconditional).
 		with self._write_lock:
+			self._fh.flush()
+			try:
+				os.fsync(self._fh.fileno())
+			except OSError:
+				log.debug("final review fsync failed (non-fatal)", exc_info=True)
 			self._fh.close()
 
 		backup_path = str(self._bak) if self._bak is not None else None

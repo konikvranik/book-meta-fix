@@ -41,6 +41,7 @@ import posixpath
 import shutil
 import subprocess
 import tempfile
+import threading
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -84,19 +85,128 @@ class CoverInfo:
 	signals: list[str] = field(default_factory=list)
 
 
+# ---------------------------------------------------------------------------
+# Cover-verdict caching (in-run memo + optional persistent store)
+# ---------------------------------------------------------------------------
+#
+# Decoding a JPEG with Pillow (~72 ms CPU per cover) is by far the most
+# expensive thing the C11 detector does, and ONE analyze run asks for the
+# same cover up to 4 times: the serial OK-filter, the worker's own detect(),
+# and the review writer's projected-clean / identity-verified passes. So the
+# verdict is memoized in-process keyed by (path, mtime_ns, size) and — when a
+# library.Cache is attached via set_cover_cache() — persisted in the cache
+# DB's `covers` table, so the NEXT run skips the decode for unchanged covers
+# too. Same invalidation contract as the books cache: mtime/size change
+# recomputes. Failed decodes (width == 0) are never cached — a transient NFS
+# read error must not freeze a "not an image" verdict for the whole run.
+
+_cover_memo: dict[tuple[str, int, int], CoverInfo] = {}
+_cover_memo_lock = threading.Lock()
+# Persistent store: any object with get_cover(path, mtime_ns, size) -> dict|None
+# and put_cover(path, mtime_ns, size, payload) (library.Cache implements it).
+_cover_store: object | None = None
+_cover_store_lock = threading.Lock()
+
+
+def set_cover_cache(store: object | None) -> None:
+	"""Attach/detach the persistent cover-verdict store (library.Cache).
+
+	Call with None to fall back to the in-run memo only (e.g. --no-cache).
+	Does not clear the in-run memo — stat-keyed entries stay valid.
+	"""
+	global _cover_store
+	with _cover_store_lock:
+		_cover_store = store
+
+
+def clear_cover_cache() -> None:
+	"""Drop the in-run memo (test isolation)."""
+	with _cover_memo_lock:
+		_cover_memo.clear()
+
+
+def _cover_key(path: Path) -> tuple[str, int, int] | None:
+	try:
+		st = path.stat()
+	except OSError:
+		return None
+	return (str(path), st.st_mtime_ns, st.st_size)
+
+
+def _cover_from_payload(d: dict) -> CoverInfo:
+	return CoverInfo(
+		width=int(d.get("width") or 0),
+		height=int(d.get("height") or 0),
+		is_generated=bool(d.get("is_generated")),
+		confidence=float(d.get("confidence") or 0.0),
+		signals=list(d.get("signals") or []),
+	)
+
+
+def _copy_info(info: CoverInfo) -> CoverInfo:
+	"""Defensive copy — callers get their own CoverInfo so a mutated result
+	can never poison the memoized/persisted instance."""
+	return CoverInfo(
+		width=info.width, height=info.height, is_generated=info.is_generated,
+		confidence=info.confidence, signals=list(info.signals),
+	)
+
+
 def analyze_cover(path: str | Path) -> CoverInfo:
 	"""Analyze a cover image and determine whether it looks auto-generated.
 
 	Returns a CoverInfo with is_generated flag and the signals that fired.
 	Never raises — on any error returns CoverInfo(is_generated=False).
+	Results are cached (see the module comment above): unchanged files are
+	never decoded twice in one run, and not at all across runs when a
+	persistent store is attached.
 	"""
+	path = Path(path)
+	key = _cover_key(path)
+	if key is not None:
+		with _cover_memo_lock:
+			hit = _cover_memo.get(key)
+		if hit is not None:
+			return _copy_info(hit)
+		with _cover_store_lock:
+			store = _cover_store
+		if store is not None:
+			try:
+				payload = store.get_cover(key[0], key[1], key[2])
+			except Exception:  # noqa: BLE001 - cache must never break analysis
+				payload = None
+			if payload is not None:
+				info = _cover_from_payload(payload)
+				with _cover_memo_lock:
+					_cover_memo[key] = info
+				return _copy_info(info)
+	info = _analyze_cover_uncached(path)
+	# width == 0 means the decode failed — never cache (see module comment).
+	if key is not None and info.width:
+		with _cover_memo_lock:
+			_cover_memo[key] = info
+		with _cover_store_lock:
+			store = _cover_store
+		if store is not None:
+			try:
+				store.put_cover(key[0], key[1], key[2], {
+					"width": info.width, "height": info.height,
+					"is_generated": info.is_generated,
+					"confidence": info.confidence, "signals": info.signals,
+				})
+			except Exception:  # noqa: BLE001
+				log.debug("cover cache store failed for %s", path, exc_info=True)
+	return _copy_info(info)
+
+
+def _analyze_cover_uncached(path: Path) -> CoverInfo:
+	"""Pixel analysis of *path* — the pre-cache body of analyze_cover."""
 	try:
 		from PIL import Image
 	except ImportError:
 		log.debug("Pillow not available; skipping cover analysis")
 		return CoverInfo()
 
-	path = Path(path)
 	info = CoverInfo()
 	try:
 		with Image.open(path) as img:

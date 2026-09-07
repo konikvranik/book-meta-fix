@@ -72,7 +72,17 @@ src/book_meta_fix/
   config.py        Config dataclass + .env walk-up loader
   i18n.py          gettext wrapper: _() with English msgids, cs catalog, locale detect
   readers.py       parse metadata.json (primary) / metadata.opf (fallback) / path
-  library.py       traverse library tree + SQLite cache
+  library.py       traverse library tree + SQLite cache (parallel scan: the walk
+                   splits per top-level dir and the per-folder cache-hit/parse/
+                   uuid-mint work fans out over a thread pool — scan_workers/
+                   BMF_SCAN_WORKERS/--scan-workers, default 8, 1 = serial; Cache
+                   is thread-safe: one connection, check_same_thread=False +
+                   _lock around SQL, file I/O outside the lock, results sorted
+                   back to path order; also hosts the `covers` table — the
+                   persistent C11 verdict store keyed (path, mtime_ns, size)
+                   that covers.analyze_cover attaches to via set_cover_cache,
+                   so an unchanged cover.jpg is never Pillow-decoded twice,
+                   in-run (memo) or across runs)
   detectors.py     rules C1–C14 → Diagnosis (C13 = location mismatch; exists only
                    when detect() gets library_root/pattern kwargs; C14 = series
                    order glued into the series NAME "Mark Stone #73" →
@@ -104,9 +114,13 @@ src/book_meta_fix/
                    processing set is known — BEFORE the first book, so a bar shows
                    its total/ETA immediately instead of pulsing at 0/None until
                    the first LLM-bound completion — then (done, total) per book;
-                   scan_progress_callback is forwarded to scan_library so analyze
-                   renders the (minutes-long on NFS) scan as its own labelled
-                   phase before the processing bar (cli.py swaps the rich tasks)
+                   scan_progress_callback is forwarded to scan_library (workers =
+                   scan_workers) so analyze renders the scan as its own labelled
+                   phase before the processing bar (cli.py swaps the rich tasks).
+                   The incremental OK-filter (_filter_not_ok) fans its detect()
+                   calls over the same pool — C11 cover decode dominates it and
+                   Pillow releases the GIL — and covers.analyze_cover's memo +
+                   persistent cache make repeat decodes free
   llm.py           Z.AI provider: LeakyBucket + global 429 cooldown + reconcile_loop + tolerant JSON
   review_writer.py streaming review.yaml writer (queue + writer thread)
   review.py        parse review.yaml (multi-doc + legacy list) + update_paths

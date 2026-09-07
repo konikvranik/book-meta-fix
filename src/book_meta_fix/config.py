@@ -75,6 +75,14 @@ class Config:
 	# `bmf abs-rescan --abs-workers`.
 	abs_workers: int = 4
 
+	# Threads for the library scan itself (tree walk + per-folder metadata
+	# reads + uuid minting). The scan is NFS-latency-bound, not CPU-bound —
+	# every readdir/stat/open is a network round trip — so a small pool cuts
+	# minutes to tens of seconds; 8 measured as a good default. 1 restores
+	# the historical serial scan. Override via BMF_SCAN_WORKERS or
+	# `bmf analyze --scan-workers`.
+	scan_workers: int = 8
+
 	# API rate limit / timeout
 	api_rate_sec: float = DEFAULT_API_RATE_SEC
 	api_timeout: float = DEFAULT_API_TIMEOUT
@@ -208,6 +216,11 @@ class Config:
 		if (v := os.environ.get("BMF_ABS_WORKERS")) is not None:
 			try:
 				cfg.abs_workers = max(1, int(v))
+			except ValueError:
+				pass
+		if (v := os.environ.get("BMF_SCAN_WORKERS")) is not None:
+			try:
+				cfg.scan_workers = max(1, int(v))
 			except ValueError:
 				pass
 		if (v := os.environ.get("BMF_OPENLIBRARY")) is not None:

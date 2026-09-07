@@ -259,7 +259,7 @@ class TestStatsSourceBreakdown:
 		from book_meta_fix import pipeline as pmod
 		from book_meta_fix.pipeline import run_pipeline
 
-		with patch.object(pmod, "scan_library", lambda lib, cache=None, progress_callback=None: []):
+		with patch.object(pmod, "scan_library", lambda lib, cache=None, progress_callback=None, workers=8: []):
 			stats: dict = {}
 			run_pipeline(tmp_path, cache=None, workers=1, stats=stats)
 

@@ -873,3 +873,41 @@ class TestC14PrefillAndTolerance:
 		# the split proposal rides along (it does not change title/author).
 		assert parsed[0].action == "accept"
 		assert parsed[0].proposed["series"] == "Mark Stone"
+
+
+class TestFsyncBatching:
+	"""fsync is paced (at most every _FSYNC_MIN_ENTRIES entries / _FSYNC_MIN_SEC
+	seconds) with one unconditional sync in finish() — an fsync on NFS is a
+	synchronous COMMIT RPC, so one per entry meant thousands of round trips
+	per run. Everything must still be on disk after finish()."""
+
+	def test_many_entries_fewer_fsyncs_than_entries(self, tmp_path, monkeypatch):
+		import book_meta_fix.review_writer as rwmod
+
+		calls = {"n": 0}
+		real_fsync = rwmod.os.fsync
+
+		def counting_fsync(fd):
+			calls["n"] += 1
+			return real_fsync(fd)
+
+		monkeypatch.setattr(rwmod.os, "fsync", counting_fsync)
+		out = tmp_path / "review.yaml"
+		writer = ReviewWriter(out, library_root=tmp_path)
+		n = 60
+		for i in range(n):
+			writer.submit(_result(i))
+		writer.finish()
+		assert calls["n"] < n  # paced mid-run + exactly one final sync
+		# Durability contract: every entry is in the file after finish().
+		entries = [e for e in parse_review(out) if e is not None]
+		assert len(entries) == n
+
+	def test_small_run_still_flushes_everything(self, tmp_path):
+		out = tmp_path / "review.yaml"
+		writer = ReviewWriter(out, library_root=tmp_path)
+		for i in range(3):
+			writer.submit(_result(i))
+		writer.finish()
+		entries = [e for e in parse_review(out) if e is not None]
+		assert len(entries) == 3

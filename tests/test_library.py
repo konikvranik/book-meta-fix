@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from book_meta_fix.library import Cache, iter_book_folders
+from book_meta_fix.library import Cache, iter_book_folders, scan_library
 from book_meta_fix.readers import read_book_folder
 
 
@@ -240,3 +240,112 @@ class TestCacheError:
 
 		with pytest.raises(CacheError, match="Cannot create directory"):
 			Cache(bad_db)
+
+
+class TestParallelScan:
+	"""workers>1 scans in a thread pool (walk + per-folder work). Results,
+	ordering and the cache must behave exactly like the serial scan."""
+
+	@staticmethod
+	def _valid_book(folder: Path) -> None:
+		folder.mkdir(parents=True)
+		(folder / "metadata.json").write_text(
+			'{"title": "Kniha", "authors": ["Autor"]}\n', encoding="utf-8",
+		)
+
+	def _library(self, tmp_path: Path, per_author: int = 3) -> Path:
+		for a in ("Autor A", "Autor B", "Autor C"):
+			for i in range(per_author):
+				self._valid_book(tmp_path / a / f"Kniha {i} ({i})")
+		return tmp_path
+
+	def test_parallel_matches_serial(self, tmp_path: Path) -> None:
+		lib = self._library(tmp_path)
+		serial = scan_library(lib, use_cache=False, workers=1)
+		parallel = scan_library(lib, use_cache=False, workers=4)
+		assert sorted(m.path for m in serial) == sorted(m.path for m in parallel)
+		assert len(parallel) == 9
+
+	def test_parallel_result_is_path_sorted(self, tmp_path: Path) -> None:
+		# Completion order is nondeterministic; the RESULT must not be.
+		lib = self._library(tmp_path)
+		books = scan_library(lib, use_cache=False, workers=4)
+		paths = [m.path for m in books]
+		assert paths == sorted(paths)
+
+	def test_parallel_progress_counts_monotonic(self, tmp_path: Path) -> None:
+		lib = self._library(tmp_path)
+		seen: list[int] = []
+		scan_library(lib, use_cache=False, workers=4, progress_callback=lambda d, t: seen.append(d))
+		assert seen == sorted(seen)
+		assert seen[-1] == 9
+		assert len(seen) == 9
+
+	def test_parallel_scan_with_cache_second_run_all_cached(self, tmp_path: Path) -> None:
+		lib = self._library(tmp_path)
+		cache = Cache(tmp_path / "cache.db")
+		first = scan_library(lib, cache=cache, workers=4)
+		second = scan_library(lib, cache=cache, workers=4)
+		assert [m.path for m in first] == [m.path for m in second]
+		# Every book carried a uuid through ensure_uuid -> all rows cached.
+		assert all(m.uuid is not None for m in first)
+		cache.close()
+
+	def test_cache_access_from_threads(self, tmp_path: Path) -> None:
+		"""Concurrent put/get across threads must not raise (the scan pool
+		shares one connection; check_same_thread=False + _lock guard it)."""
+		from concurrent.futures import ThreadPoolExecutor
+
+		lib = self._library(tmp_path, per_author=4)
+		folders = [p for p in lib.rglob("metadata.json")]
+		cache = Cache(tmp_path / "cache.db")
+
+		def put_one(json_path: Path) -> None:
+			meta = read_book_folder(json_path.parent)
+			# Unique per folder (name alone collides across author dirs and
+			# INSERT OR REPLACE on the uuid PK would silently drop rows).
+			meta.uuid = "u-" + str(json_path.parent.relative_to(tmp_path))
+			cache.put(meta)
+
+		with ThreadPoolExecutor(max_workers=4) as pool:
+			list(pool.map(put_one, folders))
+		cache.commit()
+
+		def get_one(json_path: Path) -> bool:
+			return cache.get(json_path.parent) is not None
+
+		with ThreadPoolExecutor(max_workers=4) as pool:
+			hits = list(pool.map(get_one, folders))
+		assert all(hits)
+		cache.close()
+
+
+class TestCoversTable:
+	"""The persistent cover-verdict table (path + mtime_ns + size -> payload)
+	that covers.analyze_cover attaches to via set_cover_cache."""
+
+	def test_put_get_roundtrip(self, tmp_path: Path) -> None:
+		cache = Cache(tmp_path / "cache.db")
+		cover = tmp_path / "book" / "cover.jpg"
+		payload = {"width": 1200, "height": 1600, "is_generated": True, "confidence": 0.7, "signals": ["few_colours (3)"]}
+		cache.put_cover(cover, 111, 222, payload)
+		assert cache.get_cover(cover, 111, 222) == payload
+
+	def test_mtime_or_size_mismatch_is_miss(self, tmp_path: Path) -> None:
+		cache = Cache(tmp_path / "cache.db")
+		cover = tmp_path / "book" / "cover.jpg"
+		cache.put_cover(cover, 111, 222, {"width": 10})
+		assert cache.get_cover(cover, 999, 222) is None
+		assert cache.get_cover(cover, 111, 999) is None
+		assert cache.get_cover(tmp_path / "other.jpg", 111, 222) is None
+		cache.close()
+
+	def test_corrupt_payload_is_miss(self, tmp_path: Path) -> None:
+		cache = Cache(tmp_path / "cache.db")
+		cover = tmp_path / "book" / "cover.jpg"
+		cache.conn.execute(
+			"INSERT INTO covers(path, mtime_ns, size, payload) VALUES (?,?,?,?)",
+			(str(cover), 1, 2, "not json{"),
+		)
+		assert cache.get_cover(cover, 1, 2) is None
+		cache.close()

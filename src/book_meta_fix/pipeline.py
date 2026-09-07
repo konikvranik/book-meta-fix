@@ -29,7 +29,7 @@ from .detectors import all_diagnoses
 from .detectors import detect as detect_fn
 from .enrichers import EnrichedMeta, Enricher
 from .extractors import ExtractedMeta
-from .library import Cache, scan_library
+from .library import DEFAULT_SCAN_WORKERS, Cache, scan_library
 from .models import BookMeta, Confidence, Diagnosis, Verdict
 from .review import _COVER_CATEGORIES, _migrate_entry, build_review, parse_review, prune_review, update_paths
 from .verifier import (
@@ -45,6 +45,22 @@ from .writers import write_book_meta
 log = logging.getLogger(__name__)
 
 
+def _filter_not_ok(books: list[BookMeta], detect: Any, workers: int) -> list[BookMeta]:
+	"""Keep only books whose detect() verdict is not OK (order preserved).
+
+	The detector's per-book cost is dominated by the C11 cover pixel analysis,
+	so with *workers* > 1 the detect calls fan out over a thread pool (Pillow
+	releases the GIL while decoding; the cover verdict itself is memoized in
+	covers.analyze_cover). pool.map preserves input order, so the selection is
+	identical to the serial list comprehension.
+	"""
+	if workers <= 1 or len(books) <= 1:
+		return [b for b in books if detect(b).verdict != Verdict.OK]
+	with ThreadPoolExecutor(max_workers=min(workers, len(books))) as pool:
+		verdicts = list(pool.map(detect, books))
+	return [b for b, v in zip(books, verdicts, strict=True) if v.verdict != Verdict.OK]
+
+
 def run_pipeline(
 	library: Path,
 	cache: Cache | None = None,
@@ -56,6 +72,7 @@ def run_pipeline(
 	llm_categories: tuple[str, ...] = ("ALL",),
 	limit: int | None = None,
 	workers: int = 10,
+	scan_workers: int = DEFAULT_SCAN_WORKERS,
 	progress_callback: Any = None,
 	scan_progress_callback: Any = None,
 	only_needs_review: bool = True,
@@ -104,6 +121,8 @@ def run_pipeline(
 	*workers* controls parallelism: each book's expensive I/O (content
 	extraction, online lookup, LLM call) runs in a ThreadPoolExecutor with
 	this many workers. Output order matches input order.
+	*scan_workers* threads parallelize the initial library scan (tree walk +
+	per-folder reads — NFS latency-bound; 1 restores the serial scan).
 	*progress_callback* (if given) is called with (0, total) once the
 	processing set is known — BEFORE the first book starts — and then with
 	(i, total) after each book. The upfront call lets a progress bar show
@@ -135,7 +154,9 @@ def run_pipeline(
 	metadata). Without *location_root* detection stays location-blind — the
 	historic behaviour report/epubgen rely on.
 	"""
-	all_books = scan_library(library, cache=cache, progress_callback=scan_progress_callback)
+	all_books = scan_library(
+		library, cache=cache, progress_callback=scan_progress_callback, workers=scan_workers,
+	)
 	if skip_verified:
 		before = len(all_books)
 		all_books = [b for b in all_books if not b.verified]
@@ -151,11 +172,15 @@ def run_pipeline(
 	else:
 		_detect = detect_fn
 	# Apply the detector cheaply to filter out already-OK books (incremental).
-	# This is fast (no I/O — just regex/heuristics over metadata).
+	# NOT free: rule_generated_cover decodes cover.jpg with Pillow (~70 ms CPU
+	# per book), so over thousands of books this filter is minutes of serial
+	# CPU. It runs in a thread pool (Pillow releases the GIL, measured ~3.2x
+	# on 4 threads) and analyze_cover's memo/persistent cache makes unchanged
+	# covers nearly free after the first run.
 	# verify_ok overrides this: OK books must be kept so they can be verified
 	# against their content (audit mode).
 	if only_needs_review and not verify_ok:
-		books = [b for b in all_books if _detect(b).verdict != Verdict.OK]
+		books = _filter_not_ok(all_books, _detect, workers)
 		log.info(
 			"pipeline: %d total books, %d already OK -> %d to process",
 			len(all_books), len(all_books) - len(books), len(books),

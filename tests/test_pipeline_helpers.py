@@ -461,6 +461,60 @@ class TestProgressCallbacks:
 		assert {r[0].uuid for r in results} == {"u1", "u2"}
 
 
+class TestFilterNotOk:
+	"""The incremental OK-filter fans out over a thread pool (the C11 cover
+	decode dominates its cost and Pillow releases the GIL). Selection and
+	order must be IDENTICAL to the serial list comprehension."""
+
+	@staticmethod
+	def _books(n: int = 20) -> list[BookMeta]:
+		return [
+			BookMeta(calibre_id=i, uuid=f"u{i}", title=f"B{i}", authors=["A"], path=f"/lib/B{i} ({i})")
+			for i in range(n)
+		]
+
+	@staticmethod
+	def _detect_odd_needs_review(meta: BookMeta) -> Diagnosis:
+		# Odd calibre_ids -> OK verdict, even -> NEEDS_REVIEW (filtered IN).
+		verdict = Verdict.OK if meta.calibre_id % 2 else Verdict.NEEDS_REVIEW
+		return Diagnosis(category="C2", reason="r", confidence=Confidence.HIGH, verdict=verdict)
+
+	def test_parallel_selection_matches_serial(self):
+		from book_meta_fix.pipeline import _filter_not_ok
+
+		books = self._books()
+		serial = _filter_not_ok(books, self._detect_odd_needs_review, workers=1)
+		parallel = _filter_not_ok(books, self._detect_odd_needs_review, workers=4)
+		assert [b.calibre_id for b in serial] == [b.calibre_id for b in parallel]
+		# Order preserved, not completion order.
+		assert [b.calibre_id for b in parallel] == sorted(b.calibre_id for b in parallel)
+
+	def test_detect_runs_once_per_book(self):
+		from book_meta_fix.pipeline import _filter_not_ok
+
+		books = self._books(6)
+		calls: list[int] = []
+
+		def counting_detect(meta: BookMeta) -> Diagnosis:
+			calls.append(meta.calibre_id)
+			return self._detect_odd_needs_review(meta)
+
+		_filter_not_ok(books, counting_detect, workers=4)
+		assert sorted(calls) == sorted(b.calibre_id for b in books)
+
+	def test_single_book_stays_serial(self):
+		from book_meta_fix.pipeline import _filter_not_ok
+
+		one = self._books(1)
+
+		def ok_detect(_meta: BookMeta) -> Diagnosis:
+			return Diagnosis(category="OK", reason="clean", confidence=Confidence.HIGH, verdict=Verdict.OK)
+
+		# No pool is spawned for a single book (workers is capped by len());
+		# the serial path must still select correctly.
+		assert _filter_not_ok(one, ok_detect, workers=8) == []
+
+
 class TestLocationAwarePipeline:
 	"""With location_root the incremental filter sees C13; without it, a
 	misplaced-but-clean book stays OK (location-blind) and is skipped."""

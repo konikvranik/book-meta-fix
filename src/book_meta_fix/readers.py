@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -149,24 +150,40 @@ def _parse_path(folder: Path) -> BookMeta:
 
 
 def _collect_formats(folder: Path, meta: BookMeta) -> None:
-	"""List book file extensions present and pick a primary file for extraction."""
+	"""List book file extensions present and pick a primary file for extraction.
+
+	ONE scandir pass, DirEntry-cached: on NFS each directory listing is a
+	round trip and the old shape paid it twice (suffix scan + sorted
+	re-iteration for the primary file). File order within the folder is the
+	readdir order, exactly what iterdir produced before.
+	"""
 	pref = list(EBOOK_EXTS)
 	seen: list[str] = []
-	for entry in folder.iterdir():
-		if not entry.is_file():
+	primary: str | None = None
+	primary_rank = len(pref)  # preference rank of the current primary pick
+	with os.scandir(folder) as it:
+		entries = list(it)
+	for entry in entries:
+		try:
+			if not entry.is_file():
+				continue
+		except OSError:
 			continue
-		suffix = entry.suffix.lower()
-		if suffix in pref:
-			seen.append(suffix)
-	# Sort by preference
+		suffix = Path(entry.name).suffix.lower()
+		if suffix not in pref:
+			continue
+		seen.append(suffix)
+		# Primary = the best-ranked book file; first wins on a tie (matches
+		# the old stable sort over the same readdir order).
+		rank = pref.index(suffix)
+		if primary is None or rank < primary_rank:
+			primary = entry.path
+			primary_rank = rank
+	# Sort by preference (stable — duplicates keep their file order).
 	seen.sort(key=lambda s: pref.index(s) if s in pref else 999)
 	meta.formats = seen
-	if seen:
-		# primary_file = the first preferred format actually present
-		for entry in sorted(folder.iterdir(), key=lambda e: pref.index(e.suffix.lower()) if e.suffix.lower() in pref else 999):
-			if entry.is_file() and entry.suffix.lower() in pref:
-				meta.primary_file = str(entry)
-				break
+	if primary:
+		meta.primary_file = primary
 
 
 def _fill_from_json(path: Path, meta: BookMeta) -> None:

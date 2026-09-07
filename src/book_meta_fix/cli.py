@@ -55,9 +55,14 @@ def _validate_library(library: Path) -> None:
 def _open_cache(db_path: Path, no_cache: bool = False) -> Cache | None:
 	"""Safely instantiate Cache, handling unmounted/inaccessible paths gracefully."""
 	if no_cache:
+		# Without the SQLite cache there is no persistent cover-verdict store
+		# either — detach any previously attached one (tests reuse the module).
+		from .covers import set_cover_cache
+
+		set_cover_cache(None)
 		return None
 	try:
-		return Cache(db_path)
+		cache = Cache(db_path)
 	except CacheError as e:
 		console.print(
 			f"[bold red]{_('Error:')}[/bold red] "
@@ -66,6 +71,12 @@ def _open_cache(db_path: Path, no_cache: bool = False) -> Cache | None:
 			f"[dim]{e}[/dim]"
 		)
 		sys.exit(1)
+	# Share the cache with the cover analyzer: unchanged cover.jpg files then
+	# skip the (expensive) Pillow decode in every command that detects.
+	from .covers import set_cover_cache
+
+	set_cover_cache(cache)
+	return cache
 
 # Initialize the translation catalog from the environment BEFORE the click
 # decorators below run: their `help=` texts are evaluated at import time, so
@@ -113,13 +124,16 @@ def main(verbose: bool) -> None:
 @click.option("--library", "library", type=click.Path(file_okay=False, path_type=Path), help=_("Library root (default: $BMF_LIBRARY or ~/Books)"))
 @click.option("--no-cache", is_flag=True, help=_("Disable SQLite cache (force full re-parse)"))
 @click.option("--limit", type=int, default=None, help=_("Process only the first N books (for testing)"))
-def scan(library: Path | None, no_cache: bool, limit: int | None) -> None:
+@click.option("--scan-workers", "scan_workers", type=int, default=None, help=_("Parallel threads for the library scan (tree walk + metadata reads; NFS latency-bound). Default 8, or BMF_SCAN_WORKERS. 1 = serial scan."))
+def scan(library: Path | None, no_cache: bool, limit: int | None, scan_workers: int | None) -> None:
 	"""Scan the library and print summary statistics."""
 	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 
 	cfg = Config.from_env()
 	if library is not None:
 		cfg.library = library
+	if scan_workers is not None:
+		cfg.scan_workers = max(1, scan_workers)
 
 	_validate_library(cfg.library)
 	console.print(f"[bold]Scanning[/bold] [cyan]{cfg.library}[/cyan]", highlight=False)
@@ -141,7 +155,7 @@ def scan(library: Path | None, no_cache: bool, limit: int | None) -> None:
 				progress.update(task_id, total=total)
 			progress.update(task_id, completed=done)
 
-		books = scan_library(cfg.library, cache=cache, use_cache=not no_cache, progress_callback=_cb)
+		books = scan_library(cfg.library, cache=cache, use_cache=not no_cache, progress_callback=_cb, workers=cfg.scan_workers)
 
 	if limit is not None:
 		books = books[:limit]
@@ -197,7 +211,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 				progress.update(task_id, total=total)
 			progress.update(task_id, completed=done)
 
-		books = scan_library(cfg.library, cache=cache, use_cache=not no_cache, progress_callback=_scan_cb)
+		books = scan_library(cfg.library, cache=cache, use_cache=not no_cache, progress_callback=_scan_cb, workers=cfg.scan_workers)
 	if limit is not None:
 		books = books[:limit]
 	if not books:
@@ -250,6 +264,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--llm", "use_llm", is_flag=True, help=_("Enable LLM reconciliation (needs ZAI_API_KEY or BMF_LLM_MOCK=1)"))
 @click.option("--llm-categories", default="ALL", help=_("Comma-separated categories to send to LLM, or 'ALL' (default). ALL = every category except C9 (legitimate anonyms like the Bible, where an LLM-invented author would be wrong). Each book is one LLM request that returns all fields at once, so the cost is per-book, not per-category."))
 @click.option("--workers", "-w", type=int, default=10, help=_("Parallel workers for I/O (extract/LLM/enrich). Default 10."))
+@click.option("--scan-workers", "scan_workers", type=int, default=None, help=_("Parallel threads for the library scan (tree walk + metadata reads; NFS latency-bound). Default 8, or BMF_SCAN_WORKERS. 1 = serial scan."))
 @click.option("--llm-min-interval", "llm_min_interval", type=float, default=None, help=_("Minimum seconds between LLM requests (RPM throttle, default 2.0 = ~30 RPM). Decoupled from --workers: cheap I/O still runs at full worker count. Lower (e.g. 1.0 = 60 RPM) on a higher Z.AI tier; raise (e.g. 4.0 = 15 RPM) if you still hit 429."))
 @click.option("--llm-model", "llm_model", default=None, help=_("Primary model for the LLM loop (default glm-4.7-flash, the free first attempt; with --no-llm-loop the fallback-quality model instead). Alternatives: glm-4.6, glm-4.5-air, glm-4.5-flash. See README 'LLM model choice' for the token/quality tradeoffs measured by scripts/llm_experiment.py."))
 @click.option("--llm-reasoning-effort", "llm_reasoning_effort", default=None, help=_("reasoning_effort for GLM-5.x models: low (default) | medium | max. Lower cuts reasoning tokens ~60%% vs max. Ignored by GLM-4.x (use --llm-thinking)."))
@@ -260,7 +275,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--llm-rate-limit-base", "llm_rate_limit_base", type=float, default=None, help=_("Base seconds of the global cooldown applied when a 429 is seen (default 5). When ANY worker hits a 429, ALL workers pause this long; the cooldown escalates 5/10/20/... with consecutive 429s, honours the server Retry-After when longer, and is capped by --llm-rate-limit-max. Higher = safer but slower; lower = more 429 risk."))
 @click.option("--llm-rate-limit-max", "llm_rate_limit_max", type=float, default=None, help=_("Cap (seconds) on the escalating 429 cooldown (default 60). Prevents a sustained outage from parking workers indefinitely."))
 @click.option("--llm-max-inflight", "llm_max_inflight", type=int, default=None, help=_("Hard cap on LLM requests running at the same instant (default 3). The Z.AI coding plan admits only ~5 concurrent requests per account (interactive clients draw from the same ceiling), so a deep fallback herd gets 429/1302 storms — and false 1113 'insufficient balance' — no matter how slow the drip is. Workers queue on this instead of being rejected. Flash-family models get a stricter sub-cap of min(2, this value)."))
-def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, use_legie: bool, abs_czech_url: str | None, skip_verify: bool, verify_ok: bool, no_strict_verify: bool, accept_missing: bool, pattern: str | None, no_check_location: bool, recheck_ok: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int, llm_min_interval: float | None, llm_model: str | None, llm_reasoning_effort: str | None, llm_thinking: str | None, no_llm_loop: bool, llm_fallback_model: str | None, llm_burst: float | None, llm_rate_limit_base: float | None, llm_rate_limit_max: float | None, llm_max_inflight: int | None) -> None:
+def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, use_legie: bool, abs_czech_url: str | None, skip_verify: bool, verify_ok: bool, no_strict_verify: bool, accept_missing: bool, pattern: str | None, no_check_location: bool, recheck_ok: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int, scan_workers: int | None, llm_min_interval: float | None, llm_model: str | None, llm_reasoning_effort: str | None, llm_thinking: str | None, no_llm_loop: bool, llm_fallback_model: str | None, llm_burst: float | None, llm_rate_limit_base: float | None, llm_rate_limit_max: float | None, llm_max_inflight: int | None) -> None:
 	"""Run full pipeline and generate a review.yaml for NEEDS_REVIEW books."""
 	from rich.progress import BarColumn, Progress, SpinnerColumn, TaskID, TextColumn, TimeRemainingColumn
 
@@ -271,6 +286,8 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 	cfg = Config.from_env()
 	if library is not None:
 		cfg.library = library
+	if scan_workers is not None:
+		cfg.scan_workers = max(1, scan_workers)
 	_validate_library(cfg.library)
 	cache = _open_cache(cfg.cache_db, no_cache=no_cache)
 	out = output or cfg.review_file
@@ -353,7 +370,7 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 		if recheck_ok:
 			from .writers import clear_verified
 
-			books = scan_library(cfg.library, cache=cache, use_cache=not no_cache, progress_callback=_scan_cb)
+			books = scan_library(cfg.library, cache=cache, use_cache=not no_cache, progress_callback=_scan_cb, workers=cfg.scan_workers)
 			cleared = 0
 			for b in books:
 				if b.verified:
@@ -435,6 +452,7 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 			llm_categories=tuple(c.strip() for c in llm_categories.split(",") if c.strip()) if use_llm else (),
 			limit=limit,
 			workers=workers,
+			scan_workers=cfg.scan_workers,
 			progress_callback=_proc_cb,
 			scan_progress_callback=_scan_cb,
 			review_writer=review_writer,
@@ -815,7 +833,7 @@ def epubgen(library: Path | None, no_cache: bool, limit: int | None, do_apply: b
 				progress.update(task_id, total=total)
 			progress.update(task_id, completed=done)
 
-		books = scan_library(cfg.library, cache=cache, use_cache=not no_cache, progress_callback=_scan_cb)
+		books = scan_library(cfg.library, cache=cache, use_cache=not no_cache, progress_callback=_scan_cb, workers=cfg.scan_workers)
 	if cache is not None:
 		cache.close()
 	if limit is not None:
@@ -939,7 +957,7 @@ def crosscheck(library: Path | None, no_cache: bool, limit: int | None, needfix_
 					progress.update(task_id, total=total)
 				progress.update(task_id, completed=done)
 
-			books = scan_library(cfg.library, cache=cache, use_cache=not no_cache, progress_callback=_scan_cb)
+			books = scan_library(cfg.library, cache=cache, use_cache=not no_cache, progress_callback=_scan_cb, workers=cfg.scan_workers)
 		if limit is not None:
 			books = books[:limit]
 
@@ -1110,7 +1128,7 @@ def strip_covers(library: Path | None, no_cache: bool, limit: int | None, do_app
 					progress.update(task_id, total=total)
 				progress.update(task_id, completed=done)
 
-			books = scan_library(cfg.library, cache=cache, use_cache=not no_cache, progress_callback=_scan_cb)
+			books = scan_library(cfg.library, cache=cache, use_cache=not no_cache, progress_callback=_scan_cb, workers=cfg.scan_workers)
 		if limit is not None:
 			books = books[:limit]
 

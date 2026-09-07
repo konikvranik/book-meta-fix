@@ -423,3 +423,95 @@ class TestExtractMbp:
 
 		assert ".mbp" in EBOOK_EXTS
 		assert EBOOK_EXTS[-1] == ".mbp"
+
+
+class TestTxtBoundedReads:
+	"""extract_txt must read ONLY the bounded windows (15 KB head + 5 KB tail).
+	The pre-fix code read the WHOLE file into memory twice — catastrophic for
+	multi-MB TXTs on NFS."""
+
+	def _make_txt(self, tmp_path: Path, size: int, head: str, tail: str, name: str = "book.txt") -> Path:
+		f = tmp_path / name
+		middle = "x" * (size - len(head.encode()) - len(tail.encode()))
+		f.write_text(head + middle + tail, encoding="utf-8")
+		return f
+
+	def test_bytes_read_are_bounded(self, tmp_path: Path, monkeypatch) -> None:
+		import builtins
+
+		f = self._make_txt(tmp_path, 100_000, "Titul knihy\n", "\nkonec\n")
+		read_bytes = {"n": 0}
+		real_open = builtins.open
+
+		def counting_open(file, mode="r", *args, **kwargs):
+			fh = real_open(file, mode, *args, **kwargs)
+			if "b" in mode and hasattr(fh, "read"):
+				real_read = fh.read
+
+				def counted_read(*a, **k):
+					data = real_read(*a, **k)
+					read_bytes["n"] += len(data) if data else 0
+					return data
+
+				fh.read = counted_read  # type: ignore[method-assign]
+			return fh
+
+		monkeypatch.setattr(builtins, "open", counting_open)
+		result = extract_txt(f)
+		monkeypatch.undo()
+		assert result.first_page_text  # semantics intact
+		# 15 KB head + 5 KB tail (+seek slack) for a 100 KB file.
+		assert read_bytes["n"] <= 15000 + 5000 + 8192
+
+	def test_semantics_head_and_tail(self, tmp_path: Path) -> None:
+		# ISBN in the head is found; a head without one falls back to the tail.
+		f = self._make_txt(tmp_path, 60_000, "ISBN 978-80-720-7232-3\n", "\nkonec\n")
+		assert extract_txt(f).isbn_from_text is not None
+		f2 = self._make_txt(tmp_path, 60_000, "Babička\nBožena Němcová.\n", "\nISBN 978-80-720-7232-3\n", name="book2.txt")
+		# head has no ISBN and is > 8000 bytes -> the tail is scanned
+		assert extract_txt(f2).isbn_from_text is not None
+
+
+class TestEpubSingleOpfRead:
+	"""extract_epub reads the OPF member ONCE and every spine member at most
+	ONCE per extraction. The pre-fix shape re-read+re-parsed the OPF 4x and
+	the first spine items 3x — each read is an NFS round trip."""
+
+	def test_opf_and_spine_members_read_once(self, tmp_path: Path) -> None:
+		import book_meta_fix.extractors as exmod
+		from book_meta_fix.extractors import extract_epub
+
+		items = [f"<p>kapitola {i} — {('text ' * 40)}</p>" for i in range(12)]
+		items.append("<p>Colophon. ISBN 978-80-720-7232-3.</p>")
+		epub = tmp_path / "book.epub"
+		_build_epub(epub, items)
+
+		counts: dict[str, int] = {}
+		real_zipfile = exmod.zipfile.ZipFile
+
+		class CountingZipFile(real_zipfile):  # type: ignore[misc, valid-type]
+			def read(self, name):
+				counts[name] = counts.get(name, 0) + 1
+				return super().read(name)
+
+		monkeypatch_target = "book_meta_fix.extractors.zipfile.ZipFile"
+		import pytest
+
+		with pytest.MonkeyPatch.context() as mp:
+			mp.setattr(monkeypatch_target, CountingZipFile)
+			result = extract_epub(epub)
+
+		assert result.error is None
+		assert result.first_page_text
+		# The OPF is fetched exactly once (was 4x).
+		assert counts.get("content.opf") == 1
+		# Spine members in all three windows (first 8 / first 5+last 5 / first
+		# 15) are fetched exactly once each (c0 was 3x before).
+		for i in range(5):
+			assert counts.get(f"c{i}.xhtml") == 1, f"c{i}.xhtml read more than once"
+		for i in range(5, 8):
+			assert counts.get(f"c{i}.xhtml") == 1
+		assert counts.get("c12.xhtml") == 1  # the last-5 window tail item
+		# And the semantics survived: ISBN from the colophon, 13 items joined.
+		assert result.isbn_from_text and "9788072072323" in result.isbn_from_text
+		assert result.broader_text and len(result.broader_text) > len(result.first_page_text)

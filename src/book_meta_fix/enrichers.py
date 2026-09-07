@@ -67,7 +67,17 @@ class EnrichedMeta:
 
 
 class RateLimiter:
-	"""Simple per-host rate limiter (min interval between calls)."""
+	"""Per-host rate limiter (min interval between call STARTS).
+
+	The wait sleeps OUTSIDE the lock: under it we only RESERVE the next
+	start slot for the host (advancing ``_last[host]`` into the future), so
+	N queued callers immediately learn their own slots and park in parallel.
+	The previous shape (hold the lock across time.sleep) serialized every
+	worker of every host behind one global sleep — with 10 workers the whole
+	enrichment stage crawled at one call per interval no matter the host.
+	Per-host spacing is preserved exactly: reserved starts are >= min_interval
+	apart, same as a serial sleeper would produce.
+	"""
 
 	def __init__(self) -> None:
 		self._last: dict[str, float] = {}
@@ -76,11 +86,13 @@ class RateLimiter:
 	def wait(self, host: str, min_interval: float) -> None:
 		with self._lock:
 			now = time.monotonic()
-			last = self._last.get(host, 0.0)
-			sleep = max(0.0, last + min_interval - now)
-			if sleep > 0:
-				time.sleep(sleep)
-			self._last[host] = time.monotonic()
+			start = max(now, self._last.get(host, 0.0))
+			# Reserve this caller's slot: the next caller for the same host
+			# queues behind it even while we sleep outside the lock.
+			self._last[host] = start + min_interval
+		delay = start - now
+		if delay > 0:
+			time.sleep(delay)
 
 
 _rate_limiter = RateLimiter()

@@ -882,3 +882,112 @@ class TestStripScopeGating:
 		assert result.invalid_epubs == ["i.epub"]
 		assert (tmp_path / "cover.html").is_file()
 		assert (tmp_path / "cover.jpg").is_file()
+
+
+class TestCoverAnalysisCache:
+	"""analyze_cover memoizes its verdict per (path, mtime_ns, size) and — with
+	a persistent store attached — carries it across the in-run memo. One
+	analyze run asks for the same cover up to 4x (OK-filter, worker detect,
+	two review-writer projections); unchanged covers must decode once."""
+
+	def setup_method(self) -> None:
+		from book_meta_fix import covers as covers_mod
+
+		covers_mod.clear_cover_cache()
+		covers_mod.set_cover_cache(None)
+
+	def teardown_method(self) -> None:
+		from book_meta_fix import covers as covers_mod
+
+		covers_mod.clear_cover_cache()
+		covers_mod.set_cover_cache(None)
+
+	@staticmethod
+	def _counting_decode(monkeypatch):
+		"""Patch the uncached core with a call counter; returns the counter."""
+		from book_meta_fix import covers as covers_mod
+
+		calls = {"n": 0}
+		orig = covers_mod._analyze_cover_uncached
+
+		def counting(p):
+			calls["n"] += 1
+			return orig(p)
+
+		monkeypatch.setattr(covers_mod, "_analyze_cover_uncached", counting)
+		return calls
+
+	def test_second_call_hits_memo(self, tmp_path: Path, monkeypatch) -> None:
+		cover = tmp_path / "cover.jpg"
+		_solid_cover(cover)
+		calls = self._counting_decode(monkeypatch)
+		a = analyze_cover(cover)
+		b = analyze_cover(cover)
+		assert calls["n"] == 1
+		assert (a.width, a.height, a.is_generated) == (b.width, b.height, b.is_generated)
+
+	def test_mtime_change_recomputes(self, tmp_path: Path, monkeypatch) -> None:
+		import os
+
+		cover = tmp_path / "cover.jpg"
+		_solid_cover(cover)
+		calls = self._counting_decode(monkeypatch)
+		analyze_cover(cover)
+		st = cover.stat()
+		os.utime(cover, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+		b = analyze_cover(cover)
+		assert calls["n"] == 2
+		assert b.width != 0  # genuinely re-analyzed
+
+	def test_content_change_new_size_recomputes(self, tmp_path: Path, monkeypatch) -> None:
+		cover = tmp_path / "cover.jpg"
+		_solid_cover(cover)
+		calls = self._counting_decode(monkeypatch)
+		analyze_cover(cover)
+		_solid_cover(cover, size=(600, 800))  # different bytes -> different size
+		analyze_cover(cover)
+		assert calls["n"] == 2
+
+	def test_returned_info_is_a_copy(self, tmp_path: Path) -> None:
+		# Mutating a returned CoverInfo (its signals list) must not poison the
+		# cached verdict other callers receive.
+		cover = tmp_path / "cover.jpg"
+		_solid_cover(cover)
+		a = analyze_cover(cover)
+		a.signals.append("poison")
+		b = analyze_cover(cover)
+		assert "poison" not in b.signals
+
+	def test_persistent_store_serves_across_memo_clear(self, tmp_path: Path, monkeypatch) -> None:
+		"""With a library.Cache attached, a verdict survives even after the
+		in-run memo is dropped (the cross-run case)."""
+		from book_meta_fix import covers as covers_mod
+		from book_meta_fix.library import Cache
+
+		cover = tmp_path / "cover.jpg"
+		_solid_cover(cover)
+		calls = self._counting_decode(monkeypatch)
+		cache = Cache(tmp_path / "cache.db")
+		try:
+			covers_mod.set_cover_cache(cache)
+			first = analyze_cover(cover)
+			assert calls["n"] == 1
+			# Simulate a fresh process: memo empty, SQLite warm.
+			covers_mod.clear_cover_cache()
+			second = analyze_cover(cover)
+			assert calls["n"] == 1  # served from the covers table, no decode
+			assert second.is_generated == first.is_generated
+			assert second.width == first.width
+		finally:
+			covers_mod.set_cover_cache(None)
+			cache.close()
+
+	def test_failed_decode_never_cached(self, tmp_path: Path, monkeypatch) -> None:
+		"""A transient read failure (width == 0) must not freeze the verdict:
+		the next call decodes again."""
+		cover = tmp_path / "cover.jpg"
+		cover.write_text("<html>not an image</html>", encoding="utf-8")
+		calls = self._counting_decode(monkeypatch)
+		assert analyze_cover(cover).width == 0
+		assert analyze_cover(cover).width == 0
+		assert calls["n"] == 2

@@ -5,16 +5,25 @@ A "library" is a directory of Calibre-style book folders:
 
 Traversal excludes Calibre scratch dirs, dotfiles, and (concrete) MS-Word
 lock FILES. Author directories whose name starts with ``~$`` are NOT pruned:
-a book whose author metadata was polluted to ``~$Foo`` lives under such a
+a book whose author metadata got polluted to ``~$Foo`` lives under such a
 folder and must stay visible so the C6 detector can flag it for review.
 Results are cached in a SQLite database so repeated runs skip unchanged folders.
+
+The scan is threaded by default (see DEFAULT_SCAN_WORKERS): on NFS every
+directory listing and file stat is a network round trip, so a serial walk of
+~5500 book folders costs minutes; the GUI's index build measured the walk
+alone at 38 s over NFS v3. All per-folder work here is either read-only or
+per-folder-atomic (uuid minting), so threads are safe.
 """
 from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from .models import BookMeta
@@ -31,6 +40,12 @@ _EXCLUDE_DIRS = {"temp_calibre"}
 
 # A book folder is recognized by having metadata.opf OR metadata.json
 _META_FILES = ("metadata.opf", "metadata.json")
+
+# Default thread count for the parallel scan (walk + per-folder reads).
+# NFS latency, not CPU, is the scan's bottleneck, so a small pool hides the
+# round trips well; 8 measured as a good default on the real library. 1 in
+# run_pipeline/scan_library restores the historical serial behaviour.
+DEFAULT_SCAN_WORKERS = 8
 
 
 def iter_book_folders(library: Path):
@@ -50,6 +65,43 @@ def iter_book_folders(library: Path):
 	yield from _walk_for_book_folders(library)
 
 
+def iter_book_folders_parallel(library: Path, workers: int) -> list[Path]:
+	"""``iter_book_folders`` with the tree walk split per top-level directory.
+
+	``iter_book_folders`` alone costs tens of seconds on the real library
+	(measured: 38 s for 5339 folders over NFS v3 — each directory entry
+	probes for a metadata sidecar, one RPC round trip each). Splitting the
+	walk by top-level folder and running the subtrees in a small pool cuts
+	that to a few seconds. Exclusions are applied to the top level manually
+	(iter_book_folders applies them only below the root). The concatenated
+	result keeps the same deterministic order as the serial walk.
+	"""
+	library = Path(library)
+	try:
+		tops = sorted(
+			e.path for e in os.scandir(library)
+			if e.is_dir() and not _is_excluded(e.name)
+		)
+	except OSError:
+		return []
+
+	def _walk(top: str) -> list[Path]:
+		top_path = Path(top)
+		# A top-level directory may itself be a BOOK folder (a book sitting
+		# directly in the library root) — _walk_for_book_folders treats its
+		# argument as a container, so test the top itself first and don't
+		# descend into it (the same rule the walk applies below the root).
+		if any((top_path / mf).is_file() for mf in _META_FILES):
+			return [top_path]
+		return list(_walk_for_book_folders(top_path))
+
+	if workers <= 1:
+		return [f for top in tops for f in _walk(top)]
+	with ThreadPoolExecutor(max_workers=workers) as ex:
+		parts = list(ex.map(_walk, tops))
+	return [f for part in parts for f in part]
+
+
 def _walk_for_book_folders(folder: Path):
 	"""Recurse into *folder*, yielding directories that hold a metadata file.
 
@@ -58,24 +110,28 @@ def _walk_for_book_folders(folder: Path):
 	subdirectories are not separate books). Excluded entries are pruned.
 	"""
 	for entry in _scandir_sorted(folder):
+		# DirEntry.is_dir() is free on Linux (d_type from readdir) — unlike
+		# Path.is_dir() it costs no extra stat RPC on NFS.
 		if not entry.is_dir():
 			continue
 		if _is_excluded(entry.name):
 			continue
-		if any((entry / mf).is_file() for mf in _META_FILES):
-			yield entry
+		probe = Path(entry.path)
+		if any((probe / mf).is_file() for mf in _META_FILES):
+			yield probe
 			continue  # book folder — don't descend into its contents
-		yield from _walk_for_book_folders(entry)
+		yield from _walk_for_book_folders(probe)
 
 
 def _scandir_sorted(path: Path):
-	"""os.scandir results sorted by name (deterministic order)."""
+	"""os.scandir entries sorted by name (deterministic order)."""
 	try:
-		entries = list(Path(path).iterdir())
+		with os.scandir(path) as it:
+			entries = list(it)
 	except (PermissionError, OSError) as e:
 		log.warning("cannot list %s: %s", path, e)
 		return []
-	return sorted(entries, key=lambda p: p.name)
+	return sorted(entries, key=lambda e: e.name)
 
 
 def _is_excluded(name: str, *, is_file: bool = False) -> bool:
@@ -118,12 +174,19 @@ class Cache:
 	invalidate_many() for folders they change (apply), or repoint() for a
 	move/rename (organize), so the cache never serves a stale entry —
 	important on NFS, where the client attribute cache can mask a new mtime.
+
+	Thread-safe for the parallel scan: the single connection is opened with
+	``check_same_thread=False`` (same pattern as the Enricher's cache) and
+	every SQL statement runs under :attr:`_lock`. Filesystem I/O
+	(:func:`_stat_folder`, reads, uuid minting) happens OUTSIDE the lock —
+	that is the part the scan's thread pool exists to overlap.
 	"""
 
 	SCHEMA_VERSION = 2
 
 	def __init__(self, db_path: Path):
 		self.db_path = Path(db_path)
+		self._lock = threading.Lock()
 		try:
 			if not self.db_path.parent.exists():
 				try:
@@ -132,7 +195,7 @@ class Cache:
 					raise CacheError(
 						f"Cannot create directory for cache database '{self.db_path.parent}': {e}"
 					) from e
-			self.conn = sqlite3.connect(str(self.db_path))
+			self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
 			self.conn.execute("PRAGMA journal_mode=WAL")
 			self._init_schema()
 		except (sqlite3.OperationalError, sqlite3.DatabaseError) as e:
@@ -146,6 +209,21 @@ class Cache:
 			CREATE TABLE IF NOT EXISTS schema_meta (
 				key TEXT PRIMARY KEY,
 				value TEXT NOT NULL
+			);
+			"""
+		)
+		# Cover-analysis verdicts (covers.py analyze_cover): decoding a JPEG
+		# with Pillow is the most expensive thing the detector does per book,
+		# so an unchanged cover.jpg must never be re-decoded — not even in the
+		# next run. Same (mtime, size) invalidation contract as the books
+		# table; CREATE IF NOT EXISTS so old caches gain it without a drop.
+		self.conn.executescript(
+			"""
+			CREATE TABLE IF NOT EXISTS covers (
+				path TEXT PRIMARY KEY,
+				mtime_ns INTEGER NOT NULL,
+				size INTEGER NOT NULL,
+				payload TEXT NOT NULL
 			);
 			"""
 		)
@@ -184,9 +262,10 @@ class Cache:
 
 	def get(self, folder: Path) -> BookMeta | None:
 		"""Return cached BookMeta if folder mtime/size unchanged, else None."""
-		row = self.conn.execute(
-			"SELECT mtime, size, payload FROM books WHERE path = ?", (str(folder),)
-		).fetchone()
+		with self._lock:
+			row = self.conn.execute(
+				"SELECT mtime, size, payload FROM books WHERE path = ?", (str(folder),)
+			).fetchone()
 		if row is None:
 			return None
 		cached_mtime, cached_size, payload = row
@@ -206,10 +285,41 @@ class Cache:
 			return
 		mtime, size = _stat_folder(Path(meta.path))
 		payload = _bookmeta_to_payload(meta)
-		self.conn.execute(
-			"INSERT OR REPLACE INTO books(uuid, path, mtime, size, payload, scanned_at) VALUES (?,?,?,?,?,?)",
-			(meta.uuid, str(meta.path), mtime, size, payload, time.time()),
-		)
+		with self._lock:
+			self.conn.execute(
+				"INSERT OR REPLACE INTO books(uuid, path, mtime, size, payload, scanned_at) VALUES (?,?,?,?,?,?)",
+				(meta.uuid, str(meta.path), mtime, size, payload, time.time()),
+			)
+
+	def get_cover(self, path: str | Path, mtime_ns: int, size: int) -> dict | None:
+		"""Return the stored cover-verdict payload dict if (mtime_ns, size) match.
+
+		Used by :func:`covers.analyze_cover` through its attached persistent
+		store (see ``covers.set_cover_cache``); the payload is a plain dict so
+		neither module needs to import the other's types.
+		"""
+		with self._lock:
+			row = self.conn.execute(
+				"SELECT mtime_ns, size, payload FROM covers WHERE path = ?",
+				(str(Path(path)),),
+			).fetchone()
+		if row is None:
+			return None
+		c_mtime, c_size, payload = row
+		if c_mtime == mtime_ns and c_size == size:
+			try:
+				return json.loads(payload)
+			except Exception:  # noqa: BLE001
+				return None
+		return None
+
+	def put_cover(self, path: str | Path, mtime_ns: int, size: int, payload: dict) -> None:
+		"""Store a cover-verdict payload keyed by path + (mtime_ns, size)."""
+		with self._lock:
+			self.conn.execute(
+				"INSERT OR REPLACE INTO covers(path, mtime_ns, size, payload) VALUES (?,?,?,?)",
+				(str(Path(path)), mtime_ns, size, json.dumps(payload, ensure_ascii=False)),
+			)
 
 	def invalidate(self, path: str | Path) -> None:
 		"""Drop the cached entry for *path* so the next scan re-parses it.
@@ -217,13 +327,15 @@ class Cache:
 		Safe to call with a path that has no cached entry (no-op). The key is
 		normalised to ``str(Path(path))`` to match get()/put().
 		"""
-		self.conn.execute("DELETE FROM books WHERE path = ?", (str(Path(path)),))
+		with self._lock:
+			self.conn.execute("DELETE FROM books WHERE path = ?", (str(Path(path)),))
 
 	def invalidate_many(self, paths) -> None:
 		"""Drop cached entries for several paths at once."""
 		keys = [(str(Path(p)),) for p in paths]
 		if keys:
-			self.conn.executemany("DELETE FROM books WHERE path = ?", keys)
+			with self._lock:
+				self.conn.executemany("DELETE FROM books WHERE path = ?", keys)
 
 	def repoint(self, src_path: str | Path, dst_path: str | Path) -> bool:
 		"""Re-attach a cached entry from *src_path* to *dst_path* (folder moved).
@@ -237,32 +349,36 @@ class Cache:
 		"""
 		src = str(Path(src_path))
 		dst = str(Path(dst_path))
-		row = self.conn.execute("SELECT payload FROM books WHERE path = ?", (src,)).fetchone()
-		if row is None:
-			return False
-		payload = row[0]
-		try:
-			meta = _bookmeta_from_payload(payload)
-			meta.path = dst
-			new_payload = _bookmeta_to_payload(meta)
-		except Exception:  # noqa: BLE001
-			new_payload = payload  # keep old payload; path column is what matters
-		self.conn.execute("DELETE FROM books WHERE path = ?", (dst,))
-		self.conn.execute("UPDATE books SET path = ?, payload = ? WHERE path = ?", (dst, new_payload, src))
+		with self._lock:
+			row = self.conn.execute("SELECT payload FROM books WHERE path = ?", (src,)).fetchone()
+			if row is None:
+				return False
+			payload = row[0]
+			try:
+				meta = _bookmeta_from_payload(payload)
+				meta.path = dst
+				new_payload = _bookmeta_to_payload(meta)
+			except Exception:  # noqa: BLE001
+				new_payload = payload  # keep old payload; path column is what matters
+			self.conn.execute("DELETE FROM books WHERE path = ?", (dst,))
+			self.conn.execute("UPDATE books SET path = ?, payload = ? WHERE path = ?", (dst, new_payload, src))
 		return True
 
 	def clear(self) -> None:
 		"""Drop every cached entry (the table stays)."""
-		self.conn.execute("DELETE FROM books")
+		with self._lock:
+			self.conn.execute("DELETE FROM books")
 
 	def commit(self) -> None:
-		self.conn.commit()
+		with self._lock:
+			self.conn.commit()
 
 	def close(self) -> None:
-		try:
-			self.conn.commit()
-		finally:
-			self.conn.close()
+		with self._lock:
+			try:
+				self.conn.commit()
+			finally:
+				self.conn.close()
 
 
 def _stat_folder(folder: Path) -> tuple[float, int]:
@@ -270,9 +386,15 @@ def _stat_folder(folder: Path) -> tuple[float, int]:
 	max_mtime = 0.0
 	total_size = 0
 	try:
-		for entry in folder.iterdir():
-			if entry.is_file():
+		# os.scandir's DirEntry caches each entry's stat after the first call,
+		# so is_file()+stat() below costs ONE stat syscall per file — a
+		# Path-based iterdir would pay two, and on NFS every stat is a
+		# network round trip.
+		with os.scandir(folder) as it:
+			for entry in it:
 				try:
+					if not entry.is_file():
+						continue
 					st = entry.stat()
 					max_mtime = max(max_mtime, st.st_mtime)
 					total_size += st.st_size
@@ -310,49 +432,54 @@ def scan_library(
 	cache: Cache | None = None,
 	use_cache: bool = True,
 	progress_callback=None,
+	workers: int = DEFAULT_SCAN_WORKERS,
 ) -> list[BookMeta]:
 	"""Scan the whole library and return a list of BookMeta.
 
 	If *cache* is given and *use_cache* is True, unchanged folders are loaded
 	from the cache instead of re-parsing.
 
+	*workers* threads parallelize both the tree walk (per top-level
+	directory — measured 38 s -> a few seconds over NFS v3) and the
+	per-folder work (cache stat / metadata parse / uuid mint), which is
+	either read-only or per-folder atomic, so threads are safe. The result
+	comes back in deterministic path-sorted order regardless of completion
+	order. ``workers=1`` restores the historical serial scan.
+
 	*progress_callback*, if given, is called as ``callback(done, total)`` after
 	each book folder is processed (cache hit or fresh parse), with the running
-	1-based count and the total folder count. The folder list is materialized
-	upfront (one dir walk) precisely so *total* is known and reported from the
-	very first call — letting a progress bar show an ETA immediately instead of
-	pulsing blindly. This matches the ``(done, total)`` contract every other
-	long-running callback in the codebase already uses.
+	1-based count and the total folder count. In the parallel scan it fires
+	from the consuming main thread in COMPLETION order (monotonic counts),
+	which matches the contract the abs-rescan progress bar already follows.
+	The folder list is materialized upfront (one dir walk) precisely so
+	*total* is known and reported from the very first call — letting a
+	progress bar show an ETA immediately instead of pulsing blindly.
 	"""
 	library = Path(library)
 	# Materialize the folder list once so we know the total up front (lets the
-	# caller render a determinate bar with ETA from the first callback). The walk
-	# itself is cheap relative to parsing: readdir + a metadata-file existence
-	# check per folder — no per-file stat or metadata parse happens here yet.
-	folders = list(iter_book_folders(library))
+	# caller render a determinate bar with ETA from the first callback). The
+	# walk runs in the same pool (split per top-level dir) — its readdir +
+	# metadata-file probes are NFS round trips too.
+	if workers > 1:
+		folders = iter_book_folders_parallel(library, workers)
+	else:
+		folders = list(iter_book_folders(library))
 	total = len(folders)
 	results: list[BookMeta] = []
 	n_cached = n_fresh = 0
 	done = 0  # folders processed (cache hit + fresh parse + errors)
 
-	for folder in folders:
+	def _scan_one(folder: Path) -> tuple[BookMeta | None, bool]:
+		"""Process one folder: cache hit, or fresh parse (+uuid mint+cache)."""
 		if use_cache and cache is not None:
 			cached = cache.get(folder)
 			if cached is not None:
-				results.append(cached)
-				n_cached += 1
-				done += 1
-				if progress_callback is not None:
-					progress_callback(done, total)
-				continue
+				return cached, True
 		try:
 			meta = read_book_folder(folder)
 		except Exception as e:  # noqa: BLE001
 			log.error("failed to read %s: %s", folder, e)
-			done += 1
-			if progress_callback is not None:
-				progress_callback(done, total)
-			continue
+			return None, False
 		# Lazily mint + persist a uuid the first time a book is parsed (it is
 		# needed as the cache PK and the review identity). Non-fatal: a write
 		# error must never abort the scan — the book is still usable in-memory.
@@ -361,13 +488,50 @@ def scan_library(
 				ensure_uuid(meta)
 			except Exception as e:  # noqa: BLE001
 				log.warning("could not ensure uuid for %s: %s", folder, e)
-		results.append(meta)
 		if cache is not None:
 			cache.put(meta)
-		n_fresh += 1
-		done += 1
-		if progress_callback is not None:
-			progress_callback(done, total)
+		return meta, False
+
+	if workers > 1 and total > 1:
+		interrupted = False
+		futures = []
+		with ThreadPoolExecutor(max_workers=min(workers, total)) as pool:
+			try:
+				futures = [pool.submit(_scan_one, f) for f in folders]
+				for fut in as_completed(futures):
+					meta, from_cache = fut.result()
+					if meta is not None:
+						results.append(meta)
+						if from_cache:
+							n_cached += 1
+						else:
+							n_fresh += 1
+					done += 1
+					if progress_callback is not None:
+						progress_callback(done, total)
+			except KeyboardInterrupt:
+				interrupted = True
+				for f in futures:
+					f.cancel()
+		if interrupted:
+			log.warning(
+				"scan interrupted by user after %d/%d folders; keeping partial results", done, total,
+			)
+		# Completion order is nondeterministic; restore the walk's path order
+		# so `limit`, logs and review entry order stay stable across runs.
+		results.sort(key=lambda m: m.path)
+	else:
+		for folder in folders:
+			meta, from_cache = _scan_one(folder)
+			if meta is not None:
+				results.append(meta)
+				if from_cache:
+					n_cached += 1
+				else:
+					n_fresh += 1
+			done += 1
+			if progress_callback is not None:
+				progress_callback(done, total)
 
 	if cache is not None:
 		cache.commit()
