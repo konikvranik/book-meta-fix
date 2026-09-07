@@ -262,7 +262,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--llm-max-inflight", "llm_max_inflight", type=int, default=None, help=_("Hard cap on LLM requests running at the same instant (default 3). The Z.AI coding plan admits only ~5 concurrent requests per account (interactive clients draw from the same ceiling), so a deep fallback herd gets 429/1302 storms — and false 1113 'insufficient balance' — no matter how slow the drip is. Workers queue on this instead of being rejected. Flash-family models get a stricter sub-cap of min(2, this value)."))
 def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, use_legie: bool, abs_czech_url: str | None, skip_verify: bool, verify_ok: bool, no_strict_verify: bool, accept_missing: bool, pattern: str | None, no_check_location: bool, recheck_ok: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int, llm_min_interval: float | None, llm_model: str | None, llm_reasoning_effort: str | None, llm_thinking: str | None, no_llm_loop: bool, llm_fallback_model: str | None, llm_burst: float | None, llm_rate_limit_base: float | None, llm_rate_limit_max: float | None, llm_max_inflight: int | None) -> None:
 	"""Run full pipeline and generate a review.yaml for NEEDS_REVIEW books."""
-	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
+	from rich.progress import BarColumn, Progress, SpinnerColumn, TaskID, TextColumn, TimeRemainingColumn
 
 	from .enrichers import Enricher
 	from .llm import get_provider
@@ -301,92 +301,12 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 		strict = not no_strict_verify
 		console.print(f"  [cyan]--verify-ok[/cyan] {_('--verify-ok audit: OK books checked against content (strict={strict})').format(strict=strict)}")
 
-	# --recheck-ok: wipe the persistent `verified` flag off every book that
-	# carries it, so those user-confirmed books re-enter normal detection.
-	# Must run BEFORE run_pipeline (which skips verified books right after its
-	# scan) and must invalidate the cache rows, or the scan would keep serving
-	# the pre-clear BookMeta (esp. on NFS).
-	if recheck_ok:
-		from .writers import clear_verified
-
-		books = scan_library(cfg.library, cache=cache, use_cache=not no_cache)
-		cleared = 0
-		for b in books:
-			if b.verified:
-				if clear_verified(Path(b.path)):
-					cleared += 1
-				if cache is not None:
-					cache.invalidate(b.path)
-		if cache is not None:
-			cache.commit()
-		console.print("[cyan]--recheck-ok[/cyan]: " + _("cleared the verified flag on {count} book(s)").format(count=cleared))
-
-	enricher = None
-	if not skip_enrich:
-		enricher = Enricher(
-			cache_db=cfg.cache_db,
-			databazeknih_enabled=cfg.databazeknih_enabled,
-			legie_enabled=cfg.legie_enabled,
-			abs_czech_url=cfg.abs_czech_url or None,
-			abs_czech_token=cfg.abs_czech_token,
-			openlibrary_enabled=cfg.openlibrary_enabled,
-			google_books_enabled=cfg.google_books_enabled,
-			negative_ttl_sec=cfg.enrich_negative_ttl_sec,
-		)
-
-	# LLM provider
-	llm_provider = None
-	if use_llm:
-		if llm_min_interval is not None:
-			cfg.llm_min_interval = llm_min_interval
-		if llm_max_inflight is not None:
-			cfg.llm_max_inflight = max(1, llm_max_inflight)
-		if llm_model is not None:
-			cfg.llm_model = llm_model
-		if llm_reasoning_effort is not None:
-			cfg.zai_reasoning_effort = llm_reasoning_effort
-		if llm_thinking is not None:
-			cfg.zai_thinking = llm_thinking
-		if no_llm_loop:
-			cfg.llm_loop = False
-		if llm_fallback_model is not None:
-			cfg.llm_fallback_model = llm_fallback_model
-		if llm_burst is not None:
-			cfg.llm_burst = llm_burst
-		if llm_rate_limit_base is not None:
-			cfg.llm_rate_limit_base = llm_rate_limit_base
-		if llm_rate_limit_max is not None:
-			cfg.llm_rate_limit_max = llm_rate_limit_max
-		llm_provider = get_provider(cfg)
-		if llm_provider is None:
-			console.print("[yellow]" + _("--llm given but no provider available (set ZAI_API_KEY or BMF_LLM_MOCK=1)") + "[/yellow]")
-		else:
-			cats = tuple(c.strip() for c in llm_categories.split(",") if c.strip())
-			rpm = round(60.0 / cfg.llm_min_interval) if cfg.llm_min_interval > 0 else float("inf")
-			flash_via = f", flash via {llm_provider.flash_base_url}" if getattr(llm_provider, "flash_base_url", None) else ""
-			if cfg.llm_loop:
-				# Loop mode (default): free loop model first, paid fallback second.
-				console.print(
-					f"  LLM: [cyan]{llm_provider.name}[/cyan] "
-					f"primary={llm_provider.model} → fallback={llm_provider.fallback_model} "
-					f"(reasoning_effort={cfg.zai_reasoning_effort}) "
-					f"for categories {cats} (≤{rpm} RPM, min {cfg.llm_min_interval}s between calls, max {cfg.llm_max_inflight} in flight, adaptive{flash_via})"
-				)
-			else:
-				# Single-call mode (--no-llm-loop): one model, no fallback.
-				is_glm5 = llm_provider.model.lower().startswith("glm-5")
-				reason = f"reasoning_effort={cfg.zai_reasoning_effort}" if is_glm5 else f"thinking={cfg.zai_thinking}"
-				console.print(f"  LLM: [cyan]{llm_provider.name}[/cyan] model={llm_provider.model} ({reason}) for categories {cats} (≤{rpm} RPM, min {cfg.llm_min_interval}s between calls, max {cfg.llm_max_inflight} in flight, adaptive{flash_via})")
-
-	# Streaming review writer: appends each processed book to review.yaml as it
-	# completes (Unix-pipe style). The original is moved to .bak on
-	# construction so user decisions are preserved; finish() carries over any
-	# unprocessed prior entries and deletes .bak on success.
-	from .review_writer import ReviewWriter
-
-	review_writer = ReviewWriter(out, library_root=cfg.library)
-
-	# Progress bar (updated from worker threads via callback)
+	# Two-phase progress under one transient bar: the library scan (minutes on
+	# NFS) gets its own labelled task fed by scan_library's callbacks, and the
+	# per-book processing task appears only when processing actually starts —
+	# run_pipeline announces (0, total) before the first book, so the bar shows
+	# its total and ETA immediately instead of pulsing at 0/None until the
+	# first (LLM-bound) book completes.
 	progress = Progress(
 		SpinnerColumn(),
 		TextColumn("[progress.description]{task.description}"),
@@ -396,8 +316,26 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 		console=console,
 		transient=True,
 	)
-	task_id = progress.add_task(_("processing"), total=None)
-	progress.start()
+	scan_task = progress.add_task(_("Scanning"), total=None)
+	proc_task: TaskID | None = None
+
+	def _scan_cb(done: int, total: int) -> None:
+		# total is re-set on every call — the --recheck-ok pre-scan below and
+		# run_pipeline's own scan both feed this task.
+		progress.update(scan_task, total=total, completed=done)
+
+	def _proc_cb(done: int, total: int) -> None:
+		nonlocal proc_task
+		if proc_task is None:
+			# First processing callback = the scan phase is over; swap the
+			# tasks so the bar always names what is actually running.
+			progress.remove_task(scan_task)
+			proc_task = progress.add_task(_("processing"), total=total)
+		progress.update(proc_task, completed=done)
+
+	enricher = None
+	llm_provider = None
+	review_writer = None
 	results: list = []
 	interrupted = False
 	# Populated by run_pipeline (passed in) so we can print a fix-source
@@ -405,10 +343,90 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 	# run_pipeline, so it's safe to read here even on early failure.
 	pipe_stats: dict = {}
 	try:
-		def _cb(done: int, total: int) -> None:
-			if progress.tasks[0].total is None and total:
-				progress.update(task_id, total=total)
-			progress.update(task_id, completed=done)
+		progress.start()
+
+		# --recheck-ok: wipe the persistent `verified` flag off every book that
+		# carries it, so those user-confirmed books re-enter normal detection.
+		# Must run BEFORE run_pipeline (which skips verified books right after its
+		# scan) and must invalidate the cache rows, or the scan would keep serving
+		# the pre-clear BookMeta (esp. on NFS).
+		if recheck_ok:
+			from .writers import clear_verified
+
+			books = scan_library(cfg.library, cache=cache, use_cache=not no_cache, progress_callback=_scan_cb)
+			cleared = 0
+			for b in books:
+				if b.verified:
+					if clear_verified(Path(b.path)):
+						cleared += 1
+					if cache is not None:
+						cache.invalidate(b.path)
+			if cache is not None:
+				cache.commit()
+			console.print("[cyan]--recheck-ok[/cyan]: " + _("cleared the verified flag on {count} book(s)").format(count=cleared))
+
+		if not skip_enrich:
+			enricher = Enricher(
+				cache_db=cfg.cache_db,
+				databazeknih_enabled=cfg.databazeknih_enabled,
+				legie_enabled=cfg.legie_enabled,
+				abs_czech_url=cfg.abs_czech_url or None,
+				abs_czech_token=cfg.abs_czech_token,
+				openlibrary_enabled=cfg.openlibrary_enabled,
+				google_books_enabled=cfg.google_books_enabled,
+				negative_ttl_sec=cfg.enrich_negative_ttl_sec,
+			)
+
+		# LLM provider
+		if use_llm:
+			if llm_min_interval is not None:
+				cfg.llm_min_interval = llm_min_interval
+			if llm_max_inflight is not None:
+				cfg.llm_max_inflight = max(1, llm_max_inflight)
+			if llm_model is not None:
+				cfg.llm_model = llm_model
+			if llm_reasoning_effort is not None:
+				cfg.zai_reasoning_effort = llm_reasoning_effort
+			if llm_thinking is not None:
+				cfg.zai_thinking = llm_thinking
+			if no_llm_loop:
+				cfg.llm_loop = False
+			if llm_fallback_model is not None:
+				cfg.llm_fallback_model = llm_fallback_model
+			if llm_burst is not None:
+				cfg.llm_burst = llm_burst
+			if llm_rate_limit_base is not None:
+				cfg.llm_rate_limit_base = llm_rate_limit_base
+			if llm_rate_limit_max is not None:
+				cfg.llm_rate_limit_max = llm_rate_limit_max
+			llm_provider = get_provider(cfg)
+			if llm_provider is None:
+				console.print("[yellow]" + _("--llm given but no provider available (set ZAI_API_KEY or BMF_LLM_MOCK=1)") + "[/yellow]")
+			else:
+				cats = tuple(c.strip() for c in llm_categories.split(",") if c.strip())
+				rpm = round(60.0 / cfg.llm_min_interval) if cfg.llm_min_interval > 0 else float("inf")
+				flash_via = f", flash via {llm_provider.flash_base_url}" if getattr(llm_provider, "flash_base_url", None) else ""
+				if cfg.llm_loop:
+					# Loop mode (default): free loop model first, paid fallback second.
+					console.print(
+						f"  LLM: [cyan]{llm_provider.name}[/cyan] "
+						f"primary={llm_provider.model} → fallback={llm_provider.fallback_model} "
+						f"(reasoning_effort={cfg.zai_reasoning_effort}) "
+						f"for categories {cats} (≤{rpm} RPM, min {cfg.llm_min_interval}s between calls, max {cfg.llm_max_inflight} in flight, adaptive{flash_via})"
+					)
+				else:
+					# Single-call mode (--no-llm-loop): one model, no fallback.
+					is_glm5 = llm_provider.model.lower().startswith("glm-5")
+					reason = f"reasoning_effort={cfg.zai_reasoning_effort}" if is_glm5 else f"thinking={cfg.zai_thinking}"
+					console.print(f"  LLM: [cyan]{llm_provider.name}[/cyan] model={llm_provider.model} ({reason}) for categories {cats} (≤{rpm} RPM, min {cfg.llm_min_interval}s between calls, max {cfg.llm_max_inflight} in flight, adaptive{flash_via})")
+
+		# Streaming review writer: appends each processed book to review.yaml as it
+		# completes (Unix-pipe style). The original is moved to .bak on
+		# construction so user decisions are preserved; finish() carries over any
+		# unprocessed prior entries and deletes .bak on success.
+		from .review_writer import ReviewWriter
+
+		review_writer = ReviewWriter(out, library_root=cfg.library)
 
 		results = run_pipeline(
 			cfg.library, cache=cache, enricher=enricher,
@@ -417,7 +435,8 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 			llm_categories=tuple(c.strip() for c in llm_categories.split(",") if c.strip()) if use_llm else (),
 			limit=limit,
 			workers=workers,
-			progress_callback=_cb,
+			progress_callback=_proc_cb,
+			scan_progress_callback=_scan_cb,
 			review_writer=review_writer,
 			location_root=None if no_check_location else cfg.library,
 			location_pattern=pattern or cfg.path_pattern,
@@ -428,7 +447,8 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 			stats=pipe_stats,
 		)
 	except KeyboardInterrupt:
-		# A second Ctrl-C (or one that escaped run_pipeline's internal handler).
+		# A second Ctrl-C, or one that escaped run_pipeline's internal handler
+		# (or landed during the scan/setup phase before the writer existed).
 		# The streaming writer has already flushed everything up to the point of
 		# interruption; finish() below carries over prior unprocessed entries.
 		interrupted = True
@@ -442,11 +462,14 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 		# Always finalize the writer — even on Ctrl-C/error — so the review file
 		# is consistent and prior decisions are carried over. keep_backup when
 		# interrupted, so the user can recover the pre-run state if needed.
-		try:
-			summary = review_writer.finish(keep_backup=interrupted)
-		except Exception as e:  # noqa: BLE001
-			console.print(f"[red]{_('review writer finalize failed: {error}').format(error=e)}[/red]")
-			summary = {"written": 0, "skipped_user_decided": 0, "remaining_count": 0, "backup_path": None, "action_accept": 0, "action_null": 0, "action_other": 0, "verified_prefilled": 0}
+		# A run interrupted before the writer was created (scan/setup phase) has
+		# nothing to finalize — review.yaml was never moved to .bak.
+		summary = {"written": 0, "skipped_user_decided": 0, "remaining_count": 0, "backup_path": None, "action_accept": 0, "action_null": 0, "action_other": 0, "verified_prefilled": 0}
+		if review_writer is not None:
+			try:
+				summary = review_writer.finish(keep_backup=interrupted)
+			except Exception as e:  # noqa: BLE001
+				console.print(f"[red]{_('review writer finalize failed: {error}').format(error=e)}[/red]")
 
 	# Print pipeline summary (action breakdown leads; results list still drives stats).
 	_print_pipeline_summary(results, pipe_stats, review_summary=summary)

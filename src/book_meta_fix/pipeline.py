@@ -57,6 +57,7 @@ def run_pipeline(
 	limit: int | None = None,
 	workers: int = 10,
 	progress_callback: Any = None,
+	scan_progress_callback: Any = None,
 	only_needs_review: bool = True,
 	review_writer: Any = None,
 	skip_uuids: set[str] | None = None,
@@ -103,7 +104,17 @@ def run_pipeline(
 	*workers* controls parallelism: each book's expensive I/O (content
 	extraction, online lookup, LLM call) runs in a ThreadPoolExecutor with
 	this many workers. Output order matches input order.
-	*progress_callback* (if given) is called with (i, total) after each book.
+	*progress_callback* (if given) is called with (0, total) once the
+	processing set is known — BEFORE the first book starts — and then with
+	(i, total) after each book. The upfront call lets a progress bar show
+	its total and ETA immediately; the first per-book call would otherwise
+	fire only when a book COMPLETES, which on an LLM-bound run can be
+	minutes away (a bar pulsing at 0/None the whole time).
+
+	*scan_progress_callback* (if given) is forwarded to
+	:func:`scan_library` and reports the initial library scan — a separate
+	phase that can take minutes on NFS. Callers feed it to a different
+	visual task than *progress_callback* so the two phases stay distinct.
 
 	*review_writer* (optional): if a ReviewWriter is supplied, each processed
 	result is also streamed to review.yaml via ``review_writer.submit()`` as it
@@ -124,7 +135,7 @@ def run_pipeline(
 	metadata). Without *location_root* detection stays location-blind — the
 	historic behaviour report/epubgen rely on.
 	"""
-	all_books = scan_library(library, cache=cache)
+	all_books = scan_library(library, cache=cache, progress_callback=scan_progress_callback)
 	if skip_verified:
 		before = len(all_books)
 		all_books = [b for b in all_books if not b.verified]
@@ -234,6 +245,12 @@ def run_pipeline(
 
 	# No point spawning a pool of 10 if we only have 3 books.
 	n_workers = max(1, min(workers, total))
+	# Announce the processing total before the first book starts: the next
+	# callback fires only when a book COMPLETES, which for an LLM-bound
+	# first batch can be minutes away — without this the caller's bar sits
+	# at 0/None the whole time.
+	if progress_callback is not None:
+		progress_callback(0, total)
 	interrupted = False
 	if n_workers == 1:
 		# Serial path — keeps stack traces readable for debugging

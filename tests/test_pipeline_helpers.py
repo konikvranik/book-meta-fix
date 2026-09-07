@@ -397,6 +397,70 @@ class TestSkipVerified:
 		assert set(seen) == {"v1", "p1"}
 
 
+class TestProgressCallbacks:
+	"""run_pipeline reports its two phases distinctly so a progress bar can
+	label them separately: the library scan is forwarded to scan_library via
+	scan_progress_callback, and the per-book progress_callback fires (0, total)
+	BEFORE the first book starts — the first per-book callback would otherwise
+	fire only when a book COMPLETES, which on an LLM-bound run can be minutes
+	away (a bar pulsing at 0/None the whole time)."""
+
+	def _two_books(self, tmp_path):
+		return [
+			BookMeta(calibre_id=1, uuid="u1", title="A", authors=["X"], path=str(tmp_path / "a")),
+			BookMeta(calibre_id=2, uuid="u2", title="B", authors=["Y"], path=str(tmp_path / "b")),
+		]
+
+	def _fake_process(self, seen):
+		def fake_process(meta, *a, **k):
+			seen.append(meta.uuid)
+			return (meta, None, None, None)
+		return fake_process
+
+	def test_scan_callback_forwarded_to_scan_library(self, tmp_path):
+		from book_meta_fix.pipeline import run_pipeline
+
+		def scan_cb(done, total):
+			pass
+
+		seen = []
+		with patch("book_meta_fix.pipeline.scan_library", return_value=self._two_books(tmp_path)) as scan_mock, \
+			patch("book_meta_fix.pipeline._process_book", side_effect=self._fake_process(seen)):
+			run_pipeline(tmp_path, workers=1, only_needs_review=False, scan_progress_callback=scan_cb)
+		assert scan_mock.call_args.kwargs.get("progress_callback") is scan_cb
+
+	def test_processing_total_announced_before_first_completion_serial(self, tmp_path):
+		from book_meta_fix.pipeline import run_pipeline
+
+		calls = []
+		seen = []
+		with patch("book_meta_fix.pipeline.scan_library", return_value=self._two_books(tmp_path)), \
+			patch("book_meta_fix.pipeline._process_book", side_effect=self._fake_process(seen)):
+			run_pipeline(tmp_path, workers=1, only_needs_review=False, progress_callback=lambda d, t: calls.append((d, t)))
+		# (0, total) first — the bar total is known before any book completes.
+		assert calls == [(0, 2), (1, 2), (2, 2)]
+
+	def test_processing_total_announced_before_first_completion_parallel(self, tmp_path):
+		from book_meta_fix.pipeline import run_pipeline
+
+		calls = []
+		seen = []
+		with patch("book_meta_fix.pipeline.scan_library", return_value=self._two_books(tmp_path)), \
+			patch("book_meta_fix.pipeline._process_book", side_effect=self._fake_process(seen)):
+			run_pipeline(tmp_path, workers=2, only_needs_review=False, progress_callback=lambda d, t: calls.append((d, t)))
+		assert calls[0] == (0, 2)
+		assert sorted(calls[1:]) == [(1, 2), (2, 2)]
+
+	def test_no_callback_still_fine(self, tmp_path):
+		from book_meta_fix.pipeline import run_pipeline
+
+		seen = []
+		with patch("book_meta_fix.pipeline.scan_library", return_value=self._two_books(tmp_path)), \
+			patch("book_meta_fix.pipeline._process_book", side_effect=self._fake_process(seen)):
+			results = run_pipeline(tmp_path, workers=1, only_needs_review=False)
+		assert {r[0].uuid for r in results} == {"u1", "u2"}
+
+
 class TestLocationAwarePipeline:
 	"""With location_root the incremental filter sees C13; without it, a
 	misplaced-but-clean book stays OK (location-blind) and is skipped."""

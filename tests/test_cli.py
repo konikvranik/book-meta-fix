@@ -488,3 +488,40 @@ class TestPathValidation:
 		assert result.exit_code != 0
 		assert "Cannot open cache database" in result.output
 		assert "Traceback" not in result.output
+
+
+class TestAnalyzeEndToEnd:
+	"""analyze runs the full two-phase flow (scan progress + per-book
+	progress under a non-interactive console) and streams review.yaml."""
+
+	def test_analyze_writes_review(self, tmp_path: Path, monkeypatch) -> None:
+		import json as _json
+
+		lib = tmp_path / "lib"
+		for i in (1, 2):
+			folder = lib / f"Autor{i}" / f"Kniha{i} ({i})"
+			folder.mkdir(parents=True)
+			(folder / "metadata.json").write_text(_json.dumps({
+				"title": f"Kniha{i}",
+				"authors": [f"Autor{i}"],
+				"isbn": "9788020403117",
+				"publishedYear": "2001",
+			}), encoding="utf-8")
+			(folder / "book.epub").write_text("x", encoding="utf-8")
+		review = tmp_path / "review.yaml"
+		# Isolate from the host environment: the developer shell may export
+		# BMF_REVIEW/BMF_CACHE/BMF_DATABAZEKNIH pointing at the REAL library
+		# (CliRunner inherits os.environ) — the test must never touch those.
+		monkeypatch.setenv("BMF_REVIEW", str(review))
+		monkeypatch.setenv("BMF_CACHE", str(tmp_path / "cache.db"))
+		monkeypatch.setenv("BMF_DATABAZEKNIH", "0")
+		monkeypatch.setenv("BMF_LIBRARY", str(lib))
+
+		result = CliRunner().invoke(main, [
+			"analyze", "--library", str(lib), "--skip-enrich", "--no-check-location",
+		])
+		assert result.exit_code == 0, result.output
+		assert "Running pipeline" in result.output
+		text = review.read_text(encoding="utf-8")
+		assert "Autor1/Kniha1 (1)" in text
+		assert "Autor2/Kniha2 (2)" in text

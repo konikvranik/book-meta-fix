@@ -99,7 +99,14 @@ src/book_meta_fix/
                    author never wins and an author-less match needs a near-exact title
                    (>= 90) — same gates in _cover_same_book for borrowed covers
   pipeline.py      orchestration: ThreadPoolExecutor, per-book state machine +
-                   apply_review (metadata writes + PLACEMENT — the former organize)
+                   apply_review (metadata writes + PLACEMENT — the former organize).
+                   Progress contract: progress_callback fires (0, total) once the
+                   processing set is known — BEFORE the first book, so a bar shows
+                   its total/ETA immediately instead of pulsing at 0/None until
+                   the first LLM-bound completion — then (done, total) per book;
+                   scan_progress_callback is forwarded to scan_library so analyze
+                   renders the (minutes-long on NFS) scan as its own labelled
+                   phase before the processing bar (cli.py swaps the rich tasks)
   llm.py           Z.AI provider: LeakyBucket + global 429 cooldown + reconcile_loop + tolerant JSON
   review_writer.py streaming review.yaml writer (queue + writer thread)
   review.py        parse review.yaml (multi-doc + legacy list) + update_paths
