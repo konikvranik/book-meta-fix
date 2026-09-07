@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from click.testing import CliRunner
-from test_abs_client import _DeleteRecorder, _GetRecorder, _PostRecorder
+from test_abs_client import _DeleteRecorder, _GetRecorder, _PostRecorder, _Resp
 from test_covers import (
 	_HTML_BYTES,
 	_gradient_cover,
@@ -180,11 +180,12 @@ class TestAbsRescan:
 		(b / "metadata.opf").write_text(self._MINI_OPF)
 		return a, b
 
-	def _fake_abs(self, monkeypatch, books: list[Path], covers: dict[int, str] | None = None) -> _PostRecorder:  # noqa: ANN001
+	def _fake_abs(self, monkeypatch, books: list[Path], covers: dict[int, str] | None = None, post: _PostRecorder | None = None) -> _PostRecorder:  # noqa: ANN001
 		"""Serve libraries + items covering exactly *books*; record every POST.
 
 		*covers* maps an item index to its stored media.coverPath row (the
-		value --fix-covers audits).
+		value --fix-covers audits); *post* overrides the POST recorder (to
+		make selected item scans fail).
 		"""
 		items = []
 		for i, book in enumerate(books):
@@ -199,7 +200,7 @@ class TestAbsRescan:
 				"media": media,
 			})
 
-		def _get(url, *, params=None, timeout=15.0, headers=None):  # noqa: ANN001, ARG001
+		def _get(url, *, params=None, timeout=15.0, headers=None, session=None):  # noqa: ANN001, ARG001
 			if url.endswith("/api/libraries"):
 				return {
 					"libraries": [
@@ -211,7 +212,8 @@ class TestAbsRescan:
 			return None
 
 		monkeypatch.setattr(abs_client, "_http_get_json", _get)
-		post = _PostRecorder()
+		if post is None:
+			post = _PostRecorder()
 		monkeypatch.setattr(abs_client, "_http_post", post)
 		return post
 
@@ -228,13 +230,28 @@ class TestAbsRescan:
 		books = self._make_library(tmp_path)
 		post = self._fake_abs(monkeypatch, list(books))
 		monkeypatch.setattr(abs_client.time, "sleep", lambda s: None)
-		result = CliRunner().invoke(main, ["abs-rescan", "--library", str(tmp_path), "--apply"], env=self._ENV)
+		result = CliRunner().invoke(main, ["abs-rescan", "--library", str(tmp_path), "--abs-workers", "1", "--apply"], env=self._ENV)
 		assert result.exit_code == 0
 		assert "WRITE" in result.output
+		# The per-item loop drives a progress bar whose final state stays in
+		# the output (N/N + the ETA column) — the run must not look hung.
+		assert "Rescanning ABS items" in result.output
+		assert "2/2" in result.output
 		assert [c["url"] for c in post.calls] == [
 			"http://abs.lan:13378/api/items/item-0/scan",
 			"http://abs.lan:13378/api/items/item-1/scan",
 		]
+
+	def test_apply_partial_scan_failure_warns_with_counts(self, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+		books = self._make_library(tmp_path)
+		post = _PostRecorder({"http://abs.lan:13378/api/items/item-1/scan": _Resp(403)})
+		self._fake_abs(monkeypatch, list(books), post=post)
+		monkeypatch.setattr(abs_client.time, "sleep", lambda s: None)
+		result = CliRunner().invoke(main, ["abs-rescan", "--library", str(tmp_path), "--apply"], env=self._ENV)
+		# Most items delivered, one rejected: a warning with counts, not a
+		# hard failure (the majority of the rescan did land in ABS).
+		assert result.exit_code == 0
+		assert "Failed to request the rescan of 1 of 2 ABS items" in result.output
 
 	def test_missing_config_exits_with_hint(self, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
 		# chdir away from the repo so a developer's .env cannot satisfy the check
@@ -262,7 +279,42 @@ class TestAbsRescan:
 		result = CliRunner().invoke(main, ["abs-rescan", "--library", str(tmp_path), "--apply"], env=self._ENV)
 		assert result.exit_code == 0
 		assert "not found in ABS" in result.output
-		assert [c["url"] for c in post.calls] == ["http://abs.lan:13378/api/items/item-0/scan"]
+		# The unmatched book has no item id to scan; instead a PLAIN library
+		# scan (no force param) is requested so ABS learns the new paths.
+		assert [c["url"] for c in post.calls] == [
+			"http://abs.lan:13378/api/items/item-0/scan",
+			"http://abs.lan:13378/api/libraries/lib1/scan",
+		]
+		assert post.calls[-1]["params"] is None
+		assert "Plain ABS library scan requested in the background" in result.output
+
+	def test_unmatched_dry_run_promises_library_scan_without_posting(self, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+		books = self._make_library(tmp_path)
+		post = self._fake_abs(monkeypatch, books[:1])
+		result = CliRunner().invoke(main, ["abs-rescan", "--library", str(tmp_path)], env=self._ENV)
+		assert result.exit_code == 0
+		assert "Dry-run: would trigger a plain ABS library scan" in result.output
+		assert post.calls == []
+
+	def test_matched_only_apply_fires_no_library_scan(self, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+		books = self._make_library(tmp_path)
+		post = self._fake_abs(monkeypatch, list(books))
+		monkeypatch.setattr(abs_client.time, "sleep", lambda s: None)
+		result = CliRunner().invoke(main, [
+			"abs-rescan", "--library", str(tmp_path), "--abs-workers", "1", "--apply",
+		], env=self._ENV)
+		assert result.exit_code == 0
+		assert not any("/api/libraries/lib1/scan" in c["url"] for c in post.calls)
+
+	def test_library_scan_failure_warns_without_failing_run(self, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+		books = self._make_library(tmp_path)
+		post = _PostRecorder({"http://abs.lan:13378/api/libraries/lib1/scan": _Resp(403)})
+		self._fake_abs(monkeypatch, books[:1], post=post)
+		monkeypatch.setattr(abs_client.time, "sleep", lambda s: None)
+		result = CliRunner().invoke(main, ["abs-rescan", "--library", str(tmp_path), "--apply"], env=self._ENV)
+		# The matched rescan was delivered; the follow-up library scan only warns.
+		assert result.exit_code == 0
+		assert "Failed to request the library scan" in result.output
 
 	def test_nothing_changed_is_green_noop(self, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
 		import os
@@ -347,6 +399,8 @@ class TestAbsRescan:
 			"abs-rescan", "--library", str(tmp_path), "--since", "1h", "--fix-covers", "--apply",
 		], env=self._ENV)
 		assert result.exit_code == 0
+		assert "Clearing broken covers" in result.output
+		assert "1/1" in result.output
 		assert "Cleared 1 stored item cover" in result.output
 		# The cleared item joins the scan set even though nothing changed
 		# within --since — the rescan is what lets ABS pick a new cover.
@@ -386,7 +440,7 @@ class TestAbsRescan:
 		delete = self._fake_delete(monkeypatch)
 		monkeypatch.setattr(abs_client.time, "sleep", lambda s: None)
 		result = CliRunner().invoke(main, [
-			"abs-rescan", "--library", str(tmp_path), "--since", "1h", "--fix-covers", "--apply",
+			"abs-rescan", "--library", str(tmp_path), "--since", "1h", "--fix-covers", "--abs-workers", "1", "--apply",
 		], env=self._ENV)
 		assert result.exit_code == 0
 		assert delete.urls == ["http://abs.lan:13378/api/items/item-1/cover"]

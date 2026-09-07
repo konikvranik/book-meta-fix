@@ -33,9 +33,12 @@ the API, which bypasses the mtime gate entirely:
 from __future__ import annotations
 
 import logging
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import requests
 
@@ -46,13 +49,19 @@ log = logging.getLogger(__name__)
 
 USER_AGENT = "book-meta-fix/0.1 (https://github.com/konikvranik/book-meta-fix)"
 
+# Pause between two consecutive scan POSTs of the SAME worker thread: keeps
+# the aggregate burst off a tiny LAN server (with N workers the aggregate
+# rate is N/(scan_time + this), still gentle per connection).
+SCAN_CALL_PAUSE = 0.15
+
 
 def _http_get_json(
-	url: str, *, params: dict | None = None, timeout: float = 15.0, headers: dict[str, str] | None = None
+	url: str, *, params: dict | None = None, timeout: float = 15.0, headers: dict[str, str] | None = None,
+	session: requests.Session | None = None,
 ) -> dict | None:
 	"""GET returning parsed JSON, or None on any failure (network/HTTP/JSON)."""
 	try:
-		r = requests.get(url, params=params, timeout=timeout, headers=headers)
+		r = (session or requests).get(url, params=params, timeout=timeout, headers=headers)
 	except requests.RequestException as e:
 		log.debug("HTTP GET failed for %s: %s", url, e)
 		return None
@@ -72,6 +81,7 @@ def _http_post(
 	json_body: dict | None = None,
 	timeout: float = 15.0,
 	headers: dict[str, str] | None = None,
+	session: requests.Session | None = None,
 ) -> requests.Response | None:
 	"""POST returning the whole response, or None on network failure.
 
@@ -80,7 +90,7 @@ def _http_post(
 	403 non-admin token / 404 endpoint missing) and a tiny or empty body.
 	"""
 	try:
-		return requests.post(url, params=params, json=json_body, timeout=timeout, headers=headers)
+		return (session or requests).post(url, params=params, json=json_body, timeout=timeout, headers=headers)
 	except requests.RequestException as e:
 		log.debug("HTTP POST failed for %s: %s", url, e)
 		return None
@@ -91,6 +101,7 @@ def _http_delete(
 	*,
 	timeout: float = 15.0,
 	headers: dict[str, str] | None = None,
+	session: requests.Session | None = None,
 ) -> requests.Response | None:
 	"""DELETE returning the whole response, or None on network failure.
 
@@ -98,7 +109,7 @@ def _http_delete(
 	a bare status we must distinguish (200 cleared / 403 non-admin token).
 	"""
 	try:
-		return requests.delete(url, timeout=timeout, headers=headers)
+		return (session or requests).delete(url, timeout=timeout, headers=headers)
 	except requests.RequestException as e:
 		log.debug("HTTP DELETE failed for %s: %s", url, e)
 		return None
@@ -125,10 +136,21 @@ class AudiobookshelfClient:
 			"Accept": "application/json",
 			"Authorization": f"Bearer {token}",
 		}
+		# One shared session for every call of this client: module-level
+		# requests.get/post/delete would open (and TLS-handshake) a NEW
+		# connection per call — measured as a visible chunk of the per-item
+		# rescan time over ~3000 calls. urllib3's pool is thread-safe and the
+		# API is stateless (Bearer auth, no cookies), so worker threads share
+		# it; the oversized pool keeps parallel workers from discarding
+		# keep-alive connections.
+		self._session = requests.Session()
+		adapter = requests.adapters.HTTPAdapter(pool_connections=32, pool_maxsize=32)
+		self._session.mount("https://", adapter)
+		self._session.mount("http://", adapter)
 
 	def libraries(self) -> list[dict] | None:
 		"""All libraries on the server (id, name, mediaType, folders)."""
-		data = _http_get_json(f"{self.base_url}/api/libraries", headers=self._headers)
+		data = _http_get_json(f"{self.base_url}/api/libraries", headers=self._headers, session=self._session)
 		if not isinstance(data, dict):
 			return None
 		libs = data.get("libraries")
@@ -140,6 +162,7 @@ class AudiobookshelfClient:
 			f"{self.base_url}/api/libraries/{library_id}/items",
 			params={"limit": 0},
 			headers=self._headers,
+			session=self._session,
 		)
 		if not isinstance(data, dict):
 			return None
@@ -168,25 +191,62 @@ class AudiobookshelfClient:
 			)
 		return items
 
-	def scan_items(self, item_ids: list[str]) -> bool:
-		"""Ask ABS to re-scan the given items (their metadata is re-read).
+	def scan_items(self, item_ids: list[str], progress_callback: Any = None, workers: int = 1) -> int:
+		"""Ask ABS to re-scan the given items; returns the FAILURE count (0 = all delivered).
 
 		Deliberately PER-ITEM, not POST /api/items/batch/scan: the batch
 		endpoint answers 200 immediately and is supposed to scan in the
 		background, but on a real server it was measured accepting ~1100 ids
 		and then processing NONE of them (no visible job, no item changed)
 		while the per-item endpoint synchronously re-scans and returns the
-		result. The small sleep keeps the burst off a tiny LAN server.
+		result.
+
+		Each POST blocks until ABS has re-read that one item, but the ITEMS
+		are independent — *workers* > 1 runs the per-item scans on a thread
+		pool (ABS is a Node server and serves concurrent per-item scans
+		fine; it parallelises its own library scans the same way). The
+		default 1 keeps the historical serial behaviour for direct callers;
+		the CLI passes the BMF_ABS_WORKERS/--abs-workers knob. The per-thread
+		SCAN_CALL_PAUSE keeps each connection's burst gentle, so N workers
+		raise the aggregate rate roughly N-fold without a thundering herd.
+
+		A few thousand items run for many minutes even in parallel —
+		*progress_callback* (called as ``callback(done, total)`` after every
+		item, same contract as mover/crosscheck) lets the CLI drive a
+		progress bar with an ETA so the run does not look hung. It is invoked
+		under the counter lock, so implementations see monotonically
+		increasing *done* even from worker threads.
 		"""
-		ok = True
-		for i, item_id in enumerate(item_ids):
-			if i:
-				time.sleep(0.15)
-			r = _http_post(f"{self.base_url}/api/items/{item_id}/scan", headers=self._headers)
-			if r is None or r.status_code != 200:
-				log.debug("item scan failed for %s (HTTP %s)", item_id, None if r is None else r.status_code)
-				ok = False
-		return ok
+		total = len(item_ids)
+		failed = 0
+		done = 0
+		lock = threading.Lock()
+		paused_once = threading.local()
+
+		def _scan_one(item_id: str) -> None:
+			nonlocal done, failed
+			# Sleep BETWEEN two calls of the same worker thread (the serial
+			# behaviour); the first call of each thread goes out immediately.
+			if getattr(paused_once, "v", False):
+				time.sleep(SCAN_CALL_PAUSE)
+			paused_once.v = True
+			r = _http_post(f"{self.base_url}/api/items/{item_id}/scan", headers=self._headers, session=self._session)
+			with lock:
+				if r is None or r.status_code != 200:
+					log.debug("item scan failed for %s (HTTP %s)", item_id, None if r is None else r.status_code)
+					failed += 1
+				done += 1
+				if progress_callback is not None:
+					progress_callback(done, total)
+
+		w = max(1, int(workers))
+		if w == 1 or total <= 1:
+			for item_id in item_ids:
+				_scan_one(item_id)
+		else:
+			with ThreadPoolExecutor(max_workers=w) as pool:
+				list(pool.map(_scan_one, item_ids))
+		return failed
 
 	def scan_library(self, library_id: str, *, force: bool = False) -> bool:
 		"""Trigger a library scan (force = re-scan every item)."""
@@ -194,6 +254,7 @@ class AudiobookshelfClient:
 			f"{self.base_url}/api/libraries/{library_id}/scan",
 			params={"force": 1} if force else None,
 			headers=self._headers,
+			session=self._session,
 		)
 		return r is not None and r.status_code == 200
 
@@ -208,7 +269,7 @@ class AudiobookshelfClient:
 		cover cache; the caller follows up with a rescan so ABS picks a real
 		cover from the folder again. Returns False on network/HTTP failure.
 		"""
-		r = _http_delete(f"{self.base_url}/api/items/{item_id}/cover", headers=self._headers)
+		r = _http_delete(f"{self.base_url}/api/items/{item_id}/cover", headers=self._headers, session=self._session)
 		return r is not None and r.status_code == 200
 
 

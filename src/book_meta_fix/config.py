@@ -67,6 +67,13 @@ class Config:
 	# empty = auto-detect (a single book library, or a folder-path match).
 	# Override via BMF_ABS_LIBRARY or `bmf abs-rescan --abs-library`.
 	abs_library: str = ""
+	# Parallel per-item scan workers for `bmf abs-rescan --apply`. Each POST
+	# waits for ABS to synchronously re-scan one item, so the serial loop
+	# crawls at ~1.5 items/s; a small pool raises the aggregate rate about
+	# N-fold. 4 is gentle on a small NAS (cover re-picks spawn ffmpeg);
+	# 1 = the historical serial behaviour. Override via BMF_ABS_WORKERS or
+	# `bmf abs-rescan --abs-workers`.
+	abs_workers: int = 4
 
 	# API rate limit / timeout
 	api_rate_sec: float = DEFAULT_API_RATE_SEC
@@ -198,6 +205,11 @@ class Config:
 			cfg.abs_token = v.strip() or None
 		if (v := os.environ.get("BMF_ABS_LIBRARY")) is not None:
 			cfg.abs_library = v.strip()
+		if (v := os.environ.get("BMF_ABS_WORKERS")) is not None:
+			try:
+				cfg.abs_workers = max(1, int(v))
+			except ValueError:
+				pass
 		if (v := os.environ.get("BMF_OPENLIBRARY")) is not None:
 			cfg.openlibrary_enabled = v.strip().lower() in ("1", "true", "yes", "on")
 		if (v := os.environ.get("BMF_GOOGLE_BOOKS")) is not None:

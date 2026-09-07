@@ -40,14 +40,23 @@ anything else with 403.
    folder-name match (covers books moved by apply's placement).
 3. Asks ABS to re-scan them one by one (`POST /api/items/{id}/scan`). The
    per-item endpoint runs the scan synchronously and returns the result, so
-   when the command finishes, the metadata is already re-read. (There is also
+   when the command finishes, the metadata is already re-read. Each POST
+   waits for ABS to re-read that one item, so even in parallel a few
+   thousand items take minutes — the items are scanned by a small worker
+   pool (`--abs-workers`, default 4, env `BMF_ABS_WORKERS`; `1` = serial)
+   and a progress bar with an ETA tracks the run (the `--fix-covers`
+   cover-clearing pass shows one too). (There is also
    a batch endpoint — it answers 200 immediately and is supposed to scan in
    the background, but on a real server it was measured accepting ~1100 ids
    and processing none, so bmf does not use it.)
 
 Books that cannot be matched (brand-new or moved to a path ABS has never
-seen) are listed with a hint: run one plain library scan in ABS so it learns
-the new paths, then re-run `bmf abs-rescan`.
+seen) have no item id to scan, so after the per-item loop `--apply` also
+fires a **plain library scan** (`POST /api/libraries/{id}/scan` — the
+endpoint is async server-side, the scan runs on ABS in the background and
+fully reads metadata.json for items it discovers). Re-run `bmf abs-rescan`
+once it finishes if any books remain unmatched. In a dry-run the old manual
+hint is printed instead.
 
 `--force-all` skips the mapping entirely and sends
 `POST /api/libraries/{id}/scan?force=1` — ABS re-reads every item. Use it

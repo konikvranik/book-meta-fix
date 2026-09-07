@@ -40,8 +40,8 @@ class _GetRecorder:
 		self.payload = payload
 		self.calls: list[dict] = []
 
-	def __call__(self, url, *, params=None, timeout=15.0, headers=None):
-		self.calls.append({"url": url, "params": params, "timeout": timeout, "headers": headers})
+	def __call__(self, url, *, params=None, timeout=15.0, headers=None, session=None):
+		self.calls.append({"url": url, "params": params, "timeout": timeout, "headers": headers, "session": session})
 		return self.payload
 
 
@@ -52,8 +52,8 @@ class _PostRecorder:
 		self.replies = replies or {}
 		self.calls: list[dict] = []
 
-	def __call__(self, url, *, params=None, json_body=None, timeout=15.0, headers=None):
-		self.calls.append({"url": url, "params": params, "json_body": json_body, "timeout": timeout, "headers": headers})
+	def __call__(self, url, *, params=None, json_body=None, timeout=15.0, headers=None, session=None):
+		self.calls.append({"url": url, "params": params, "json_body": json_body, "timeout": timeout, "headers": headers, "session": session})
 		return self.replies.get(url, _Resp(200))
 
 	@property
@@ -68,8 +68,8 @@ class _DeleteRecorder:
 		self.replies = replies or {}
 		self.calls: list[dict] = []
 
-	def __call__(self, url, *, timeout=15.0, headers=None):
-		self.calls.append({"url": url, "timeout": timeout, "headers": headers})
+	def __call__(self, url, *, timeout=15.0, headers=None, session=None):
+		self.calls.append({"url": url, "timeout": timeout, "headers": headers, "session": session})
 		return self.replies.get(url, _Resp(200))
 
 	@property
@@ -248,22 +248,63 @@ class TestClient:
 		rec = _PostRecorder()
 		monkeypatch.setattr(abs_client, "_http_post", rec)
 		monkeypatch.setattr(abs_client.time, "sleep", lambda s: None)
-		assert self._client().scan_items(["a", "b"]) is True
+		assert self._client().scan_items(["a", "b"]) == 0
 		assert rec.urls == [
 			"http://abs.lan:13378/api/items/a/scan",
 			"http://abs.lan:13378/api/items/b/scan",
 		]
 
-	def test_scan_items_rejected_token_returns_false(self, monkeypatch) -> None:  # noqa: ANN001
+	def test_scan_items_reports_progress_and_failure_count(self, monkeypatch) -> None:  # noqa: ANN001
+		rec = _PostRecorder({"http://abs.lan:13378/api/items/b/scan": _Resp(403)})
+		monkeypatch.setattr(abs_client, "_http_post", rec)
+		monkeypatch.setattr(abs_client.time, "sleep", lambda s: None)
+		seen: list[tuple[int, int]] = []
+		failed = self._client().scan_items(["a", "b", "c"], progress_callback=lambda d, t: seen.append((d, t)))
+		assert failed == 1
+		assert seen == [(1, 3), (2, 3), (3, 3)]
+
+	def test_scan_items_threaded_delivers_all_and_monotonic_progress(self, monkeypatch) -> None:  # noqa: ANN001
+		# workers > 1 fans the per-item POSTs over a thread pool; the callback
+		# must still fire exactly once per item with strictly increasing
+		# counts (it is invoked under the counter lock).
+		rec = _PostRecorder({"http://abs.lan:13378/api/items/f/scan": _Resp(403)})
+		monkeypatch.setattr(abs_client, "_http_post", rec)
+		monkeypatch.setattr(abs_client.time, "sleep", lambda s: None)
+		ids = list("abcdef")
+		seen: list[int] = []
+		failed = self._client().scan_items(ids, progress_callback=lambda d, t: seen.append(d), workers=3)
+		assert failed == 1
+		assert sorted(seen) == list(range(1, 7))
+		assert seen == sorted(seen)  # monotone despite the thread pool
+		assert set(rec.urls) == {f"http://abs.lan:13378/api/items/{i}/scan" for i in ids}
+
+	def test_client_passes_shared_session_to_all_calls(self, monkeypatch) -> None:  # noqa: ANN001
+		# One Session for the whole client (keep-alive reuse across the
+		# per-item loop) instead of a fresh TLS handshake per call.
+		get = _GetRecorder({"libraries": []})
+		post = _PostRecorder()
+		delete = _DeleteRecorder()
+		monkeypatch.setattr(abs_client, "_http_get_json", get)
+		monkeypatch.setattr(abs_client, "_http_post", post)
+		monkeypatch.setattr(abs_client, "_http_delete", delete)
+		client = self._client()
+		client.libraries()
+		client.scan_items(["a"])
+		client.clear_item_cover("a")
+		assert get.calls[0]["session"] is client._session
+		assert post.calls[0]["session"] is client._session
+		assert delete.calls[0]["session"] is client._session
+
+	def test_scan_items_rejected_token_counts_failure(self, monkeypatch) -> None:  # noqa: ANN001
 		rec = _PostRecorder({"http://abs.lan:13378/api/items/a/scan": _Resp(403)})
 		monkeypatch.setattr(abs_client, "_http_post", rec)
 		monkeypatch.setattr(abs_client.time, "sleep", lambda s: None)
-		assert self._client().scan_items(["a"]) is False
+		assert self._client().scan_items(["a"]) == 1
 
-	def test_scan_items_empty_list_is_noop_true(self, monkeypatch) -> None:  # noqa: ANN001
+	def test_scan_items_empty_list_is_noop_zero(self, monkeypatch) -> None:  # noqa: ANN001
 		rec = _PostRecorder()
 		monkeypatch.setattr(abs_client, "_http_post", rec)
-		assert self._client().scan_items([]) is True
+		assert self._client().scan_items([]) == 0
 		assert rec.calls == []
 
 	def test_scan_library_force_param(self, monkeypatch) -> None:  # noqa: ANN001

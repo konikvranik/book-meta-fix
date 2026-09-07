@@ -86,3 +86,11 @@ class TestAbsRescanEnv:
 	def test_empty_token_strips_to_none(self, monkeypatch):
 		monkeypatch.setenv("BMF_ABS_TOKEN", "")
 		assert Config.from_env().abs_token is None
+
+	def test_workers_env_resolution(self, monkeypatch):
+		monkeypatch.setenv("BMF_ABS_WORKERS", "8")
+		assert Config.from_env().abs_workers == 8
+		monkeypatch.setenv("BMF_ABS_WORKERS", "0")  # clamped to the serial floor
+		assert Config.from_env().abs_workers == 1
+		monkeypatch.setenv("BMF_ABS_WORKERS", "junk")  # ignored, keeps default
+		assert Config.from_env().abs_workers == 4

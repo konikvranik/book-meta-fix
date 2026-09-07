@@ -556,6 +556,7 @@ Nastavení se vyhodnocuje z těchto zdrojů (v pořadí od nejvyšší přednost
 | `BMF_ABS_URL` | — | Základní URL serveru Audiobookshelf pro `bmf abs-rescan` (např. `http://abs.lan:13378`; prázdné = příkaz není k dispozici) |
 | `BMF_ABS_TOKEN` | — | **Admin** API token Audiobookshelf (Nastavení → Uživatelé → API klíč — scan endpointy odmítají ne-admin tokeny) |
 | `BMF_ABS_LIBRARY` | *(auto)* | Název nebo id ABS knihovny, když server hostí více knihoven knih |
+| `BMF_ABS_WORKERS` | `4` | Paralelní per-položková scan volání pro `bmf abs-rescan --apply` (`1` = sériově) |
 | `ZAI_API_KEY` | — | API klíč Z.AI (LLM, volitelné — fáze 7) |
 | `ZAI_BASE_URL` | `https://api.z.ai/api/paas/v4/` | základní URL Z.AI |
 | `BMF_LLM_MODEL` | `glm-4.7-flash` | model prvního pokusu smyčky LLM (fallback model, když je smyčka vypnutá) |

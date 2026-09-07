@@ -1169,8 +1169,9 @@ def _print_strip_covers_summary(results, do_apply: bool) -> None:  # noqa: ANN00
 @click.option("--abs-library", "abs_library", default=None, help=_("Audiobookshelf library name or id (default: auto-detect)"))
 @click.option("--fix-covers", "fix_covers", is_flag=True, help=_("Also clear broken covers stored in the ABS database (coverPath pointing at a non-image or missing file — behind the ffmpeg 'Invalid data found' errors) and rescan those items"))
 @click.option("--force-all", "force_all", is_flag=True, help=_("Force-rescan the whole ABS library instead of only the changed books"))
+@click.option("--abs-workers", "abs_workers", type=int, default=None, help=_("Parallel per-item scan requests (default: 4, BMF_ABS_WORKERS; 1 = serial)"))
 @click.option("--apply", "do_apply", is_flag=True, help=_("Actually trigger the rescan (default: dry-run)"))
-def abs_rescan(library: Path | None, since: str, url: str | None, abs_library: str | None, fix_covers: bool, force_all: bool, do_apply: bool) -> None:
+def abs_rescan(library: Path | None, since: str, url: str | None, abs_library: str | None, fix_covers: bool, force_all: bool, abs_workers: int | None, do_apply: bool) -> None:
 	"""Tell Audiobookshelf to re-read the metadata of recently changed books.
 
 	ABS keeps its own database and a plain library scan skips every folder
@@ -1191,11 +1192,15 @@ def abs_rescan(library: Path | None, since: str, url: str | None, abs_library: s
 	"""
 	import time as _time
 
+	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
+
 	from .abs_client import AudiobookshelfClient, broken_cover_items, changed_folders, match_items, parse_since_duration
 
 	cfg = Config.from_env()
 	if library is not None:
 		cfg.library = library
+	if abs_workers is not None:
+		cfg.abs_workers = max(1, abs_workers)
 
 	_validate_library(cfg.library)
 
@@ -1225,6 +1230,17 @@ def abs_rescan(library: Path | None, since: str, url: str | None, abs_library: s
 		highlight=False,
 	)
 	client = AudiobookshelfClient(base_url, cfg.abs_token)
+
+	# The per-item HTTP loops below run for many minutes (each POST waits for
+	# ABS to re-read one item); both drive this bar so the run shows N/M + ETA
+	# instead of a silent, hung-looking terminal. The bar stays on screen at
+	# the end (not transient) as a completion record.
+	def _new_progress() -> Progress:
+		return Progress(
+			SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+			BarColumn(complete_style="cyan", finished_style="cyan", pulse_style="cyan"), TextColumn("{task.completed}/{task.total}"),
+			TimeRemainingColumn(), console=console,
+		)
 
 	libs = client.libraries()
 	if libs is None:
@@ -1265,15 +1281,22 @@ def abs_rescan(library: Path | None, since: str, url: str | None, abs_library: s
 		else:
 			_print_broken_covers(broken, do_apply)
 			if do_apply:
-				for b in broken:
-					if client.clear_item_cover(b.item.id):
-						cleared_ids.append(b.item.id)
-					else:
-						console.print(
-							"[yellow]"
-							+ _("Failed to clear the stored cover of {title} — check the token (must be an ADMIN API token).").format(title=b.item.title or b.item.id)
-							+ "[/yellow]"
-						)
+				failed_clears: list[str] = []
+				with _new_progress() as progress:
+					task_id = progress.add_task(_("Clearing broken covers"), total=len(broken))
+					for b in broken:
+						if client.clear_item_cover(b.item.id):
+							cleared_ids.append(b.item.id)
+						else:
+							failed_clears.append(b.item.title or b.item.id)
+						progress.update(task_id, advance=1)
+				if failed_clears:
+					sample = ", ".join(failed_clears[:3])
+					console.print(
+						"[yellow]"
+						+ _("Failed to clear {count} stored item cover(s) (e.g. {sample}) — check the token (must be an ADMIN API token).").format(count=len(failed_clears), sample=sample)
+						+ "[/yellow]"
+					)
 				if cleared_ids:
 					console.print("[green]" + _("Cleared {count} stored item cover(s) — the rescan below lets ABS pick a real cover again.").format(count=len(cleared_ids)) + "[/green]")
 
@@ -1306,15 +1329,57 @@ def abs_rescan(library: Path | None, since: str, url: str | None, abs_library: s
 	scan_ids = list(mres.item_ids) if mres else []
 	scan_ids.extend(i for i in cleared_ids if i not in scan_ids)
 	if do_apply and scan_ids:
-		if client.scan_items(scan_ids):
+		with _new_progress() as progress:
+			task_id = progress.add_task(_("Rescanning ABS items"), total=len(scan_ids))
+
+			def _scan_cb(done: int, total: int) -> None:
+				progress.update(task_id, completed=done)
+
+			failed_scans = client.scan_items(scan_ids, progress_callback=_scan_cb, workers=cfg.abs_workers)
+		if failed_scans:
+			msg = _("Failed to request the rescan of {count} of {total} ABS items — check the token (must be an ADMIN API token) and URL.").format(
+				count=failed_scans, total=len(scan_ids)
+			)
+			if failed_scans == len(scan_ids):
+				console.print(f"[bold red]{msg}[/bold red]", highlight=False)
+				sys.exit(1)
+			console.print(f"[yellow]{msg}[/yellow]", highlight=False)
+		else:
 			console.print(
 				"[green]"
 				+ _("Rescan of {count} ABS items done — refresh the ABS web UI to see the new metadata.").format(count=len(scan_ids))
 				+ "[/green]"
 			)
+
+	# Unmatched folders (moved or brand-new): ABS has never seen their path,
+	# so no per-item id exists to scan. A plain library scan teaches ABS the
+	# new paths and fully reads metadata.json for items it discovers; the
+	# endpoint is async server-side (200 = accepted, scan runs in the
+	# background), so firing it costs no command time. Deliberately AFTER the
+	# per-item loop: while our scans run, the library scanner would race over
+	# the same items and double the server load for no gain.
+	if mres is not None and mres.unmatched:
+		if do_apply:
+			if client.scan_library(lib_id):
+				console.print(
+					"[green]"
+					+ _("Plain ABS library scan requested in the background — it learns the paths of the {count} unmatched book(s); re-run abs-rescan afterwards if any stay unmatched.").format(count=len(mres.unmatched))
+					+ "[/green]"
+				)
+			else:
+				# A follow-up nicety, not the primary work (the matched
+				# rescans are already delivered) — warn, do not fail the run.
+				console.print(
+					"[yellow]"
+					+ _("Failed to request the library scan — check the token (must be an ADMIN API token) and URL.")
+					+ "[/yellow]"
+				)
 		else:
-			console.print("[bold red]" + _("Failed to request the rescan — check the token (must be an ADMIN API token) and URL.") + "[/bold red]")
-			sys.exit(1)
+			console.print(
+				"[dim]"
+				+ _("Dry-run: would trigger a plain ABS library scan for the {count} unmatched book(s).").format(count=len(mres.unmatched))
+				+ "[/dim]"
+			)
 
 
 def _common_tail_components(a: str, b: str) -> int:
@@ -1379,11 +1444,11 @@ def _print_abs_rescan_summary(mres, do_apply: bool) -> None:  # noqa: ANN001
 
 	if mres.unmatched:
 		console.print()
-		console.print(
-			"[yellow]"
-			+ _("Not found in ABS (moved or new): run a plain library scan in ABS once so it learns the new paths, then re-run abs-rescan.")
-			+ "[/yellow]"
-		)
+		if do_apply:
+			hint = _("Not found in ABS (moved or new): a plain library scan below lets ABS learn the new paths; re-run abs-rescan afterwards if any stay unmatched.")
+		else:
+			hint = _("Not found in ABS (moved or new): run a plain library scan in ABS once so it learns the new paths, then re-run abs-rescan.")
+		console.print("[yellow]" + hint + "[/yellow]")
 		t = Table(show_header=False)
 		for folder in mres.unmatched[:10]:
 			t.add_row(folder.name[:70])

@@ -125,8 +125,21 @@ src/book_meta_fix/
                   answering 200 while processing nothing). ABS keeps its own DB and
                   plain scans skip "unchanged" folders, so apply's disk writes are only pushed
                   into ABS through this per-item rescan; scan endpoints need an ADMIN token
-                  (BMF_ABS_URL/BMF_ABS_TOKEN/BMF_ABS_LIBRARY; module-level _http_get_json/
-                  _http_post/_http_delete are the monkeypatch seams for the no-network tests).
+                  (BMF_ABS_URL/BMF_ABS_TOKEN/BMF_ABS_LIBRARY/BMF_ABS_WORKERS; module-level
+                  _http_get_json/_http_post/_http_delete are the monkeypatch seams for the
+                  no-network tests and take an optional session= kwarg — the client shares ONE
+                  requests.Session across all calls so the per-item loop keeps TCP+TLS
+                  connections alive instead of handshaking per call). scan_items fans the items
+                  over a ThreadPoolExecutor (workers knob: --abs-workers/BMF_ABS_WORKERS,
+                  default 4, 1 = serial; per-thread SCAN_CALL_PAUSE keeps each connection's
+                  burst gentle) and drives a progress_callback(done, total) under the counter
+                  lock — the CLI renders it as a rich progress bar with ETA because the
+                  synchronous per-item scans run for minutes even in parallel. With --apply,
+                  unmatched folders (moved/new — no item id to scan) additionally get a PLAIN
+                  library scan fired AFTER the per-item loop (async server-side, fire-and-
+                  forget; after the loop on purpose — a racing library scanner would double
+                  the server load and could collide with our per-item scans); its failure
+                  only warns, it cannot fail the run.
                   abs-rescan --fix-covers = the ABS-DB half of the cover cleanup:
                   broken_cover_items audits EVERY item's stored media.coverPath (exposed by
                   the items listing) — a row is broken when its target's extension is not in

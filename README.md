@@ -546,6 +546,7 @@ Settings resolve from (highest precedence first):
 | `BMF_ABS_URL` | — | Audiobookshelf server base URL for `bmf abs-rescan` (e.g. `http://abs.lan:13378`; empty = the command is unavailable) |
 | `BMF_ABS_TOKEN` | — | Audiobookshelf **admin** API token (Settings → Users → API key — the scan endpoints reject non-admin tokens) |
 | `BMF_ABS_LIBRARY` | *(auto)* | ABS library name or id when the server hosts several book libraries |
+| `BMF_ABS_WORKERS` | `4` | Parallel per-item scan requests for `bmf abs-rescan --apply` (`1` = serial) |
 | `ZAI_API_KEY` | — | Z.AI API key (LLM, optional — phase 7) |
 | `ZAI_BASE_URL` | `https://api.z.ai/api/paas/v4/` | Z.AI base URL |
 | `BMF_LLM_MODEL` | `glm-4.7-flash` | LLM loop first-attempt model (fallback model when the loop is off) |

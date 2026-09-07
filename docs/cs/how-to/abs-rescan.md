@@ -40,14 +40,24 @@ Token musí patřit **adminovi** — scan endpointy vše ostatní odmítnou s 40
    jednoznačná shoda jména složky (pokryje knihy přesunuté placementem).
 3. Požádá ABS o jejich rescan po jednom (`POST /api/items/{id}/scan`).
    Per-položkový endpoint běží synchronně a vrací výsledek — když příkaz
-   doběhne, metadata jsou už přenačtená. (Batch endpoint existuje taky —
+   doběhne, metadata jsou už přenačtená. Každé POST čeká, až ABS onu jednu
+   položku znovu načte, takže i paralelně trvá pár tisíc položek minuty —
+   položky skenuje malý fond workerů (`--abs-workers`, výchozí 4, env
+   `BMF_ABS_WORKERS`; `1` = sériově) a průběh sleduje progressbar s
+   odhadem času (ETA), vlastní progressbar má i čisticí pass `--fix-covers`.
+   (Batch endpoint existuje taky —
    odpoví okamžitě 200 a měl by skenovat na pozadí, ale na reálném serveru
    byl naceněn tak, že ~1100 id přijal a nezpracoval žádné, takže ho bmf
    nepoužívá.)
 
 Knihy, které nelze namapovat (úplně nové, nebo přesunuté na cestu, kterou
-ABS nikdy neviděl), se vypíší s hintem: spusť jednou v ABS obyčejný scan
-knihovny, aby se naučil nové cesty, a pak spusť `bmf abs-rescan` znovu.
+ABS nikdy neviděl), nemají id položky k rescanu — po per-položkové smyčce
+proto `--apply` navíc spustí **obyčejný scan knihovny**
+(`POST /api/libraries/{id}/scan` — endpoint je na serveru asynchronní, scan
+běží na ABS na pozadí a u nově objevených položek načte metadata.json
+celá). Až doběhne, spusť `bmf abs-rescan` znovu, pokud nějaké knihy
+zůstávají nenamapované. V dry-runu se místo toho vypíše původní ruční
+hint.
 
 `--force-all` mapování úplně přeskočí a pošle
 `POST /api/libraries/{id}/scan?force=1` — ABS přenačte všechny položky.
