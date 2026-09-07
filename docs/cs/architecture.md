@@ -92,7 +92,7 @@ Veškerý zdrojový kód leží v `src/book_meta_fix/`. Testy zrcadlí název mo
 | `encoding.py` | Detekce + oprava mojibake (oktalové escape `\376\377...` a špatně dekódované cp1250/iso-8859-2). Neobnovitelná pole označí pro LLM. |
 | `isbn.py` | Extrakce/kanonizace/validace ISBN (10/13místné, s pomlčkami, s prefixem `ISBN:`, koncové `X`). |
 | `verifier.py` | Porovnává DB metadata vůči **skutečnému obsahu** knihy (ne vloženým metadatům). Kaskádové signály: shoda ISBN → fuzzy název → UNCERTAIN. `verify_proposal` + `confirm_identity` hlídají návrhy LLM/enricherů. |
-| `enrichers.py` | Online zdroje metadat: databazeknih.cz (CZ/SK, scrape), OpenLibrary, Google Books. `Enricher` obaluje requests `Session` + `RateLimiter` na host + SQLite cache. → `EnrichedMeta` |
+| `enrichers.py` | Online zdroje metadat: vlastní provider audiobookshelf_czech_metadata (opt-in přes `BMF_ABS_CZECH_URL`, agregátor CZ e-shopů), databazeknih.cz (CZ/SK, scrape), legie.info, OpenLibrary, Google Books. `Enricher` obaluje `RateLimiter` na host + SQLite cache. → `EnrichedMeta` |
 | `pipeline.py` | Orchestrace: `run_pipeline()` provádí knihy skrz detect→extract→verify→fix-kaskádu, paralelizovaně přes `ThreadPoolExecutor`. `_process_book()` je stavový automat jedné knihy. |
 | `llm.py` | Poskytovatel LLM Z.AI (kompatibilní s OpenAI) — opravce poslední instance. Vyhlazovač rychlosti `LeakyBucket` + globální 429 cooldown; `reconcile_loop` (Flash→feedback→final); tolerantní parsování JSON. → `ReconciledMeta` |
 | `review_writer.py` | Streamovaný zapisovač `review.yaml`: fronta + zapisovací vlákno přidává jeden YAML dokument za každou dokončenou knihu (styl unixové roury). Přenos `.bak` zachovává předchozí rozhodnutí uživatele. |

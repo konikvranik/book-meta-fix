@@ -236,6 +236,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--skip-enrich", is_flag=True, default=True, help=_("Skip online enrichment (offline mode)"))
 @click.option("--databazeknih", "use_databazeknih", is_flag=True, help=_("Enable databazeknih.cz lookup (CZ/SK genres + metadata). Implies --no-skip-enrich."))
 @click.option("--legie", "use_legie", is_flag=True, help=_("Enable legie.info lookup (CZ/SK sci-fi/fantasy — short stories & series databazeknih misses). Implies --no-skip-enrich."))
+@click.option("--abs-czech", "abs_czech_url", default=None, help=_("Use a self-hosted audiobookshelf_czech_metadata instance at this base URL (aggregates ~17 CZ audiobook storefronts — audio-edition metadata). Implies --no-skip-enrich. Also settable via BMF_ABS_CZECH_URL."))
 @click.option("--skip-verify", is_flag=True, help=_("Skip content verification"))
 @click.option("--verify-ok", "verify_ok", is_flag=True, help=_("Audit: also verify books the detectors marked OK against their content. Reads every OK book's file (slower). A MISMATCH reclassifies it to NEEDS_REVIEW and seeks a fix (enrichment + LLM). Use periodically to catch corruption the structural detectors miss."))
 @click.option("--no-strict-verify", "no_strict_verify", is_flag=True, help=_("With --verify-ok: only reclassify a clear MISMATCH (fuzzy title < 0.5). By default (without this flag) UNCERTAIN (0.5–0.8) is also reclassified."))
@@ -257,7 +258,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--llm-rate-limit-base", "llm_rate_limit_base", type=float, default=None, help=_("Base seconds of the global cooldown applied when a 429 is seen (default 5). When ANY worker hits a 429, ALL workers pause this long; the cooldown escalates 5/10/20/... with consecutive 429s, honours the server Retry-After when longer, and is capped by --llm-rate-limit-max. Higher = safer but slower; lower = more 429 risk."))
 @click.option("--llm-rate-limit-max", "llm_rate_limit_max", type=float, default=None, help=_("Cap (seconds) on the escalating 429 cooldown (default 60). Prevents a sustained outage from parking workers indefinitely."))
 @click.option("--llm-max-inflight", "llm_max_inflight", type=int, default=None, help=_("Hard cap on LLM requests running at the same instant (default 3). The Z.AI coding plan admits only ~5 concurrent requests per account (interactive clients draw from the same ceiling), so a deep fallback herd gets 429/1302 storms — and false 1113 'insufficient balance' — no matter how slow the drip is. Workers queue on this instead of being rejected. Flash-family models get a stricter sub-cap of min(2, this value)."))
-def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, use_legie: bool, skip_verify: bool, verify_ok: bool, no_strict_verify: bool, accept_missing: bool, pattern: str | None, no_check_location: bool, recheck_ok: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int, llm_min_interval: float | None, llm_model: str | None, llm_reasoning_effort: str | None, llm_thinking: str | None, no_llm_loop: bool, llm_fallback_model: str | None, llm_burst: float | None, llm_rate_limit_base: float | None, llm_rate_limit_max: float | None, llm_max_inflight: int | None) -> None:
+def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, use_legie: bool, abs_czech_url: str | None, skip_verify: bool, verify_ok: bool, no_strict_verify: bool, accept_missing: bool, pattern: str | None, no_check_location: bool, recheck_ok: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int, llm_min_interval: float | None, llm_model: str | None, llm_reasoning_effort: str | None, llm_thinking: str | None, no_llm_loop: bool, llm_fallback_model: str | None, llm_burst: float | None, llm_rate_limit_base: float | None, llm_rate_limit_max: float | None, llm_max_inflight: int | None) -> None:
 	"""Run full pipeline and generate a review.yaml for NEEDS_REVIEW books."""
 	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 
@@ -280,6 +281,11 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 	if use_legie:
 		skip_enrich = False
 		cfg.legie_enabled = True
+	# --abs-czech points at a self-hosted audiobookshelf_czech_metadata
+	# instance (CZ audiobook storefront aggregator) and enables its lookup.
+	if abs_czech_url:
+		skip_enrich = False
+		cfg.abs_czech_url = abs_czech_url
 
 	console.print(f"[bold]{_('Running pipeline')}[/bold] {cfg.library} ({_('workers')}: {workers})", highlight=False)
 	if cfg.databazeknih_enabled:
@@ -287,6 +293,8 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 		console.print("  [cyan]" + _("cover replacement") + "[/cyan] " + _("enabled (C11 generated / MISSING_COVER → databazeknih cover_url)"))
 	if cfg.legie_enabled:
 		console.print("  [cyan]legie.info[/cyan] " + _("lookup enabled (sci-fi/fantasy — short stories & series)"))
+	if cfg.abs_czech_url:
+		console.print(f"  [cyan]{cfg.abs_czech_url}[/cyan] " + _("CZ audiobook provider lookup enabled (storefront aggregator)"))
 	if verify_ok:
 		strict = not no_strict_verify
 		console.print(f"  [cyan]--verify-ok[/cyan] {_('--verify-ok audit: OK books checked against content (strict={strict})').format(strict=strict)}")
@@ -317,6 +325,8 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 			cache_db=cfg.cache_db,
 			databazeknih_enabled=cfg.databazeknih_enabled,
 			legie_enabled=cfg.legie_enabled,
+			abs_czech_url=cfg.abs_czech_url or None,
+			abs_czech_token=cfg.abs_czech_token,
 			openlibrary_enabled=cfg.openlibrary_enabled,
 			google_books_enabled=cfg.google_books_enabled,
 			negative_ttl_sec=cfg.enrich_negative_ttl_sec,
@@ -534,6 +544,7 @@ def _print_fix_source_summary(stats: dict) -> None:
 		(_("Online fixes"), online_total, False),
 		(_("  └ databazeknih.cz"), stats.get("online_databazeknih", 0), True),
 		(_("  └ legie.info"), stats.get("online_legie", 0), True),
+		(_("  └ CZ audiobook provider"), stats.get("online_abs_czech", 0), True),
 		(_("  └ openlibrary.org"), stats.get("online_openlibrary", 0), True),
 		(_("  └ Google Books"), stats.get("online_google_books", 0), True),
 		(_("LLM fixes"), llm_total, False),

@@ -92,7 +92,7 @@ All source lives under `src/book_meta_fix/`. Tests mirror the module name
 | `encoding.py` | Mojibake detection + repair (octal-escape `\376\377...` and mis-decoded cp1250/iso-8859-2). Flags unrecoverable fields for the LLM. |
 | `isbn.py` | ISBN extraction/canonicalization/validation (10/13 digit, hyphenated, `ISBN:`-prefixed, trailing `X`). |
 | `verifier.py` | Compare DB metadata against the book's **actual content** (not embedded meta). Cascading signals: ISBN match → fuzzy title → UNCERTAIN. `verify_proposal` + `confirm_identity` gate LLM/enricher proposals. |
-| `enrichers.py` | Online metadata sources: databazeknih.cz (CZ/SK, scrape), OpenLibrary, Google Books. `Enricher` wraps a requests `Session` + a per-host `RateLimiter` + the SQLite cache. → `EnrichedMeta` |
+| `enrichers.py` | Online metadata sources: a self-hosted audiobookshelf_czech_metadata provider (opt-in via `BMF_ABS_CZECH_URL`, CZ storefront aggregator), databazeknih.cz (CZ/SK, scrape), legie.info, OpenLibrary, Google Books. `Enricher` wraps a per-host `RateLimiter` + the SQLite cache. → `EnrichedMeta` |
 | `pipeline.py` | Orchestration: `run_pipeline()` threads books through detect→extract→verify→fix-cascade, parallelised with a `ThreadPoolExecutor`. `_process_book()` is the per-book state machine. |
 | `llm.py` | Z.AI LLM provider (OpenAI-compatible) — the last-resort fixer. `LeakyBucket` rate smoother + global 429 cooldown; `reconcile_loop` (Flash→feedback→final); tolerant JSON parsing. → `ReconciledMeta` |
 | `review_writer.py` | Streaming `review.yaml` writer: a queue + writer thread appends one YAML document per finished book (Unix-pipe style). `.bak` carry-over preserves prior user decisions. |

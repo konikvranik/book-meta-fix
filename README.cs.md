@@ -26,7 +26,7 @@ při opětovném prohledání.
 - [x] Skenování (`bmf scan`)
 - [x] Detekce (`bmf report`) — pravidla C1–C14
 - [x] Verifikace (kaskáda obsah vs metadata)
-- [x] Obohacení (scraping databazeknih.cz pro CZ/SK žánry + metadata; legie.info pro sci-fi/fantasy povídky a série; OpenLibrary + Google Books jako fallback)
+- [x] Obohacení (scraping databazeknih.cz pro CZ/SK žánry + metadata; legie.info pro sci-fi/fantasy povídky a série; vlastní instance audiobookshelf_czech_metadata agregující ~17 CZ audioknihových e-shopů; OpenLibrary + Google Books jako fallback)
 - [x] Analýza + YAML revize (`bmf analyze`, `bmf apply`)
 - [x] Umísťování (`bmf apply`) — čisté/verified knihy na vzor cesty, nevyřešené do needfix/ (organize sloučeno)
 - [x] Generování EPUB (`bmf epubgen`)
@@ -50,6 +50,10 @@ bmf analyze --skip-enrich -o review.yaml --limit 1000
 #    2 HTTP requests per book, opt-in scraping). Adds genres + metadata to
 #    the proposed block.
 bmf analyze --databazeknih -o review.yaml --limit 1000
+
+#    Optional: query a self-hosted audiobookshelf_czech_metadata instance
+#    (aggregates ~17 CZ audiobook storefronts; audio-edition metadata).
+bmf analyze --abs-czech http://provider:8000 -o review.yaml --limit 1000
 
 # 3. Edit review.yaml — set `action: accept|delete|keep` per entry
 $EDITOR review.yaml
@@ -111,7 +115,7 @@ zůstane zachován, abyste mohli obnovit stav před během.
 
 Společné volby: `--library PATH`, `--limit N`, `--no-cache`, `-o FILE`,
 `--skip-enrich`, `--skip-verify`, `--databazeknih`, `--legie`,
-`--accept-missing/--no-accept-missing` (výchozí zapnuto).
+`--abs-czech URL`, `--accept-missing/--no-accept-missing` (výchozí zapnuto).
 
 `--accept-missing` (výchozí): kniha s `MISSING_ISBN`/`MISSING_YEAR`/
 `MISSING_COVER`, jejíž autor+titul byly potvrzeny proti obsahu knihy, dostane
@@ -256,11 +260,14 @@ do cache `bmf_cache.db`, takže opakované běhy znovu nezatěžují síť.
 |---|---|---|---|
 | `--databazeknih` | databazeknih.cz | **Nejlepší pro CZ/SK**. Vrací žánry (široké kategorie + uživatelské štítky), ISBN, nakladatelství, jazyk, popis, obálku. | Scraping (bez API klíče). 2 požadavky/kniha. Fuzzy shoda titulu výsledek hlídá, takže se nepřiřadí žánry jiné knihy. |
 | `--legie` | legie.info | **Nejlepší pro CZ/SK sci-fi/fantasy**. Indexuje povídky („povídky“) a sérii/vesmír, do nichž dílo patří, což vyhledávání knih na databazeknih přehlíží. Silný pro identitu (titul + autor + původní titul). | Scraping (bez API klíče). Bez ISBN/roku/nakladatele (jen identita). Zkouší se po databazeknih. |
+| `--abs-czech URL` | vlastní [audiobookshelf_czech_metadata](https://github.com/stecik/audiobookshelf_czech_metadata) | **Metadata AUDIO vydání pro CZ/SK.** Vaše vlastní instance agreguje ~17 CZ audioknihových e-shopů (Alza, Audiolibrix, Audioteka, Kosmas, Radioteka, Rozhlas, …) za ABS custom-provider API `/search` — nakladatelství/rok/obálku/žánry *audio* vydání, ideální pro audioknihovou knihovnu. Rychlé (bmf ascrapuje třetí strany). | Opt-in přes base URL (`BMF_ABS_CZECH_URL`; token `BMF_ABS_CZECH_TOKEN` pro instance s `AUDIOBOOKSHELF_AUTH_TOKEN`). Bez ISBN endpointu — jen titul+autor. Narrator/duration bmf nemodeluje a zahazuje. Zkouší se po databazeknih-podle-ISBN, před jeho hledáním podle titulu. |
 | *(vždy zapnuto při povoleném obohacení)* | OpenLibrary | ISBN + vyhledávání podle titulu, mezinárodní vydání | Slabé pokrytí CZ (~10 %) |
 | *(vždy zapnuto při povoleném obohacení)* | Google Books | Dotaz podle ISBN | Často rate-limit bez API klíče |
 
-Pořadí dotazů při zapnutém obohacení: **databazeknih (pokud je zapnuto) →
-legie.info (pokud je zapnuto) → OpenLibrary podle ISBN → Google Books podle
+Pořadí dotazů při zapnutém obohacení: **databazeknih podle ISBN (pokud je
+zapnuto) → vlastní CZ provider podle titulu (pokud je nastaveno URL) →
+databazeknih podle titulu (pokud je zapnuto) → legie.info (pokud je zapnuto)
+→ OpenLibrary podle ISBN → Google Books podle
 ISBN → OpenLibrary podle titulu**. První úspěch vyhrává.
 
 ```bash
@@ -269,6 +276,10 @@ bmf analyze --databazeknih --limit 100 -o review.yaml
 
 # Enable via env var instead of the flag
 echo 'BMF_DATABAZEKNIH=1' >> .env
+
+# Point at your self-hosted audiobookshelf_czech_metadata instance (base URL,
+# not the /search endpoint; token only when deployed with auth enabled)
+echo 'BMF_ABS_CZECH_URL=http://provider:8000' >> .env
 ```
 
 ## Jak opravná pipeline vybírá návrh
@@ -461,7 +472,8 @@ bmf analyze --llm --llm-burst 1 --llm-min-interval 4.0 --llm-rate-limit-base 10
 Výchozí calibre funkce „Generate cover“ vytváří zástupný obrázek (jednolitý
 podklad + vykreslený text titulu/autora) přesně o velikosti 1200×1600. Pipeline
 je detekuje pixelovou analýzou — **bez jakéhokoli LLM** — a když je k
-dispozici náhrada, navrhne ji z databazeknih.cz.
+dispozici náhrada, navrhne ji z online zdroje (vlastní CZ provider, když je
+nastaven, jinak databazeknih.cz).
 
 **Detekce** (`covers.py` + `rule_generated_cover`): tři signály, každý přidává
 spolehlivost; obálka je klasifikována jako generovaná při spolehlivosti ≥ 0,5:
@@ -617,7 +629,7 @@ kompletně doplní (projektovaný stav po apply je detektory čistý) — oprave
 kniha se do review už nikdy nevrátí. Předvyplní se i u akceptovaného záznamu,
 jehož FINÁLNÍ identita (titul/autor po aplikování návrhu, případně ISBN) je
 potvrzená proti obsahu knihy A zároveň online zdrojem (databazeknih/legie/
-OpenLibrary/Google Books — odpověď LLM se nepočítá): taková kniha se opraví
+vlastní CZ provider/OpenLibrary/Google Books — odpověď LLM se nepočítá): taková kniha se opraví
 A zavře jedním apply, i když zůstávají benigní chybějící pole (ISBN/rok/
 obálka, které žádný zdroj nemá). Zbylý problém NEEDS_REVIEW předvyplnění
 blokuje, aby známý defekt zůstal viditelný — chybějící obálka je benigní a
@@ -782,7 +794,10 @@ Nástroj funguje i bez nich, ale s omezeným pokrytím formátů.
 
 - **Online obohacení pro CZ/SK knihy**: použijte `--databazeknih` pro
   vyhledávání zaměřené na CZ/SK přes scraping databazeknih.cz (žánry +
-  metadata, bez API klíče). OpenLibrary a Google Books zůstávají jako
+  metadata, bez API klíče), nebo `--abs-czech URL` / `BMF_ABS_CZECH_URL` pro
+  vlastní instanci [audiobookshelf_czech_metadata](https://github.com/stecik/audiobookshelf_czech_metadata)
+  (agreguje ~17 CZ audioknihových e-shopů; metadata audio vydání). OpenLibrary
+  a Google Books zůstávají jako
   mezinárodní fallbacky, ale mají slabé pokrytí českých ISBN. API
   `obalkyknih.cz` vyžaduje knihovnický klíč (zatím neimplementováno).
 - **Mojibake v obsahu EPUB**: když Calibre importovalo knihu s poškozenými

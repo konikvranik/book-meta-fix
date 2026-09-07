@@ -83,7 +83,11 @@ src/book_meta_fix/
   isbn.py          ISBN extract/canonicalize/validate
   verifier.py      compare DB meta vs BOOK CONTENT (do NOT trust embedded) + identity primitives
   classify.py      disposition for report/epubgen (detect + identity gate + opt-in OK-audit)
-  enrichers.py     databazeknih.cz / legie.info / OpenLibrary / Google Books → EnrichedMeta
+  enrichers.py     databazeknih.cz / legie.info / self-hosted audiobookshelf_czech_metadata
+                   provider (opt-in via BMF_ABS_CZECH_URL, aggregates ~17 CZ audiobook
+                   storefronts behind ABS's /search contract; source key "abs_czech",
+                   no ISBN endpoint — title+author only, narrator/duration unmodelled)
+                   / OpenLibrary / Google Books → EnrichedMeta
   pipeline.py      orchestration: ThreadPoolExecutor, per-book state machine +
                    apply_review (metadata writes + PLACEMENT — the former organize)
   llm.py           Z.AI provider: LeakyBucket + global 429 cooldown + reconcile_loop + tolerant JSON

@@ -44,6 +44,15 @@ class Config:
 	openlibrary_enabled: bool = True
 	databazeknih_enabled: bool = False  # scraping, opt-in
 	legie_enabled: bool = False  # legie.info scraping (CZ/SK sci-fi/fantasy), opt-in
+	# Self-hosted audiobookshelf_czech_metadata instance (an aggregator over
+	# ~17 CZ audiobook storefronts speaking ABS's custom-provider contract;
+	# github.com/stecik/audiobookshelf_czech_metadata). Empty URL = disabled;
+	# set the BASE url (…:8000), not the /search endpoint. Override via
+	# BMF_ABS_CZECH_URL or --abs-czech.
+	abs_czech_url: str = ""
+	# Bearer token for an instance deployed with AUDIOBOOKSHELF_AUTH_TOKEN.
+	# Override via BMF_ABS_CZECH_TOKEN.
+	abs_czech_token: str | None = None
 
 	# API rate limit / timeout
 	api_rate_sec: float = DEFAULT_API_RATE_SEC
@@ -165,6 +174,10 @@ class Config:
 			cfg.databazeknih_enabled = v.strip().lower() in ("1", "true", "yes", "on")
 		if (v := os.environ.get("BMF_LEGIE")) is not None:
 			cfg.legie_enabled = v.strip().lower() in ("1", "true", "yes", "on")
+		if (v := os.environ.get("BMF_ABS_CZECH_URL")) is not None:
+			cfg.abs_czech_url = v.strip()
+		if (v := os.environ.get("BMF_ABS_CZECH_TOKEN")) is not None:
+			cfg.abs_czech_token = v.strip() or None
 		if (v := os.environ.get("BMF_OPENLIBRARY")) is not None:
 			cfg.openlibrary_enabled = v.strip().lower() in ("1", "true", "yes", "on")
 		if (v := os.environ.get("BMF_GOOGLE_BOOKS")) is not None:

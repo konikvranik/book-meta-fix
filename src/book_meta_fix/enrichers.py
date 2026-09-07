@@ -7,6 +7,10 @@ Status of sources (verified against this library's CZ/SK content):
 - databazeknih.cz:     CZ/SK-focused, no API key, scrapes search + detail.
                        Best source for CZ/SK genres (JSON-LD `genre` + user
                        `Štítky`). Opt-in (scraping, enabled via config flag).
+- audiobookshelf_czech: self-hosted aggregator over ~17 CZ audiobook
+                       storefronts (ABS custom-provider contract). Opt-in via
+                       base URL (BMF_ABS_CZECH_URL); no ISBN endpoint, so
+                       title+author only. Audio-edition metadata.
 - OpenLibrary ISBN:    works for ~10% of CZ books (international reprints)
 - OpenLibrary title:   works for famous books in original language
 - Google Books ISBN:   rate-limited without API key (shared quota)
@@ -82,14 +86,20 @@ class RateLimiter:
 _rate_limiter = RateLimiter()
 
 
-def _http_get(url: str, params: dict | None = None, timeout: float = 15.0, rate: float = 1.0) -> requests.Response | None:
-	"""GET with rate limiting, returning None on network failure."""
+def _http_get(url: str, params: dict | None = None, timeout: float = 15.0, rate: float = 1.0, headers: dict[str, str] | None = None) -> requests.Response | None:
+	"""GET with rate limiting, returning None on network failure.
+
+	*headers* is merged over the default UA/Accept pair (e.g. an Authorization
+	header for the self-hosted provider)."""
 	from urllib.parse import urlparse
 
 	host = urlparse(url).netloc
 	_rate_limiter.wait(host, rate)
+	req_headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+	if headers:
+		req_headers.update(headers)
 	try:
-		r = requests.get(url, params=params, timeout=timeout, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+		r = requests.get(url, params=params, timeout=timeout, headers=req_headers)
 		return r
 	except requests.RequestException as e:
 		log.debug("HTTP GET failed for %s: %s", url, e)
@@ -596,6 +606,119 @@ def lookup_legie(*, title: str, author: str | None = None) -> EnrichedMeta | Non
 
 
 # ---------------------------------------------------------------------------
+# audiobookshelf_czech_metadata provider (self-hosted, opt-in via URL)
+# ---------------------------------------------------------------------------
+#
+# A self-hosted instance of github.com/stecik/audiobookshelf_czech_metadata —
+# a FastAPI aggregator over ~17 CZ audiobook storefronts (Alza, Audiolibrix,
+# Audioteka, Kosmas, Radioteka, Rozhlas, O2 Knihovna, Palmknihy, ...) that
+# speaks Audiobookshelf's custom-metadata-provider contract:
+# GET {base}/search?query=<title>&author=<author> → {"matches": [...]} with
+# title/author/publisher/publishedYear/description/cover/genres/language.
+# The response also carries narrator/duration, which bmf deliberately drops:
+# writers preserve ABS-owned manifest fields (narrators, chapters, ...) that
+# BookMeta does not model, so proposing them here would go nowhere.
+# Opt-in: enabled by configuring the instance base URL (BMF_ABS_CZECH_URL /
+# --abs-czech); empty URL = disabled. The provider ranks its own matches, but
+# a storefront search is still keyword-based — we gate on title fuzzy (>= 70,
+# the databazeknih floor) and prefer an author-agreeing entry (>= 80, the
+# verifier's author-match bar) so a weak hit cannot attach another book's
+# metadata. There is no ISBN endpoint (query/author only), so this source is
+# reachable only through the title path.
+
+
+def _abs_search_url(base_url: str) -> str:
+	"""Normalize the configured base URL into the /search endpoint.
+
+	Accepts the base with or without a trailing slash and tolerates a base
+	configured with the /search suffix already appended (same convention as
+	ABS itself: one configures the BASE url, not the endpoint)."""
+	base = base_url.rstrip("/")
+	if base.endswith("/search"):
+		base = base[: -len("/search")]
+	return base + "/search"
+
+
+def _pick_abs_match(matches: list[dict], title: str, author: str | None) -> dict | None:
+	"""Pick the best entry from the provider's ranked match list.
+
+	Title must fuzzy-match (>= 70); among the survivors an entry whose author
+	agrees (>= 80 token_sort) is preferred over an author-less or disagreeing
+	one, then the best title score wins. Returns None when nothing clears the
+	title floor — an empty/weak match list must not produce a proposal."""
+	from rapidfuzz import fuzz
+
+	best: tuple[bool, int, dict] | None = None
+	for m in matches:
+		mtitle = (m.get("title") or "").strip()
+		if not mtitle:
+			continue
+		tscore = fuzz.token_sort_ratio(title.lower(), mtitle.lower())
+		if tscore < 70:
+			continue
+		agrees = True
+		if author and m.get("author"):
+			agrees = fuzz.token_sort_ratio(author.lower(), str(m["author"]).lower()) >= 80
+		if best is None or (agrees, tscore) > (best[0], best[1]):
+			best = (agrees, tscore, m)
+	return best[2] if best is not None else None
+
+
+def _abs_match_to_meta(m: dict) -> EnrichedMeta:
+	"""Map one ABS-provider match dict onto EnrichedMeta (see the section
+	comment for why narrator/duration are dropped)."""
+	em = EnrichedMeta(source="abs_czech")
+	em.title = (m.get("title") or "").strip() or None
+	# 'author' arrives as a plain string; storefronts join multiple authors
+	# with commas inside it.
+	em.authors = [a.strip() for a in str(m.get("author") or "").split(",") if a.strip()]
+	em.publisher = m.get("publisher") or None
+	year_m = _re.search(r"\d{4}", str(m.get("publishedYear") or ""))
+	if year_m:
+		em.year = int(year_m.group(0))
+	em.language = m.get("language") or None
+	em.description = m.get("description") or None
+	em.cover_url = m.get("cover") or None
+	genres = m.get("genres")
+	if isinstance(genres, list):
+		em.genres = [str(g) for g in genres if g]
+	return em
+
+
+def lookup_abs_czech(*, base_url: str, title: str, author: str | None = None, token: str | None = None) -> EnrichedMeta | None:
+	"""Query a self-hosted audiobookshelf_czech_metadata instance by title.
+
+	One HTTP call. The provider fans out to the enabled storefronts under its
+	own scraper budget (its README advises ≤ 8 s per scraper so searches fit
+	Audiobookshelf's 10 s cap) and can take tens of seconds when every source
+	is slow — hence the 30 s timeout instead of the 15 s default. *token* is
+	sent as a Bearer header for instances deployed with
+	AUDIOBOOKSHELF_AUTH_TOKEN set.
+	"""
+	params: dict[str, str] = {"query": title}
+	if author:
+		params["author"] = author
+	headers = {"Authorization": f"Bearer {token}"} if token else None
+	r = _http_get(_abs_search_url(base_url), params=params, timeout=30.0, rate=0.5, headers=headers)
+	if r is None or r.status_code != 200:
+		return None
+	try:
+		data = r.json()
+	except ValueError:
+		return None
+	matches = data.get("matches") if isinstance(data, dict) else None
+	if not isinstance(matches, list) or not matches:
+		return None
+	pick = _pick_abs_match(matches, title, author)
+	if pick is None:
+		return None
+	em = _abs_match_to_meta(pick)
+	if not em.title:
+		return None
+	return em
+
+
+# ---------------------------------------------------------------------------
 # Top-level lookup with caching
 # ---------------------------------------------------------------------------
 
@@ -610,6 +733,8 @@ class Enricher:
 		*,
 		databazeknih_enabled: bool = False,
 		legie_enabled: bool = False,
+		abs_czech_url: str | None = None,
+		abs_czech_token: str | None = None,
 		openlibrary_enabled: bool = True,
 		google_books_enabled: bool = True,
 		negative_ttl_sec: float = 7 * 24 * 3600,
@@ -617,6 +742,8 @@ class Enricher:
 		self.rate_sec = rate_sec
 		self.databazeknih_enabled = databazeknih_enabled
 		self.legie_enabled = legie_enabled
+		self.abs_czech_url = abs_czech_url or None
+		self.abs_czech_token = abs_czech_token
 		self.openlibrary_enabled = openlibrary_enabled
 		self.google_books_enabled = google_books_enabled
 		# A cached negative ("__NOT_FOUND__") older than this is treated as a
@@ -642,12 +769,17 @@ class Enricher:
 	def lookup(self, *, isbn: str | None = None, title: str | None = None, author: str | None = None, year: int | None = None) -> EnrichedMeta | None:
 		"""Try sources in order. Returns first hit or None.
 
-		Order (gated by *_enabled flags):
+		Order (gated by *_enabled flags / configured URL):
 		  1. databazeknih.cz by ISBN (exact; best for CZ/SK + genres)
-		  2. databazeknih.cz by title (fuzzy >= 70; prefers year-matching edition)
-		  3. OpenLibrary by ISBN
-		  4. Google Books by ISBN
-		  5. OpenLibrary by title
+		  2. audiobookshelf_czech provider by title (self-hosted CZ storefront
+		     aggregator; audio-edition metadata, so it outranks the remaining
+		     title sources for this audiobook library — and being the user's
+		     own service it is faster and gentler than scraping)
+		  3. databazeknih.cz by title (fuzzy >= 70; prefers year-matching edition)
+		  4. legie.info by title
+		  5. OpenLibrary by ISBN
+		  6. Google Books by ISBN
+		  7. OpenLibrary by title
 
 		*year* is used only by the databazeknih title search to disambiguate
 		editions; ISBN lookups are exact. databazeknih by ISBN goes first: it's
@@ -672,6 +804,10 @@ class Enricher:
 		# has an ISBN. Goes first when an ISBN is available.
 		if result is None and self.databazeknih_enabled and isbn:
 			result = lookup_databazeknih_isbn(isbn)
+		# Self-hosted CZ audiobook storefront aggregator (opt-in via URL, no
+		# ISBN endpoint — title+author only; see the section comment above).
+		if result is None and self.abs_czech_url and title:
+			result = lookup_abs_czech(base_url=self.abs_czech_url, title=title, author=author, token=self.abs_czech_token)
 		# databazeknih by title (search). Best CZ/SK source + genres.
 		if result is None and self.databazeknih_enabled and title:
 			result = lookup_databazeknih(title=title, author=author, year=year)

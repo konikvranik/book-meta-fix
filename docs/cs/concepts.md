@@ -216,14 +216,25 @@ Online dotazy jsou **ve výchozím nastavení vypnuté** (`--skip-enrich` je
 výchozí pro `analyze`). Výsledky se cachují v `bmf_cache.db`. Pořadí dotazů
 při zapnutém obohacení — **první zásah vyhrává**:
 
-1. **databazeknih.cz** (při `--databazeknih`) — nejlepší pro CZ/SK. Vrací
-   žánry (široké kategorie + uživatelské štítky), ISBN, vydavatele, jazyk,
-   popis, obálku. Scraping (bez API klíče), 2 požadavky/kniha, fuzzy shoda
-   názvu hlídá výsledek, takže se nepřipojí žánry špatné knihy.
-2. **OpenLibrary podle ISBN** — mezinárodní vydání; slabé pokrytí CZ
+1. **databazeknih.cz podle ISBN** (při `--databazeknih`) — přesná shoda;
+   nejlepší pro CZ/SK. Vrací žánry (široké kategorie + uživatelské štítky),
+   ISBN, vydavatele, jazyk, popis, obálku. Scraping (bez API klíče),
+   2 požadavky/kniha.
+2. **Vlastní CZ provider podle názvu** (při `--abs-czech URL` /
+   `BMF_ABS_CZECH_URL`) — vaše instance
+   [audiobookshelf_czech_metadata](https://github.com/stecik/audiobookshelf_czech_metadata),
+   která agreguje ~17 CZ audioknihových e-shopů za ABS custom-provider API
+   `/search`. Metadata audio vydání (nakladatelství, rok, obálka, žánry,
+   jazyk); bez ISBN endpointu (jen titul+autor).
+3. **databazeknih.cz podle názvu** (při `--databazeknih`) — fuzzy shoda
+   názvu hlídá výsledek, takže se nepřipojí žánry špatné knihy; upřednostňuje
+   vydání ze shodného roku.
+4. **legie.info** (při `--legie`) — CZ/SK sci-fi/fantasy; povídky a série/
+   vesmíry, které vyhledávání knih na databazeknih přehlíží (jen identita).
+5. **OpenLibrary podle ISBN** — mezinárodní vydání; slabé pokrytí CZ
    (~10 %).
-3. **Google Books podle ISBN** — často rate-limitované bez API klíče.
-4. **OpenLibrary podle názvu**.
+6. **Google Books podle ISBN** — často rate-limitované bez API klíče.
+7. **OpenLibrary podle názvu**.
 
 ## Vzory pro umísťování
 

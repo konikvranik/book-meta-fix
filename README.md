@@ -25,7 +25,7 @@ Audiobookshelf and Kavita pick up the fixes on rescan.
 - [x] Scan (`bmf scan`)
 - [x] Detect (`bmf report`) — C1–C14 rules
 - [x] Verify (content vs metadata cascade)
-- [x] Enrich (databazeknih.cz scraping for CZ/SK genres + metadata; legie.info for sci-fi/fantasy short stories & series; OpenLibrary + Google Books fallback)
+- [x] Enrich (databazeknih.cz scraping for CZ/SK genres + metadata; legie.info for sci-fi/fantasy short stories & series; a self-hosted audiobookshelf_czech_metadata instance aggregating ~17 CZ audiobook storefronts; OpenLibrary + Google Books fallback)
 - [x] Analyze + YAML review (`bmf analyze`, `bmf apply`)
 - [x] Placement (`bmf apply`) — clean/verified books to the pattern path, unresolved to needfix/ (organize merged in)
 - [x] EPUB generation (`bmf epubgen`)
@@ -49,6 +49,10 @@ bmf analyze --skip-enrich -o review.yaml --limit 1000
 #    2 HTTP requests per book, opt-in scraping). Adds genres + metadata to
 #    the proposed block.
 bmf analyze --databazeknih -o review.yaml --limit 1000
+
+#    Optional: query a self-hosted audiobookshelf_czech_metadata instance
+#    (aggregates ~17 CZ audiobook storefronts; audio-edition metadata).
+bmf analyze --abs-czech http://provider:8000 -o review.yaml --limit 1000
 
 # 3. Edit review.yaml — set `action: accept|delete|keep` per entry
 $EDITOR review.yaml
@@ -108,7 +112,7 @@ can recover the pre-run state.
 
 Common options: `--library PATH`, `--limit N`, `--no-cache`, `-o FILE`,
 `--skip-enrich`, `--skip-verify`, `--databazeknih`, `--legie`,
-`--accept-missing/--no-accept-missing` (default on).
+`--abs-czech URL`, `--accept-missing/--no-accept-missing` (default on).
 
 `--accept-missing` (default): a `MISSING_ISBN`/`MISSING_YEAR`/`MISSING_COVER`
 book whose author+title were confirmed against the book's content is
@@ -254,10 +258,11 @@ for `analyze`). Enable them with the flags below; results are cached in
 |---|---|---|---|
 | `--databazeknih` | databazeknih.cz | **Best for CZ/SK**. Returns genres (broad categories + user tags), ISBN, publisher, language, description, cover. | Scraping (no API key). 2 requests/book. Fuzzy title match gates the result so the wrong book's genres aren't attached. |
 | `--legie` | legie.info | **Best for CZ/SK sci-fi/fantasy**. Indexes short stories ("povídky") and the series/universe a work belongs to, which databazeknih's book search misses. Strong for identity (title + author + original title). | Scraping (no API key). No ISBN/Year/Publisher (identity only). Tried after databazeknih. |
+| `--abs-czech URL` | self-hosted [audiobookshelf_czech_metadata](https://github.com/stecik/audiobookshelf_czech_metadata) | **Audio-edition CZ/SK metadata.** Your own instance aggregates ~17 CZ audiobook storefronts (Alza, Audiolibrix, Audioteka, Kosmas, Radioteka, Rozhlas, …) behind ABS's custom-provider `/search` API — publisher/year/cover/genres of the *audio* edition, ideal for an audiobook library. Fast (no third-party scraping from bmf's side). | Opt-in via base URL (`BMF_ABS_CZECH_URL`; token via `BMF_ABS_CZECH_TOKEN` for instances with `AUDIOBOOKSHELF_AUTH_TOKEN`). No ISBN endpoint — title+author only. Narrator/duration are not modeled by bmf and dropped. Tried after databazeknih-by-ISBN, before its title search. |
 | *(always on when enrichment enabled)* | OpenLibrary | ISBN + title search, international editions | Weak CZ coverage (~10%) |
 | *(always on when enrichment enabled)* | Google Books | ISBN lookup | Often rate-limited without an API key |
 
-Lookup order when enrichment is on: **databazeknih (if enabled) → legie.info (if enabled) → OpenLibrary by ISBN → Google Books by ISBN → OpenLibrary by title**. First hit wins.
+Lookup order when enrichment is on: **databazeknih by ISBN (if enabled) → the self-hosted CZ provider by title (if a URL is configured) → databazeknih by title (if enabled) → legie.info (if enabled) → OpenLibrary by ISBN → Google Books by ISBN → OpenLibrary by title**. First hit wins.
 
 ```bash
 # Enrich with CZ/SK genres only (no international fallbacks needed for a CZ library)
@@ -265,6 +270,10 @@ bmf analyze --databazeknih --limit 100 -o review.yaml
 
 # Enable via env var instead of the flag
 echo 'BMF_DATABAZEKNIH=1' >> .env
+
+# Point at your self-hosted audiobookshelf_czech_metadata instance (base URL,
+# not the /search endpoint; token only when deployed with auth enabled)
+echo 'BMF_ABS_CZECH_URL=http://provider:8000' >> .env
 ```
 
 ## How the fix pipeline picks a proposal
@@ -456,7 +465,8 @@ bmf analyze --llm --llm-burst 1 --llm-min-interval 4.0 --llm-rate-limit-base 10
 Calibre's default "Generate cover" produces a placeholder image (solid
 background + rendered title/author text) at exactly 1200×1600. The pipeline
 detects these by pixel analysis — **no LLM involved** — and proposes a
-replacement from databazeknih.cz when one is available.
+replacement from an online source (the self-hosted CZ provider when
+configured, else databazeknih.cz) when one is available.
 
 **Detection** (`covers.py` + `rule_generated_cover`): three signals, each adds
 confidence; a cover is classified as generated at confidence ≥ 0.5:
@@ -610,7 +620,7 @@ its own proposal completes the book (the projected post-apply state is
 detector-clean), so a fixed book never re-enters review. It is also
 pre-filled for an accepted entry whose FINAL identity (the post-proposal
 title/author, plus ISBN when known) is confirmed against the book's content
-AND an online source (databazeknih/legie/OpenLibrary/Google Books — an LLM
+AND an online source (databazeknih/legie/the self-hosted CZ provider/OpenLibrary/Google Books — an LLM
 answer does not count): such a book is fixed AND closed in one apply even when benign fields stay missing (an ISBN/year/cover no source
 has). A remaining NEEDS_REVIEW problem blocks the pre-fill so a known
 defect stays visible — a missing cover is benign and may stay, but a
@@ -770,7 +780,10 @@ The tool works without them, but with reduced format coverage.
 
 - **Online enrichment for CZ/SK books**: use `--databazeknih` for
   CZ/SK-focused lookup via databazeknih.cz scraping (genres + metadata, no API
-  key). OpenLibrary and Google Books remain as international fallbacks but
+  key), or `--abs-czech URL` / `BMF_ABS_CZECH_URL` for a self-hosted
+  [audiobookshelf_czech_metadata](https://github.com/stecik/audiobookshelf_czech_metadata)
+  instance (aggregates ~17 CZ audiobook storefronts; audio-edition metadata).
+  OpenLibrary and Google Books remain as international fallbacks but
   have poor Czech ISBN coverage. `obalkyknih.cz` API requires a library key
   (not yet implemented).
 - **Mojibake in EPUB content**: when Calibre imported a book with corrupt

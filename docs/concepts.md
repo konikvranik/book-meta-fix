@@ -208,13 +208,23 @@ Online lookups are **off by default** (`--skip-enrich` is the default for
 `analyze`). Results are cached in `bmf_cache.db`. Lookup order when enrichment
 is on — **first hit wins**:
 
-1. **databazeknih.cz** (if `--databazeknih`) — best for CZ/SK. Returns genres
-   (broad categories + user tags), ISBN, publisher, language, description,
-   cover. Scraping (no API key), 2 requests/book, fuzzy title match gates the
-   result so the wrong book's genres aren't attached.
-2. **OpenLibrary by ISBN** — international editions; weak CZ coverage (~10%).
-3. **Google Books by ISBN** — often rate-limited without an API key.
-4. **OpenLibrary by title**.
+1. **databazeknih.cz by ISBN** (if `--databazeknih`) — exact match; best for
+   CZ/SK. Returns genres (broad categories + user tags), ISBN, publisher,
+   language, description, cover. Scraping (no API key), 2 requests/book.
+2. **Self-hosted CZ provider by title** (if `--abs-czech URL` /
+   `BMF_ABS_CZECH_URL`) — your own
+   [audiobookshelf_czech_metadata](https://github.com/stecik/audiobookshelf_czech_metadata)
+   instance aggregating ~17 CZ audiobook storefronts behind ABS's
+   custom-provider `/search` API. Audio-edition metadata (publisher, year,
+   cover, genres, language); no ISBN endpoint (title+author only).
+3. **databazeknih.cz by title** (if `--databazeknih`) — fuzzy title match
+   gates the result so the wrong book's genres aren't attached; prefers a
+   year-matching edition.
+4. **legie.info** (if `--legie`) — CZ/SK sci-fi/fantasy; short stories and
+   series/universe databazeknih's book search misses (identity only).
+5. **OpenLibrary by ISBN** — international editions; weak CZ coverage (~10%).
+6. **Google Books by ISBN** — often rate-limited without an API key.
+7. **OpenLibrary by title**.
 
 ## Placement patterns
 

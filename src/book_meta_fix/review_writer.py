@@ -54,7 +54,7 @@ _SENTINEL: Any = object()
 # (llm:*) reasons from memory, and the content/embedded proposals never left
 # the book's own file. Gates _identity_verified.
 _ONLINE_SOURCES: frozenset[str] = frozenset(
-	{"databazeknih", "legie", "openlibrary", "google_books"}
+	{"databazeknih", "legie", "abs_czech", "openlibrary", "google_books"}
 )
 
 
