@@ -142,7 +142,35 @@ src/book_meta_fix/
                    calls over the same pool — C11 cover decode dominates it and
                    Pillow releases the GIL — and covers.analyze_cover's memo +
                    persistent cache make repeat decodes free
-  llm.py           Z.AI provider: LeakyBucket + global 429 cooldown + reconcile_loop + tolerant JSON
+  llm.py           Z.AI provider: LeakyBucket + global 429 cooldown + reconcile_loop + tolerant
+                   JSON salvage + get_provider (the provider FACTORY: BMF_LLM_PROVIDER picks the
+                   branch — auto/Z.AI/antigravity-ACP/mock/off; the Antigravity branch composes
+                   AntigravityAcpProvider with a quality stage per BMF_ANTIGRAVITY_FALLBACK: agy
+                   (default — a second ACP pool on gemini-pro) or glm (a ZaiProvider loop), so a
+                   ZAI_API_KEY alone no longer means the Z.AI fast tier)
+  acp.py           AntigravityAcpProvider — a Google Antigravity subscription as the loop's FAST
+                   tier via the Agent Client Protocol (the official `agy_acp_server.par` from the
+                   ACP Registry; any ACP agent works — the command is user-configured,
+                   BMF_ANTIGRAVITY_CMD / --antigravity-cmd). AcpAgentConnection = one agent
+                   subprocess speaking ACP v1 (JSON-RPC 2.0, newline-delimited, over stdio; the
+                   reader thread owns stdout, per-id futures resolve responses, agent→client
+                   requests get non-interactive answers: permission → "cancelled", fs/terminal →
+                   method-not-found, since bmf advertises NO capabilities). Fresh session per
+                   prompt (a session keeps history — reuse would bleed one book's evidence into
+                   the next); auth handled once via the -32000 → authenticate dance (terminal-type
+                   logins are refused with guidance — headless bmf cannot run them); model chosen
+                   through session/set_config_option (category "model", best-effort). Model names
+                   are FAMILY-matched against the agent's own options (match_model_option:
+                   "gemini-flash" → "gemini-3-flash", digit tokens skippable) — defaults
+                   gemini-flash (fast tier) + gemini-pro (quality stage). Pool of connections =
+                   the in-flight cap (BMF_ACP_MAX_INFLIGHT, default 2), transport errors retry
+                   once on a fresh process, THREE consecutive failures disable the fast tier for
+                   the run (the quality stage takes over per book). reconcile_loop mirrors
+                   ZaiProvider's contract/source labels; the QUALITY stage (_run_fallback) is
+                   BMF_ANTIGRAVITY_FALLBACK: 'agy' (default — a second AntigravityAcpProvider
+                   pool on gemini-pro, ONE attempt, llm:high on verify pass / llm:low) or 'glm'
+                   (the injected zai_fallback.reconcile_loop(max_flash=1) — Z.AI's measured rate
+                   machinery stays untouched for exactly the calls that need it)
   review_writer.py streaming review.yaml writer (queue + writer thread)
   review.py        parse review.yaml (multi-doc + legacy list) + update_paths
                    + merge_normalizations (bmf normalize --apply merges C15/C16
@@ -263,11 +291,16 @@ src/book_meta_fix/
                   strip-covers, normalize, abs-rescan, gui
                   (organize is a deprecation stub — placement lives in apply; in abs_rescan
                   the two _() header strings sit OUTSIDE the f-string — babel on py3.10
-                  cannot extract calls from f-string holes; strip_covers exposes the engine's
+                  cannot extract calls from f-string holes — the SAME reason the ACP info
+                  line's "fast tier"/"no Z.AI fallback" strings are hoisted into locals
+                  before their f-string; strip_covers exposes the engine's
                   two selectors as --generated/--invalid optional-value flags — click
                   is_flag=False + flag_value="both": bare flag = both, a value
                   external/embedded narrows, NO flag at all falls back to generated-only
-                  so bare `bmf strip-covers` keeps its historical behaviour)
+                  so bare `bmf strip-covers` keeps its historical behaviour; analyze
+                  takes --llm-provider/--antigravity-cmd/--antigravity-model and closes
+                  the provider in its finally block — only the ACP provider actually
+                  holds subprocesses)
 ```
 
 ## Non-obvious gotchas

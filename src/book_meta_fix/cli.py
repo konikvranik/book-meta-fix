@@ -261,7 +261,12 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--no-check-location", "no_check_location", is_flag=True, help=_("Skip the C13 location check (analyze metadata only, no placement proposals)."))
 @click.option("--recheck-ok", "recheck_ok", is_flag=True, help=_("Clear the `verified` flag (see review.yaml / the GUI checkbox) from every book, returning user-confirmed books to normal detection. Undo of a too-hasty OK."))
 @click.option("--output", "-o", type=click.Path(path_type=Path), default=None, help=_("Output review file (default: review.yaml)"))
-@click.option("--llm", "use_llm", is_flag=True, help=_("Enable LLM reconciliation (needs ZAI_API_KEY or BMF_LLM_MOCK=1)"))
+@click.option("--llm", "use_llm", is_flag=True, help=_("Enable LLM reconciliation (needs ZAI_API_KEY, BMF_ANTIGRAVITY_CMD, or BMF_LLM_MOCK=1)"))
+@click.option("--llm-provider", "llm_provider", default=None, type=click.Choice(["antigravity", "acp", "agy", "zai", "mock", "off"], case_sensitive=False), help=_("Force the LLM provider branch (default: auto — Antigravity ACP when BMF_ANTIGRAVITY_CMD is set, else Z.AI when ZAI_API_KEY is set). 'antigravity' = the ACP agent is the fast tier and Z.AI (if a key exists) only the paid fallback; 'zai' never uses ACP."))
+@click.option("--antigravity-cmd", "antigravity_cmd", default=None, help=_("Command that launches an Agent Client Protocol agent process (ACP v1 over stdio) — a Google Antigravity subscription as the FAST LLM tier. The official agent is `agy_acp_server.par` from the ACP Registry (release zips need chmod +x); any ACP agent works, e.g. `gemini --acp`. When set, it replaces the glm-flash first attempts of the loop; Z.AI stays the paid fallback if a key exists. Same as BMF_ANTIGRAVITY_CMD."))
+@click.option("--antigravity-model", "antigravity_model", default=None, help=_("Model the ACP agent should serve the fast tier with (matched against the agent's session config options by exact value/name or token family, so 'gemini-flash' picks 'gemini-3-flash'; empty = the agent's default pick). Default gemini-flash. Same as BMF_ANTIGRAVITY_MODEL."))
+@click.option("--antigravity-fallback", "antigravity_fallback", default=None, type=click.Choice(["agy", "acp", "antigravity", "glm", "zai"], case_sensitive=False), help=_("Who serves the loop's QUALITY stage when the ACP agent is the fast tier: 'agy' (default — a second ACP pool on the fallback model, the whole loop stays on the subscription) or 'glm' (the Z.AI flash+paid loop; needs ZAI_API_KEY). Same as BMF_ANTIGRAVITY_FALLBACK."))
+@click.option("--antigravity-fallback-model", "antigravity_fallback_model", default=None, help=_("Model for the agy quality stage, family-matched like --antigravity-model (empty = the agent's default pick). Default gemini-pro. Ignored with --antigravity-fallback glm. Same as BMF_ANTIGRAVITY_FALLBACK_MODEL."))
 @click.option("--llm-categories", default="ALL", help=_("Comma-separated categories to send to LLM, or 'ALL' (default). ALL = every category except C9 (legitimate anonyms like the Bible, where an LLM-invented author would be wrong). Each book is one LLM request that returns all fields at once, so the cost is per-book, not per-category."))
 @click.option("--workers", "-w", type=int, default=10, help=_("Parallel workers for I/O (extract/LLM/enrich). Default 10."))
 @click.option("--scan-workers", "scan_workers", type=int, default=None, help=_("Parallel threads for the library scan (tree walk + metadata reads; NFS latency-bound). Default 8, or BMF_SCAN_WORKERS. 1 = serial scan."))
@@ -275,7 +280,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--llm-rate-limit-base", "llm_rate_limit_base", type=float, default=None, help=_("Base seconds of the global cooldown applied when a 429 is seen (default 5). When ANY worker hits a 429, ALL workers pause this long; the cooldown escalates 5/10/20/... with consecutive 429s, honours the server Retry-After when longer, and is capped by --llm-rate-limit-max. Higher = safer but slower; lower = more 429 risk."))
 @click.option("--llm-rate-limit-max", "llm_rate_limit_max", type=float, default=None, help=_("Cap (seconds) on the escalating 429 cooldown (default 60). Prevents a sustained outage from parking workers indefinitely."))
 @click.option("--llm-max-inflight", "llm_max_inflight", type=int, default=None, help=_("Hard cap on LLM requests running at the same instant (default 3). The Z.AI coding plan admits only ~5 concurrent requests per account (interactive clients draw from the same ceiling), so a deep fallback herd gets 429/1302 storms — and false 1113 'insufficient balance' — no matter how slow the drip is. Workers queue on this instead of being rejected. Flash-family models get a stricter sub-cap of min(2, this value)."))
-def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, use_legie: bool, abs_czech_url: str | None, skip_verify: bool, verify_ok: bool, no_strict_verify: bool, accept_missing: bool, pattern: str | None, no_check_location: bool, recheck_ok: bool, output: Path | None, use_llm: bool, llm_categories: str, workers: int, scan_workers: int | None, llm_min_interval: float | None, llm_model: str | None, llm_reasoning_effort: str | None, llm_thinking: str | None, no_llm_loop: bool, llm_fallback_model: str | None, llm_burst: float | None, llm_rate_limit_base: float | None, llm_rate_limit_max: float | None, llm_max_inflight: int | None) -> None:
+def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, use_legie: bool, abs_czech_url: str | None, skip_verify: bool, verify_ok: bool, no_strict_verify: bool, accept_missing: bool, pattern: str | None, no_check_location: bool, recheck_ok: bool, output: Path | None, use_llm: bool, llm_provider: str | None, antigravity_cmd: str | None, antigravity_model: str | None, antigravity_fallback: str | None, antigravity_fallback_model: str | None, llm_categories: str, workers: int, scan_workers: int | None, llm_min_interval: float | None, llm_model: str | None, llm_reasoning_effort: str | None, llm_thinking: str | None, no_llm_loop: bool, llm_fallback_model: str | None, llm_burst: float | None, llm_rate_limit_base: float | None, llm_rate_limit_max: float | None, llm_max_inflight: int | None) -> None:
 	"""Run full pipeline and generate a review.yaml for NEEDS_REVIEW books."""
 	from rich.progress import BarColumn, Progress, SpinnerColumn, TaskID, TextColumn, TimeRemainingColumn
 
@@ -416,9 +421,38 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 				cfg.llm_rate_limit_base = llm_rate_limit_base
 			if llm_rate_limit_max is not None:
 				cfg.llm_rate_limit_max = llm_rate_limit_max
+			if llm_provider:
+				cfg.llm_provider = llm_provider.lower()
+			if antigravity_cmd is not None:
+				cfg.acp_command = antigravity_cmd
+			if antigravity_model is not None:
+				cfg.acp_model = antigravity_model
+			if antigravity_fallback is not None:
+				cfg.acp_fallback_provider = antigravity_fallback.lower()
+			if antigravity_fallback_model is not None:
+				cfg.acp_fallback_model = antigravity_fallback_model
 			llm_provider = get_provider(cfg)
 			if llm_provider is None:
-				console.print("[yellow]" + _("--llm given but no provider available (set ZAI_API_KEY or BMF_LLM_MOCK=1)") + "[/yellow]")
+				console.print("[yellow]" + _("--llm given but no provider available (set ZAI_API_KEY, BMF_ANTIGRAVITY_CMD, or BMF_LLM_MOCK=1)") + "[/yellow]")
+			elif llm_provider.name == "antigravity-acp":
+				# ACP fast tier: the informative knobs are the agent command,
+				# the model pick, and who serves the quality stage.
+				cats = tuple(c.strip() for c in llm_categories.split(",") if c.strip())
+				model_s = llm_provider.model or _("agent default")
+				fb_model = llm_provider.fallback_model or _("agent default")
+				# Hoisted OUT of the f-string below: babel on py3.10 cannot
+				# extract _() calls from f-string holes (the abs-rescan gotcha).
+				fast_tier = _("fast tier")
+				no_fb = _("no fallback configured")
+				fallback_s = {
+					"agy": f" → fallback agy:{fb_model}",
+					"glm": f" → fallback glm:{fb_model}",
+				}.get(llm_provider.fallback_kind, f" ({no_fb})")
+				console.print(
+					f"  LLM: [cyan]{llm_provider.name}[/cyan] {fast_tier} model={model_s}{fallback_s} "
+					f"({' '.join(llm_provider.command)}) "
+					f"for categories {cats} (≤{cfg.acp_max_inflight} agents in flight)"
+				)
 			else:
 				cats = tuple(c.strip() for c in llm_categories.split(",") if c.strip())
 				rpm = round(60.0 / cfg.llm_min_interval) if cfg.llm_min_interval > 0 else float("inf")
@@ -477,6 +511,11 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 			cache.close()
 		if enricher is not None:
 			enricher.close()
+		# Shut down pooled ACP agent subprocesses (the Antigravity fast tier
+		# keeps up to --acp workers alive between books; Z.AI/Mock providers
+		# have nothing to close).
+		if llm_provider is not None and hasattr(llm_provider, "close"):
+			llm_provider.close()
 		# Always finalize the writer — even on Ctrl-C/error — so the review file
 		# is consistent and prior decisions are carried over. keep_backup when
 		# interrupted, so the user can recover the pre-run state if needed.

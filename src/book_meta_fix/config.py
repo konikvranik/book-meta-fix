@@ -166,6 +166,53 @@ class Config:
 	llm_rate_limit_base: float = 5.0
 	llm_rate_limit_max: float = 60.0
 
+	# LLM provider selection. Empty = auto (Z.AI when a key exists, then the
+	# Antigravity ACP agent when its command is configured, then the mock,
+	# then none). Explicit values: 'antigravity' (aliases 'acp', 'agy') force
+	# the ACP fast tier (still falling back to Z.AI for the paid stage when a
+	# key exists), 'zai' forbids ACP, 'mock' forces the offline mock, 'off'
+	# disables the LLM stage. Override via BMF_LLM_PROVIDER.
+	llm_provider: str = ""
+	# Google Antigravity subscription as the FAST LLM tier: the command that
+	# launches an Agent Client Protocol agent process bmf speaks to over
+	# stdio (JSON-RPC, ACP v1). The official agent is Google's
+	# `agy_acp_server.par` from the ACP Registry ("antigravity-acp"); any ACP
+	# agent works, e.g. "gemini --acp". When set (with BMF_LLM_PROVIDER unset
+	# or =antigravity), the agent replaces the glm-flash first attempts of
+	# the loop and Z.AI (if a key exists) becomes the paid fallback only.
+	# Example: /opt/agy/agy_acp_server.par — release zips need chmod +x.
+	# Override via BMF_ANTIGRAVITY_CMD (alias: BMF_ACP_COMMAND).
+	acp_command: str = ""
+	# Model the ACP agent should serve the fast tier with. Matched against
+	# the agent's own session config options by exact value/name or by token
+	# family ("gemini-flash" picks "gemini-3-flash"); empty (via
+	# BMF_ANTIGRAVITY_MODEL=) = the agent's default pick. Default
+	# "gemini-flash" — the quick-check tier. Override via
+	# BMF_ANTIGRAVITY_MODEL (alias: BMF_ACP_MODEL).
+	acp_model: str | None = "gemini-flash"
+	# The loop's QUALITY (fallback) stage when the ACP agent is the fast
+	# tier: 'agy' (default — a SECOND ACP pool on acp_fallback_model, so the
+	# whole loop stays on the subscription) or 'glm' (the Z.AI flash+paid
+	# loop; needs ZAI_API_KEY and reuses Z.AI's rate machinery). Override via
+	# BMF_ANTIGRAVITY_FALLBACK (alias: BMF_ACP_FALLBACK).
+	acp_fallback_provider: str = "agy"
+	# Model for the agy quality stage, family-matched like acp_model.
+	# Default "gemini-pro". Override via BMF_ANTIGRAVITY_FALLBACK_MODEL
+	# (alias: BMF_ACP_FALLBACK_MODEL).
+	acp_fallback_model: str | None = "gemini-pro"
+	# Seconds before a hung ACP prompt turn is cancelled (session/cancel)
+	# and the connection killed. Gemini reasoning calls usually finish in
+	# tens of seconds; 300 is generous headroom. Override via BMF_ACP_TIMEOUT.
+	acp_prompt_timeout: float = 300.0
+	# How many ACP agent processes may run prompts at once (each draws from
+	# the subscription's concurrency on the user's account; 2 is polite and
+	# still keeps the fast tier ahead of the enrichers). Override via
+	# BMF_ACP_MAX_INFLIGHT.
+	acp_max_inflight: int = 2
+	# Minimum seconds between ACP prompt starts (politeness drip; 0 = as fast
+	# as the in-flight cap allows). Override via BMF_ACP_MIN_INTERVAL.
+	acp_min_interval: float = 0.0
+
 	# Interface language for CLI/GUI messages ('cs' | 'en'). Empty string =
 	# auto-detect from the user's locale (LC_ALL/LC_MESSAGES/LANG; cs* → Czech,
 	# anything else → English). Override via BMF_LANGUAGE or --lang.
@@ -298,6 +345,32 @@ class Config:
 		if (v := os.environ.get("BMF_LLM_RATE_LIMIT_MAX")) is not None:
 			try:
 				cfg.llm_rate_limit_max = max(0.0, float(v))
+			except ValueError:
+				pass
+		# LLM provider selection + the Antigravity ACP fast tier
+		if v := os.environ.get("BMF_LLM_PROVIDER"):
+			cfg.llm_provider = v.strip().lower()
+		if v := os.environ.get("BMF_ANTIGRAVITY_CMD") or os.environ.get("BMF_ACP_COMMAND"):
+			cfg.acp_command = v.strip()
+		if (v := os.environ.get("BMF_ANTIGRAVITY_MODEL") or os.environ.get("BMF_ACP_MODEL")) is not None:
+			cfg.acp_model = v.strip() or None
+		if v := os.environ.get("BMF_ANTIGRAVITY_FALLBACK") or os.environ.get("BMF_ACP_FALLBACK"):
+			cfg.acp_fallback_provider = v.strip().lower()
+		if (v := os.environ.get("BMF_ANTIGRAVITY_FALLBACK_MODEL") or os.environ.get("BMF_ACP_FALLBACK_MODEL")) is not None:
+			cfg.acp_fallback_model = v.strip() or None
+		if (v := os.environ.get("BMF_ACP_TIMEOUT")) is not None:
+			try:
+				cfg.acp_prompt_timeout = max(1.0, float(v))
+			except ValueError:
+				pass
+		if (v := os.environ.get("BMF_ACP_MAX_INFLIGHT")) is not None:
+			try:
+				cfg.acp_max_inflight = max(1, int(v))
+			except ValueError:
+				pass
+		if (v := os.environ.get("BMF_ACP_MIN_INTERVAL")) is not None:
+			try:
+				cfg.acp_min_interval = max(0.0, float(v))
 			except ValueError:
 				pass
 		return cfg

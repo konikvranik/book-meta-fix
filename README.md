@@ -360,6 +360,69 @@ Re-run the experiment yourself as Z.AI's lineup evolves:
 .venv/bin/python scripts/llm_experiment.py --limit 10
 ```
 
+### Fast tier via Google Antigravity (ACP)
+
+If you have a **Google Antigravity** subscription, its Gemini models can serve
+the loop's *fast* tier through Google's official **Agent Client Protocol**
+agent — instead of glm-flash's chronically crowded free pool. The whole loop
+can stay on the subscription (quick check on gemini-flash, quality fallback
+on gemini-pro), or hand the quality stage to Z.AI when a `ZAI_API_KEY` also
+exists — see the fallback knob below.
+
+bmf speaks ACP v1 natively (JSON-RPC 2.0, one message per line over the agent
+process's stdio — no extra dependency): it launches the agent, creates a
+**fresh session per book** (a session keeps its history, so reusing one would
+bleed one book's evidence into the next), denies tools and file access (the
+evidence is already in the prompt), and parses the answer with the same JSON
+salvage the Z.AI provider uses.
+
+Setup:
+
+1. Get the official agent from the ACP Registry
+   ([agentclientprotocol.com/get-started/registry](https://agentclientprotocol.com/get-started/registry),
+   entry "antigravity-acp") — e.g.
+   `https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-agy_acp_server_1.1.1-linux-x86_64.zip`,
+   unzip, `chmod +x agy_acp_server.par`.
+2. Log in once interactively (e.g. in Zed or the Antigravity IDE) — bmf is
+   headless and cannot run an OAuth flow; when stored credentials are missing
+   it says so and surfaces the agent's stderr (where login URLs land).
+3. Point bmf at the binary and run analyze normally:
+
+```bash
+export BMF_ANTIGRAVITY_CMD=/opt/agy/agy_acp_server.par   # or --antigravity-cmd
+bmf analyze --llm
+```
+
+Any ACP agent works the same way — e.g. `BMF_ANTIGRAVITY_CMD="gemini --acp"`
+(Gemini CLI's ACP mode, a separate Google login). Provider selection
+(`BMF_LLM_PROVIDER` / `--llm-provider`): **auto** (default) uses the ACP agent
+as the fast tier whenever the command is configured, demoting Z.AI to the
+fallback; **`zai`** never touches ACP; **`antigravity`/`acp`/`agy`** forces
+the ACP branch; **`off`** disables the LLM stage.
+
+**The loop's two stages** both default to the subscription: the quick check
+runs on **gemini-flash** and the quality fallback on a **second ACP pool with
+gemini-pro** (model names are family-matched against the agent's own model
+list, so "gemini-flash" picks "gemini-3-flash" and survives generation
+bumps). `BMF_ANTIGRAVITY_FALLBACK=glm` swaps the quality stage to Z.AI's
+flash+paid loop instead (needs `ZAI_API_KEY`; Z.AI's rate machinery applies
+untouched) — with a key configured, the whole loop still stays on Antigravity
+unless you say otherwise.
+
+| Knob | CLI | Env | Meaning |
+|---|---|---|---|
+| Agent command | `--antigravity-cmd` | `BMF_ANTIGRAVITY_CMD` (alias `BMF_ACP_COMMAND`) | the ACP agent process to launch (bare names are looked up on PATH) |
+| Fast-tier model | `--antigravity-model` | `BMF_ANTIGRAVITY_MODEL` (alias `BMF_ACP_MODEL`) | family-matched; `gemini-flash` default, empty = the agent's default |
+| Fallback provider | `--antigravity-fallback` | `BMF_ANTIGRAVITY_FALLBACK` (alias `BMF_ACP_FALLBACK`) | `agy` (default — second ACP pool on the fallback model) or `glm` (Z.AI flash+paid loop; needs a key) |
+| Fallback model | `--antigravity-fallback-model` | `BMF_ANTIGRAVITY_FALLBACK_MODEL` (alias `BMF_ACP_FALLBACK_MODEL`) | agy fallback only; `gemini-pro` default, family-matched |
+| Prompt timeout | — | `BMF_ACP_TIMEOUT` | a hung turn is cancelled (`session/cancel`) after this many seconds (default 300) |
+| In-flight agents | — | `BMF_ACP_MAX_INFLIGHT` | concurrent agent processes per pool (default 2; each draws from the subscription's concurrency) |
+| Politeness drip | — | `BMF_ACP_MIN_INTERVAL` | minimum seconds between prompt starts (default 0) |
+
+Three consecutive transport failures (deleted binary, expired login) park the
+fast tier for the rest of the run — later books go straight to the Z.AI
+fallback instead of re-paying the spawn/timeout cost per book.
+
 ### LLM self-correction loop
 
 When the deterministic stages (offline text mining, online lookup) miss, the

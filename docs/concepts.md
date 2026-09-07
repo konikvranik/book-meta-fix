@@ -92,7 +92,11 @@ first-page text skip the LLM entirely (no point spending tokens on nothing).
 ## The LLM self-correction loop
 
 When the deterministic stages miss, the LLM fallback runs a self-correction
-loop (`reconcile_loop`) instead of a single expensive call:
+loop (`reconcile_loop`) instead of a single expensive call. The loop's *fast*
+tier is not bound to Z.AI: with a Google Antigravity subscription, an
+**Agent Client Protocol** agent (`BMF_ANTIGRAVITY_CMD`, e.g. Google's
+`agy_acp_server.par` — see README "Fast tier via Google Antigravity (ACP)")
+serves the first attempts while Z.AI keeps only the paid fallback role.
 
 ```
  1. GLM-4.x Flash (free, thinking off)  →  verify_proposal(title, author vs first-page text)

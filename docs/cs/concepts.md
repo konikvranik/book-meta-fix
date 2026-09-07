@@ -97,7 +97,11 @@ textu první strany LLM celkově přeskočí (nemá smysl utrácet tokeny za nic
 ## Sebekorekční smyčka LLM
 
 Když deterministické fáze selžou, LLM fallback spustí sebekorekční smyčku
-(`reconcile_loop`) místo jednoho drahého volání:
+(`reconcile_loop`) místo jednoho drahého volání. *Rychlá* vrstva smyčky není
+vázána na Z.AI: s předplatným Google Antigravity obsluhuje první pokusy
+**Agent Client Protocol** agent (`BMF_ANTIGRAVITY_CMD`, např. Google
+`agy_acp_server.par` — viz README „Rychlá vrstva přes Google Antigravity
+(ACP)“) a Z.AI si nechá jen roli placené zálohy.
 
 ```
  1. GLM-4.x Flash (free, thinking off)  →  verify_proposal(title, author vs first-page text)

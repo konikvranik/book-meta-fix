@@ -368,6 +368,67 @@ Zopakujte experiment sami, jak se nabídka Z.AI vyvíjí:
 .venv/bin/python scripts/llm_experiment.py --limit 10
 ```
 
+### Rychlá vrstva přes Google Antigravity (ACP)
+
+Když máte **předplatné Google Antigravity**, jeho modely Gemini mohou skrze
+oficiální **Agent Client Protocol** agenta obsluhovat *rychlou* vrstvu smyčky
+— místo chronicky přetíženého bezplatného bazénu glm-flash. Celá smyčka může
+zůstat na předplatném (rychlá kontrola na gemini-flash, kvalitní záloha na
+gemini-pro), nebo kvalitní fázi předat Z.AI, pokud existuje i `ZAI_API_KEY`
+— viz volba zálohy níže.
+
+bmf mluví ACP v1 přímo (JSON-RPC 2.0, jedna zpráva na řádek přes stdio
+agentního procesu — bez nové závislosti): spustí agenta, pro každou knihu
+zakládá **čerstvou relaci** (relace si uchovává historii, takže opakovaná by
+vmíchala důkazy jedné knihy do druhé), odmítá nástroje i přístup k souborům
+(důkazy už jsou v promptu) a odpověď parsuje stejnou JSON záchrannou, jakou
+používá provider Z.AI.
+
+Nastavení:
+
+1. Sejměte oficiálního agenta z ACP Registry
+   ([agentclientprotocol.com/get-started/registry](https://agentclientprotocol.com/get-started/registry),
+   položka „antigravity-acp“) — např.
+   `https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-agy_acp_server_1.1.1-linux-x86_64.zip`,
+   rozbalte, `chmod +x agy_acp_server.par`.
+2. Jednou se přihlaste interaktivně (např. v Zed nebo v IDE Antigravity) —
+   bmf běží bez terminálové relace a OAuth flow neumí; když uložené přihlášení
+   chybí, řekne to a zobrazí stderr agenta (tam přistávají přihlašovací URL).
+3. Nasměrujte bmf na binárku a pusťte analyze jako obvykle:
+
+```bash
+export BMF_ANTIGRAVITY_CMD=/opt/agy/agy_acp_server.par   # nebo --antigravity-cmd
+bmf analyze --llm
+```
+
+Stejně tak funguje jakýkoli ACP agent — např. `BMF_ANTIGRAVITY_CMD="gemini
+--acp"` (ACP režim Gemini CLI, samostatné Google přihlášení). Výběr provideru
+(`BMF_LLM_PROVIDER` / `--llm-provider`): **auto** (výchozí) použije ACP agenta
+jako rychlou vrstvu, kdykoli je příkaz nastaven; **`zai`** ACP nikdy nedotkne;
+**`antigravity`/`acp`/`agy`** větev ACP vynutí; **`off`** fázi LLM vypne.
+
+**Obě fáze smyčky** mají výchozí na předplatném: rychlá kontrola běží na
+**gemini-flash** a kvalitní záloha na **druhém ACP poolu s gemini-pro** (názvy
+modelů se párují po rodině proti vlastnímu seznamu modelů agenta, takže
+„gemini-flash“ vybere „gemini-3-flash“ a přežije výměny generací).
+`BMF_ANTIGRAVITY_FALLBACK=glm` naopak předá kvalitní fázi smyčce flash+placené
+Z.AI (potřebuje `ZAI_API_KEY`; Z.AI rate machinery zůstává nedotčená) — s
+nastaveným klíčem zůstává celá smyčka na Antigravity, dokud neřeknete jinak.
+
+| Volba | CLI | Env | Význam |
+|---|---|---|---|
+| Příkaz agenta | `--antigravity-cmd` | `BMF_ANTIGRAVITY_CMD` (alias `BMF_ACP_COMMAND`) | spouštěný ACP agentní proces (holá jména se hledají na PATH) |
+| Model rychlé vrstvy | `--antigravity-model` | `BMF_ANTIGRAVITY_MODEL` (alias `BMF_ACP_MODEL`) | párovaný po rodině; výchozí `gemini-flash`, prázdné = výchozí volba agenta |
+| Provider zálohy | `--antigravity-fallback` | `BMF_ANTIGRAVITY_FALLBACK` (alias `BMF_ACP_FALLBACK`) | `agy` (výchozí — druhý ACP pool na fallback modelu) nebo `glm` (smyčka flash+placené Z.AI; potřebuje klíč) |
+| Model zálohy | `--antigravity-fallback-model` | `BMF_ANTIGRAVITY_FALLBACK_MODEL` (alias `BMF_ACP_FALLBACK_MODEL`) | jen pro zálohu agy; výchozí `gemini-pro`, párováno po rodině |
+| Timeout promptu | — | `BMF_ACP_TIMEOUT` | zaseknutý tah se po tolika sekundách zruší (`session/cancel`, výchozí 300) |
+| Souběžní agenti | — | `BMF_ACP_MAX_INFLIGHT` | souběžné agentní procesy na pool (výchozí 2; každý čerpá ze souběžnosti předplatného) |
+| Slušnost kapání | — | `BMF_ACP_MIN_INTERVAL` | minimální sekundy mezi starty promptů (výchozí 0) |
+
+Tři po sobě jdoucí transportní selhání (smazaná binárka, vypršené přihlášení)
+odloží rychlou vrstvu pro zbytek běhu — další knihy jdou rovnou do Z.AI zálohy,
+místo aby za každou knihu znovu platily cenu spawnu/timeoutu.
+
 ### Samoopravná smyčka LLM
 
 Když deterministické fáze (offline dolování textu, online dotaz) minou, spustí

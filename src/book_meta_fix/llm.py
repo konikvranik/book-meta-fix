@@ -9,8 +9,11 @@ Currently used for:
 	  book's first-page text when no other source has them
 
 The provider is pluggable:
-	- ZaiProvider : real Z.AI API (OpenAI-compatible, glm-5.2)
-	- MockProvider: deterministic responses for tests / offline runs
+	- ZaiProvider            : real Z.AI API (OpenAI-compatible, glm-5.2)
+	- AntigravityAcpProvider : a Google Antigravity subscription (or any
+	                           Agent Client Protocol agent) as the FAST tier,
+	                           Z.AI as the paid fallback — see acp.py
+	- MockProvider           : deterministic responses for tests / offline runs
 
 A provider returns a ReconciledMeta dict. Callers (pipeline/review) decide
 whether to trust it (always NEEDS_REVIEW verdict — LLM output is a *proposal*,
@@ -22,9 +25,11 @@ import json
 import logging
 import os
 import re
+import shlex
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 # json-repair salvages LLM JSON that the cheap built-in sanitizer cannot
@@ -1160,6 +1165,21 @@ class MockProvider(LLMProvider):
 # ---------------------------------------------------------------------------
 
 
+# Provider-selection aliases for BMF_LLM_PROVIDER / --llm-provider. Unknown
+# values are rejected with a warning (not silently ignored) so a typo like
+# "atigravity" cannot quietly flip the run back onto the paid endpoint.
+PROVIDER_ALIASES = {
+	"antigravity": "acp",
+	"agy": "acp",
+	"acp": "acp",
+	"zai": "zai",
+	"glm": "zai",
+	"mock": "mock",
+	"off": "off",
+	"none": "off",
+}
+
+
 def resolve_models(config: Any) -> tuple[str, str]:  # noqa: ANN001
 	"""Resolve (model, fallback_model) from the config.
 
@@ -1175,35 +1195,130 @@ def resolve_models(config: Any) -> tuple[str, str]:  # noqa: ANN001
 	return model, fallback
 
 
+def _build_zai(config: Any, api_key: str) -> ZaiProvider:
+	"""Construct the ZaiProvider from the config (shared by the pure-Z.AI
+	selection and the Antigravity-ACP-with-Z.AI-fallback composition)."""
+	# Minimum seconds between LLM requests (RPM throttle). Falls back to the
+	# class default (~30 RPM) if unset. Lower (e.g. 1.0 = 60 RPM) only on a
+	# higher Z.AI tier; raise (e.g. 4.0 = 15 RPM) if you still hit 429s.
+	min_interval = getattr(config, "llm_min_interval", None)
+	model, fallback_model = resolve_models(config)
+	return ZaiProvider(
+		api_key=api_key,
+		base_url=getattr(config, "zai_base_url", "https://api.z.ai/api/paas/v4/"),
+		model=model,
+		fallback_model=fallback_model,
+		min_interval=min_interval,
+		reasoning_effort=getattr(config, "zai_reasoning_effort", None),
+		thinking=getattr(config, "zai_thinking", None),
+		burst=getattr(config, "llm_burst", 1.0),
+		rate_limit_base=getattr(config, "llm_rate_limit_base", 5.0),
+		rate_limit_max=getattr(config, "llm_rate_limit_max", 60.0),
+		max_inflight=getattr(config, "llm_max_inflight", None),
+		flash_base_url=getattr(config, "zai_flash_base_url", None),
+	)
+
+
+def _build_acp(config: Any, zai_fallback: ZaiProvider | None) -> Any:
+	"""Construct the Antigravity ACP provider with its QUALITY stage.
+
+	BMF_ANTIGRAVITY_FALLBACK picks who serves the loop's second stage:
+	  'agy' (default) — a SECOND ACP pool on the fallback model
+	  (BMF_ANTIGRAVITY_FALLBACK_MODEL, default gemini-pro), so the whole
+	  loop stays on the subscription; a configured Z.AI key is NOT used;
+	  'glm' — the ZaiProvider's flash+paid loop (needs ZAI_API_KEY, reuses
+	  Z.AI's measured rate machinery untouched).
+	"""
+	from .acp import AntigravityAcpProvider
+
+	command = shlex.split(getattr(config, "acp_command", "") or "")
+	# The agent's cwd is informational only (bmf grants no fs access); the
+	# library is the natural choice but must not BREAK the provider when it
+	# is a stale/unmounted path (Popen with a missing cwd fails outright).
+	library = getattr(config, "library", None)
+	cwd = library if library is not None and Path(library).is_dir() else "."
+	fb_raw = (getattr(config, "acp_fallback_provider", "agy") or "").strip().lower()
+	fb = {"agy": "acp", "acp": "acp", "antigravity": "acp", "glm": "zai", "zai": "zai"}.get(fb_raw, "")
+	if not fb:
+		log.warning("Unknown BMF_ANTIGRAVITY_FALLBACK %r (expected agy or glm) — using agy", fb_raw)
+		fb = "acp"
+	acp_fallback = None
+	if fb == "acp":
+		zai_fallback = None  # the agy quality stage replaces Z.AI entirely
+		acp_fallback = AntigravityAcpProvider(
+			command,
+			cwd=cwd,
+			model=getattr(config, "acp_fallback_model", None),
+			prompt_timeout=getattr(config, "acp_prompt_timeout", 300.0),
+			max_inflight=getattr(config, "acp_max_inflight", 2),
+			min_interval=getattr(config, "acp_min_interval", 0.0),
+		)
+	elif zai_fallback is None:
+		log.warning("BMF_ANTIGRAVITY_FALLBACK=glm but no ZAI_API_KEY — no quality fallback configured")
+	return AntigravityAcpProvider(
+		# resolve_acp_command already validated executability.
+		command,
+		cwd=cwd,
+		model=getattr(config, "acp_model", None),
+		prompt_timeout=getattr(config, "acp_prompt_timeout", 300.0),
+		max_inflight=getattr(config, "acp_max_inflight", 2),
+		min_interval=getattr(config, "acp_min_interval", 0.0),
+		zai_fallback=zai_fallback,
+		acp_fallback=acp_fallback,
+	)
+
+
 def get_provider(config: Any) -> LLMProvider | None:  # noqa: ANN001
 	"""Construct the configured LLM provider, or None if disabled/unavailable.
 
-	Resolution:
-		1. If config.zai_api_key is set -> ZaiProvider
-		2. Else if env var BMF_LLM_MOCK=1 -> MockProvider (for testing)
-		3. Else -> None (LLM disabled)
+	Resolution (BMF_LLM_PROVIDER / --llm-provider picks the branch):
+		- 'off'  → None (the LLM stage is disabled)
+		- 'mock' → MockProvider (for testing)
+		- 'zai'  → ZaiProvider; requires ZAI_API_KEY, ACP never used
+		- 'acp' (aliases 'antigravity'/'agy') → the Antigravity ACP agent as
+		  the fast tier, with ZaiProvider (if ZAI_API_KEY exists) as the
+		  loop's paid fallback; requires BMF_ANTIGRAVITY_CMD
+		- '' (auto) → the historical chain, extended one step: ZaiProvider
+		  when ZAI_API_KEY is set, EXCEPT the ACP agent takes the fast tier
+		  when BMF_ANTIGRAVITY_CMD is configured (Z.AI drops to fallback);
+		  else BMF_LLM_MOCK=1 → MockProvider; else None
 	"""
+	pref_raw = (getattr(config, "llm_provider", "") or "").strip().lower()
+	pref = PROVIDER_ALIASES.get(pref_raw, pref_raw)
+	if pref and pref not in PROVIDER_ALIASES.values():
+		log.warning("Unknown BMF_LLM_PROVIDER %r (expected antigravity/acp, zai, mock, off) — treating as auto", pref_raw)
+		pref = ""
 	api_key = getattr(config, "zai_api_key", None) or os.environ.get("ZAI_API_KEY")
-	if api_key:
-		# Minimum seconds between LLM requests (RPM throttle). Falls back to the
-		# class default (~30 RPM) if unset. Lower (e.g. 1.0 = 60 RPM) only on a
-		# higher Z.AI tier; raise (e.g. 4.0 = 15 RPM) if you still hit 429s.
-		min_interval = getattr(config, "llm_min_interval", None)
-		model, fallback_model = resolve_models(config)
-		return ZaiProvider(
-			api_key=api_key,
-			base_url=getattr(config, "zai_base_url", "https://api.z.ai/api/paas/v4/"),
-			model=model,
-			fallback_model=fallback_model,
-			min_interval=min_interval,
-			reasoning_effort=getattr(config, "zai_reasoning_effort", None),
-			thinking=getattr(config, "zai_thinking", None),
-			burst=getattr(config, "llm_burst", 1.0),
-			rate_limit_base=getattr(config, "llm_rate_limit_base", 5.0),
-			rate_limit_max=getattr(config, "llm_rate_limit_max", 60.0),
-			max_inflight=getattr(config, "llm_max_inflight", None),
-			flash_base_url=getattr(config, "zai_flash_base_url", None),
-		)
+	if pref == "off":
+		return None
+	if pref == "mock":
+		return MockProvider()
+	# The Z.AI provider is built lazily-needed: as THE provider, as the ACP
+	# fallback, or not at all ('off'/'mock' already returned; acp without a
+	# key simply runs ACP-only).
+	zai = _build_zai(config, api_key) if (api_key and pref in ("", "zai", "acp")) else None
+	if pref == "zai":
+		if zai is not None:
+			return zai
+		log.warning("BMF_LLM_PROVIDER=zai but no ZAI_API_KEY — no LLM provider")
+		return None
+	# 'acp' (explicit) or auto with a configured command. resolve_acp_command
+	# validates the executable and logs WHY it rejected a broken command.
+	from .acp import resolve_acp_command
+
+	command = resolve_acp_command(getattr(config, "acp_command", "") or "") if pref in ("", "acp") else None
+	if pref == "acp":
+		if command is None:
+			log.warning("BMF_LLM_PROVIDER=antigravity but no usable ACP agent command — set BMF_ANTIGRAVITY_CMD (e.g. /opt/agy/agy_acp_server.par)")
+			return None
+		return _build_acp(config, zai)
+	# Auto: a configured ACP agent takes the fast tier (Z.AI, when a key
+	# exists, drops to the loop's paid fallback); otherwise the historical
+	# Z.AI → mock → none chain.
+	if command is not None:
+		return _build_acp(config, zai)
+	if zai is not None:
+		return zai
 	if os.environ.get("BMF_LLM_MOCK"):
 		return MockProvider()
 	return None
