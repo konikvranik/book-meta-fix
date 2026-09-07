@@ -1,9 +1,10 @@
-"""Tests for CLI commands: completion installer, shims, strip-covers."""
+"""Tests for CLI commands: completion installer, shims, strip-covers, abs-rescan."""
 from __future__ import annotations
 
 from pathlib import Path
 
 from click.testing import CliRunner
+from test_abs_client import _GetRecorder, _PostRecorder
 from test_covers import (
 	_gradient_cover,
 	_gradient_jpeg_bytes,
@@ -12,6 +13,7 @@ from test_covers import (
 	_solid_jpeg_bytes,
 )
 
+from book_meta_fix import abs_client
 from book_meta_fix.cli import main
 from book_meta_fix.covers import epub_cover_image
 
@@ -115,6 +117,133 @@ class TestStripCovers:
 		# the clean book is untouched
 		assert (good / "cover.jpg").is_file()
 		assert epub_cover_image(good / "g.epub") is not None
+
+
+class TestAbsRescan:
+	"""`bmf abs-rescan` maps changed folders to ABS items and triggers rescans.
+
+	All HTTP is monkeypatched at the abs_client module level (no network).
+	"""
+
+	_MINI_OPF = TestStripCovers._MINI_OPF
+	_ENV = {"BMF_ABS_URL": "http://abs.lan:13378", "BMF_ABS_TOKEN": "s3cret"}
+
+	def _make_library(self, root: Path) -> tuple[Path, Path]:
+		a = root / "Autor A/Kniha (1)"
+		a.mkdir(parents=True)
+		(a / "metadata.opf").write_text(self._MINI_OPF)
+		b = root / "Autor B/Serie 2 - Druha (2)"
+		b.mkdir(parents=True)
+		(b / "metadata.opf").write_text(self._MINI_OPF)
+		return a, b
+
+	def _fake_abs(self, monkeypatch, books: list[Path]) -> _PostRecorder:  # noqa: ANN001
+		"""Serve libraries + items covering exactly *books*; record every POST."""
+		items = [
+			{
+				"id": f"item-{i}",
+				"path": str(book),
+				"relPath": f"{book.parent.name}/{book.name}",
+				"media": {"metadata": {"title": book.name}},
+			}
+			for i, book in enumerate(books)
+		]
+
+		def _get(url, *, params=None, timeout=15.0, headers=None):  # noqa: ANN001, ARG001
+			if url.endswith("/api/libraries"):
+				return {
+					"libraries": [
+						{"id": "lib1", "name": "Books", "mediaType": "book", "folders": [{"fullPath": "/data/books"}]}
+					]
+				}
+			if "/items" in url:
+				return {"results": items}
+			return None
+
+		monkeypatch.setattr(abs_client, "_http_get_json", _get)
+		post = _PostRecorder()
+		monkeypatch.setattr(abs_client, "_http_post", post)
+		return post
+
+	def test_dry_run_reports_without_posting(self, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+		books = self._make_library(tmp_path)
+		post = self._fake_abs(monkeypatch, list(books))
+		result = CliRunner().invoke(main, ["abs-rescan", "--library", str(tmp_path)], env=self._ENV)
+		assert result.exit_code == 0
+		assert "DRY-RUN" in result.output
+		assert "ABS rescan summary" in result.output
+		assert post.calls == []
+
+	def test_apply_posts_batch_scan(self, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+		books = self._make_library(tmp_path)
+		post = self._fake_abs(monkeypatch, list(books))
+		result = CliRunner().invoke(main, ["abs-rescan", "--library", str(tmp_path), "--apply"], env=self._ENV)
+		assert result.exit_code == 0
+		assert "WRITE" in result.output
+		assert [c["url"] for c in post.calls] == ["http://abs.lan:13378/api/items/batch/scan"]
+		assert post.calls[0]["json_body"] == {"libraryItemIds": ["item-0", "item-1"]}
+
+	def test_missing_config_exits_with_hint(self, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+		# chdir away from the repo so a developer's .env cannot satisfy the check
+		monkeypatch.chdir(tmp_path)
+		for var in ("BMF_ABS_URL", "BMF_ABS_TOKEN"):
+			monkeypatch.delenv(var, raising=False)
+		result = CliRunner().invoke(main, ["abs-rescan", "--library", str(tmp_path)])
+		assert result.exit_code != 0
+		assert "Audiobookshelf is not configured" in result.output
+		assert "Traceback" not in result.output
+
+	def test_unreachable_server_exits_with_hint(self, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+		self._make_library(tmp_path)
+		monkeypatch.setattr(abs_client, "_http_get_json", _GetRecorder(None))
+		monkeypatch.setattr(abs_client, "_http_post", _PostRecorder())
+		result = CliRunner().invoke(main, ["abs-rescan", "--library", str(tmp_path)], env=self._ENV)
+		assert result.exit_code != 0
+		assert "Cannot reach Audiobookshelf" in result.output
+		assert "Traceback" not in result.output
+
+	def test_unmatched_books_reported_not_posted(self, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+		books = self._make_library(tmp_path)
+		post = self._fake_abs(monkeypatch, books[:1])  # ABS knows only the first book
+		result = CliRunner().invoke(main, ["abs-rescan", "--library", str(tmp_path), "--apply"], env=self._ENV)
+		assert result.exit_code == 0
+		assert "not found in ABS" in result.output
+		assert post.calls[0]["json_body"] == {"libraryItemIds": ["item-0"]}
+
+	def test_nothing_changed_is_green_noop(self, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+		import os
+		import time as _time
+
+		self._make_library(tmp_path)
+		old = _time.time() - 7 * 86400
+		for opf in tmp_path.rglob("metadata.opf"):
+			os.utime(opf, (old, old))
+		post = self._fake_abs(monkeypatch, [])
+		result = CliRunner().invoke(main, ["abs-rescan", "--library", str(tmp_path), "--since", "1h"], env=self._ENV)
+		assert result.exit_code == 0
+		assert "nothing to rescan" in result.output
+		assert post.calls == []
+
+	def test_invalid_since_rejected(self, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+		self._make_library(tmp_path)
+		self._fake_abs(monkeypatch, [])
+		result = CliRunner().invoke(main, ["abs-rescan", "--library", str(tmp_path), "--since", "2x"], env=self._ENV)
+		assert result.exit_code != 0
+		assert "Invalid --since value" in result.output
+		assert "Traceback" not in result.output
+
+	def test_force_all_dry_run_vs_apply(self, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+		self._make_library(tmp_path)
+		post = self._fake_abs(monkeypatch, [])
+		runner = CliRunner()
+		dry = runner.invoke(main, ["abs-rescan", "--library", str(tmp_path), "--force-all"], env=self._ENV)
+		assert dry.exit_code == 0
+		assert "would force-rescan" in dry.output
+		assert post.calls == []
+		wet = runner.invoke(main, ["abs-rescan", "--library", str(tmp_path), "--force-all", "--apply"], env=self._ENV)
+		assert wet.exit_code == 0
+		assert [c["url"] for c in post.calls] == ["http://abs.lan:13378/api/libraries/lib1/scan"]
+		assert post.calls[0]["params"] == {"force": 1}
 
 
 class TestPathValidation:

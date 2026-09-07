@@ -110,6 +110,15 @@ src/book_meta_fix/
   covers.py        generated-cover detection (pixel math) + replacement & in-book extraction fallback
                   + embedded-cover strip (EPUB zip+OPF surgery) + strip_generated_covers
                   (the per-folder engine of `bmf strip-covers`: sidecar → .bak, embedded EPUB probe+strip)
+  abs_client.py    Audiobookshelf API client + the engine of `bmf abs-rescan`: changed_folders
+                  (stat-only walk over iter_book_folders, max file mtime ≥ since), match_items
+                  (folder → ABS item: exact path → relPath → unique folder-name match — covers
+                  different mount prefixes and placement moves), AudiobookshelfClient (batch
+                  /api/items/batch/scan with per-item fallback on 404). ABS keeps its own DB and
+                  plain scans skip "unchanged" folders, so apply's disk writes are only pushed
+                  into ABS through this per-item rescan; scan endpoints need an ADMIN token
+                  (BMF_ABS_URL/BMF_ABS_TOKEN/BMF_ABS_LIBRARY; module-level _http_get_json/
+                  _http_post are the monkeypatch seams for the no-network tests)
   gui.py           bmf gui — keyboard-first Tkinter review.yaml editor (no new writer: loads raw
                   entry dicts, writes via review._header + review._render_entry; scrollable detail
                   column, Tab-trap bindtag, per-format embedded covers, Ctrl+G double-decode recode,
@@ -171,8 +180,10 @@ src/book_meta_fix/
                   automatic gap-fill (survivor's value, else first found), so confirming
                   as-is loses nothing
   cli.py           click commands: scan, report, analyze, apply, epubgen, crosscheck,
-                  strip-covers, gui
-                  (organize is a deprecation stub — placement lives in apply)
+                  strip-covers, abs-rescan, gui
+                  (organize is a deprecation stub — placement lives in apply; in abs_rescan
+                  the two _() header strings sit OUTSIDE the f-string — babel on py3.10
+                  cannot extract calls from f-string holes)
 ```
 
 ## Non-obvious gotchas

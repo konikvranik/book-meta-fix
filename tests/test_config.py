@@ -57,3 +57,32 @@ class TestLegacyEnvAliases:
 		monkeypatch.setenv("BMF_LLM_FALLBACK_MODEL", "glm-5.3")
 		cfg = Config.from_env()
 		assert cfg.llm_fallback_model == "glm-5.3"
+
+
+class TestAbsRescanEnv:
+	"""BMF_ABS_* knobs for `bmf abs-rescan`."""
+
+	ABS_VARS = ("BMF_ABS_URL", "BMF_ABS_TOKEN", "BMF_ABS_LIBRARY")
+
+	def test_defaults_when_unset(self, monkeypatch):
+		for var in self.ABS_VARS:
+			monkeypatch.delenv(var, raising=False)
+		cfg = Config.from_env()
+		assert cfg.abs_url == ""
+		assert cfg.abs_token is None
+		assert cfg.abs_library == ""
+
+	def test_env_resolution(self, monkeypatch):
+		for var in self.ABS_VARS:
+			monkeypatch.delenv(var, raising=False)
+		monkeypatch.setenv("BMF_ABS_URL", "http://abs.lan:13378")
+		monkeypatch.setenv("BMF_ABS_TOKEN", "s3cret")
+		monkeypatch.setenv("BMF_ABS_LIBRARY", "Books")
+		cfg = Config.from_env()
+		assert cfg.abs_url == "http://abs.lan:13378"
+		assert cfg.abs_token == "s3cret"
+		assert cfg.abs_library == "Books"
+
+	def test_empty_token_strips_to_none(self, monkeypatch):
+		monkeypatch.setenv("BMF_ABS_TOKEN", "")
+		assert Config.from_env().abs_token is None

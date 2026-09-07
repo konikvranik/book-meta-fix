@@ -53,6 +53,20 @@ class Config:
 	# Bearer token for an instance deployed with AUDIOBOOKSHELF_AUTH_TOKEN.
 	# Override via BMF_ABS_CZECH_TOKEN.
 	abs_czech_token: str | None = None
+	# The user's actual Audiobookshelf server, targeted by `bmf abs-rescan`
+	# (ABS keeps its own database, so bmf's disk writes only appear there
+	# after a per-item API re-scan). Empty URL = the command is unavailable.
+	# Set the BASE url (e.g. http://abs.lan:13378), not an endpoint.
+	# Override via BMF_ABS_URL or `bmf abs-rescan --url`.
+	abs_url: str = ""
+	# Admin API token — the scan endpoints reject non-admin tokens (403).
+	# Settings -> Users -> API key in the ABS web UI. Override via
+	# BMF_ABS_TOKEN.
+	abs_token: str | None = None
+	# ABS library name or id when the server hosts several book libraries;
+	# empty = auto-detect (a single book library, or a folder-path match).
+	# Override via BMF_ABS_LIBRARY or `bmf abs-rescan --abs-library`.
+	abs_library: str = ""
 
 	# API rate limit / timeout
 	api_rate_sec: float = DEFAULT_API_RATE_SEC
@@ -178,6 +192,12 @@ class Config:
 			cfg.abs_czech_url = v.strip()
 		if (v := os.environ.get("BMF_ABS_CZECH_TOKEN")) is not None:
 			cfg.abs_czech_token = v.strip() or None
+		if (v := os.environ.get("BMF_ABS_URL")) is not None:
+			cfg.abs_url = v.strip()
+		if (v := os.environ.get("BMF_ABS_TOKEN")) is not None:
+			cfg.abs_token = v.strip() or None
+		if (v := os.environ.get("BMF_ABS_LIBRARY")) is not None:
+			cfg.abs_library = v.strip()
 		if (v := os.environ.get("BMF_OPENLIBRARY")) is not None:
 			cfg.openlibrary_enabled = v.strip().lower() in ("1", "true", "yes", "on")
 		if (v := os.environ.get("BMF_GOOGLE_BOOKS")) is not None:

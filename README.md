@@ -109,6 +109,8 @@ can recover the pre-run state.
 | `bmf crosscheck --apply` | Actually move the mismatched format files |
 | `bmf strip-covers` | Remove generated covers (dry-run: list affected books) |
 | `bmf strip-covers --apply` | Actually remove them: `cover.jpg` → `.bak` + embedded EPUB covers stripped |
+| `bmf abs-rescan` | Tell Audiobookshelf to re-read metadata of books changed recently (dry-run: list the mapping) |
+| `bmf abs-rescan --apply` | Actually trigger the per-item ABS rescan (batch API); `--since 2h` narrows the window, `--force-all` re-scans the whole library |
 
 Common options: `--library PATH`, `--limit N`, `--no-cache`, `-o FILE`,
 `--skip-enrich`, `--skip-verify`, `--databazeknih`, `--legie`,
@@ -538,6 +540,9 @@ Settings resolve from (highest precedence first):
 | `BMF_CACHE` | `bmf_cache.db` | SQLite cache path |
 | `BMF_REVIEW` | `review.yaml` | Default review file path |
 | `BMF_LANGUAGE` | *(auto)* | Interface language — `cs` or `en`. Auto-detected from the user's locale (`cs*` → Czech, anything else → English). Can also be set per-run: `bmf --lang cs report` |
+| `BMF_ABS_URL` | — | Audiobookshelf server base URL for `bmf abs-rescan` (e.g. `http://abs.lan:13378`; empty = the command is unavailable) |
+| `BMF_ABS_TOKEN` | — | Audiobookshelf **admin** API token (Settings → Users → API key — the scan endpoints reject non-admin tokens) |
+| `BMF_ABS_LIBRARY` | *(auto)* | ABS library name or id when the server hosts several book libraries |
 | `ZAI_API_KEY` | — | Z.AI API key (LLM, optional — phase 7) |
 | `ZAI_BASE_URL` | `https://api.z.ai/api/paas/v4/` | Z.AI base URL |
 | `BMF_LLM_MODEL` | `glm-4.7-flash` | LLM loop first-attempt model (fallback model when the loop is off) |

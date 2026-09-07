@@ -12,6 +12,8 @@ Subcommands:
 	                 quarantine format files whose content differs from metadata
 	bmf strip-covers — remove generated covers (cover.jpg sidecar renamed to
 	                 .bak + embedded EPUB covers stripped); dry-run by default
+	bmf abs-rescan  — tell Audiobookshelf to re-read the metadata of recently
+	                 changed books (per-item API rescan); dry-run by default
 """
 from __future__ import annotations
 
@@ -1130,6 +1132,195 @@ def _print_strip_covers_summary(results, do_apply: bool) -> None:  # noqa: ANN00
 			console.print("[yellow]" + _("Some EPUB covers probed as generated but could not be stripped (corrupt zip / unparseable OPF); see the list above.") + "[/yellow]")
 		if not do_apply:
 			console.print("[dim]" + _("Dry-run: nothing removed. Re-run with --apply to strip the covers.") + "[/dim]")
+
+
+@main.command(name="abs-rescan")
+@click.option("--library", "library", type=click.Path(file_okay=False, path_type=Path), help=_("Library root (default: $BMF_LIBRARY or ~/Books)"))
+@click.option("--since", "since", default="24h", help=_("Rescan books changed within this window, e.g. 90m, 2h, 3d (default: 24h)"))
+@click.option("--url", "url", default=None, help=_("Audiobookshelf base URL (default: $BMF_ABS_URL)"))
+@click.option("--abs-library", "abs_library", default=None, help=_("Audiobookshelf library name or id (default: auto-detect)"))
+@click.option("--force-all", "force_all", is_flag=True, help=_("Force-rescan the whole ABS library instead of only the changed books"))
+@click.option("--apply", "do_apply", is_flag=True, help=_("Actually trigger the rescan (default: dry-run)"))
+def abs_rescan(library: Path | None, since: str, url: str | None, abs_library: str | None, force_all: bool, do_apply: bool) -> None:
+	"""Tell Audiobookshelf to re-read the metadata of recently changed books.
+
+	ABS keeps its own database and a plain library scan skips every folder
+	it considers unchanged (mtime gate; an NFS attribute cache can mask
+	even a new mtime), so bmf's writes stay invisible in ABS. This command
+	finds book folders changed within --since, maps them to ABS library
+	items and triggers a per-item re-scan through the ABS API, which
+	re-reads metadata.json unconditionally. Requires BMF_ABS_URL and
+	BMF_ABS_TOKEN (an ADMIN API token — scan endpoints reject the rest).
+	"""
+	import time as _time
+
+	from .abs_client import AudiobookshelfClient, changed_folders, match_items, parse_since_duration
+
+	cfg = Config.from_env()
+	if library is not None:
+		cfg.library = library
+
+	_validate_library(cfg.library)
+
+	base_url = url if url is not None else cfg.abs_url
+	if not base_url or not cfg.abs_token:
+		console.print(
+			f"[bold red]{_('Error:')}[/bold red] "
+			+ _("Audiobookshelf is not configured: set BMF_ABS_URL and BMF_ABS_TOKEN (an admin API token) in .env or the environment.")
+		)
+		sys.exit(1)
+
+	try:
+		since_sec = parse_since_duration(since)
+	except ValueError:
+		console.print(f"[bold red]{_('Error:')}[/bold red] " + _("Invalid --since value: {value}").format(value=since))
+		sys.exit(1)
+	since_ts = _time.time() - since_sec
+
+	# The two _() calls sit OUTSIDE the f-string on purpose: babel (Python
+	# 3.10 tokenizer) cannot see function calls inside f-string holes, so an
+	# inlined _('...') would never reach the .pot and stay untranslated.
+	header = _("ABS rescan")
+	window_lbl = _("changed within {window}").format(window=since)
+	console.print(
+		f"[bold]{header}[/bold] [cyan]{base_url}[/cyan] [{'WRITE' if do_apply else 'DRY-RUN'}] "
+		f"[dim]{window_lbl}[/dim]",
+		highlight=False,
+	)
+	client = AudiobookshelfClient(base_url, cfg.abs_token)
+
+	libs = client.libraries()
+	if libs is None:
+		console.print(f"[bold red]{_('Error:')}[/bold red] " + _("Cannot reach Audiobookshelf at {url} — check the URL and token.").format(url=base_url))
+		sys.exit(1)
+
+	book_libs = [l for l in libs if str(l.get("mediaType") or "book") == "book"]
+	if not book_libs:
+		console.print(f"[bold red]{_('Error:')}[/bold red] " + _("No book libraries found on the ABS server."))
+		sys.exit(1)
+
+	selected = _select_abs_library(book_libs, wanted=abs_library if abs_library is not None else cfg.abs_library, library_root=cfg.library)
+	if selected is None:
+		names = ", ".join(str(l.get("name") or l.get("id")) for l in book_libs)
+		console.print(
+			f"[bold red]{_('Error:')}[/bold red] "
+			+ _("Multiple book libraries on the ABS server; pick one with --abs-library (or BMF_ABS_LIBRARY). Available: {names}").format(names=names)
+		)
+		sys.exit(1)
+	lib_id = str(selected.get("id"))
+	console.print(_("ABS library: {name}").format(name=selected.get("name") or lib_id), highlight=False)
+
+	if force_all:
+		if not do_apply:
+			console.print("[dim]" + _("Dry-run: would force-rescan the whole ABS library. Re-run with --apply.") + "[/dim]")
+		elif client.scan_library(lib_id, force=True):
+			console.print("[green]" + _("Force-rescan of the whole ABS library requested — ABS re-reads every item in the background.") + "[/green]")
+		else:
+			console.print("[bold red]" + _("Failed to request the library scan — check the token (must be an ADMIN API token) and URL.") + "[/bold red]")
+			sys.exit(1)
+		return
+
+	folders = changed_folders(cfg.library, since_ts)
+	if not folders:
+		console.print("[green]" + _("No books changed within {window} — nothing to rescan.").format(window=since) + "[/green]")
+		return
+
+	items = client.items(lib_id)
+	if items is None:
+		console.print(f"[bold red]{_('Error:')}[/bold red] " + _("Cannot list ABS library items — check the URL/token."))
+		sys.exit(1)
+
+	mres = match_items(folders, items, cfg.library)
+	_print_abs_rescan_summary(mres, do_apply)
+
+	if do_apply and mres.matched:
+		if client.scan_items(mres.item_ids):
+			console.print(
+				"[green]"
+				+ _("Rescan requested for {count} ABS items — the server re-reads them in the background; refresh the web UI in a moment.").format(count=len(mres.item_ids))
+				+ "[/green]"
+			)
+		else:
+			console.print("[bold red]" + _("Failed to request the rescan — check the token (must be an ADMIN API token) and URL.") + "[/bold red]")
+			sys.exit(1)
+
+
+def _common_tail_components(a: str, b: str) -> int:
+	"""Length of the shared trailing path-component suffix of two posix paths."""
+	ac = [c for c in a.split("/") if c]
+	bc = [c for c in b.split("/") if c]
+	n = 0
+	while n < len(ac) and n < len(bc) and ac[-1 - n].lower() == bc[-1 - n].lower():
+		n += 1
+	return n
+
+
+def _select_abs_library(book_libs: list[dict], *, wanted: str, library_root: Path) -> dict | None:
+	"""Pick the ABS book library: explicit name/id > single library > path tail.
+
+	The tail match compares our library root with each ABS library's folder
+	fullPath component-wise from the end — the same storage is usually
+	mounted under different prefixes (workstation NFS mount vs. the ABS
+	container), so a shared trailing folder name is the expected signal.
+	Returns None when it cannot decide (the caller lists the options and
+	exits).
+	"""
+	w = (wanted or "").strip().lower()
+	if w:
+		for lib in book_libs:
+			if str(lib.get("id", "")).lower() == w or str(lib.get("name", "")).lower() == w:
+				return lib
+		return None
+	if len(book_libs) == 1:
+		return book_libs[0]
+	root_posix = library_root.resolve().as_posix().rstrip("/")
+	candidates: list[dict] = []
+	for lib in book_libs:
+		for folder in lib.get("folders") or []:
+			full = str(folder.get("fullPath") or "").rstrip("/")
+			if full and _common_tail_components(root_posix, full) >= 1:
+				candidates.append(lib)
+				break
+	return candidates[0] if len(candidates) == 1 else None
+
+
+def _print_abs_rescan_summary(mres, do_apply: bool) -> None:  # noqa: ANN001
+	console.print()
+	t = Table(title=_("ABS rescan summary"), show_header=True, header_style="bold cyan")
+	t.add_column(_("Metric"), style="bold")
+	t.add_column(_("Count"), justify="right")
+	t.add_row(_("books changed"), str(len(mres.matched) + len(mres.unmatched)))
+	t.add_row(_("matched to ABS items"), str(len(mres.matched)))
+	t.add_row(_("not found in ABS"), str(len(mres.unmatched)))
+	console.print(t)
+
+	if mres.matched:
+		console.print()
+		t = Table(title=_("Matched books (first 25)"), show_header=True, header_style="bold cyan")
+		t.add_column(_("Book folder"))
+		t.add_column(_("ABS item"), style="dim")
+		for folder, item in mres.matched[:25]:
+			t.add_row(folder.name[:60], (item.title or item.id)[:60])
+		if len(mres.matched) > 25:
+			t.add_row("…", f"({len(mres.matched) - 25} more)")
+		console.print(t)
+
+	if mres.unmatched:
+		console.print()
+		console.print(
+			"[yellow]"
+			+ _("Not found in ABS (moved or new): run a plain library scan in ABS once so it learns the new paths, then re-run abs-rescan.")
+			+ "[/yellow]"
+		)
+		t = Table(show_header=False)
+		for folder in mres.unmatched[:10]:
+			t.add_row(folder.name[:70])
+		if len(mres.unmatched) > 10:
+			t.add_row(f"… ({len(mres.unmatched) - 10} more)")
+		console.print(t)
+
+	if not do_apply:
+		console.print("[dim]" + _("Dry-run: nothing sent. Re-run with --apply to trigger the rescan.") + "[/dim]")
 
 
 # Required imports for the new commands
