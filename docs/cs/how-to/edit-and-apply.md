@@ -40,8 +40,8 @@ Viz [Organizace knihovny](organize.md) pro pole vzoru a řešení kolizí.
 (nebo `BMF_PATTERN` / `BMF_NEEDFIX_DIR`) přebijí cíle.
 
 Každé získané pole se dostane až ke knize: název/autor(y), ISBN, rok,
-vydavatel, jazyk, série + pořadí v sérii (uloženo jako ABS seznam
-`[{"name", "index"}]`, zrcadleno do `metadata.opf` jako
+vydavatel, jazyk, série + pořadí v sérii (uloženo jako ABS-nativní seznam
+řetězců `["Název #N"]` v `metadata.json`, zrcadleno do `metadata.opf` jako
 `calibre:series`/`calibre:series_index`), žánry (a tagy — obojí jako OPF
 `<dc:subject>`) a popis/anotace z databazeknih / Google Books /
 OpenLibrary. Návrh, který nese jen polovinu série, si ponechá aktuální

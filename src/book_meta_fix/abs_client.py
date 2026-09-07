@@ -17,10 +17,18 @@ the API, which bypasses the mtime gate entirely:
 	                                           endpoint (404 -> fall back)
 	POST /api/libraries/{id}/scan?force=1   -> the --force-all escape hatch
 
-Auth is `Authorization: Bearer <token>` and the scan endpoints require an
-ADMIN token (a regular user's token gets 403). Everything here is
-best-effort: network/HTTP failures return None/False and log at debug —
-a rescan we cannot deliver is a hint in the command output, not a crash.
+	Auth is `Authorization: Bearer <token>` and the scan endpoints require an
+	ADMIN token (a regular user's token gets 403). Everything here is
+	best-effort: network/HTTP failures return None/False and log at debug —
+	a rescan we cannot deliver is a hint in the command output, not a crash.
+
+	GET  /api/libraries/{id}/items  also yields each item's media.coverPath —
+	the stored cover row abs-rescan --fix-covers audits. A coverPath written
+	by an older ABS build can point at a non-image file (metadata.json,
+	cover.html) and while that file exists the scanner never re-picks, so
+	every cover-cache refresh feeds it to ffmpeg ("Invalid data found").
+	DELETE /api/items/{id}/cover nulls the row + purges the cache; the
+	follow-up rescan lets ABS choose a real cover again.
 """
 from __future__ import annotations
 
@@ -31,6 +39,7 @@ from pathlib import Path
 
 import requests
 
+from .covers import ABS_IMAGE_EXTS
 from .library import _stat_folder, iter_book_folders
 
 log = logging.getLogger(__name__)
@@ -77,6 +86,24 @@ def _http_post(
 		return None
 
 
+def _http_delete(
+	url: str,
+	*,
+	timeout: float = 15.0,
+	headers: dict[str, str] | None = None,
+) -> requests.Response | None:
+	"""DELETE returning the whole response, or None on network failure.
+
+	Same whole-response shape as _http_post: the cover endpoint answers with
+	a bare status we must distinguish (200 cleared / 403 non-admin token).
+	"""
+	try:
+		return requests.delete(url, timeout=timeout, headers=headers)
+	except requests.RequestException as e:
+		log.debug("HTTP DELETE failed for %s: %s", url, e)
+		return None
+
+
 @dataclass(frozen=True)
 class AbsItem:
 	"""An Audiobookshelf library item — the fields a rescan needs."""
@@ -85,6 +112,7 @@ class AbsItem:
 	path: str = ""  # absolute path as the ABS server sees it (its own mount)
 	rel_path: str = ""  # relative to the ABS library folder
 	title: str = ""
+	cover_path: str = ""  # media.coverPath — the stored DB row --fix-covers audits
 
 
 class AudiobookshelfClient:
@@ -124,14 +152,18 @@ class AudiobookshelfClient:
 				continue
 			media = row.get("media")
 			title = ""
-			if isinstance(media, dict) and isinstance(media.get("metadata"), dict):
-				title = str(media["metadata"].get("title") or "")
+			cover = ""
+			if isinstance(media, dict):
+				if isinstance(media.get("metadata"), dict):
+					title = str(media["metadata"].get("title") or "")
+				cover = str(media.get("coverPath") or "")
 			items.append(
 				AbsItem(
 					id=str(row["id"]),
 					path=str(row.get("path") or ""),
 					rel_path=str(row.get("relPath") or ""),
 					title=title,
+					cover_path=cover,
 				)
 			)
 		return items
@@ -139,28 +171,20 @@ class AudiobookshelfClient:
 	def scan_items(self, item_ids: list[str]) -> bool:
 		"""Ask ABS to re-scan the given items (their metadata is re-read).
 
-		Batch endpoint first — one call, the server scans in background. A
-		404 means an older ABS without it, then we fall back to per-item
-		POSTs (the small sleep keeps the burst off a tiny LAN server).
+		Deliberately PER-ITEM, not POST /api/items/batch/scan: the batch
+		endpoint answers 200 immediately and is supposed to scan in the
+		background, but on a real server it was measured accepting ~1100 ids
+		and then processing NONE of them (no visible job, no item changed)
+		while the per-item endpoint synchronously re-scans and returns the
+		result. The small sleep keeps the burst off a tiny LAN server.
 		"""
-		if not item_ids:
-			return True
-		r = _http_post(
-			f"{self.base_url}/api/items/batch/scan",
-			json_body={"libraryItemIds": list(item_ids)},
-			headers=self._headers,
-		)
-		if r is not None and r.status_code == 200:
-			return True
-		if r is None or r.status_code != 404:
-			return False
-		log.debug("batch/scan missing (HTTP %s) — falling back to per-item scans", r.status_code)
 		ok = True
 		for i, item_id in enumerate(item_ids):
 			if i:
-				time.sleep(0.1)
-			rr = _http_post(f"{self.base_url}/api/items/{item_id}/scan", headers=self._headers)
-			if rr is None or rr.status_code != 200:
+				time.sleep(0.15)
+			r = _http_post(f"{self.base_url}/api/items/{item_id}/scan", headers=self._headers)
+			if r is None or r.status_code != 200:
+				log.debug("item scan failed for %s (HTTP %s)", item_id, None if r is None else r.status_code)
 				ok = False
 		return ok
 
@@ -171,6 +195,20 @@ class AudiobookshelfClient:
 			params={"force": 1} if force else None,
 			headers=self._headers,
 		)
+		return r is not None and r.status_code == 200
+
+	def clear_item_cover(self, item_id: str) -> bool:
+		"""Null an item's stored cover row (DELETE /api/items/{id}/cover).
+
+		The ABS-database counterpart of the strip-covers file cleanup: a stale
+		``media.coverPath`` (ffmpeg fed metadata.json as the cover) never
+		self-heals, because the scanner only re-picks a cover when the row is
+		NULL or its file vanished — and a metadata.json neither vanishes nor
+		counts as an image file. The DELETE nulls the row and purges ABS's
+		cover cache; the caller follows up with a rescan so ABS picks a real
+		cover from the folder again. Returns False on network/HTTP failure.
+		"""
+		r = _http_delete(f"{self.base_url}/api/items/{item_id}/cover", headers=self._headers)
 		return r is not None and r.status_code == 200
 
 
@@ -228,6 +266,56 @@ class MatchResult:
 		for _, item in self.matched:
 			seen.setdefault(item.id, None)
 		return list(seen)
+
+
+# ---------------------------------------------------------------------------
+# Engine: audit stored cover rows (`abs-rescan --fix-covers`)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BrokenCover:
+	"""An ABS item whose stored coverPath row can only yield a broken cover."""
+
+	item: AbsItem
+	cover_path: str
+	reason: str  # "ext" (target is not an image file) | "missing" (target gone)
+
+
+def broken_cover_items(
+	items: list[AbsItem], library_root: Path, abs_folder_paths: list[str],
+) -> list[BrokenCover]:
+	"""Pick the items whose ABS-DB coverPath row is junk, not a real cover.
+
+	ABS chooses item covers from image-extension files only (cover.* first —
+	BookScanner.js), but a coverPath written by an older ABS build can point
+	at ANY file in the folder; while that file exists the scanner keeps the
+	row forever, and every cover-cache refresh feeds the file to ffmpeg
+	("Invalid data found when processing input" on metadata.json or
+	cover.html). A row is broken when its target's extension is not an
+	image type, or — when the target maps under an ABS library folder onto
+	*library_root* — the mapped file no longer exists. Targets outside the
+	library folders (ABS's own uploaded covers under its /metadata dir) get
+	the extension check only: their storage belongs to the ABS server, not
+	to our mount.
+	"""
+	folders = [_norm_posix(f) for f in abs_folder_paths if str(f or "").strip("/")]
+	out: list[BrokenCover] = []
+	for item in items:
+		cover = _norm_posix(item.cover_path or "")
+		if not cover or "/" not in cover:
+			continue  # nothing stored — the scanner is free to pick a cover
+		if Path(cover).suffix.lower() not in ABS_IMAGE_EXTS:
+			out.append(BrokenCover(item=item, cover_path=cover, reason="ext"))
+			continue
+		rel = ""
+		for folder in folders:
+			if cover.startswith(folder + "/"):
+				rel = cover[len(folder) + 1:]
+				break
+		if rel and not (library_root / rel).exists():
+			out.append(BrokenCover(item=item, cover_path=cover, reason="missing"))
+	return out
 
 
 def _norm_posix(path: str | Path) -> str:

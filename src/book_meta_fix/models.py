@@ -6,9 +6,37 @@ Verdict: bucket the book falls into (OK / AUTO_FIXABLE / NEEDS_REVIEW / UNFIXABL
 """
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any
+
+# A trailing " #N" in a series STRING is the sequence — ABS's own convention
+# (server/utils/parsers/parseSeriesString.js), mirrored here so the
+# manifest's string form ("Mark Stone #7") splits back into name + index.
+_SERIES_SEQ_RE = re.compile(r" #([^#\s]+)$")
+
+
+def series_entry_pair(s: Any) -> tuple[str, str]:
+	"""(name, index) of ONE series entry, normalising the wild shapes.
+
+	metadata.json carries series as plain strings (``"Zaklínač #8"`` — the
+	form current ABS writes and reads) or as ``{"name", "index"}`` dicts
+	(bmf's internal shape); older Audiobookshelf manifests used
+	``sequence`` for the index key. This is the single normalizer behind
+	``BookMeta.series_pair()`` and the writer's string serialization, so
+	every consumer sees the same (name, index) regardless of storage.
+	"""
+	if isinstance(s, dict):
+		idx = s.get("index")
+		if idx is None:
+			idx = s.get("sequence")
+		return str(s.get("name") or ""), str(idx) if idx is not None else ""
+	text = str(s or "")
+	m = _SERIES_SEQ_RE.search(text)
+	if m:
+		return text[: m.start()], m.group(1)
+	return text, ""
 
 
 class Verdict(str, Enum):
@@ -80,21 +108,13 @@ class BookMeta:
 	def series_pair(self) -> tuple[str, str]:
 		"""First series as ``(name, index)``, normalising the wild shapes.
 
-		metadata.json in this library carries series either as plain strings
-		(``"Zaklínač #8"``) or as ``{"name", "index"}`` dicts; newer
-		Audiobookshelf builds write ``sequence`` for the index key. This is the
-		ONE accessor for display / organize / OPF, so every consumer sees the
+		See ``series_entry_pair`` for the accepted shapes; this is the ONE
+		accessor for display / organize / OPF, so every consumer sees the
 		same (name, index) regardless of the stored shape.
 		"""
 		if not self.series:
 			return "", ""
-		s0 = self.series[0]
-		if not isinstance(s0, dict):
-			return str(s0), ""
-		idx = s0.get("index")
-		if idx is None:
-			idx = s0.get("sequence")
-		return str(s0.get("name") or ""), str(idx) if idx is not None else ""
+		return series_entry_pair(self.series[0])
 
 	def to_dict(self) -> dict[str, Any]:
 		d = asdict(self)

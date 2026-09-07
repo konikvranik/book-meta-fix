@@ -109,8 +109,11 @@ can recover the pre-run state.
 | `bmf crosscheck --apply` | Actually move the mismatched format files |
 | `bmf strip-covers` | Remove generated covers (dry-run: list affected books) |
 | `bmf strip-covers --apply` | Actually remove them: `cover.jpg` → `.bak` + embedded EPUB covers stripped |
+| `bmf strip-covers --invalid` | Remove INVALID covers instead: image-extension / `cover.*` files no decoder can read (behind ABS's ffmpeg "Invalid data found" errors) |
+| `bmf strip-covers --generated embedded --apply` | Each selector (`--generated`, `--invalid`) takes an optional scope: `external`, `embedded`, or bare flag = both |
 | `bmf abs-rescan` | Tell Audiobookshelf to re-read metadata of books changed recently (dry-run: list the mapping) |
 | `bmf abs-rescan --apply` | Actually trigger the per-item ABS rescan (batch API); `--since 2h` narrows the window, `--force-all` re-scans the whole library |
+| `bmf abs-rescan --fix-covers --apply` | Also null broken cover rows stored in the ABS database (coverPath at a non-image/missing file — the ffmpeg "Invalid data found" errors) and rescan those items |
 
 Common options: `--library PATH`, `--limit N`, `--no-cache`, `-o FILE`,
 `--skip-enrich`, `--skip-verify`, `--databazeknih`, `--legie`,

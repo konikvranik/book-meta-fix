@@ -417,7 +417,7 @@ class TestC14SeriesSplitProposal:
 		from book_meta_fix.detectors import rule_c14_series_index_in_name
 
 		meta = _meta(1)
-		meta.series = ["Mark Stone #73"]
+		meta.series = [{"name": "Mark Stone #73", "index": ""}]
 		diag = rule_c14_series_index_in_name(meta)
 		proposed = _build_proposed(meta, None, None, diag)
 		assert proposed["series"] == "Mark Stone"
@@ -428,7 +428,7 @@ class TestC14SeriesSplitProposal:
 		from book_meta_fix.detectors import detect
 
 		meta = _meta(1, title="soubor_epub.epub")  # C2 fires
-		meta.series = ["Mark Stone #73"]
+		meta.series = [{"name": "Mark Stone #73", "index": ""}]
 		primary = detect(meta)
 		assert primary.category == "C2"
 		assert primary.additional and primary.additional[0].category == "C14"
@@ -440,7 +440,7 @@ class TestC14SeriesSplitProposal:
 		from book_meta_fix.detectors import rule_c14_series_index_in_name
 
 		meta = _meta(1)
-		meta.series = ["Mark Stone #73"]
+		meta.series = [{"name": "Mark Stone #73", "index": ""}]
 		diag = rule_c14_series_index_in_name(meta)
 		enriched = EnrichedMeta(source="databazeknih", series="Mark Stone", series_index="73")
 		proposed = _build_proposed(meta, None, enriched, diag)

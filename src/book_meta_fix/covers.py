@@ -20,6 +20,15 @@ catches generated covers at ANY size, not just the 1200x1600 default.
 
 A cover is classified "generated" at confidence >= 0.5.
 
+Besides generated placeholders, a cover file can be outright INVALID — not
+decodable as an image at all (an HTML page saved as .jpg, a truncated
+download, a cover.html masquerading by name). Audiobookshelf picks item
+covers by file EXTENSION only (prefers cover.*, else the first png/jpg/
+jpeg/webp in the folder — BookScanner.js + globals.SupportedImageTypes), so
+such a file becomes the item cover and its ffmpeg resize fails with
+"Invalid data found when processing input". image_is_readable() is that
+validity check; the strip engine removes invalid covers on demand.
+
 No LLM is involved — all detection is deterministic pixel math via Pillow,
 and the replacement URL comes from the existing enricher chain (preferably
 databazeknih.cz).
@@ -469,13 +478,25 @@ class CoverStripResult:
 	# EPUBs whose cover probed as generated but the strip failed — surfaced in
 	# the summary so the failure is visible, not silent.
 	failed_epubs: list[str] = field(default_factory=list)
+	# Cover files that no image decoder can read (image extension or cover.*
+	# name — see strip_generated_covers) renamed to <name>.bak.
+	invalid_baks: list[str] = field(default_factory=list)
+	# EPUB file names whose embedded cover does not decode as an image and
+	# was (or would be) stripped for that reason.
+	invalid_epubs: list[str] = field(default_factory=list)
 
 	@property
 	def touched(self) -> bool:
-		return self.cover_bak or bool(self.stripped_epubs) or bool(self.failed_epubs)
+		return (
+			self.cover_bak
+			or bool(self.stripped_epubs)
+			or bool(self.failed_epubs)
+			or bool(self.invalid_baks)
+			or bool(self.invalid_epubs)
+		)
 
 
-def probe_embedded_cover(book_path: str | Path) -> CoverInfo:
+def probe_embedded_cover(book_path: str | Path, *, data: bytes | None = None) -> CoverInfo:
 	"""Analyze the cover EMBEDDED in an ebook file, without touching the file.
 
 	EPUB-only and calibre-free: reads the OPF-wired cover bytes via
@@ -484,9 +505,11 @@ def probe_embedded_cover(book_path: str | Path) -> CoverInfo:
 	spills them to a temp file and runs the same pixel math as the C11
 	detector. Returns an empty CoverInfo (is_generated=False) for non-EPUB
 	files, EPUBs without an embedded cover and anything unreadable. Never
-	raises.
+	raises. Pass *data* to reuse bytes already fetched by the caller instead
+	of re-opening the zip.
 	"""
-	data = epub_cover_image(book_path)
+	if data is None:
+		data = epub_cover_image(book_path)
 	if not data:
 		return CoverInfo()
 	tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False, prefix="bmf-probe-")
@@ -498,18 +521,76 @@ def probe_embedded_cover(book_path: str | Path) -> CoverInfo:
 		Path(tmp.name).unlink(missing_ok=True)
 
 
-def strip_generated_covers(folder: str | Path, *, dry_run: bool = True) -> CoverStripResult:
-	"""Remove every GENERATED cover from one book folder — sidecar and embedded.
+def image_is_readable(src: bytes | str | Path) -> bool:
+	"""True when Pillow can fully decode *src* as an image.
 
-	Per-folder engine of ``bmf strip-covers``. Bulk cleanup before the pipeline
-	refetches real covers: once cover.jpg is gone the book re-fires
-	MISSING_COVER, whose recovery/replacement path already exists. Two targets:
+	The INVALID-cover test shared by the sidecar scan (path) and the embedded
+	EPUB probe (bytes): a file that carries an image extension or a cover.*
+	name but does not decode is junk a scanner will still pick up as the item
+	cover (ABS chooses by extension only), and the consumer then chokes on it
+	(ffmpeg: "Invalid data found when processing input"). ``img.load()``
+	forces a full pixel decode, so truncated files fail too, not just wrong
+	magic bytes. Returns True (nothing can be judged invalid) when Pillow is
+	unavailable — the callers then delete nothing, which is the safe default.
+	"""
+	try:
+		from PIL import Image
+	except ImportError:
+		return True
+	try:
+		if isinstance(src, bytes):
+			import io
 
-	- ``cover.jpg`` that :func:`analyze_cover` classifies as generated (the C11
-	  pixel math) → renamed to ``cover.jpg.bak`` (reversible; overwrites any
-	  existing .bak) — never hard-deleted.
-	- each ``*.epub`` whose embedded cover probes as generated
-	  (:func:`probe_embedded_cover`) → :func:`strip_cover_from_book` surgery.
+			src = io.BytesIO(src)
+		with Image.open(src) as img:
+			img.load()
+		return True
+	except Exception:  # noqa: BLE001
+		return False
+
+
+# File extensions Audiobookshelf classifies as images (scanner fallback: with
+# no cover.* present it takes the FIRST such file in the folder as the cover).
+# Anything undecodable with one of these extensions — or a cover.* name with
+# any extension — is an invalid-cover candidate. Also the extension whitelist
+# for the ABS-database cover audit (abs_client.broken_cover_items): a stored
+# coverPath with any other extension can only be a stale/broken row.
+ABS_IMAGE_EXTS = frozenset({".jpg", ".jpeg", ".png", ".webp"})
+
+
+def _invalid_cover_candidate(p: Path) -> bool:
+	"""Could a scanner mistake *p* for the book's cover file?"""
+	if not p.is_file() or not p.suffix:
+		return False
+	name = p.name.lower()
+	if name.endswith((".bak", ".tmp")):
+		return False
+	return p.suffix.lower() in ABS_IMAGE_EXTS or p.stem.lower() == "cover"
+
+
+def strip_generated_covers(
+	folder: str | Path, *, dry_run: bool = True,
+	generated: str | None = "both", invalid: str | None = None,
+) -> CoverStripResult:
+	"""Remove GENERATED and/or INVALID covers from one book folder.
+
+	Per-folder engine of ``bmf strip-covers``. Two selectors, each with its
+	own scope (``"external"`` = loose files in the folder, ``"embedded"`` =
+	covers inside EPUBs, ``"both"``):
+
+	- *generated* (default ``"both"``; ``None`` disables) — the C11 pixel
+	  math: ``cover.jpg`` classified generated → renamed ``cover.jpg.bak``
+	  (reversible; overwrites any existing .bak), an EPUB whose embedded
+	  cover probes generated → :func:`strip_cover_from_book` surgery. Bulk
+	  cleanup before the pipeline refetches real covers: once cover.jpg is
+	  gone the book re-fires MISSING_COVER, whose recovery path exists.
+	- *invalid* (default ``None`` = off) — covers no image decoder can read
+	  (:func:`image_is_readable`): an HTML page saved as .jpg, a truncated
+	  download, ``cover.html``. Externals (any image-extension file or
+	  ``cover.*`` — the set ABS picks item covers from) are renamed to
+	  ``<name>.bak``; an EPUB whose OPF-wired cover bytes do not decode is
+	  stripped with the same surgery. These are the files behind ABS's ffmpeg
+	  "Invalid data found when processing input" resize errors.
 
 	Non-EPUB format files are deliberately untouched: their covers live in
 	binary EXTH headers with no safe removal path (see
@@ -519,8 +600,24 @@ def strip_generated_covers(folder: str | Path, *, dry_run: bool = True) -> Cover
 	folder = Path(folder)
 	result = CoverStripResult(path=str(folder))
 
+	def _ext(scope: str | None) -> bool:
+		return scope in ("external", "both")
+
+	def _emb(scope: str | None) -> bool:
+		return scope in ("embedded", "both")
+
+	def _bak_away(path: Path, report: list[str]) -> None:
+		if dry_run:
+			report.append(path.name)
+			return
+		try:
+			os.replace(path, path.with_suffix(path.suffix + ".bak"))
+			report.append(path.name)
+		except OSError as exc:
+			log.warning("cover strip failed for %s: %s", path, exc)
+
 	cover_path = folder / "cover.jpg"
-	if cover_path.is_file() and analyze_cover(cover_path).is_generated:
+	if _ext(generated) and cover_path.is_file() and analyze_cover(cover_path).is_generated:
 		if dry_run:
 			result.cover_bak = True
 		else:
@@ -530,11 +627,26 @@ def strip_generated_covers(folder: str | Path, *, dry_run: bool = True) -> Cover
 			except OSError as exc:
 				log.warning("sidecar cover strip failed for %s: %s", folder, exc)
 
+	if _ext(invalid):
+		for p in sorted(folder.iterdir()):
+			# A generated cover.jpg cannot also be invalid (it decoded into
+			# pixels for the C11 math) — the two passes never collide.
+			if _invalid_cover_candidate(p) and not image_is_readable(p):
+				_bak_away(p, result.invalid_baks)
+
 	for epub in sorted(folder.glob("*.epub")):
-		if not probe_embedded_cover(epub).is_generated:
+		data = epub_cover_image(epub)
+		if data is None:
+			continue
+		invalid_hit = _emb(invalid) and not image_is_readable(data)
+		generated_hit = (
+			not invalid_hit and _emb(generated)
+			and probe_embedded_cover(epub, data=data).is_generated
+		)
+		if not (invalid_hit or generated_hit):
 			continue
 		if dry_run or strip_cover_from_book(epub):
-			result.stripped_epubs.append(epub.name)
+			(result.invalid_epubs if invalid_hit else result.stripped_epubs).append(epub.name)
 		else:
 			result.failed_epubs.append(epub.name)
 	return result

@@ -14,6 +14,7 @@ from book_meta_fix import abs_client
 from book_meta_fix.abs_client import (
 	AbsItem,
 	AudiobookshelfClient,
+	broken_cover_items,
 	changed_folders,
 	match_items,
 	parse_since_duration,
@@ -53,6 +54,22 @@ class _PostRecorder:
 
 	def __call__(self, url, *, params=None, json_body=None, timeout=15.0, headers=None):
 		self.calls.append({"url": url, "params": params, "json_body": json_body, "timeout": timeout, "headers": headers})
+		return self.replies.get(url, _Resp(200))
+
+	@property
+	def urls(self) -> list[str]:
+		return [c["url"] for c in self.calls]
+
+
+class _DeleteRecorder:
+	"""Captures _http_delete kwargs; replies per-URL from a dict, else 200."""
+
+	def __init__(self, replies: dict[str, _Resp] | None = None) -> None:
+		self.replies = replies or {}
+		self.calls: list[dict] = []
+
+	def __call__(self, url, *, timeout=15.0, headers=None):
+		self.calls.append({"url": url, "timeout": timeout, "headers": headers})
 		return self.replies.get(url, _Resp(200))
 
 	@property
@@ -197,7 +214,7 @@ class TestClient:
 					"id": "i1",
 					"path": "/data/A/Kniha",
 					"relPath": "A/Kniha",
-					"media": {"metadata": {"title": "Kniha"}},
+					"media": {"metadata": {"title": "Kniha"}, "coverPath": "/data/A/Kniha/cover.jpg"},
 				},
 				{"id": "", "path": "/data/x"},  # no id -> skipped
 				{"nonsense": True},  # not a dict row -> skipped
@@ -207,32 +224,41 @@ class TestClient:
 		monkeypatch.setattr(abs_client, "_http_get_json", rec)
 		items = self._client().items("lib1")
 		assert items is not None and len(items) == 1
-		assert items[0] == AbsItem(id="i1", path="/data/A/Kniha", rel_path="A/Kniha", title="Kniha")
+		assert items[0] == AbsItem(
+			id="i1", path="/data/A/Kniha", rel_path="A/Kniha", title="Kniha",
+			cover_path="/data/A/Kniha/cover.jpg",
+		)
 		assert rec.calls[0]["params"] == {"limit": 0}
 
-	def test_scan_items_batch_success(self, monkeypatch) -> None:  # noqa: ANN001
-		rec = _PostRecorder()
-		monkeypatch.setattr(abs_client, "_http_post", rec)
-		assert self._client().scan_items(["a", "b"]) is True
-		assert rec.urls == ["http://abs.lan:13378/api/items/batch/scan"]
-		assert rec.calls[0]["json_body"] == {"libraryItemIds": ["a", "b"]}
+	def test_clear_item_cover_deletes_and_reports(self, monkeypatch) -> None:  # noqa: ANN001
+		rec = _DeleteRecorder()
+		monkeypatch.setattr(abs_client, "_http_delete", rec)
+		assert self._client().clear_item_cover("item-7") is True
+		assert rec.urls == ["http://abs.lan:13378/api/items/item-7/cover"]
+		assert rec.calls[0]["headers"]["Authorization"] == "Bearer s3cret"
 
-	def test_scan_items_falls_back_per_item_on_404(self, monkeypatch) -> None:  # noqa: ANN001
-		rec = _PostRecorder({"http://abs.lan:13378/api/items/batch/scan": _Resp(404)})
+	def test_clear_item_cover_rejected_token_returns_false(self, monkeypatch) -> None:  # noqa: ANN001
+		rec = _DeleteRecorder({"http://abs.lan:13378/api/items/x/cover": _Resp(403)})
+		monkeypatch.setattr(abs_client, "_http_delete", rec)
+		assert self._client().clear_item_cover("x") is False
+
+	def test_scan_items_posts_per_item(self, monkeypatch) -> None:  # noqa: ANN001
+		# Per-item on purpose: the batch endpoint was measured answering 200
+		# while processing nothing (see scan_items docstring).
+		rec = _PostRecorder()
 		monkeypatch.setattr(abs_client, "_http_post", rec)
 		monkeypatch.setattr(abs_client.time, "sleep", lambda s: None)
 		assert self._client().scan_items(["a", "b"]) is True
 		assert rec.urls == [
-			"http://abs.lan:13378/api/items/batch/scan",
 			"http://abs.lan:13378/api/items/a/scan",
 			"http://abs.lan:13378/api/items/b/scan",
 		]
 
 	def test_scan_items_rejected_token_returns_false(self, monkeypatch) -> None:  # noqa: ANN001
-		rec = _PostRecorder({"http://abs.lan:13378/api/items/batch/scan": _Resp(403)})
+		rec = _PostRecorder({"http://abs.lan:13378/api/items/a/scan": _Resp(403)})
 		monkeypatch.setattr(abs_client, "_http_post", rec)
+		monkeypatch.setattr(abs_client.time, "sleep", lambda s: None)
 		assert self._client().scan_items(["a"]) is False
-		assert len(rec.calls) == 1  # no per-item retry after a 403
 
 	def test_scan_items_empty_list_is_noop_true(self, monkeypatch) -> None:  # noqa: ANN001
 		rec = _PostRecorder()
@@ -279,3 +305,50 @@ class TestSelectAbsLibrary:
 	def test_ambiguous_tail_returns_none(self, tmp_path: Path) -> None:
 		libs = [_lib("l1", "A", ["/x/books"]), _lib("l2", "B", ["/y/books"])]
 		assert _select_abs_library(libs, wanted="", library_root=Path("/z/books")) is None
+
+
+# ---------------------------------------------------------------------------
+# broken_cover_items
+# ---------------------------------------------------------------------------
+
+
+class TestBrokenCoverItems:
+	"""The --fix-covers audit: stored coverPath rows that cannot be a cover."""
+
+	def _item(self, id: str, cover: str) -> AbsItem:  # noqa: A002
+		return AbsItem(id=id, path=f"/data/books/{id}", rel_path=id, title=f"Kniha {id}", cover_path=cover)
+
+	def test_non_image_extension_is_broken(self, tmp_path: Path) -> None:
+		# The measured ABS failure: ffmpeg fed metadata.json / cover.html.
+		items = [self._item("a", "/data/books/a/metadata.json"), self._item("b", "/data/books/b/cover.html")]
+		broken = broken_cover_items(items, tmp_path, ["/data/books"])
+		assert [(b.item.id, b.reason) for b in broken] == [("a", "ext"), ("b", "ext")]
+
+	def test_valid_existing_cover_not_flagged(self, tmp_path: Path) -> None:
+		(tmp_path / "Autor/Kniha (1)").mkdir(parents=True)
+		(tmp_path / "Autor/Kniha (1)/cover.jpg").write_bytes(b"\xff\xd8jpg")
+		items = [self._item("a", "/data/books/Autor/Kniha (1)/cover.jpg")]
+		assert broken_cover_items(items, tmp_path, ["/data/books"]) == []
+
+	def test_missing_cover_file_is_broken(self, tmp_path: Path) -> None:
+		# Image extension but nothing at the mapped path — e.g. the file was
+		# renamed to .bak by strip-covers while ABS still stores the old row.
+		items = [self._item("a", "/data/books/Autor/Ztracena/cover.jpg")]
+		broken = broken_cover_items(items, tmp_path, ["/data/books"])
+		assert [(b.item.id, b.reason) for b in broken] == [("a", "missing")]
+
+	def test_cover_outside_library_folders_only_ext_checked(self, tmp_path: Path) -> None:
+		# ABS-uploaded covers live under its own /metadata dir — not on our
+		# mount, so existence cannot be judged and must not be attempted.
+		items = [self._item("a", "/metadata/items/item-a/cover.jpg")]
+		assert broken_cover_items(items, tmp_path, ["/data/books"]) == []
+
+	def test_empty_or_bare_cover_paths_skipped(self, tmp_path: Path) -> None:
+		items = [self._item("a", ""), self._item("b", "cover.jpg")]
+		assert broken_cover_items(items, tmp_path, ["/data/books"]) == []
+
+	def test_no_folder_prefix_means_ext_check_only(self, tmp_path: Path) -> None:
+		# Library dict without folders — degrade to the extension check.
+		items = [self._item("a", "/somewhere/else/x/metadata.json")]
+		broken = broken_cover_items(items, tmp_path, [])
+		assert [(b.item.id, b.reason) for b in broken] == [("a", "ext")]

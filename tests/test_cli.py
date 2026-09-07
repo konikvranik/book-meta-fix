@@ -4,8 +4,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from click.testing import CliRunner
-from test_abs_client import _GetRecorder, _PostRecorder
+from test_abs_client import _DeleteRecorder, _GetRecorder, _PostRecorder
 from test_covers import (
+	_HTML_BYTES,
 	_gradient_cover,
 	_gradient_jpeg_bytes,
 	_make_epub,
@@ -118,6 +119,48 @@ class TestStripCovers:
 		assert (good / "cover.jpg").is_file()
 		assert epub_cover_image(good / "g.epub") is not None
 
+	def _add_invalid_book(self, root: Path) -> Path:
+		"""A book whose cover files are not images at all (the ABS ffmpeg case)."""
+		ugly = root / "Jan Nevalidni - Kniha"
+		ugly.mkdir(parents=True)
+		(ugly / "metadata.opf").write_text(self._MINI_OPF)
+		(ugly / "cover.html").write_bytes(_HTML_BYTES)
+		_make_epub(ugly / "i.epub", cover_bytes=_HTML_BYTES)
+		return ugly
+
+	def test_invalid_selector_renames_invalid_and_strips_epub(self, tmp_path: Path) -> None:
+		bad, good = self._make_library(tmp_path)
+		ugly = self._add_invalid_book(tmp_path)
+		result = CliRunner().invoke(main, [
+			"strip-covers", "--library", str(tmp_path), "--no-cache", "--apply", "--invalid",
+		])
+		assert result.exit_code == 0
+		assert not (ugly / "cover.html").exists()
+		assert (ugly / "cover.html.bak").is_file()
+		assert epub_cover_image(ugly / "i.epub") is None
+		# generated covers stay out of the --invalid run
+		assert (bad / "cover.jpg").is_file()
+		assert epub_cover_image(bad / "b.epub") is not None
+		assert result.output.count("invalid cover files renamed to .bak") == 1
+
+	def test_invalid_external_scope_leaves_embedded(self, tmp_path: Path) -> None:
+		ugly = self._add_invalid_book(tmp_path)
+		result = CliRunner().invoke(main, [
+			"strip-covers", "--library", str(tmp_path), "--no-cache", "--apply", "--invalid", "external",
+		])
+		assert result.exit_code == 0
+		assert (ugly / "cover.html.bak").is_file()
+		assert epub_cover_image(ugly / "i.epub") is not None
+
+	def test_generated_scope_value_leaves_sidecar(self, tmp_path: Path) -> None:
+		bad, _good = self._make_library(tmp_path)
+		result = CliRunner().invoke(main, [
+			"strip-covers", "--library", str(tmp_path), "--no-cache", "--apply", "--generated", "embedded",
+		])
+		assert result.exit_code == 0
+		assert (bad / "cover.jpg").is_file()
+		assert epub_cover_image(bad / "b.epub") is None
+
 
 class TestAbsRescan:
 	"""`bmf abs-rescan` maps changed folders to ABS items and triggers rescans.
@@ -137,17 +180,24 @@ class TestAbsRescan:
 		(b / "metadata.opf").write_text(self._MINI_OPF)
 		return a, b
 
-	def _fake_abs(self, monkeypatch, books: list[Path]) -> _PostRecorder:  # noqa: ANN001
-		"""Serve libraries + items covering exactly *books*; record every POST."""
-		items = [
-			{
+	def _fake_abs(self, monkeypatch, books: list[Path], covers: dict[int, str] | None = None) -> _PostRecorder:  # noqa: ANN001
+		"""Serve libraries + items covering exactly *books*; record every POST.
+
+		*covers* maps an item index to its stored media.coverPath row (the
+		value --fix-covers audits).
+		"""
+		items = []
+		for i, book in enumerate(books):
+			media: dict = {"metadata": {"title": book.name}}
+			cover = (covers or {}).get(i, "")
+			if cover:
+				media["coverPath"] = cover
+			items.append({
 				"id": f"item-{i}",
 				"path": str(book),
 				"relPath": f"{book.parent.name}/{book.name}",
-				"media": {"metadata": {"title": book.name}},
-			}
-			for i, book in enumerate(books)
-		]
+				"media": media,
+			})
 
 		def _get(url, *, params=None, timeout=15.0, headers=None):  # noqa: ANN001, ARG001
 			if url.endswith("/api/libraries"):
@@ -174,14 +224,17 @@ class TestAbsRescan:
 		assert "ABS rescan summary" in result.output
 		assert post.calls == []
 
-	def test_apply_posts_batch_scan(self, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+	def test_apply_posts_per_item_scans(self, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
 		books = self._make_library(tmp_path)
 		post = self._fake_abs(monkeypatch, list(books))
+		monkeypatch.setattr(abs_client.time, "sleep", lambda s: None)
 		result = CliRunner().invoke(main, ["abs-rescan", "--library", str(tmp_path), "--apply"], env=self._ENV)
 		assert result.exit_code == 0
 		assert "WRITE" in result.output
-		assert [c["url"] for c in post.calls] == ["http://abs.lan:13378/api/items/batch/scan"]
-		assert post.calls[0]["json_body"] == {"libraryItemIds": ["item-0", "item-1"]}
+		assert [c["url"] for c in post.calls] == [
+			"http://abs.lan:13378/api/items/item-0/scan",
+			"http://abs.lan:13378/api/items/item-1/scan",
+		]
 
 	def test_missing_config_exits_with_hint(self, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
 		# chdir away from the repo so a developer's .env cannot satisfy the check
@@ -205,10 +258,11 @@ class TestAbsRescan:
 	def test_unmatched_books_reported_not_posted(self, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
 		books = self._make_library(tmp_path)
 		post = self._fake_abs(monkeypatch, books[:1])  # ABS knows only the first book
+		monkeypatch.setattr(abs_client.time, "sleep", lambda s: None)
 		result = CliRunner().invoke(main, ["abs-rescan", "--library", str(tmp_path), "--apply"], env=self._ENV)
 		assert result.exit_code == 0
 		assert "not found in ABS" in result.output
-		assert post.calls[0]["json_body"] == {"libraryItemIds": ["item-0"]}
+		assert [c["url"] for c in post.calls] == ["http://abs.lan:13378/api/items/item-0/scan"]
 
 	def test_nothing_changed_is_green_noop(self, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
 		import os
@@ -244,6 +298,114 @@ class TestAbsRescan:
 		assert wet.exit_code == 0
 		assert [c["url"] for c in post.calls] == ["http://abs.lan:13378/api/libraries/lib1/scan"]
 		assert post.calls[0]["params"] == {"force": 1}
+
+	def _fake_delete(self, monkeypatch) -> _DeleteRecorder:  # noqa: ANN001
+		rec = _DeleteRecorder()
+		monkeypatch.setattr(abs_client, "_http_delete", rec)
+		return rec
+
+	@staticmethod
+	def _abs_cover(book: Path, name: str) -> str:
+		"""A stored coverPath the way ABS sees it (its own /data/books mount)."""
+		return f"/data/books/{book.parent.name}/{book.name}/{name}"
+
+	def _age_library(self, tmp_path: Path) -> None:
+		import os
+		import time as _time
+
+		old = _time.time() - 7 * 86400
+		for opf in tmp_path.rglob("metadata.opf"):
+			os.utime(opf, (old, old))
+
+	def test_fix_covers_dry_run_lists_without_calls(self, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+		books = self._make_library(tmp_path)
+		self._age_library(tmp_path)
+		# Item 0 stores metadata.json as its cover — the ffmpeg "Invalid
+		# data found" row; item 1 has a real, existing cover.jpg.
+		(books[1] / "cover.jpg").write_bytes(b"\xff\xd8jpg")
+		self._fake_abs(monkeypatch, list(books), covers={
+			0: self._abs_cover(books[0], "metadata.json"),
+			1: self._abs_cover(books[1], "cover.jpg"),
+		})
+		delete = self._fake_delete(monkeypatch)
+		result = CliRunner().invoke(main, [
+			"abs-rescan", "--library", str(tmp_path), "--since", "1h", "--fix-covers",
+		], env=self._ENV)
+		assert result.exit_code == 0
+		assert "Broken covers in the ABS database" in result.output
+		assert "not an image file" in result.output
+		assert "covers stay as they are" in result.output
+		assert delete.calls == []  # dry-run clears nothing
+
+	def test_fix_covers_apply_clears_then_rescans(self, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+		books = self._make_library(tmp_path)
+		self._age_library(tmp_path)
+		self._fake_abs(monkeypatch, list(books), covers={0: self._abs_cover(books[0], "metadata.json")})
+		delete = self._fake_delete(monkeypatch)
+		monkeypatch.setattr(abs_client.time, "sleep", lambda s: None)
+		result = CliRunner().invoke(main, [
+			"abs-rescan", "--library", str(tmp_path), "--since", "1h", "--fix-covers", "--apply",
+		], env=self._ENV)
+		assert result.exit_code == 0
+		assert "Cleared 1 stored item cover" in result.output
+		# The cleared item joins the scan set even though nothing changed
+		# within --since — the rescan is what lets ABS pick a new cover.
+		assert delete.urls == ["http://abs.lan:13378/api/items/item-0/cover"]
+		assert [c["url"] for c in abs_client._http_post.calls] == [
+			"http://abs.lan:13378/api/items/item-0/scan",
+		]
+
+	def test_fix_covers_nothing_broken_is_green_noop(self, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+		books = self._make_library(tmp_path)
+		self._age_library(tmp_path)
+		for book in books:
+			(book / "cover.jpg").write_bytes(b"\xff\xd8jpg")
+		self._fake_abs(monkeypatch, list(books), covers={
+			0: self._abs_cover(books[0], "cover.jpg"),
+			1: self._abs_cover(books[1], "cover.jpg"),
+		})
+		delete = self._fake_delete(monkeypatch)
+		result = CliRunner().invoke(main, [
+			"abs-rescan", "--library", str(tmp_path), "--since", "1h", "--fix-covers",
+		], env=self._ENV)
+		assert result.exit_code == 0
+		assert "No broken item covers found" in result.output
+		assert delete.calls == []
+
+	def test_fix_covers_union_with_changed_books(self, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+		import os
+		import time as _time
+
+		books = self._make_library(tmp_path)
+		# Book 0 changed within --since (matched); book 1 is unchanged but
+		# its stored cover row is junk (cleared) -> both end up in the scan set.
+		old = _time.time() - 7 * 86400
+		for opf in books[1].rglob("metadata.opf"):
+			os.utime(opf, (old, old))
+		self._fake_abs(monkeypatch, list(books), covers={1: self._abs_cover(books[1], "cover.html")})
+		delete = self._fake_delete(monkeypatch)
+		monkeypatch.setattr(abs_client.time, "sleep", lambda s: None)
+		result = CliRunner().invoke(main, [
+			"abs-rescan", "--library", str(tmp_path), "--since", "1h", "--fix-covers", "--apply",
+		], env=self._ENV)
+		assert result.exit_code == 0
+		assert delete.urls == ["http://abs.lan:13378/api/items/item-1/cover"]
+		assert [c["url"] for c in abs_client._http_post.calls] == [
+			"http://abs.lan:13378/api/items/item-0/scan",
+			"http://abs.lan:13378/api/items/item-1/scan",
+		]
+
+	def test_fix_covers_missing_file_reported(self, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+		books = self._make_library(tmp_path)
+		self._age_library(tmp_path)
+		# Image extension but the mapped file does not exist locally.
+		self._fake_abs(monkeypatch, list(books), covers={0: self._abs_cover(books[0], "cover.jpg")})
+		self._fake_delete(monkeypatch)
+		result = CliRunner().invoke(main, [
+			"abs-rescan", "--library", str(tmp_path), "--since", "1h", "--fix-covers",
+		], env=self._ENV)
+		assert result.exit_code == 0
+		assert "file missing" in result.output
 
 
 class TestPathValidation:

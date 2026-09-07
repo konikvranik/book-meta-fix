@@ -20,6 +20,7 @@ from book_meta_fix.covers import (
 	analyze_cover,
 	download_cover,
 	epub_cover_image,
+	image_is_readable,
 	probe_embedded_cover,
 	recover_cover_from_book,
 	strip_cover_from_book,
@@ -92,6 +93,11 @@ def _gradient_jpeg_bytes(size: tuple[int, int] = (458, 500)) -> bytes:
 	buf = io.BytesIO()
 	img.save(buf, format="JPEG")
 	return buf.getvalue()
+
+
+# Not-an-image bytes: an HTML page saved where a cover image belongs — the
+# exact thing ABS feeds ffmpeg when it picks a cover by file extension.
+_HTML_BYTES = b"<html><head><title>Cover</title></head><body>Not an image.</body></html>"
 
 
 # ---------------------------------------------------------------------------
@@ -719,3 +725,160 @@ class TestStripGeneratedCovers:
 			tmp_path.chmod(0o755)
 		assert result.failed_epubs == ["b.epub"]
 		assert result.stripped_epubs == []
+
+
+class TestImageIsReadable:
+	"""The invalid-cover validity test (Pillow full decode, bytes or path)."""
+
+	def test_valid_file_and_bytes(self, tmp_path: Path) -> None:
+		cover = tmp_path / "cover.jpg"
+		_gradient_cover(cover)
+		assert image_is_readable(cover) is True
+		assert image_is_readable(_gradient_jpeg_bytes()) is True
+
+	def test_html_bytes_rejected(self) -> None:
+		assert image_is_readable(_HTML_BYTES) is False
+
+	def test_html_file_rejected(self, tmp_path: Path) -> None:
+		p = tmp_path / "cover.html"
+		p.write_bytes(_HTML_BYTES)
+		assert image_is_readable(p) is False
+
+	def test_truncated_jpeg_rejected(self) -> None:
+		# Headers intact but pixel data cut in half — Image.open succeeds, only
+		# the forced full decode (img.load) catches it.
+		data = _gradient_jpeg_bytes()
+		assert image_is_readable(data[: len(data) // 2]) is False
+
+	def test_empty_bytes_rejected(self) -> None:
+		assert image_is_readable(b"") is False
+
+
+class TestStripInvalidCovers:
+	def test_invalid_sidecar_files_baked(self, tmp_path: Path) -> None:
+		# The ABS failure mode: cover.html picked by name, an HTML error page
+		# saved as .jpg picked by extension. Valid artwork must stay.
+		cover = tmp_path / "cover.jpg"
+		_gradient_cover(cover)
+		(tmp_path / "cover.html").write_bytes(_HTML_BYTES)
+		(tmp_path / "ilustra.jpg").write_bytes(_HTML_BYTES)
+		before = cover.read_bytes()
+		result = strip_generated_covers(tmp_path, dry_run=False, generated=None, invalid="external")
+		assert result.invalid_baks == ["cover.html", "ilustra.jpg"]  # sorted
+		assert cover.is_file() and cover.read_bytes() == before
+		assert (tmp_path / "cover.html.bak").read_bytes() == _HTML_BYTES
+		assert (tmp_path / "ilustra.jpg.bak").read_bytes() == _HTML_BYTES
+
+	def test_image_extension_set_mirrors_abs(self, tmp_path: Path) -> None:
+		# png/webp junk is picked by ABS too; gif is NOT in ABS's list and has
+		# no cover.* name, so it stays even though it is not an image.
+		(tmp_path / "a.png").write_bytes(_HTML_BYTES)
+		(tmp_path / "b.webp").write_bytes(_HTML_BYTES)
+		(tmp_path / "c.gif").write_bytes(_HTML_BYTES)
+		result = strip_generated_covers(tmp_path, dry_run=False, generated=None, invalid="external")
+		assert result.invalid_baks == ["a.png", "b.webp"]
+		assert (tmp_path / "c.gif").is_file()
+
+	def test_any_cover_name_extension_covers_cover_html(self, tmp_path: Path) -> None:
+		# The name rule is extension-agnostic (cover.html was in the ABS log);
+		# a bare "cover" with no extension is NOT an ABS candidate and stays.
+		(tmp_path / "cover.html").write_bytes(_HTML_BYTES)
+		(tmp_path / "cover").write_bytes(_HTML_BYTES)
+		result = strip_generated_covers(tmp_path, dry_run=False, generated=None, invalid="external")
+		assert result.invalid_baks == ["cover.html"]
+		assert (tmp_path / "cover").is_file()
+
+	def test_bak_and_tmp_and_metadata_untouched(self, tmp_path: Path) -> None:
+		(tmp_path / "cover.jpg.bak").write_bytes(_HTML_BYTES)
+		(tmp_path / "cover.jpg.tmp").write_bytes(_HTML_BYTES)
+		(tmp_path / "metadata.json").write_bytes(_HTML_BYTES)
+		result = strip_generated_covers(tmp_path, dry_run=False, generated=None, invalid="both")
+		assert result.touched is False
+		for name in ("cover.jpg.bak", "cover.jpg.tmp", "metadata.json"):
+			assert (tmp_path / name).is_file()
+
+	def test_invalid_epub_cover_stripped(self, tmp_path: Path) -> None:
+		# OPF wires media-type image/jpeg but the bytes are HTML — exactly what
+		# makes ffmpeg fail inside ABS. The strip surgery is content-agnostic.
+		epub = _make_epub(tmp_path / "b.epub", cover_bytes=_HTML_BYTES)
+		result = strip_generated_covers(tmp_path, dry_run=False, generated=None, invalid="embedded")
+		assert result.invalid_epubs == ["b.epub"]
+		assert result.stripped_epubs == []
+		assert epub_cover_image(epub) is None
+
+	def test_invalid_cover_undecodable_not_generated(self, tmp_path: Path) -> None:
+		# Default selectors: generated only — an undecodable cover is NOT the
+		# generated class (analyze_cover cannot read pixels), so it stays.
+		(tmp_path / "cover.html").write_bytes(_HTML_BYTES)
+		epub = _make_epub(tmp_path / "b.epub", cover_bytes=_HTML_BYTES)
+		before = epub.read_bytes()
+		result = strip_generated_covers(tmp_path, dry_run=False)
+		assert result.touched is False
+		assert (tmp_path / "cover.html").is_file()
+		assert epub.read_bytes() == before
+
+	def test_dry_run_reports_invalid_but_touches_nothing(self, tmp_path: Path) -> None:
+		(tmp_path / "cover.html").write_bytes(_HTML_BYTES)
+		epub = _make_epub(tmp_path / "b.epub", cover_bytes=_HTML_BYTES)
+		result = strip_generated_covers(tmp_path, dry_run=True, generated=None, invalid="both")
+		assert result.invalid_baks == ["cover.html"]
+		assert result.invalid_epubs == ["b.epub"]
+		assert (tmp_path / "cover.html").is_file()
+		assert not (tmp_path / "cover.html.bak").exists()
+		assert epub_cover_image(epub) is not None
+
+	def test_combined_run_generated_and_invalid(self, tmp_path: Path) -> None:
+		cover = tmp_path / "cover.jpg"
+		_solid_cover(cover)
+		(tmp_path / "cover.html").write_bytes(_HTML_BYTES)
+		good = _make_epub(tmp_path / "good.epub", cover_bytes=_gradient_jpeg_bytes())
+		bad = _make_epub(tmp_path / "bad.epub", cover_bytes=_HTML_BYTES)
+		result = strip_generated_covers(tmp_path, dry_run=False, generated="both", invalid="both")
+		assert result.cover_bak is True
+		assert result.invalid_baks == ["cover.html"]
+		assert result.stripped_epubs == []  # good.epub's real artwork survives
+		assert result.invalid_epubs == ["bad.epub"]
+		assert epub_cover_image(good) is not None
+		assert epub_cover_image(bad) is None
+
+
+class TestStripScopeGating:
+	"""external/embedded scopes gate each selector independently."""
+
+	def _folder(self, tmp_path: Path) -> None:
+		_solid_cover(tmp_path / "cover.jpg")  # generated sidecar
+		_make_epub(tmp_path / "g.epub", cover_bytes=_solid_jpeg_bytes())  # generated embedded
+		(tmp_path / "cover.html").write_bytes(_HTML_BYTES)  # invalid sidecar
+		_make_epub(tmp_path / "i.epub", cover_bytes=_HTML_BYTES)  # invalid embedded
+
+	def test_generated_external_only(self, tmp_path: Path) -> None:
+		self._folder(tmp_path)
+		result = strip_generated_covers(tmp_path, dry_run=False, generated="external")
+		assert result.cover_bak is True
+		assert result.stripped_epubs == []
+		assert result.invalid_baks == []
+		assert result.invalid_epubs == []
+		assert epub_cover_image(tmp_path / "g.epub") is not None
+		assert (tmp_path / "cover.html").is_file()
+
+	def test_generated_embedded_only(self, tmp_path: Path) -> None:
+		self._folder(tmp_path)
+		result = strip_generated_covers(tmp_path, dry_run=False, generated="embedded")
+		assert result.cover_bak is False
+		assert (tmp_path / "cover.jpg").is_file()
+		assert result.stripped_epubs == ["g.epub"]
+
+	def test_invalid_external_only(self, tmp_path: Path) -> None:
+		self._folder(tmp_path)
+		result = strip_generated_covers(tmp_path, dry_run=False, generated=None, invalid="external")
+		assert result.invalid_baks == ["cover.html"]
+		assert (tmp_path / "cover.jpg").is_file()  # generated stays out of scope
+		assert result.invalid_epubs == []
+		assert epub_cover_image(tmp_path / "i.epub") is not None
+
+	def test_invalid_embedded_only(self, tmp_path: Path) -> None:
+		self._folder(tmp_path)
+		result = strip_generated_covers(tmp_path, dry_run=False, generated=None, invalid="embedded")
+		assert result.invalid_epubs == ["i.epub"]
+		assert (tmp_path / "cover.html").is_file()
+		assert (tmp_path / "cover.jpg").is_file()

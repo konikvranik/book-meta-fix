@@ -941,13 +941,16 @@ class TestCollectVocabValues:
 		for name, payload in {
 			"A B (1)": {"authors": ["Jan Amos Komen", ""], "series": [{"name": "Světová próza", "sequence": 3}]},
 			"C D (2)": {"authors": ["Karel Čapek"], "series": "Světová próza"},
+			# ABS-native string form: the " #7" is the index — the pool
+			# must suggest the BARE name.
+			"E F (3)": {"authors": ["Jean-Pierre Garen"], "series": ["Mark Stone #7"]},
 		}.items():
 			d = tmp_path / name
 			d.mkdir()
 			(d / "metadata.json").write_text(json.dumps(payload), encoding="utf-8")
 		authors, series = collect_vocab_values(tmp_path)
-		assert authors == ["Jan Amos Komen", "Karel Čapek"]
-		assert series == ["Světová próza"]  # dict + plain-string shapes collapse
+		assert authors == ["Jan Amos Komen", "Jean-Pierre Garen", "Karel Čapek"]
+		assert series == ["Mark Stone", "Světová próza"]  # all shapes collapse to bare names
 
 	def test_unreadable_folders_skipped(self, tmp_path):
 		for name, text in {"broken": "{not json", "empty": "{}"}.items():
@@ -1466,13 +1469,22 @@ class TestLibraryIndex:
 
 	def test_series_split_prefill_in_index(self, tmp_path):
 		# The C14 prefill rides on the indexed entry (proposed differs from
-		# current) — and the prefill alone must NOT count as a change.
+		# current) — and the prefill alone must NOT count as a change. The
+		# glued name must be in DICT form: a plain "Mark Stone #73" string is
+		# the ABS-native form that series_entry_pair already splits at read
+		# time, so there is nothing to prefill.
 		self._book(tmp_path, "A/T (1)", {"authors": ["Mark Stone"], "title": "X",
-		                                  "series": ["Mark Stone #73"]})
+		                                  "series": [{"name": "Mark Stone #73", "index": ""}]})
 		index = build_library_index(tmp_path)
 		entry = index[0][0]
 		assert entry["proposed"] == {"series": "Mark Stone", "series_index": "73"}
 		assert library_entry_changed(entry) is False
+
+	def test_abs_native_series_string_needs_no_prefill(self, tmp_path):
+		self._book(tmp_path, "A/T (1)", {"authors": ["Mark Stone"], "title": "X",
+		                                  "series": ["Mark Stone #73"]})
+		index = build_library_index(tmp_path)
+		assert index[0][0]["proposed"] is None
 
 
 class TestTabTrapShiftTab:

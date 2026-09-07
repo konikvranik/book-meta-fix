@@ -109,16 +109,35 @@ src/book_meta_fix/
   crosscheck.py    bmf crosscheck
   covers.py        generated-cover detection (pixel math) + replacement & in-book extraction fallback
                   + embedded-cover strip (EPUB zip+OPF surgery) + strip_generated_covers
-                  (the per-folder engine of `bmf strip-covers`: sidecar → .bak, embedded EPUB probe+strip)
+                  (the per-folder engine of `bmf strip-covers`: sidecar → .bak, embedded EPUB probe+strip;
+                  two selectors with independent scopes — generated/invalid × external/embedded; "invalid" =
+                  cover files no decoder reads (image-ext or cover.* name — ABS picks covers by EXTENSION
+                  only, prefers cover.*, else first png/jpg/jpeg/webp, so a cover.html/HTML-as-.jpg becomes
+                  the item cover and ffmpeg fails "Invalid data found"); checked by image_is_readable
+                  (Pillow full decode, no Pillow = delete nothing) → <name>.bak like the generated path;
+                  ABS_IMAGE_EXTS (the png/jpg/jpeg/webp whitelist) is the single definition shared
+                  with abs_client's stored-cover audit)
   abs_client.py    Audiobookshelf API client + the engine of `bmf abs-rescan`: changed_folders
                   (stat-only walk over iter_book_folders, max file mtime ≥ since), match_items
                   (folder → ABS item: exact path → relPath → unique folder-name match — covers
-                  different mount prefixes and placement moves), AudiobookshelfClient (batch
-                  /api/items/batch/scan with per-item fallback on 404). ABS keeps its own DB and
+                  different mount prefixes and placement moves), AudiobookshelfClient (PER-ITEM
+                  /api/items/{id}/scan — NOT /api/items/batch/scan, which was measured
+                  answering 200 while processing nothing). ABS keeps its own DB and
                   plain scans skip "unchanged" folders, so apply's disk writes are only pushed
                   into ABS through this per-item rescan; scan endpoints need an ADMIN token
                   (BMF_ABS_URL/BMF_ABS_TOKEN/BMF_ABS_LIBRARY; module-level _http_get_json/
-                  _http_post are the monkeypatch seams for the no-network tests)
+                  _http_post/_http_delete are the monkeypatch seams for the no-network tests).
+                  abs-rescan --fix-covers = the ABS-DB half of the cover cleanup:
+                  broken_cover_items audits EVERY item's stored media.coverPath (exposed by
+                  the items listing) — a row is broken when its target's extension is not in
+                  covers.ABS_IMAGE_EXTS (metadata.json/cover.html — the stale ffmpeg
+                  "Invalid data found" rows no current ABS build writes or heals) or when it
+                  maps under an ABS library folder onto library_root and the file is gone
+                  (paths outside the folders, e.g. ABS's uploaded /metadata/items covers,
+                  get the ext check only); clear_item_cover nulls the row via
+                  DELETE /api/items/{id}/cover and the cleared ids join the rescan set
+                  (--since must NOT filter them). Run strip-covers --invalid FIRST — a folder
+                  still holding an unreadable cover.jpg would get it re-picked
   gui.py           bmf gui — keyboard-first Tkinter review.yaml editor (no new writer: loads raw
                   entry dicts, writes via review._header + review._render_entry; scrollable detail
                   column, Tab-trap bindtag, per-format embedded covers, Ctrl+G double-decode recode,
@@ -183,7 +202,11 @@ src/book_meta_fix/
                   strip-covers, abs-rescan, gui
                   (organize is a deprecation stub — placement lives in apply; in abs_rescan
                   the two _() header strings sit OUTSIDE the f-string — babel on py3.10
-                  cannot extract calls from f-string holes)
+                  cannot extract calls from f-string holes; strip_covers exposes the engine's
+                  two selectors as --generated/--invalid optional-value flags — click
+                  is_flag=False + flag_value="both": bare flag = both, a value
+                  external/embedded narrows, NO flag at all falls back to generated-only
+                  so bare `bmf strip-covers` keeps its historical behaviour)
 ```
 
 ## Non-obvious gotchas
@@ -202,11 +225,19 @@ src/book_meta_fix/
   `calibre:series_index`, genres+tags as `dc:subject`). When adding a field,
   wire all three links — historically series/language/description were
   fetched but silently dropped at one of them. Series travels through
-  review.yaml as flat strings and is packed into the ABS
-  `[{"name", "index"}]` list at apply; the wild stored shapes (plain string
-  `"Name #N"`, `sequence` key) are normalised by `BookMeta.series_pair()` —
-  the single accessor for GUI display, placement patterns and the OPF
-  mirror. An edit with an emptied series name clears the series.
+  review.yaml as flat strings and is serialized into the manifest as the
+  ABS-NATIVE string list `["Name #N"]` (writers `_abs_series_string`):
+  current Audiobookshelf parses metadata.json series as a STRING array and
+  its validator DROPS non-string entries — the former `{"name", "index"}`
+  object form silently erased the series on the next item re-scan (found
+  via `bmf abs-rescan`). The wild stored shapes (plain string `"Name #N"`,
+  `{"name", "index"}` dicts, `sequence` key) are normalised by
+  `models.series_entry_pair()` — the single normalizer behind
+  `BookMeta.series_pair()` (GUI display, placement patterns, the OPF
+  mirror) and the writer's serialization; a plain `"Name #N"` string splits
+  into name + index at read time (ABS's own parseSeriesString convention),
+  so C14 fires only for a glued name in DICT form. An edit with an emptied
+  series name clears the series.
 - **Classification is unified in `classify.py`.** The rule "an identified
   MISSING_* book (author+title confirmed against the content, no co-occurring
   `NEEDS_REVIEW`) is acceptable, not broken" lives EXACTLY ONCE in

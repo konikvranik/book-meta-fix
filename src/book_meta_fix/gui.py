@@ -158,9 +158,13 @@ def collect_vocab_values(library: Path | str) -> tuple[list[str], list[str]]:
 	just the review entries' own values but every author/series already in
 	use, so a repair can be typed consistently with the rest of the library.
 	Reads only ``metadata.json`` (the source of truth) — no OPF fallback, no
-	cover/content work; unreadable folders are skipped. Series names are
-	pulled from the ABS ``[{"name", ...}]`` shape (plain strings tolerated).
+	cover/content work; unreadable folders are skipped. Series names go
+	through ``series_entry_pair`` so the suggestion is the BARE name — the
+	ABS-native ``"Name #N"`` string and the ``{"name", ...}`` dict both
+	yield "Name", never the glued "#N" form.
 	"""
+	from .models import series_entry_pair
+
 	authors: set[str] = set()
 	series: set[str] = set()
 	try:
@@ -176,11 +180,11 @@ def collect_vocab_values(library: Path | str) -> tuple[list[str], list[str]]:
 			if isinstance(a, str) and a.strip():
 				authors.add(a.strip())
 		s = data.get("series") or []
-		if isinstance(s, str):
+		if isinstance(s, (str, dict)):
 			s = [s]
-		for item in s:
-			name = item.get("name") if isinstance(item, dict) else item
-			if isinstance(name, str) and name.strip():
+		for item in s if isinstance(s, list) else []:
+			name, _ = series_entry_pair(item)
+			if name.strip():
 				series.add(name.strip())
 	return sorted(authors), sorted(series)
 

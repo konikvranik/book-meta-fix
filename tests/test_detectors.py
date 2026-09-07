@@ -529,15 +529,16 @@ class TestC14SeriesIndexInName:
 		assert d.proposed["series_index"] == "73"
 		assert d.proposed["action"] == "accept"  # lossless split → bulk-approvable
 
-	def test_fires_on_plain_string_series(self):
-		# The wild shape: series stored as a plain string with the #N inside.
+	def test_does_not_fire_on_plain_string_series(self):
+		# A plain "Name #N" string is the ABS-NATIVE manifest form: current
+		# Audiobookshelf stores and parses series exactly that way, and
+		# series_entry_pair splits the index back out at read time — there is
+		# nothing left to repair, so C14 must not fire (only a glued NAME in
+		# dict form is corruption).
 		from book_meta_fix.detectors import rule_c14_series_index_in_name
 
 		m = _meta(series=["Mark Stone - Kapitán Služby #77"])
-		d = rule_c14_series_index_in_name(m)
-		assert d is not None
-		assert d.proposed["series"] == "Mark Stone - Kapitán Služby"
-		assert d.proposed["series_index"] == "77"
+		assert rule_c14_series_index_in_name(m) is None
 
 	def test_decimal_index_normalized(self):
 		from book_meta_fix.detectors import split_series_index

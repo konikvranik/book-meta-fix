@@ -41,9 +41,10 @@ handling. `--no-place` skips moving entirely; `--pattern` /
 targets.
 
 Every fetched field reaches the book: title/author(s), ISBN, year, publisher,
-language, series + series index (stored as the ABS `[{"name", "index"}]` list,
-mirrored to `metadata.opf` as `calibre:series`/`calibre:series_index`), genres
-(and tags — both as OPF `<dc:subject>`), and the description/annotation from
+language, series + series index (stored as the ABS-native string list
+`["Name #N"]` in `metadata.json`, mirrored to `metadata.opf` as
+`calibre:series`/`calibre:series_index`), genres (and tags — both as OPF
+`<dc:subject>`), and the description/annotation from
 databazeknih / Google Books / OpenLibrary. A proposal that carries only half
 of the series keeps the current other half; a `null`/emptied series name
 clears it. For C1 (author/title swapped) the analyzer proposes the swap

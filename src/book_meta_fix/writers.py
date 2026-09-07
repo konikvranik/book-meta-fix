@@ -20,7 +20,7 @@ from uuid import uuid4
 
 from lxml import etree
 
-from .models import BookMeta
+from .models import BookMeta, series_entry_pair
 
 log = logging.getLogger(__name__)
 
@@ -235,7 +235,7 @@ def _json_overlay(meta: BookMeta) -> dict[str, Any]:
 		"title": _sanitize_xml_text(meta.title),
 		"subtitle": _sanitize_xml_text(meta.subtitle),
 		"authors": [_sanitize_xml_text(a) for a in meta.authors] if meta.authors else [],
-		"series": meta.series if isinstance(meta.series, list) else [],
+		"series": [_abs_series_string(s) for s in meta.series] if isinstance(meta.series, list) else [],
 		"genres": meta.genres,
 		"publishedYear": str(meta.year) if meta.year else None,
 		"publisher": _sanitize_xml_text(meta.publisher),
@@ -250,6 +250,24 @@ def _json_overlay(meta: BookMeta) -> dict[str, Any]:
 	if meta.verified:
 		overlay["verified"] = True
 	return overlay
+
+
+def _abs_series_string(s: Any) -> str:
+	"""Serialize one series entry into the ABS manifest's native string form.
+
+	Current Audiobookshelf parses metadata.json series as a STRING array
+	("Name #N" — server/utils/parsers/parseSeriesString.js) and its
+	validator DROPS non-string entries, so an object form like
+	``{"name", "index"}`` silently erases the series on the next item
+	re-scan (measured: a per-item rescan wiped series from every affected
+	book). Write the string ABS itself writes; dicts (the internal shape)
+	and plain strings both map onto it. ``series_entry_pair`` is the
+	reading counterpart that splits " #N" back out.
+	"""
+	name, index = series_entry_pair(s)
+	if name and index:
+		return f"{name} #{index}"
+	return name
 
 
 def _render_json(meta: BookMeta) -> str:

@@ -234,10 +234,13 @@ class TestSeriesPatternFields:
 		dest = compute_target_path(meta, "{author}/{series}/{series_index} - {title}", tmp_path)
 		assert dest == tmp_path / "Author" / "Nadace" / "3 - Book"
 
-	def test_plain_string_series_empty_index(self, tmp_path: Path) -> None:
+	def test_plain_string_series_splits_index(self, tmp_path: Path) -> None:
+		# "Zaklínač #8" is the ABS-native string form; the trailing " #N" is
+		# the sequence, NOT part of the name — a {series} placement segment
+		# must not embed it into the folder name.
 		meta = self._with_series(["Zaklínač #8"])
-		dest = compute_target_path(meta, "{author}/{series}/{title}", tmp_path)
-		assert dest == tmp_path / "Author" / "Zaklínač #8" / "Book"
+		dest = compute_target_path(meta, "{author}/{series}/{series_index} - {title}", tmp_path)
+		assert dest == tmp_path / "Author" / "Zaklínač" / "8 - Book"
 
 	def test_no_series_segment_becomes_placeholder(self, tmp_path: Path) -> None:
 		"""Without a series, sanitize_segment's empty-string placeholder ("_")
@@ -614,6 +617,20 @@ class TestMergeMeta:
 		other = BookMeta(calibre_id=2, title="T", authors=["B", "C"])
 		m = merge_meta(base, other)
 		assert m.authors == ["A", "B", "C"]
+
+	def test_series_unioned_by_name_across_shapes(self):
+		# Dict and ABS-native "Name #N" string entries must union by BARE
+		# name — the old union dropped string entries entirely.
+		base = BookMeta(calibre_id=1, title="T", authors=["A"], series=[{"name": "Nadace", "index": "2"}])
+		other = BookMeta(calibre_id=2, title="T", authors=["A"], series=["Nadace #3", "Mark Stone #7"])
+		m = merge_meta(base, other)
+		assert m.series == ["Nadace #2", "Mark Stone #7"]
+
+	def test_series_union_survivor_entry_wins(self):
+		base = BookMeta(calibre_id=1, title="T", authors=["A"], series=["Zaklínač #8"])
+		other = BookMeta(calibre_id=2, title="T", authors=["A"], series=[{"name": "Zaklínač", "index": "9"}])
+		m = merge_meta(base, other)
+		assert m.series == ["Zaklínač #8"]
 
 
 class TestOrganizeCacheInvalidationMerge:

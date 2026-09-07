@@ -208,8 +208,15 @@ def _fill_from_json(path: Path, meta: BookMeta) -> None:
 	# ISBN: validate and canonicalize
 	meta.isbn = canonicalize(data.get("isbn"))
 
-	# Series: ABS stores as list of {name, sequence}; normalize
+	# Series: the ABS-native manifest form is a LIST of "Name #N" strings;
+	# older/wild manifests also carry {"name", "index"/"sequence"} dicts,
+	# and calibre-era files occasionally a bare string/dict instead of the
+	# list. Everything is normalized at access time (models.series_entry_
+	# pair), so keep the entries as loaded — just tolerate the bare shapes
+	# instead of silently dropping the series, and drop empty junk.
 	series = data.get("series") or []
+	if isinstance(series, (str, dict)):
+		series = [series]
 	if isinstance(series, list):
 		meta.series = [s for s in series if s]
 

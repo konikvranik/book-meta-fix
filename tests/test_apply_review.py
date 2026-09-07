@@ -603,7 +603,7 @@ class TestSeriesAndFieldCoverage:
 			"id": 1, "uuid": "u1", "path": "a1/b1", "current": {},
 			"proposed": {"series": "Zaklínač", "series_index": "8"}, "action": "accept",
 		})
-		assert data["series"] == [{"name": "Zaklínač", "index": "8"}]
+		assert data["series"] == ["Zaklínač #8"]
 		opf = (folder / "metadata.opf").read_text(encoding="utf-8")
 		assert 'name="calibre:series"' in opf and 'content="Zaklínač"' in opf
 		assert 'name="calibre:series_index"' in opf and 'content="8"' in opf
@@ -625,7 +625,7 @@ class TestSeriesAndFieldCoverage:
 		apply_review(review, library, dry_run=False, place=False)
 		data = _json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
 		# The enricher didn't know the index — the current one survives.
-		assert data["series"] == [{"name": "New Name", "index": "3"}]
+		assert data["series"] == ["New Name #3"]
 
 	def test_accept_applies_series_and_index(self, tmp_path):
 		_, data = self._apply(tmp_path, {
@@ -633,7 +633,7 @@ class TestSeriesAndFieldCoverage:
 			"proposed": {"series": "Nadace", "series_index": "2", "title": "Kniha"},
 			"action": "accept",
 		})
-		assert data["series"] == [{"name": "Nadace", "index": "2"}]
+		assert data["series"] == ["Nadace #2"]
 		assert data["title"] == "Kniha"
 
 	def test_accept_null_series_clears_series(self, tmp_path):
@@ -720,7 +720,8 @@ class TestAcceptNullDeletesField:
 			"id": 1, "uuid": "u1", "path": "a1/b1", "current": {},
 			"proposed": {"series_index": None}, "action": "accept",
 		})
-		assert data["series"] == [{"name": "Série", "index": ""}]
+		# Manifest series are ABS-native strings: name kept, index dropped.
+		assert data["series"] == ["Série"]
 
 	def test_null_mixed_with_values_in_one_proposal(self, tmp_path):
 		"""A repair usually deletes some fields and fills others at once."""
@@ -731,7 +732,7 @@ class TestAcceptNullDeletesField:
 		})
 		assert data["publisher"] is None
 		assert data["publishedYear"] == "2001"
-		assert data["series"] == [{"name": "Taky špatná", "index": "1"}]  # untouched
+		assert data["series"] == ["Taky špatná #1"]  # untouched, re-serialized as ABS strings
 
 	def test_legacy_edited_block_migrated_and_applied(self, tmp_path):
 		"""An old review.yaml (edited block + action: edit) still applies:

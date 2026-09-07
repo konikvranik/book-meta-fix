@@ -405,16 +405,27 @@ def merge_meta(base: BookMeta, other: BookMeta) -> BookMeta:
 	return m
 
 
-def _union_series(a: list[dict], b: list[dict]) -> list[dict]:
-	"""Union of two series lists by series name (base order first)."""
-	out = list(a)
-	seen = {(s.get("name") or "").lower() for s in a if isinstance(s, dict)}
-	for s in b:
-		if isinstance(s, dict):
-			name = (s.get("name") or "").lower()
-			if name and name not in seen:
-				out.append(s)
-				seen.add(name)
+def _union_series(a: list, b: list) -> list:
+	"""Union of two series lists by bare series NAME (base order first).
+
+	Entries may be dicts (``{"name", "index"/"sequence"}``) or plain
+	``"Name #N"`` strings — the ABS-native manifest form — so identity is
+	compared via ``series_entry_pair`` (a string's trailing ``#N`` is its
+	index, not part of the name). The result keeps the BASE entry when both
+	sides carry the same series (survivor-first), normalized to the string
+	form the writer emits anyway.
+	"""
+	from .models import series_entry_pair
+
+	out: list[str] = []
+	seen: set[str] = set()
+	for entry in [*a, *b]:
+		name, idx = series_entry_pair(entry)
+		key = name.lower()
+		if not name or key in seen:
+			continue
+		seen.add(key)
+		out.append(f"{name} #{idx}" if idx else name)
 	return out
 
 
