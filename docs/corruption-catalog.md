@@ -1,4 +1,4 @@
-# Corruption Catalog (C1–C10)
+# Corruption Catalog (C1–C16)
 
 **English** | [Čeština](cs/corruption-catalog.md)
 
@@ -185,6 +185,54 @@ mode additionally pre-fills the same proposal for books its search pulls
 in from outside review.
 
 **Verdict:** AUTO_FIXABLE (split)
+
+## C15 — Author-name variants (library-level)
+
+The same person spelled several ways across books: "Robert A. Heinlein" vs
+"Robert Anson Heinlein" (initials vs full middle name), "Jiří Kulhánek" vs
+"Jiri Kulhanek" (diacritics), NFD-decomposed duplicates, ALL-CAPS or
+mojibake copies ("JiĹ™Ă Kosek"), academic titles ("Ing. Václav Semerád"),
+the anonym family ("Neznamy"/"Neznámý"/"Unknown" — 5 spellings, ~107
+books), and swapped name order ("James, Peter" in the Calibre
+*Surname, Given* convention, or plain "Podroužek Přemysl").
+
+A per-book detector cannot see this — the pattern only emerges ACROSS
+books. `bmf normalize` (the only emitter of C15) clusters the spellings.
+Deterministic merges are pre-filled `action: accept`: fold-equal forms,
+initials vs full given names, titles, ALL-CAPS, the anonym family, and a
+swapped order attested by the cluster (majority spelling wins). Judgement
+calls stay pending for the human: letter-level variants
+("Frederik"/"Frederick", "Miloslav"/"Miroslav" — same-letter homonyms can
+be two people) and unevidenced comma reorders ("Weis, Hickman" may be two
+authors joined by a comma). The canonical form is the most frequent
+NON-degraded spelling — "Neznamy" ×63 loses to "Neznámý" ×24. Multi-author
+strings ("Wilhelm a Jacob Grimmové") are skipped; splitting them is C7/C8
+territory.
+
+**Verdict:** AUTO_FIXABLE (whole-list replace via `proposed.authors`),
+NEEDS_REVIEW for the judgement calls
+
+## C16 — Genre/tag name variants (library-level)
+
+Genre strings that differ only by case ("Sci-fi"/"sci-fi" — 1,235 books in
+the survey), diacritics, word order ("Literatura česká"/"česká
+literatura"), language ("Science Fiction", "Comedy", "Thriller"), or
+spelling ("mumour"). Genres and tags are canonicalized against ONE shared
+vocabulary — both serialize into OPF `dc:subject` and must not drift to
+different casings of the same name.
+
+`bmf normalize` unifies them onto Czech names by two deterministic
+mechanisms only: fold groups (case/diacritics/word-order duplicates; the
+representative spelling is the library's own most frequent form) and the
+curated `GENRE_ALIASES` table in `normalize.py` (English→Czech,
+singular/plural, observed misspellings — every merge is an explicit,
+reviewable row). There is deliberately NO fuzzy auto-matching: on the real
+library's 1,621 distinct names, distance-2 "typos" were ~50% false pairs
+(Afrika→Amerika, vlaky→války, etika→erotika). The long tail
+("Hugo (literární cena)") is left alone unless a table row covers it.
+
+**Verdict:** AUTO_FIXABLE (whole-list replace via `proposed.genres` /
+`proposed.tags`)
 
 ## EMPTY_BOOK — Dead record (the book file is gone)
 

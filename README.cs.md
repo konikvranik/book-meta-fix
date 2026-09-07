@@ -18,7 +18,7 @@ při opětovném prohledání.
 | [docs/cs/architecture.md](docs/cs/architecture.md) | Mapa modulů, tok dat, model souběžnosti, cache, atomicita |
 | [docs/cs/concepts.md](docs/cs/concepts.md) | Skupiny verdiktů, filozofie verifikace, kaskáda oprav, smyčka LLM, formát review.yaml |
 | [docs/cs/how-to/](docs/cs/how-to/index.md) | Návody krok za krokem (spustit dávku, vyladit rate limit, ladit, …) |
-| [docs/cs/corruption-catalog.md](docs/cs/corruption-catalog.md) | Kategorie C1–C14 s reálnými příklady |
+| [docs/cs/corruption-catalog.md](docs/cs/corruption-catalog.md) | Kategorie C1–C16 s reálnými příklady |
 | [AGENTS.md](AGENTS.md) | Průvodce pro AI agenty upravující tento kód (konvence, rozložení, zádrhele) |
 
 ## Stav
@@ -28,6 +28,7 @@ při opětovném prohledání.
 - [x] Verifikace (kaskáda obsah vs metadata)
 - [x] Obohacení (scraping databazeknih.cz pro CZ/SK žánry + metadata; legie.info pro sci-fi/fantasy povídky a série; vlastní instance audiobookshelf_czech_metadata agregující ~17 CZ audioknihových e-shopů; OpenLibrary + Google Books jako fallback)
 - [x] Analýza + YAML revize (`bmf analyze`, `bmf apply`)
+- [x] Normalizace napříč knihovnou (`bmf normalize`) — C15 varianty jmen autorů + C16 varianty žánrů/tagů, lidsky schvalované přes review.yaml
 - [x] Umísťování (`bmf apply`) — čisté/verified knihy na vzor cesty, nevyřešené do needfix/ (organize sloučeno)
 - [x] Generování EPUB (`bmf epubgen`)
 - [x] Konzistence napříč formáty (`bmf crosscheck`) — karanténa formátů, jejichž obsah odporuje metadatům
@@ -104,6 +105,8 @@ zůstane zachován, abyste mohli obnovit stav před během.
 | `bmf apply <file>` | Aplikuje schválené změny z review.yaml (ve výchozím nastavení dry-run) |
 | `bmf apply --apply <file>` | Skutečně zapíše `metadata.json` + `metadata.opf` |
 | `bmf gui` | Interaktivní Tkinter editor ovládaný klávesnicí pro `review.yaml` |
+| `bmf normalize` | Průchod celou knihovnou: naklastruje varianty jmen autorů (C15 — iniciály vs celá jména, diakritika, tituly, anonymní zápisy, prohozené pořadí) a sjednotí žánry/tagy na české názvy (C16 — duplicity velikost písmen/diakritika/pořadí slov, aliasy EN→CZ). Dry-run: vypíše clustery |
+| `bmf normalize --apply` | Naplní review.yaml návrhy C15/C16 (deterministické s předvyplněným `accept`, úsudkové zůstanou pending); `--authors`/`--genres`/`--tags` zúží rozsah. Zápis na disk dělá až `bmf apply`; přejmenování autora přesouvá složky, takže práci zakončete `bmf abs-rescan` |
 | `bmf apply --apply <file>` | Zapíše `metadata.json` + `metadata.opf` A umístí knihu: čisté/`verified` → vzor cesty, nevyřešené → `needfix/`, mrtvé záznamy → `needfix/empty/` |
 | `bmf organize` | *(zastaralý stub)* — umísťování bylo sloučeno do `bmf apply` |
 | `bmf epubgen` | Vygeneruje chybějící soubory `.epub` pro knihy OK (z pdb/mobi/pdf/doc/txt) |
@@ -584,7 +587,7 @@ $EDITOR src/book_meta_fix/locales/cs/LC_MESSAGES/bmf.po
 make i18n-compile   # .po -> .mo
 ```
 
-## Kategorie poškození (C1–C14)
+## Kategorie poškození (C1–C16)
 
 Úplný katalog s reálnými příklady najdete v
 [`docs/cs/corruption-catalog.md`](docs/cs/corruption-catalog.md). Souhrn:
@@ -605,6 +608,8 @@ make i18n-compile   # .po -> .mo
 | C12 | znečištění autora (ztracená kapitalizace, úvodní `_`/`*`) | NEEDS_REVIEW |
 | C13 | nesouhlas umístění (složka ≠ vzorová cílová cesta) | AUTO_FIXABLE (přesun) |
 | C14 | pořadí série zalepené v názvu série (`Mark Stone #73`) | AUTO_FIXABLE (rozdělení) |
+| C15 | varianty jména autora / prohozené pořadí — úroveň knihovny, emituje jen `bmf normalize` | AUTO_FIXABLE / NEEDS_REVIEW |
+| C16 | varianty názvů žánrů/tagů (velikost písmen, pořadí slov, EN/CZ, pravopis) — úroveň knihovny, emituje jen `bmf normalize` | AUTO_FIXABLE |
 | — | EMPTY_BOOK (jen metadata/zálohy/obálka — knižní soubor chybí) | AUTO_FIXABLE (`needfix/empty/`) |
 | — | MISSING_ISBN / MISSING_YEAR | AUTO_FIXABLE (obohacení) |
 | — | MISSING_COVER (chybí přiložený `cover.jpg`) | AUTO_FIXABLE (stažení) |

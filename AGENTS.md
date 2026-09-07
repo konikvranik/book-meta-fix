@@ -87,6 +87,27 @@ src/book_meta_fix/
                    when detect() gets library_root/pattern kwargs; C14 = series
                    order glued into the series NAME "Mark Stone #73" →
                    split_series_index + pre-filled accept, lossless split)
+  normalize.py     LIBRARY-WIDE pass (`bmf normalize`, the only emitter of C15
+                   author-name variants — initials vs full names, diakritika,
+                   titles, anonym family, swapped/comma order — and C16 genre/
+                   tag variants): clusters spellings ACROSS books (a per-book
+                   detector cannot see them), proposes whole-list replacements
+                   through review.merge_normalizations; deterministic classes
+                   pre-fill accept, letter-variant/comma-suspect clusters stay
+                   pending. Genres canonicalize to Czech via fold groups +
+                   the curated GENRE_ALIASES table (lookup runs THROUGH
+                   fold_genre — table keys are human-readable, group keys are
+                   token-sorted); genres and tags share ONE vocabulary (both
+                   serialize to dc:subject). NO fuzzy tier for genres on
+                   purpose: distance-2 matching was ~50% false pairs on the
+                   real 1621-name vocabulary (Afrika→Amerika) — misspellings
+                   become explicit alias rows. The author fuzzy tier is
+                   surname-anchored (given-name token_sort ≥ 80, or ≥ 40 when
+                   one side is mojibake) and downgrades the cluster to MEDIUM
+                   (pending); _given_compat forbids in-position token skipping
+                   (it let "Kevin J." match "Poul" — false HIGH merges in the
+                   wild); different first-name initials NEVER merge (homonym
+                   guard: Karel vs Josef Čapek)
   extractors.py    per-format content extraction → ExtractedMeta
   text_meta.py     offline page-text mining (1st stage of fix cascade)
   encoding.py      mojibake detection + repair
@@ -124,6 +145,12 @@ src/book_meta_fix/
   llm.py           Z.AI provider: LeakyBucket + global 429 cooldown + reconcile_loop + tolerant JSON
   review_writer.py streaming review.yaml writer (queue + writer thread)
   review.py        parse review.yaml (multi-doc + legacy list) + update_paths
+                   + merge_normalizations (bmf normalize --apply merges C15/C16
+                   proposals IN PLACE: pending entries get proposed.authors/
+                   genres/tags overlaid + the diagnoses appended, DECIDED
+                   entries are skipped — never clobber a user decision — and
+                   unknown books get fresh entries, accept pre-filled only
+                   when every change is deterministic/HIGH)
   writers.py       atomic metadata.json/.opf writers + ensure_uuid + clear_verified
   mover.py         move/merge engine used by apply's placement (organize fn kept for tests)
   epubgen.py       bmf epubgen
@@ -233,7 +260,7 @@ src/book_meta_fix/
                   automatic gap-fill (survivor's value, else first found), so confirming
                   as-is loses nothing
   cli.py           click commands: scan, report, analyze, apply, epubgen, crosscheck,
-                  strip-covers, abs-rescan, gui
+                  strip-covers, normalize, abs-rescan, gui
                   (organize is a deprecation stub — placement lives in apply; in abs_rescan
                   the two _() header strings sit OUTSIDE the f-string — babel on py3.10
                   cannot extract calls from f-string holes; strip_covers exposes the engine's
@@ -256,7 +283,14 @@ src/book_meta_fix/
   reach disk. `_build_proposed` (`review.py`) proposes it, `_apply_action`
   (`pipeline.py`) maps it onto `BookMeta`, writers emit it in BOTH
   metadata.json and metadata.opf (series as `calibre:series` /
-  `calibre:series_index`, genres+tags as `dc:subject`). When adding a field,
+  `calibre:series_index`, genres+tags as `dc:subject`). `proposed.tags` is
+  wired too (whole-list replace like genres — `bmf normalize` proposes it;
+  the writers always serialized `meta.tags`, only the apply branch was
+  missing). A pending `bmf normalize` entry survives a fresh `bmf analyze`
+  only when the analyzer does NOT re-flag the book (finish() carries
+  unprocessed priors); a re-flagged book's pending entry is rebuilt fresh
+  and the normalize proposal keys drop out — re-running normalize
+  re-proposes them. When adding a field,
   wire all three links — historically series/language/description were
   fetched but silently dropped at one of them. Series travels through
   review.yaml as flat strings and is serialized into the manifest as the

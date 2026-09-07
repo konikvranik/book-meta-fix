@@ -1203,6 +1203,136 @@ def _print_strip_covers_summary(results, do_apply: bool) -> None:  # noqa: ANN00
 			console.print("[dim]" + _("Dry-run: nothing removed. Re-run with --apply to strip the covers.") + "[/dim]")
 
 
+@main.command()
+@click.option("--library", "library", type=click.Path(file_okay=False, path_type=Path), help=_("Library root"))
+@click.option("--no-cache", is_flag=True, help=_("Disable SQLite cache"))
+@click.option("--limit", type=int, default=None, help=_("Process only the first N books (for testing)"))
+@click.option("--authors", "do_authors", is_flag=True, default=False, help=_("Unify author-name variants (C15: initials vs full names, diacritics, titles, anonym spellings, swapped name order)"))
+@click.option("--genres", "do_genres", is_flag=True, default=False, help=_("Canonicalize genres to Czech names (C16: case/diacritics/word-order duplicates, English→Czech and singular/plural aliases)"))
+@click.option("--tags", "do_tags", is_flag=True, default=False, help=_("Canonicalize tags the same way as genres (shares the vocabulary)"))
+@click.option("--samples", type=int, default=25, help=_("Number of clusters to show per table"))
+@click.option("--apply", "do_apply", is_flag=True, help=_("Write the proposals into review.yaml as C15/C16 entries (book metadata itself is written later by `bmf apply`; default: dry-run)"))
+def normalize(library: Path | None, no_cache: bool, limit: int | None, do_authors: bool, do_genres: bool, do_tags: bool, samples: int, do_apply: bool) -> None:
+	"""Unify author-name variants and genre tags across the whole library.
+
+	The per-book detectors judge one folder in isolation; a "Robert A.
+	Heinlein" vs "Robert Anson Heinlein" pair or a "sci-fi"/"Sci-fi"/
+	"Science Fiction" trio only becomes visible across books. This command
+	clusters them and (with --apply) fills review.yaml with C15 (author
+	variant / swapped name order) and C16 (genre/tag variant) entries —
+	deterministic fixes arrive pre-filled `accept`, judgement calls (letter
+	variants, unevidenced comma reorders) stay pending. Run `bmf apply`
+	afterwards to write them; author renames also move folders, so finish
+	with `bmf abs-rescan`. Without a selector flag all three categories run.
+	"""
+	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
+
+	from .normalize import analyze_library
+	from .review import merge_normalizations
+
+	cfg = Config.from_env()
+	if library is not None:
+		cfg.library = library
+
+	if not (do_authors or do_genres or do_tags):
+		do_authors = do_genres = do_tags = True
+
+	_validate_library(cfg.library)
+	# The two _() header strings sit OUTSIDE the f-string — babel on py3.10
+	# cannot extract calls from f-string holes (same as abs_rescan).
+	title = _("Normalizing authors and genres")
+	mode = "WRITE" if do_apply else "DRY-RUN"
+	console.print(f"[bold]{title}[/bold] [cyan]{cfg.library}[/cyan] [{mode}]", highlight=False)
+	console.print("[dim]" + _("authors: {a}, genres: {g}, tags: {t}").format(
+		a=_("on") if do_authors else _("off"), g=_("on") if do_genres else _("off"), t=_("on") if do_tags else _("off"),
+	) + "[/dim]")
+
+	cache = _open_cache(cfg.cache_db, no_cache=no_cache)
+	try:
+		with Progress(
+			SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+			BarColumn(complete_style="bright_cyan", finished_style="bright_cyan", pulse_style="bright_cyan"), TextColumn("{task.completed}/{task.total}"),
+			TimeRemainingColumn(), console=console, transient=True,
+		) as progress:
+			task_id = progress.add_task(_("Reading library"), total=None)
+
+			def _scan_cb(done: int, total: int) -> None:
+				if progress.tasks[0].total is None and total:
+					progress.update(task_id, total=total)
+				progress.update(task_id, completed=done)
+
+			books = scan_library(cfg.library, cache=cache, use_cache=not no_cache, progress_callback=_scan_cb, workers=cfg.scan_workers)
+		if limit is not None:
+			books = books[:limit]
+		if not books:
+			console.print("[red]" + _("No books found.") + "[/red]")
+			sys.exit(1)
+		result = analyze_library(
+			books, fields=tuple(n for n, on in (("authors", do_authors), ("genres", do_genres), ("tags", do_tags)) if on)
+		)
+	finally:
+		if cache is not None:
+			cache.close()
+
+	_print_normalize_clusters(result, samples)
+	n_accept = sum(1 for p in result.proposals if p.high_confidence)
+	console.print()
+	console.print(
+		_("Proposals for {books} book(s): {accept} pre-filled accept, {pending} pending review").format(
+			books=len(result.proposals), accept=n_accept, pending=len(result.proposals) - n_accept,
+		)
+	)
+	if do_apply:
+		if not result.proposals:
+			console.print("[dim]" + _("Nothing to write.") + "[/dim]")
+			return
+		summary = merge_normalizations(cfg.review_file, result.proposals, books, library_root=cfg.library)
+		console.print(
+			_("review.yaml updated: {added} entry/entries added, {updated} updated, {skipped} already decided (skipped)").format(
+				added=summary["added"], updated=summary["updated"], skipped=summary["skipped_decided"],
+			)
+		)
+		console.print("[dim]" + _("Review with `bmf gui`, then run `bmf apply`. Author renames move folders — finish with `bmf abs-rescan`.") + "[/dim]")
+	else:
+		console.print("[dim]" + _("Dry-run: nothing written. Re-run with --apply to fill review.yaml.") + "[/dim]")
+
+
+def _print_normalize_clusters(result, samples: int) -> None:  # noqa: ANN001
+	console.print()
+	if result.author_clusters:
+		t = Table(title=_("Author clusters (C15)"), show_header=True, header_style="bold cyan")
+		t.add_column(_("Canonical"))
+		t.add_column(_("Variants"), style="dim", max_width=60)
+		t.add_column(_("Conf"), justify="center")
+		for c in result.author_clusters[:samples]:
+			vars_ = "; ".join(f"{v} ×{n}" for v, n in c.variants if v != c.canonical)
+			style = "green" if c.confidence.value == "HIGH" else "yellow"
+			t.add_row(f"[{style}]{c.canonical}[/{style}]", vars_[:120], f"[{style}]{c.confidence.value}[/{style}]")
+		console.print(t)
+		if len(result.author_clusters) > samples:
+			console.print(f"[dim]… {len(result.author_clusters) - samples} " + _("more") + "[/dim]")
+	if result.genre_clusters:
+		t = Table(title=_("Genre/tag clusters (C16)"), show_header=True, header_style="bold cyan")
+		t.add_column(_("Canonical"))
+		t.add_column(_("Variants"), style="dim", max_width=60)
+		t.add_column(_("Kind"), justify="center")
+		t.add_column(_("Conf"), justify="center")
+		for c in result.genre_clusters[:samples]:
+			vars_ = "; ".join(f"{v} ×{n}" for v, n in c.variants if v != c.canonical)
+			style = "green" if c.confidence.value == "HIGH" else "yellow"
+			t.add_row(f"[{style}]{c.canonical}[/{style}]", vars_[:110], c.kind, f"[{style}]{c.confidence.value}[/{style}]")
+		console.print(t)
+		if len(result.genre_clusters) > samples:
+			console.print(f"[dim]… {len(result.genre_clusters) - samples} " + _("more") + "[/dim]")
+	if result.multi_author:
+		t = Table(title=_("Skipped: multi-author strings (C7/C8 territory)"), show_header=True, header_style="bold yellow")
+		t.add_column(_("String"))
+		t.add_column(_("Books"), justify="right")
+		for raw, n in result.multi_author[: samples]:
+			t.add_row(raw[:70], str(n))
+		console.print(t)
+
+
 @main.command(name="abs-rescan")
 @click.option("--library", "library", type=click.Path(file_okay=False, path_type=Path), help=_("Library root (default: $BMF_LIBRARY or ~/Books)"))
 @click.option("--since", "since", default="24h", help=_("Rescan books changed within this window, e.g. 90m, 2h, 3d (default: 24h)"))

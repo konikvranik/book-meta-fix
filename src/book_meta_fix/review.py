@@ -503,3 +503,108 @@ def update_paths(path: str | Path, moves: dict[str, str]) -> int:
 	tmp.write_text(header + body, encoding="utf-8")
 	os.replace(tmp, p)
 	return changed
+
+
+def merge_normalizations(
+	path: str | Path,
+	proposals: list,
+	books: list,
+	library_root: Path | None = None,
+) -> dict[str, int]:
+	"""Merge `bmf normalize` proposals into review.yaml (in place, atomic).
+
+	*proposals* is a list of ``normalize.BookProposal`` (C15 author variants /
+	C16 genre-tag variants — library-level diagnoses no per-book detector can
+	see). Existing entries are matched by uuid:
+
+	- a PENDING entry gets the proposed ``authors``/``genres``/``tags`` keys
+	  overlaid onto its ``proposed`` block (other keys untouched) and the
+	  C15/C16 diagnoses appended to its ``diagnoses`` list;
+	- a DECIDED entry (action set) is left alone — the user already judged
+	  that book against its previous proposal;
+	- a book with no entry yet gets a fresh one, ``action: accept`` pre-filled
+	  only when every change is deterministic (HIGH confidence).
+
+	Reasons are plain English like detector reasons — review.yaml is a stable
+	artifact, not a localized UI surface. Returns ``{added, updated,
+	skipped_decided}``. Idempotent: re-running after the values reached disk
+	finds nothing left to propose.
+	"""
+	entries = _load_raw_entries(path) if Path(path).is_file() else []
+	by_uuid = {e.get("uuid"): e for e in entries if e.get("uuid")}
+	metas = {b.uuid: b for b in books if b.uuid}
+	added = updated = skipped = 0
+	for prop in proposals:
+		meta = metas.get(prop.uuid)
+		if meta is None:
+			continue
+		fields = {
+			k: getattr(prop, k)
+			for k in ("authors", "genres", "tags")
+			if getattr(prop, k) is not None
+		}
+		if not fields:
+			continue
+		diags_new = []
+		if prop.authors is not None and prop.author_reasons:
+			diags_new.append({
+				"category": "C15",
+				"reason": "; ".join(prop.author_reasons),
+				"confidence": "HIGH" if prop.high_confidence else "MEDIUM",
+			})
+		if (prop.genres is not None or prop.tags is not None) and prop.genre_reasons:
+			diags_new.append({
+				"category": "C16",
+				"reason": "; ".join(prop.genre_reasons),
+				"confidence": "HIGH" if prop.high_confidence else "MEDIUM",
+			})
+		existing = by_uuid.get(prop.uuid)
+		if existing is not None:
+			if existing.get("action") is not None:
+				skipped += 1
+				continue
+			proposed = dict(existing.get("proposed") or {})
+			proposed.update(fields)
+			source_parts = set((proposed.get("source") or "").split("+")) - {""} | {"normalize"}
+			proposed["source"] = "+".join(sorted(source_parts))
+			existing["proposed"] = proposed
+			diags = existing.get("diagnoses") or ([existing["diagnosis"]] if existing.get("diagnosis") else [])
+			existing_cats = {d.get("category") for d in diags}
+			for d in diags_new:
+				if d["category"] not in existing_cats:
+					diags.append(d)
+			if diags:
+				existing["diagnoses"] = diags
+			updated += 1
+		else:
+			current = _build_current(meta)
+			if prop.genres is not None and meta.genres:
+				current["genres"] = meta.genres
+			if prop.tags is not None and meta.tags:
+				current["tags"] = meta.tags
+			primary = diags_new[0] if diags_new else {"category": "C16", "reason": "; ".join(prop.reasons), "confidence": "MEDIUM"}
+			entry = {
+				"id": meta.calibre_id,
+				"uuid": meta.uuid,
+				"path": _relative_path(meta, library_root),
+				"diagnosis": primary,
+				"current": current,
+				"proposed": {**fields, "source": "normalize"},
+				"action": "accept" if prop.high_confidence else None,
+			}
+			if len(diags_new) > 1:
+				entry["diagnoses"] = diags_new
+			entries.append(entry)
+			by_uuid[meta.uuid] = entry
+			added += 1
+	if not (added or updated):
+		return {"added": 0, "updated": 0, "skipped_decided": skipped}
+	header = _header(len(entries))
+	body = "\n".join(_render_entry(e) for e in entries)
+	if body:
+		body += "\n"
+	p = Path(path)
+	tmp = p.with_suffix(p.suffix + ".tmp")
+	tmp.write_text(header + body, encoding="utf-8")
+	os.replace(tmp, p)
+	return {"added": added, "updated": updated, "skipped_decided": skipped}

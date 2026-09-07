@@ -6,8 +6,10 @@ Practical recipes. For *why* things work see [concepts.md](../concepts.md); for
 the module/data-flow detail see [architecture.md](../architecture.md); for the
 full command reference see the [README](../../README.md).
 
-Every mutating command (`apply`, `epubgen`, `crosscheck`, `strip-covers`) is a
-**dry-run by default** — add `--apply` to actually change the filesystem.
+Every mutating command (`apply`, `epubgen`, `crosscheck`, `strip-covers`,
+`normalize`) is a **dry-run by default** — add `--apply` to actually change
+the filesystem (for `normalize`, `--apply` fills review.yaml; the book
+writes still happen via `bmf apply`).
 
 ## Recipes
 
@@ -21,10 +23,11 @@ Every mutating command (`apply`, `epubgen`, `crosscheck`, `strip-covers`) is a
 8. [Cross-check multi-format folders](crosscheck.md)
 9. [Strip generated covers](strip-covers.md)
 10. [Push changes into Audiobookshelf](abs-rescan.md)
-11. [Enabling CZ/SK enrichment](enrichment.md)
-12. [Running with the LLM fallback](llm.md)
-13. [Choosing an LLM model](llm-models.md)
-14. [Running in Kubernetes](kubernetes.md)
-15. [Debugging a run](debugging.md)
-16. [Configuration](configuration.md)
-17. [Running the tests](testing.md)
+11. [Normalize author spellings and genre names](normalize.md)
+12. [Enabling CZ/SK enrichment](enrichment.md)
+13. [Running with the LLM fallback](llm.md)
+14. [Choosing an LLM model](llm-models.md)
+15. [Running in Kubernetes](kubernetes.md)
+16. [Debugging a run](debugging.md)
+17. [Configuration](configuration.md)
+18. [Running the tests](testing.md)

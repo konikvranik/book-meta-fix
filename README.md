@@ -17,7 +17,7 @@ Audiobookshelf and Kavita pick up the fixes on rescan.
 | [docs/architecture.md](docs/architecture.md) | Module map, data flow, concurrency model, caching, atomicity |
 | [docs/concepts.md](docs/concepts.md) | Verdict buckets, verification philosophy, fix cascade, LLM loop, review.yaml format |
 | [docs/how-to/](docs/how-to/index.md) | Step-by-step recipes (run a batch, tune the rate limit, debug, …) |
-| [docs/corruption-catalog.md](docs/corruption-catalog.md) | The C1–C14 categories with real examples |
+| [docs/corruption-catalog.md](docs/corruption-catalog.md) | The C1–C16 categories with real examples |
 | [AGENTS.md](AGENTS.md) | Guide for AI agents editing this codebase (conventions, layout, gotchas) |
 
 ## Status
@@ -27,6 +27,7 @@ Audiobookshelf and Kavita pick up the fixes on rescan.
 - [x] Verify (content vs metadata cascade)
 - [x] Enrich (databazeknih.cz scraping for CZ/SK genres + metadata; legie.info for sci-fi/fantasy short stories & series; a self-hosted audiobookshelf_czech_metadata instance aggregating ~17 CZ audiobook storefronts; OpenLibrary + Google Books fallback)
 - [x] Analyze + YAML review (`bmf analyze`, `bmf apply`)
+- [x] Library-wide normalize (`bmf normalize`) — C15 author-name variants + C16 genre/tag variants, human-gated via review.yaml
 - [x] Placement (`bmf apply`) — clean/verified books to the pattern path, unresolved to needfix/ (organize merged in)
 - [x] EPUB generation (`bmf epubgen`)
 - [x] Cross-format consistency (`bmf crosscheck`) — quarantine formats whose content differs from metadata
@@ -102,6 +103,8 @@ can recover the pre-run state.
 | `bmf apply <file>` | Apply approved changes from a review.yaml (dry-run by default) |
 | `bmf apply --apply <file>` | Write `metadata.json` + `metadata.opf` AND place each book: clean/`verified` → target pattern path, unresolved → `needfix/`, dead records → `needfix/empty/` |
 | `bmf gui` | Interactive keyboard-driven Tkinter editor for `review.yaml` |
+| `bmf normalize` | Library-wide pass: cluster author-name variants (C15 — initials vs full names, diacritics, titles, anonym spellings, swapped order) and canonicalize genres/tags to Czech names (C16 — case/diacritics/word-order duplicates, EN→CZ aliases). Dry-run: show the clusters |
+| `bmf normalize --apply` | Fill review.yaml with the C15/C16 proposals (deterministic ones pre-filled `accept`, judgement calls pending); `--authors`/`--genres`/`--tags` narrow the scope. Book writes happen via `bmf apply`; author renames also move folders, so finish with `bmf abs-rescan` |
 | `bmf organize` | *(deprecated stub)* — placement was merged into `bmf apply` |
 | `bmf epubgen` | Generate missing `.epub` files for OK books (from pdb/mobi/pdf/doc/txt) |
 | `bmf epubgen --apply` | Actually generate the EPUBs |
@@ -574,7 +577,7 @@ $EDITOR src/book_meta_fix/locales/cs/LC_MESSAGES/bmf.po
 make i18n-compile   # .po -> .mo
 ```
 
-## Corruption categories (C1–C14)
+## Corruption categories (C1–C16)
 
 See [`docs/corruption-catalog.md`](docs/corruption-catalog.md) for the full
 catalog with real examples. Summary:
@@ -595,6 +598,8 @@ catalog with real examples. Summary:
 | C12 | author slug/artefact pollution (lost capitalization, leading `_`/`*`) | NEEDS_REVIEW |
 | C13 | location mismatch (folder ≠ pattern-derived target) | AUTO_FIXABLE (move) |
 | C14 | series order glued into the series name (`Mark Stone #73`) | AUTO_FIXABLE (split) |
+| C15 | author-name variants / swapped order — library-level, emitted by `bmf normalize` only | AUTO_FIXABLE / NEEDS_REVIEW |
+| C16 | genre/tag name variants (case, word order, EN/CZ, spelling) — library-level, emitted by `bmf normalize` only | AUTO_FIXABLE |
 | — | EMPTY_BOOK (only metadata/backups/cover — the book file is gone) | AUTO_FIXABLE (`needfix/empty/`) |
 | — | MISSING_ISBN / MISSING_YEAR | AUTO_FIXABLE (enrich) |
 | — | MISSING_COVER (no `cover.jpg` sidecar) | AUTO_FIXABLE (download) |

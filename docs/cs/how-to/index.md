@@ -6,9 +6,10 @@ Praktické recepty. *Proč* věci fungují najdete v [concepts.md](../concepts.m
 detaily modulů a toku dat v [architecture.md](../architecture.md); úplnou
 referenci příkazů v [README](../../../README.cs.md).
 
-Každý měnící příkaz (`apply`, `epubgen`, `crosscheck`, `strip-covers`) je
-**ve výchozím nastavení dry-run** — přidejte `--apply`, chcete-li skutečně
-změnit souborový systém.
+Každý měnící příkaz (`apply`, `epubgen`, `crosscheck`, `strip-covers`,
+`normalize`) je **ve výchozím nastavení dry-run** — přidejte `--apply`,
+chcete-li skutečně změnit souborový systém (`normalize --apply` naplní
+review.yaml; zápis knih stále dělá `bmf apply`).
 
 ## Recepty
 
@@ -22,10 +23,11 @@ změnit souborový systém.
 8. [Křížová kontrola složek s více formáty](crosscheck.md)
 9. [Odstranění vygenerovaných obálek](strip-covers.md)
 10. [Propuštění změn do Audiobookshelf](abs-rescan.md)
-11. [Zapnutí CZ/SK obohacení](enrichment.md)
-12. [Běh s LLM fallbackem](llm.md)
-13. [Výběr LLM modelu](llm-models.md)
-14. [Spuštění v Kubernetes](kubernetes.md)
-15. [Ladění běhu](debugging.md)
-16. [Konfigurace](configuration.md)
-17. [Spuštění testů](testing.md)
+11. [Sjednocení pravopisů autorů a názvů žánrů](normalize.md)
+12. [Zapnutí CZ/SK obohacení](enrichment.md)
+13. [Běh s LLM fallbackem](llm.md)
+14. [Výběr LLM modelu](llm-models.md)
+15. [Spuštění v Kubernetes](kubernetes.md)
+16. [Ladění běhu](debugging.md)
+17. [Konfigurace](configuration.md)
+18. [Spuštění testů](testing.md)

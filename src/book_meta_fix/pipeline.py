@@ -1349,6 +1349,11 @@ def _apply_fields(meta: BookMeta, fields: dict) -> None:  # noqa: ANN001
 	if "genres" in fields:
 		g = fields["genres"]
 		meta.genres = [] if not g else (g if isinstance(g, list) else [g])
+	if "tags" in fields:
+		# Same list-replace semantics as genres (bmf normalize C16 proposes
+		# canonical tag lists the same way it proposes genres).
+		t = fields["tags"]
+		meta.tags = [] if not t else (t if isinstance(t, list) else [t])
 	if "description" in fields:
 		# Empty string clears the description (the GUI sends "" when
 		# the user empties a ticked field).

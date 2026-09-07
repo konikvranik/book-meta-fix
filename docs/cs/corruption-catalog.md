@@ -1,6 +1,6 @@
 [English](../corruption-catalog.md) | **Čeština**
 
-# Katalog poškození (C1–C10)
+# Katalog poškození (C1–C16)
 
 Odvozeno empiricky z CZ/SK calibre knihovny s ~5 440 knihami. Každá kategorie
 má reálné příklady (calibre_id, author_folder, title) nalezené během
@@ -189,6 +189,54 @@ v režimu `+ knihovna` navíc předvyplní tentýž návrh u knih, které
 vyhledávání přineslo mimo review.
 
 **Verdikt:** AUTO_FIXABLE (rozdělení)
+
+## C15 — Varianty jména autora (úroveň knihovny)
+
+Tentýž člověk zapsaný několika způsoby napříč knihami: „Robert A.
+Heinlein" vs „Robert Anson Heinlein" (iniciála vs celé druhé jméno),
+„Jiří Kulhánek" vs „Jiri Kulhanek" (diakritika), NFD-rozložené duplicity,
+kopie velkými písmeny nebo mojibake („JiĹ™Ă Kosek"), akademické tituly
+(„Ing. Václav Semerád"), rodina anonymů („Neznamy"/„Neznámý"/„Unknown" —
+5 zápisů, ~107 knih) a prohozené pořadí jména a příjmení („James, Peter"
+v calibre konvenci *Příjmení, Jméno*, nebo obyčejné „Podroužek Přemysl").
+
+Detektor pracující s jednou knihou tohle vidět nemůže — vzor se objeví
+až MEZI knihami. `bmf normalize` (jediný zdroj kategorie C15) pravopisy
+naklastruje. Deterministická sloučení dostanou předvyplněné
+`action: accept`: shodné po foldu, iniciály proti celým jménům, tituly,
+kapitálky, rodina anonymů a prohozené pořadí doložené klastrem (vyhrává
+většinový zápis). Úsudkové případy zůstávají pending na člověka:
+varianty lišící se písmeny („Frederik"/„Frederick", „Miloslav"/
+„Miroslav" — stejné iniciály mohou mít i dva různí lidé) a nedoložená
+čárková forma („Weis, Hickman" mohou být dva autoři spojení čárkou).
+Kanonická podoba je nejčastější NEpoškozený zápis — „Neznamy" ×63
+prohraje s „Neznámý" ×24. Multi-author řetězce („Wilhelm a Jacob
+Grimmové") se přeskočí; jejich štěpení je území C7/C8.
+
+**Verdikt:** AUTO_FIXABLE (výměna celého seznamu přes `proposed.authors`),
+NEEDS_REVIEW u úsudkových případů
+
+## C16 — Varianty názvů žánrů/tagů (úroveň knihovny)
+
+Řetězce žánrů lišící se jen velikostí písmen („Sci-fi"/„sci-fi" — 1 235
+knih v průzkumu), diakritikou, pořadím slov („Literatura česká"/„česká
+literatura"), jazykem („Science Fiction", „Comedy", „Thriller") nebo
+pravopisem („mumour"). Žánry a tagy se kanonizují proti JEDNÉ společné
+slovní zásobě — oba se serializují do OPF `dc:subject` a nesmí dospět k
+různým verzím téhož názvu.
+
+`bmf normalize` je sjednocuje na české názvy pouze dvěma deterministickými
+mechanismy: fold skupiny (duplicity velikost písmen/diakritika/pořadí
+slov; zástupce je nejčastější podoba z vlastní knihovny) a kurátorovaná
+tabulka `GENRE_ALIASES` v `normalize.py` (angličtina→čeština,
+jednotné/množné číslo, pozorované překlepy — každé sloučení je explicitní
+řádek ke kontrole). Fuzzy automatické porovnávání zde záměrně CHYBÍ: na
+1 621 názvech reálné knihovny byly „překlepy" na vzdálenosti 2 z ~50 %
+falešné (Afrika→Amerika, vlaky→války, etika→erotika). Dlouhý ocas
+(„Hugo (literární cena)") se nechá být, pokud ho nepokrývá řádek tabulky.
+
+**Verdikt:** AUTO_FIXABLE (výměna celého seznamu přes `proposed.genres` /
+`proposed.tags`)
 
 ## EMPTY_BOOK — Mrtvý záznam (knižní soubor chybí)
 
