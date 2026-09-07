@@ -436,11 +436,16 @@ když je nastaven nebo už nakešován; **`zai`** ACP nikdy nedotkne;
 včetně downloadu); **`off`** fázi LLM vypne.
 
 **Obě fáze smyčky** mají výchozí na předplatném: rychlá kontrola běží na
-**gemini-flash** a kvalitní záloha na **druhém ACP poolu s gemini-pro** (názvy
-modelů se párují po rodině proti vlastnímu seznamu modelů agenta, takže
-přežívají výměny generací — na změřeném agentu 1.1.1 `gemini-flash-low`
-vyřeší `gemini-3.8-flash-low` a `gemini-pro` `gemini-pro-agent`/Gemini 3.1
-Pro High). `BMF_ANTIGRAVITY_FALLBACK=glm` naopak předá kvalitní fázi smyčce
+**gemini-flash (low effort)** a kvalitní záloha na **druhém ACP poolu s
+gemini-flash na high effort** (názvy modelů se párují po rodině proti vlastnímu
+seznamu modelů agenta, takže přežívají výměny generací — na změřeném agentu
+1.1.1 `gemini-flash-low` vyřeší `gemini-3.8-flash-low` a `gemini-flash-high`
+`gemini-3.8-flash-high`, oba odpovídají za ~2 s). Pro záměrně NENÍ výchozí:
+`gemini-pro` se spáruje s Pro (High) agentem, který nad jednou záložní knihou
+dumá 16–37 s a ve změřeném běhu zachránil 0 z 50 LLM knih (flash projde
+verifikátorem v 96 % případů) — kvalitní branou je verifikátor, ne tier
+modelu; kdo chce pro, nastaví `BMF_ANTIGRAVITY_FALLBACK_MODEL=gemini-pro`.
+`BMF_ANTIGRAVITY_FALLBACK=glm` naopak předá kvalitní fázi smyčce
 flash+placené Z.AI (potřebuje `ZAI_API_KEY`; Z.AI rate machinery zůstává
 nedotčená) — s nastaveným klíčem zůstává celá smyčka na Antigravity, dokud
 neřeknete jinak.
@@ -451,14 +456,24 @@ neřeknete jinak.
 | Umístění cache | — | `BMF_ACP_CACHE_DIR` (nebo `XDG_CACHE_HOME`) | kde bydlí samosprávný agent (výchozí `~/.cache/book-meta-fix/acp`) |
 | Model rychlé vrstvy | `--antigravity-model` | `BMF_ANTIGRAVITY_MODEL` (alias `BMF_ACP_MODEL`) | párovaný po rodině; výchozí `gemini-flash-low` (nejnovější flash na low effort — rychlost před dumováním), prázdné = výchozí volba agenta |
 | Provider zálohy | `--antigravity-fallback` | `BMF_ANTIGRAVITY_FALLBACK` (alias `BMF_ACP_FALLBACK`) | `agy` (výchozí — druhý ACP pool na fallback modelu) nebo `glm` (smyčka flash+placené Z.AI; potřebuje klíč) |
-| Model zálohy | `--antigravity-fallback-model` | `BMF_ANTIGRAVITY_FALLBACK_MODEL` (alias `BMF_ACP_FALLBACK_MODEL`) | jen pro zálohu agy; výchozí `gemini-pro`, párováno po rodině |
+| Model zálohy | `--antigravity-fallback-model` | `BMF_ANTIGRAVITY_FALLBACK_MODEL` (alias `BMF_ACP_FALLBACK_MODEL`) | jen pro zálohu agy; výchozí `gemini-pro-low`, párováno po rodině |
 | Timeout promptu | — | `BMF_ACP_TIMEOUT` | zaseknutý tah se po tolika sekundách zruší (`session/cancel`, výchozí 300) |
-| Souběžní agenti | — | `BMF_ACP_MAX_INFLIGHT` | souběžné agentní procesy na pool (výchozí 2; každý čerpá ze souběžnosti předplatného) |
+| Souběžní agenti | — | `BMF_ACP_MAX_INFLIGHT` | souběžné agentní procesy na pool (výchozí 4; jeden agent ≈ 320 MB RSS, změřeno) |
 | Slušnost kapání | — | `BMF_ACP_MIN_INTERVAL` | minimální sekundy mezi starty promptů (výchozí 0) |
 
 Tři po sobě jdoucí transportní selhání (smazaná binárka, vypršené přihlášení)
 odloží rychlou vrstvu pro zbytek běhu — další knihy jdou rovnou do Z.AI zálohy,
 místo aby za každou knihu znovu platily cenu spawnu/timeoutu.
+
+Agent je autonomní IDE agent, ne čistý completion endpoint, takže ho bmf drží
+na krátkém vodítku: každý prompt začíná direktivou zakazující nástroje (samo
+od sebe agent kolem otázky rozjede nástrojovou kaskádu — vypisuje obsah
+session adresáře a produmává ~30 modelovými koly na knihu, čímž ze sekund
+dělá desítky sekund), session se zakládají v prázdném scratch adresáři místo
+v knihovně a agentní procesy se po několika promptech recyklují (protokol
+nabízí jen session/list a resume, žádné delete — a každá session drží
+~150 MB harness procesu do konce životnosti serveru). Odpověď flash přiletí
+za ~2 s.
 
 ### Samoopravná smyčka LLM
 

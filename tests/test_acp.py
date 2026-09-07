@@ -234,6 +234,63 @@ class TestAntigravityAcpProvider:
 		p.reconcile({"current": {"title": "y"}})
 		assert seen and "metadata repair assistant" in seen[0] and "PROBE" not in seen[0]
 
+	def test_no_tools_preamble_leads_the_message(self):
+		"""The addressee is an autonomous IDE agent: without an explicit
+		ban it tool-explores (~30 model round-trips per book, measured on
+		1.1.1). The no-tools preamble must ride FIRST, before the shared
+		Z.AI system prompt."""
+
+		def fake(text: str) -> str:
+			seen.append(text)
+			return '{"title": "x", "authors": [], "confidence": "low"}'
+
+		seen: list[str] = []
+		p = make_provider()
+		p._send_prompt = fake
+		p.reconcile({"current": {}})
+		msg = seen[0]
+		assert "Do NOT use any tools" in msg
+		assert msg.index("Do NOT use any tools") < msg.index("metadata repair assistant")
+
+	def test_sessions_get_a_neutral_scratch_cwd(self):
+		"""session/new must NOT advertise the provider cwd (the library) —
+		the agent's tools explore the session cwd (measured: it listed it).
+		An empty scratch dir is used instead and removed on close."""
+		import tempfile
+
+		p = make_provider("cwd")
+		try:
+			r = p.reconcile({"current": {}})
+			assert r is not None
+			seen_cwd = r.title
+			scratch = p._scratch
+			assert scratch is not None and seen_cwd == scratch
+			assert "bmf-acp-" in seen_cwd
+			assert seen_cwd.startswith(tempfile.gettempdir())
+			assert seen_cwd != str(Path(__file__).parent)
+			assert os.path.isdir(seen_cwd)
+		finally:
+			p.close()
+		assert not os.path.exists(scratch)
+
+	def test_connections_are_recycled_after_the_prompt_budget(self):
+		"""The real agent has no session/delete and every session pins
+		server-side state (a localharness child) for the process lifetime —
+		connections retire after the prompt budget (2 here) and a fresh
+		process takes over; the scratch dir and processes are cleaned up."""
+		p = make_provider("pid", recycle_after=2)
+		try:
+			pids = [int(p.reconcile({"current": {}}).title) for _ in range(5)]
+		finally:
+			p.close()
+		# Serial calls reuse the pooled connection (LIFO) until its budget
+		# is spent: [A, A, B, B, C].
+		assert pids[0] == pids[1]
+		assert pids[2] == pids[3]
+		assert pids[0] != pids[2]
+		assert pids[4] != pids[2]
+		assert len(set(pids)) == 3
+
 	def test_loop_fast_tier_passes_first_try(self):
 		p = make_provider()
 		p._send_prompt = lambda text: '{"title": "T", "authors": ["A"], "confidence": "high"}'
@@ -429,10 +486,10 @@ class TestGetProviderSelection:
 		assert p.fallback_kind == "agy"
 		assert isinstance(p._acp_fallback, AntigravityAcpProvider)
 		assert p._zai_fallback is None
-		assert p.fallback_model == "gemini-pro"
+		assert p.fallback_model == "gemini-flash-high"
 		assert p.model == "gemini-flash-low"
 		# The fallback pool runs the fallback model.
-		assert p._acp_fallback.model == "gemini-pro"
+		assert p._acp_fallback.model == "gemini-flash-high"
 
 	def test_glm_fallback_without_key_has_no_fallback(self):
 		p = get_provider(self._cfg(llm_provider="antigravity", acp_command=f"{sys.executable} -c pass", acp_fallback_provider="glm"))
@@ -444,13 +501,17 @@ class TestGetProviderSelection:
 	def test_config_defaults(self):
 		"""The requested defaults: quick check = agy gemini flash (low
 		effort — the real agent serves flash as -high|medium|low variants
-		and the quick tier wants latency), quality stage = agy gemini-pro."""
+		and the quick tier wants latency), quality stage = flash at HIGH
+		effort (measured: flash-high answers in 1.6–2.6 s while Pro (High)
+		deliberates 16–37 s and rescued 0 of 50 books; the verifier is the
+		quality gate, not the model tier)."""
 		from book_meta_fix.config import Config
 
 		cfg = Config()
 		assert cfg.acp_model == "gemini-flash-low"
-		assert cfg.acp_fallback_model == "gemini-pro"
+		assert cfg.acp_fallback_model == "gemini-flash-high"
 		assert cfg.acp_fallback_provider == "agy"
+		assert cfg.acp_max_inflight == 4
 
 	def test_acp_alias_agy(self, monkeypatch):
 		p = get_provider(self._cfg(llm_provider="agy", acp_command=f"{sys.executable} -c pass"))

@@ -44,6 +44,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 import threading
 from collections import deque
 from collections.abc import Callable
@@ -61,6 +62,21 @@ ACP_PROTOCOL_VERSION = 1
 # JSON-RPC / ACP error codes (agentclientprotocol.com/protocol/v1/schema).
 ERR_AUTH_REQUIRED = -32000
 ERR_METHOD_NOT_FOUND = -32601
+
+# The official agent is an autonomous IDE agent, not a completion endpoint:
+# left to itself it runs a full tool cascade around the question (measured on
+# 1.1.1: ~30 model round-trips per book prompt — it lists the session cwd,
+# "examines the directory content", deliberates about the verifier's rules),
+# turning a ~5 s answer into tens of seconds and dragging the localharness
+# into every turn. This preamble collapses the cascade to a single turn.
+ACP_NO_TOOLS_PREAMBLE = """\
+EXECUTION RULES for this request (highest priority):
+- You are used as a stateless metadata-reconciliation FUNCTION. This one
+  message already contains ALL evidence there is.
+- Do NOT use any tools. Do NOT list, read, search or explore files or
+  directories; the working directory is UNRELATED to this task.
+- No preamble, no explanation, no step-by-step reasoning out loud.
+- Reply IMMEDIATELY with the JSON object and nothing else."""
 
 
 class AcpAgentError(Exception):
@@ -116,9 +132,16 @@ class AcpAgentConnection:
 		init_timeout: float = 60.0,
 		cancel_grace: float = 15.0,
 		agent_env: dict[str, str] | None = None,
+		session_cwd: str | os.PathLike[str] | None = None,
 	) -> None:
 		self.command = command
 		self.cwd = str(cwd)
+		# The cwd advertised to the AGENT (session/new) — deliberately NOT the
+		# process cwd when set: the session cwd is the agent's tool playground,
+		# and pointing it at the library invites the very exploration the
+		# no-tools preamble forbids (defense in depth; the measured agent
+		# listed it). None = fall back to the process cwd.
+		self.session_cwd = str(session_cwd) if session_cwd is not None else None
 		self.prompt_timeout = prompt_timeout
 		self.init_timeout = init_timeout
 		# After we send session/cancel the agent MUST still answer the prompt
@@ -141,6 +164,9 @@ class AcpAgentConnection:
 		self._stderr_tail: deque[str] = deque(maxlen=30)
 		self._closed = False
 		self._spawn_error: str | None = None
+		# Prompts served by THIS process — the provider recycles connections
+		# after a budget (see AntigravityAcpProvider.PROMPTS_PER_PROCESS).
+		self.prompts_served = 0
 
 	# ------------------------------------------------------------------
 	# Low-level transport
@@ -381,7 +407,7 @@ class AcpAgentConnection:
 				raise AcpAgentError(f"session/new failed after authenticate: {e2}", stderr_tail=self._tail()) from e2
 
 	def _new_session_raw(self) -> str:
-		result = self._request("session/new", {"cwd": os.path.abspath(self.cwd), "mcpServers": []}, timeout=self.init_timeout)
+		result = self._request("session/new", {"cwd": os.path.abspath(self.session_cwd or self.cwd), "mcpServers": []}, timeout=self.init_timeout)
 		sid = result.get("sessionId")
 		if not sid:
 			raise AcpAgentError("session/new returned no sessionId", stderr_tail=self._tail())
@@ -461,6 +487,7 @@ class AcpAgentConnection:
 		if self.session_id is None:
 			raise AcpAgentError("no active session — call new_session() first", stderr_tail=self._tail())
 		budget = timeout if timeout is not None else self.prompt_timeout
+		self.prompts_served += 1
 		turn = _TurnState()
 		self._turn = turn
 		try:
@@ -623,6 +650,15 @@ class AntigravityAcpProvider:
 
 	MAX_TRANSPORT_FAILURES = 3
 
+	# Connections are recycled after this many prompts. The agent exposes NO
+	# session/delete (measured 1.1.1: sessionCapabilities list/resume only),
+	# and every session pins a localharness child (~150 MB RSS) for the
+	# server process's lifetime — a 2 700-book run would pile one per book.
+	# Recycling the PROCESS (graceful exit reaps its children — verified:
+	# no orphans after probe runs) bounds the leak to this many harnesses
+	# per pool slot.
+	PROMPTS_PER_PROCESS = 8
+
 	def __init__(
 		self,
 		command: list[str],
@@ -635,12 +671,14 @@ class AntigravityAcpProvider:
 		zai_fallback: Any = None,  # ZaiProvider | None (typed loosely to dodge the circular import)
 		acp_fallback: AntigravityAcpProvider | None = None,
 		agent_env: dict[str, str] | None = None,
+		recycle_after: int | None = None,
 	) -> None:
 		self.command = list(command)
 		self.cwd = cwd
 		self._model = model
 		self._prompt_timeout = prompt_timeout
 		self._max_inflight = max(1, max_inflight)
+		self._recycle_after = self.PROMPTS_PER_PROCESS if recycle_after is None else max(0, int(recycle_after))
 		self._zai_fallback = zai_fallback
 		# The QUALITY stage as a second ACP pool (gemini-pro default) —
 		# mutually exclusive with zai_fallback; get_provider builds exactly
@@ -669,10 +707,22 @@ class AntigravityAcpProvider:
 		self._pool_lock = threading.Lock()
 		self._transport_failures = 0
 		self._disabled: str | None = None
+		# The session cwd advertised to the agent (see AcpAgentConnection:
+		# NOT the library). One empty scratch dir per provider lifetime,
+		# created lazily and removed on close.
+		self._scratch: str | None = None
 
 	# ------------------------------------------------------------------
 	# Connection pool (lazy: processes cost memory; spawn on demand)
 	# ------------------------------------------------------------------
+
+	def _session_scratch(self) -> str:
+		"""The neutral cwd every session is created with (empty scratch dir —
+		tools find nothing there even if the agent disobeys the preamble)."""
+		with self._pool_lock:
+			if self._scratch is None:
+				self._scratch = tempfile.mkdtemp(prefix="bmf-acp-")
+			return self._scratch
 
 	def _checkout(self) -> AcpAgentConnection:
 		while True:
@@ -692,6 +742,7 @@ class AntigravityAcpProvider:
 					cwd=self.cwd,
 					prompt_timeout=self._prompt_timeout,
 					agent_env=self._agent_env,
+					session_cwd=self._session_scratch(),
 				)
 				try:
 					conn.start()
@@ -708,7 +759,10 @@ class AntigravityAcpProvider:
 				continue
 
 	def _checkin(self, conn: AcpAgentConnection, *, broken: bool = False) -> None:
-		if broken:
+		# Retirement = the same mechanics as a broken connection: the process
+		# is closed (its session-pinned harness children go down with it) and
+		# the next checkout spawns a fresh one.
+		if broken or (self._recycle_after and conn.prompts_served >= self._recycle_after):
 			conn.close()
 			with self._pool_lock:
 				self._created -= 1
@@ -731,6 +785,9 @@ class AntigravityAcpProvider:
 			# nothing new spawns.
 			self._created = 0
 			self._disabled = self._disabled or "provider closed"
+		if self._scratch is not None:
+			shutil.rmtree(self._scratch, ignore_errors=True)
+			self._scratch = None
 
 	# ------------------------------------------------------------------
 	# LLMProvider contract
@@ -768,8 +825,11 @@ class AntigravityAcpProvider:
 		self._bucket.acquire()
 		# ACP has no system role — the metadata-repair contract travels as one
 		# message. Reusing the exact Z.AI system prompt keeps the two tiers'
-		# answers interchangeable to the verifier and the JSON salvage.
-		text = SYSTEM_PROMPT + "\n\n---\n\n" + build_user_prompt(evidence)
+		# answers interchangeable to the verifier and the JSON salvage. The
+		# preamble rides FIRST (see ACP_NO_TOOLS_PREAMBLE): the addressee is
+		# an autonomous agent that would otherwise tool-explore its way
+		# through ~30 model round-trips per book.
+		text = ACP_NO_TOOLS_PREAMBLE + "\n\n" + SYSTEM_PROMPT + "\n\n---\n\n" + build_user_prompt(evidence)
 		try:
 			reply = self._send_prompt(text)
 		except AcpAgentError as e:

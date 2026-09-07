@@ -199,18 +199,23 @@ class Config:
 	# BMF_ANTIGRAVITY_FALLBACK (alias: BMF_ACP_FALLBACK).
 	acp_fallback_provider: str = "agy"
 	# Model for the agy quality stage, family-matched like acp_model.
-	# Default "gemini-pro". Override via BMF_ANTIGRAVITY_FALLBACK_MODEL
-	# (alias: BMF_ACP_FALLBACK_MODEL).
-	acp_fallback_model: str | None = "gemini-pro"
+	# Default "gemini-flash-high": a step up in EFFORT from the flash-low
+	# fast tier at the same latency (measured 2026-09-07: flash-high 1.6–2.6 s
+	# vs Pro (High) 16–37 s — and bare "gemini-pro" family-matches the Pro
+	# (High) agent). In the measured run the pro fallback rescued 0 of 50
+	# LLM books (flash already passes verify 96 % of the time), so the
+	# verifier — not the model tier — is the quality gate; pro stays one env
+	# var away. Override via BMF_ANTIGRAVITY_FALLBACK_MODEL (alias:
+	# BMF_ACP_FALLBACK_MODEL).
+	acp_fallback_model: str | None = "gemini-flash-high"
 	# Seconds before a hung ACP prompt turn is cancelled (session/cancel)
 	# and the connection killed. Gemini reasoning calls usually finish in
 	# tens of seconds; 300 is generous headroom. Override via BMF_ACP_TIMEOUT.
 	acp_prompt_timeout: float = 300.0
 	# How many ACP agent processes may run prompts at once (each draws from
-	# the subscription's concurrency on the user's account; 2 is polite and
-	# still keeps the fast tier ahead of the enrichers). Override via
-	# BMF_ACP_MAX_INFLIGHT.
-	acp_max_inflight: int = 2
+	# the subscription's concurrency on the user's account; one server is
+	# ~320 MB RSS, measured). Override via BMF_ACP_MAX_INFLIGHT.
+	acp_max_inflight: int = 4
 	# Minimum seconds between ACP prompt starts (politeness drip; 0 = as fast
 	# as the in-flight cap allows). Override via BMF_ACP_MIN_INTERVAL.
 	acp_min_interval: float = 0.0

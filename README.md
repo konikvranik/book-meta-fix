@@ -430,11 +430,17 @@ when one is configured or already cached; **`zai`** never touches ACP;
 agent download); **`off`** disables the LLM stage.
 
 **The loop's two stages** both default to the subscription: the quick check
-runs on **gemini-flash** and the quality fallback on a **second ACP pool with
-gemini-pro** (model names are family-matched against the agent's own model
-list, so they survive generation bumps — on the measured 1.1.1 agent,
-`gemini-flash-low` resolves to `gemini-3.8-flash-low` and `gemini-pro` to
-`gemini-pro-agent`/Gemini 3.1 Pro High). `BMF_ANTIGRAVITY_FALLBACK=glm` swaps
+runs on **gemini-flash (low effort)** and the quality fallback on a **second
+ACP pool with gemini-flash at high effort** (model names are family-matched
+against the agent's own model list, so they survive generation bumps — on the
+measured 1.1.1 agent, `gemini-flash-low` resolves to `gemini-3.8-flash-low`
+and `gemini-flash-high` to `gemini-3.8-flash-high`, both answering in ~2 s).
+Pro deliberately does NOT default: `gemini-pro` family-matches the Pro (High)
+agent, which deliberates 16–37 s over one fallback book and rescued 0 of 50
+LLM books in the measured run (flash passes verify 96 % of the time) — the
+verifier is the quality gate, not the model tier; set
+`BMF_ANTIGRAVITY_FALLBACK_MODEL=gemini-pro` if you want it anyway.
+`BMF_ANTIGRAVITY_FALLBACK=glm` swaps
 the quality stage to Z.AI's flash+paid loop instead (needs `ZAI_API_KEY`;
 Z.AI's rate machinery applies untouched) — with a key configured, the whole
 loop still stays on Antigravity unless you say otherwise.
@@ -445,14 +451,23 @@ loop still stays on Antigravity unless you say otherwise.
 | Cache location | — | `BMF_ACP_CACHE_DIR` (or `XDG_CACHE_HOME`) | where the self-managed agent lives (default `~/.cache/book-meta-fix/acp`) |
 | Fast-tier model | `--antigravity-model` | `BMF_ANTIGRAVITY_MODEL` (alias `BMF_ACP_MODEL`) | family-matched; `gemini-flash-low` default (newest flash at low effort — latency over deliberation), empty = the agent's default |
 | Fallback provider | `--antigravity-fallback` | `BMF_ANTIGRAVITY_FALLBACK` (alias `BMF_ACP_FALLBACK`) | `agy` (default — second ACP pool on the fallback model) or `glm` (Z.AI flash+paid loop; needs a key) |
-| Fallback model | `--antigravity-fallback-model` | `BMF_ANTIGRAVITY_FALLBACK_MODEL` (alias `BMF_ACP_FALLBACK_MODEL`) | agy fallback only; `gemini-pro` default, family-matched |
+| Fallback model | `--antigravity-fallback-model` | `BMF_ANTIGRAVITY_FALLBACK_MODEL` (alias `BMF_ACP_FALLBACK_MODEL`) | agy fallback only; `gemini-flash-high` default, family-matched (`gemini-pro` = 16–37 s of deliberation, 0 rescues measured) |
 | Prompt timeout | — | `BMF_ACP_TIMEOUT` | a hung turn is cancelled (`session/cancel`) after this many seconds (default 300) |
-| In-flight agents | — | `BMF_ACP_MAX_INFLIGHT` | concurrent agent processes per pool (default 2; each draws from the subscription's concurrency) |
+| In-flight agents | — | `BMF_ACP_MAX_INFLIGHT` | concurrent agent processes per pool (default 4; one agent ≈ 320 MB RSS, measured) |
 | Politeness drip | — | `BMF_ACP_MIN_INTERVAL` | minimum seconds between prompt starts (default 0) |
 
 Three consecutive transport failures (deleted binary, expired login) park the
 fast tier for the rest of the run — later books go straight to the Z.AI
 fallback instead of re-paying the spawn/timeout cost per book.
+
+The agent is an autonomous IDE agent, not a completion endpoint, so bmf keeps
+it on a short leash: every prompt leads with a no-tools directive (left alone,
+the agent runs a tool cascade around the question — it lists the session
+directory and deliberates over ~30 model round-trips per book, turning seconds
+into tens of seconds), sessions are created in an empty scratch directory
+instead of the library, and agent processes are recycled every few prompts
+(the protocol offers no session/delete and every session pins a ~150 MB
+harness process until the server exits). A flash answer lands in ~2 s.
 
 ### LLM self-correction loop
 

@@ -19,6 +19,10 @@ The behaviour is selected with MOCK_ACP_MODE:
 	               client's error code into the answer
 	model          answers with the model value set via
 	               session/set_config_option ("default" when never set)
+	cwd            answers with the cwd the client sent in session/new
+	               (proves sessions are created against a neutral scratch dir)
+	pid            answers with the agent process's pid (proves connection
+	               recycling: a retired process is replaced by a new pid)
 	version2       answers initialize with protocolVersion 2 (unsupported)
 	slow           never answers the prompt (hangs past any timeout)
 	crash          exits right after initialize
@@ -79,6 +83,7 @@ def request_to_client(method: str, params: dict, rpc_id: int) -> dict:
 def main() -> None:
 	authenticated = False
 	model_set = None
+	session_cwd = None
 	next_id = 100
 
 	while True:
@@ -109,6 +114,7 @@ def main() -> None:
 			if MODE in ("auth", "auth_terminal") and not authenticated:
 				reply_error(rpc_id, -32000, "Authentication required")
 			else:
+				session_cwd = params.get("cwd")
 				reply_result(rpc_id, {"sessionId": "sess-mock-1", "configOptions": CONFIG_OPTIONS})
 		elif method == "session/set_config_option":
 			model_set = params.get("value")
@@ -145,7 +151,13 @@ def main() -> None:
 			probe = "none"
 			if "PROBE:" in prompt_text:
 				probe = prompt_text.split("PROBE:", 1)[1].split()[0].strip('"')
-			title = probe if MODE != "model" else (model_set or "default")
+			title = probe
+			if MODE == "model":
+				title = model_set or "default"
+			elif MODE == "cwd":
+				title = session_cwd or "no-cwd-sent"
+			elif MODE == "pid":
+				title = str(os.getpid())
 			payload = json.dumps({"title": title, "authors": ["Test Author"], "confidence": "high", "reasoning": echo})
 			half = len(payload) // 2
 			# Two streamed chunks — the client must concatenate them in order.

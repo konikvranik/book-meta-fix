@@ -157,7 +157,19 @@ src/book_meta_fix/
                    requests get non-interactive answers: permission → "cancelled", fs/terminal →
                    method-not-found, since bmf advertises NO capabilities). Fresh session per
                    prompt (a session keeps history — reuse would bleed one book's evidence into
-                   the next); auth handled once via the -32000 → authenticate dance (terminal-type
+                   the next); the composed message LEADS with ACP_NO_TOOLS_PREAMBLE — the
+                   addressee is an autonomous IDE agent, and without the ban it tool-cascades
+                   around the question (measured on 1.1.1: ~30 model round-trips per book, it
+                   lists the session cwd and deliberates about the verifier; 2.2 s with the
+                   preamble vs 5.3 s on a clean probe, tens of seconds on feedback turns), and
+                   session/new gets a NEUTRAL per-provider scratch dir (tempfile bmf-acp-*,
+                   NOT the library — the agent's tools explore the session cwd; removed on
+                   close). Connections are RECYCLED after PROMPTS_PER_PROCESS (8) prompts:
+                   the agent offers no session/delete (1.1.1 capabilities: list/resume only)
+                   and every session pins a ~150 MB localharness child until the server
+                   process exits — graceful close reaps the children (verified: no orphans),
+                   so recycling bounds the leak per pool slot.
+                   Auth handled once via the -32000 → authenticate dance (terminal-type
                    logins are refused with guidance — headless bmf cannot run them); model chosen
                    through session/set_config_option (category "model", best-effort). Model names
                    are FAMILY-matched against the agent's own options (match_model_option:
