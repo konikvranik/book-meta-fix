@@ -401,6 +401,12 @@ class TestGetProviderSelection:
 		os.environ.pop("ZAI_API_KEY", None)
 		if "zai_api_key" not in kw:
 			cfg.zai_api_key = None
+		# Same hazard as ZAI_API_KEY above: a dev .env with BMF_LLM_PROVIDER set
+		# (e.g. =antigravity) survives the fixture's delenv through from_env's
+		# walk-up reload — the AUTO-mode tests below must not depend on it.
+		os.environ.pop("BMF_LLM_PROVIDER", None)
+		if "llm_provider" not in kw:
+			cfg.llm_provider = "auto"
 		for k, v in kw.items():
 			setattr(cfg, k, v)
 		return cfg
@@ -584,20 +590,27 @@ class TestEnsureAcpAgent:
 			for i in range(0, len(self._data), chunk_size):
 				yield self._data[i : i + chunk_size]
 
-	def _seed_cache(self, tmp_path, version: str) -> Path:
-		"""A pre-installed release older/newer than whatever the registry says."""
+	def _seed_cache(self, tmp_path, version: str, *, harness: bool = True) -> Path:
+		"""A pre-installed release older/newer than whatever the registry says.
+		harness=False seeds the LEGACY stripped layout (binary without the
+		localharness sibling — what the pre-fix installer produced)."""
 		d = tmp_path / "cache"
 		d.mkdir(parents=True, exist_ok=True)
 		binary = d / "agy_acp_server.par"
 		binary.write_text(f"#!/bin/sh\n# installed {version}\n")
 		binary.chmod(0o755)
+		if harness:
+			harness_file = d / "localharness_external"
+			harness_file.write_text("harness")
+			harness_file.chmod(0o755)
 		(d / "version.json").write_text(json.dumps({"version": version, "args": ["--uid="], "path": str(binary)}))
 		return d
 
-	def test_cold_install_downloads_and_extracts_only_the_server(self, tmp_path):
+	def test_cold_install_extracts_server_and_harness(self, tmp_path):
 		"""Empty cache → the registry release is fetched, the zip streamed,
-		ONLY agy_acp_server.par kept (exec bit set), version.json written with
-		the registry launch args, argv returned."""
+		the server AND its localharness_external sibling extracted (exec bits
+		set) side by side — the layout the agent's own startup hunts for;
+		version.json written with the registry launch args, argv returned."""
 		zip_data = self._zip_bytes("registry 9.9.9")
 		downloads: list[str] = []
 		progress: list[tuple[int, int]] = []
@@ -620,10 +633,14 @@ class TestEnsureAcpAgent:
 		binary = tmp_path / "cache" / "agy_acp_server.par"
 		assert binary.is_file() and os.access(binary, os.X_OK)
 		assert "# registry 9.9.9" in binary.read_text()
-		# localharness_external is NOT extracted (bmf denies tools).
-		assert not (tmp_path / "cache" / "localharness_external").exists()
+		# The harness is extracted TOO: the server needs it at session/new
+		# (connection strategy), regardless of bmf denying tool calls.
+		harness = tmp_path / "cache" / "localharness_external"
+		assert harness.is_file() and os.access(harness, os.X_OK)
+		assert harness.read_text() == "tool harness bmf never uses"
 		sidecar = json.loads((tmp_path / "cache" / "version.json").read_text())
 		assert sidecar["version"] == "9.9.9" and sidecar["args"] == ["--uid="]
+		assert sidecar["harness"] == "localharness_external"
 		# Progress reported monotonically, with the total.
 		assert progress and progress[-1][0] == progress[-1][1] == len(zip_data)
 
@@ -656,6 +673,69 @@ class TestEnsureAcpAgent:
 			http_get=no_download,
 		)
 		assert result is not None and result[1] == "9.9.9"
+
+	def test_stripped_install_is_repaired_even_at_same_version(self, tmp_path):
+		"""A legacy STRIPPED install (binary without the localharness sibling
+		— the pre-fix installer produced these; every session/new of such an
+		agent dies with -32603) counts as not-installed: even a SAME-version
+		registry release is re-downloaded once and the harness lands beside
+		the binary."""
+		self._seed_cache(tmp_path, "9.9.9", harness=False)
+		downloads: list[str] = []
+
+		def fake_get(url, **kw):
+			downloads.append(url)
+			return self._FakeResp(self._zip_bytes("registry 9.9.9"))
+
+		result = acp_module.ensure_acp_agent(
+			cache_dir=tmp_path / "cache",
+			http_get_json=lambda url: self._registry_json("9.9.9"),
+			http_get=fake_get,
+		)
+		assert downloads == ["https://example.com/dist.zip"]
+		assert result is not None and result[1] == "9.9.9"
+		harness = tmp_path / "cache" / "localharness_external"
+		assert harness.is_file() and os.access(harness, os.X_OK)
+		assert json.loads((tmp_path / "cache" / "version.json").read_text())["harness"] == "localharness_external"
+
+	def test_harnessless_archive_installs_once_and_does_not_loop(self, tmp_path):
+		"""An archive with no localharness member still installs (warned),
+		the sidecar records harness=null — and that install is CONSIDERED
+		complete, so ensure does not re-download it forever."""
+
+		def harnessless_zip(payload: str) -> bytes:
+			import io
+			import zipfile
+
+			buf = io.BytesIO()
+			with zipfile.ZipFile(buf, "w") as zf:
+				zf.writestr("agy_acp_server.par", f"#!/bin/sh\n# {payload}\n")
+			return buf.getvalue()
+
+		zip_data = harnessless_zip("registry 9.9.9")
+		downloads: list[str] = []
+
+		def fake_get(url, **kw):
+			downloads.append(url)
+			return self._FakeResp(zip_data)
+
+		result = acp_module.ensure_acp_agent(
+			cache_dir=tmp_path / "cache",
+			http_get_json=lambda url: self._registry_json("9.9.9"),
+			http_get=fake_get,
+		)
+		assert result is not None and result[1] == "9.9.9"
+		assert downloads == ["https://example.com/dist.zip"]
+
+		def no_download(url, **kw):
+			raise AssertionError("re-downloaded a harnessless install that cannot be fixed")
+
+		result2 = acp_module.ensure_acp_agent(
+			cache_dir=tmp_path / "cache",
+			http_get_json=lambda url: self._registry_json("9.9.9"),
+			http_get=no_download,
+		)
+		assert result2 is not None and result2[1] == "9.9.9"
 
 	def test_offline_keeps_the_installed_agent(self, tmp_path):
 		"""Registry unreachable → the installed agent is served as-is (a run

@@ -396,14 +396,15 @@ Nastavení — krátká cesta (agenta si bmf spravuje sám):
    bmf analyze --llm
    ```
 
-   První běh streamuje ~700 MB (1,9 GB rozbalené) do
+   První běh streamuje ~700 MB (2,0 GB rozbalené) do
    `~/.cache/book-meta-fix/acp` — s progress barem uvnitř normálního baru
    analyze; `XDG_CACHE_HOME` a `BMF_ACP_CACHE_DIR` umístění přesouvají.
-   Uchovává se jen binárka `agy_acp_server` (harness pro nástroje se zahodí
-   — bmf nástroje odmítá), spustitelný bit se nastaví sám a aktualizace
-   vymění binárku atomicky (rozbitý download nikdy nezničí funkční verzi).
-   Prostý auto režim (bez explicitního opt-in do agy) existující cache
-   převezme, ale sám nikdy nestahuje.
+   Uchovávají se oba členy archivu: binárka `agy_acp_server` a její sourozenec
+   `localharness_external` (agent harness resolvoval už při zakládání
+   session, takže instalace bez něj shodí každou session — spustitelné bity
+   se nastaví samy) a aktualizace vymění oba atomicky (rozbitý download
+   nikdy nezničí funkční verzi). Prostý auto režim (bez explicitního opt-in
+   do agy) existující cache převezme, ale sám nikdy nestahuje.
 
 2. Jednou se přihlaste interaktivně (např. v Zed nebo v IDE Antigravity) —
    bmf běží bez terminálové relace a OAuth flow neumí. Agent nabízí přihlášení
@@ -419,8 +420,10 @@ curl -s https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json \
   | python3 -c 'import json,sys; a=[x for x in json.load(sys.stdin)["agents"] if x["id"]=="antigravity-acp"][0]; print(a["distribution"]["binary"]["linux-x86_64"]["archive"])'
 # k 2026-09: .../agy-acp-server-agy_acp_server_1.1.1-linux-x86_64.zip —
 # uvnitř je agy_acp_server.par = server samotný (~1,9 GB soběstačný ELF;
-# chmod +x, když archivátor zahodí bit; localharness_external není potřeba).
-# Spouštěcí spec registru přidává argument --uid=:
+# chmod +x, když archivátor zahodí bit). localharness_external ponechte
+# VEDLE něj (také chmod +x) — agent ho potřebuje už při zakládání session,
+# i když bmf nástroje odmítá; alternativně na něj nasměrujte
+# ANTIGRAVITY_HARNESS_PATH. Spouštěcí spec registru přidává argument --uid=:
 export BMF_ANTIGRAVITY_CMD="/opt/agy/agy_acp_server.par --uid="
 bmf analyze --llm
 ```

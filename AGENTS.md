@@ -166,9 +166,14 @@ src/book_meta_fix/
                    high|medium|low + gemini-pro-agent/gemini-3.1-pro-low: "gemini-flash-low"
                    → gemini-3.8-flash-low, "gemini-pro" → gemini-pro-agent); defaults
                    gemini-flash-low (fast tier) + gemini-pro (quality stage). The launch
-                   command needs the registry's --uid= arg; the distributed .par IS the
+                   command needs the registry's --uid= arg (value stays EMPTY — the
+                   Google launcher reads it as a GROUP NAME for setgid; a filled uid crashes
+                   the process at startup); the distributed .par IS the
                    server (a ~1.9 GB self-contained ELF — chmod +x when an archive manager
-                   drops the bit; localharness_external in the zip is unused by bmf). Pool of connections =
+                   drops the bit; its localharness_external sibling must sit NEXT TO IT: the
+                   agent's startup resolves the harness beside argv[0] and every session/new
+                   of a harness-less install dies with -32603 Internal error — session
+                   creation builds the connection on it even though bmf denies tools). Pool of connections =
                    the in-flight cap (BMF_ACP_MAX_INFLIGHT, default 2), transport errors retry
                    once on a fresh process, THREE consecutive failures disable the fast tier for
                    the run (the quality stage takes over per book). reconcile_loop mirrors
@@ -182,8 +187,12 @@ src/book_meta_fix/
                    (provider antigravity or the sentinel) or an existing cache — checks the ACP
                    Registry, downloads (~700 MB streamed, progress_cb renders it inside analyze's
                    bar) / upgrades atomically (os.replace; a failed download keeps the previous
-                   version), extracts ONLY the agy_acp_server member (drops localharness_external),
-                   chmod +x, and serves argv incl. the registry's --uid= arg; offline keeps the
+                   version), extracts the agy_acp_server member AND its localharness*
+                   sibling (installed_acp_release treats a binary WITHOUT the sibling as
+                   not-installed, so legacy stripped caches self-heal via one same-version
+                   re-download; a sidecar harness=null — archive carried none — skips the
+                   check to avoid a re-download loop), chmod +x, and serves argv incl. the
+                   registry's --uid= arg; offline keeps the
                    installed agent. Cache: ~/.cache/book-meta-fix/acp (BMF_ACP_CACHE_DIR/XDG) with
                    a version.json sidecar. Plain auto NEVER downloads without opt-in or cache
   review_writer.py streaming review.yaml writer (queue + writer thread)

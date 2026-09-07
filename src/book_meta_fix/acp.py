@@ -878,8 +878,15 @@ ACP_REGISTRY_ID = "antigravity-acp"
 # version.json sidecar of an auto-installed release.
 ACP_VERSION_FILE = "version.json"
 
-# The download is ~700 MB zipped / ~1.9 GB unpacked — bmf refuses to start it
-# with less than this free (zip + unpacked + headroom for the atomic replace).
+# The tool-harness member of the distribution zip. The agent's own launcher
+# (main.py _configure_localharness_path) hunts for localharness_external /
+# localharness[.exe] NEXT TO ITS OWN BINARY and exports it as
+# ANTIGRAVITY_HARNESS_PATH; a prefix match covers every platform spelling.
+ACP_HARNESS_PREFIX = "localharness"
+
+# The download is ~700 MB zipped / ~2.0 GB unpacked (server + harness) — bmf
+# refuses to start it with less than this free (zip + unpacked + headroom for
+# the atomic replace).
 ACP_INSTALL_MIN_FREE_BYTES = 4 * 1024**3
 
 
@@ -948,8 +955,9 @@ def _version_tuple(v: str) -> tuple[int, ...]:
 def installed_acp_release(cache_dir: Path | None = None) -> dict[str, Any] | None:
 	"""The auto-installed release: {"version", "args", "path"} or None.
 
-	Stale sidecars (binary deleted / exec bit lost / unreadable json)
-	degrade to None — the caller then treats it as not-installed."""
+	Stale sidecars (binary deleted / exec bit lost / unreadable json /
+	localharness sibling missing) degrade to None — the caller then treats
+	it as not-installed, so a same-version re-install repairs it."""
 	d = (cache_dir or acp_cache_dir())
 	sidecar = d / ACP_VERSION_FILE
 	binary = d / "agy_acp_server.par"
@@ -961,6 +969,14 @@ def installed_acp_release(cache_dir: Path | None = None) -> dict[str, Any] | Non
 		return None
 	bin_path = Path(info.get("path") or binary)
 	if not (bin_path.is_file() and os.access(bin_path, os.X_OK)):
+		return None
+	# The localharness sibling is part of a COMPLETE install (see
+	# install_acp_release): a binary without it answers every session/new
+	# with -32603 Internal error. Only a sidecar that explicitly recorded
+	# harness=null (an archive that carried no harness member) skips the
+	# check — enforcing it there would loop a re-download nothing can fix.
+	harnessless = "harness" in info and not info.get("harness")
+	if not harnessless and not any(p.is_file() and os.access(p, os.X_OK) for p in d.glob(f"{ACP_HARNESS_PREFIX}*")):
 		return None
 	return {"version": str(info["version"]), "args": [str(a) for a in info.get("args") or []], "path": bin_path}
 
@@ -978,12 +994,18 @@ def install_acp_release(
 
 	Returns (binary_path, version, downloaded) — downloaded=False when the
 	installed version already matched and *force* was not set. The zip is
-	streamed to a temp file, ONLY the ``agy_acp_server.*`` member is
-	extracted (localharness_external — the tool-execution harness bmf never
-	uses — stays out, saving ~130 MB), the exec bit is set, the binary is
-	moved into place with os.replace (an atomic same-fs swap, so a failed
-	run never destroys the previous version), and version.json records the
-	version + registry launch args.
+	streamed to a temp file, the ``agy_acp_server.*`` member AND its
+	``localharness*`` sibling are extracted (exec bits set, each moved into
+	place with os.replace — an atomic same-fs swap, so a failed run never
+	destroys the previous version), and version.json records the version +
+	registry launch args + the harness member name.
+
+	The harness is extracted even though bmf denies every tool call: the
+	SERVER resolves it when CREATING a session (ProxyConnectionStrategy →
+	LocalConnection), so a harness-less install answers every session/new
+	with -32603 Internal error (measured 2026-09-07 on 1.1.1 — the agent's
+	main.py looks for localharness_external / localharness[.exe] next to its
+	own binary and only then sets ANTIGRAVITY_HARNESS_PATH).
 
 	*http_get_json* / *http_get* are the no-network test seams.
 	"""
@@ -1038,17 +1060,36 @@ def install_acp_release(
 					progress_cb(done, total)
 		import zipfile
 
+		def _extract_member(zf: zipfile.ZipFile, member: str) -> Path:
+			"""Stream one member to a dot-tmp file with the exec bit set (the
+			zip stores it, but belt-and-braces — see resolve_acp_command's
+			chmod note) and hand it back ready for the atomic swap."""
+			tmp = d / f".{os.path.basename(member)}.new"
+			with zf.open(member) as src, open(tmp, "wb") as dst:
+				shutil.copyfileobj(src, dst, 1024 * 1024)
+			os.chmod(tmp, 0o755)
+			return tmp
+
+		harness_name: str | None = None
 		try:
 			with zipfile.ZipFile(zip_path) as zf:
 				matches = [n for n in zf.namelist() if os.path.basename(n) == member_name]
 				if not matches:
 					raise AcpAgentError(f"the downloaded archive carries no {member_name} (members: {', '.join(zf.namelist())})")
-				new_bin = d / f".{member_name}.new"
-				with zf.open(matches[0]) as src, open(new_bin, "wb") as dst:
-					shutil.copyfileobj(src, dst, 1024 * 1024)
-				os.chmod(new_bin, 0o755)
 				final = d / member_name
-				os.replace(new_bin, final)
+				os.replace(_extract_member(zf, matches[0]), final)
+				# The harness sits beside the server binary — the layout the
+				# agent's own startup hunts for (see the docstring: without it
+				# every session/new fails, tools or no tools).
+				harness_member = next((n for n in zf.namelist() if os.path.basename(n).startswith(ACP_HARNESS_PREFIX)), None)
+				if harness_member is not None:
+					harness_name = os.path.basename(harness_member)
+					os.replace(_extract_member(zf, harness_member), d / harness_name)
+				else:
+					log.warning(
+						"ACP install: the archive carries no %s* member — the agent's sessions will fail unless ANTIGRAVITY_HARNESS_PATH points at a harness",
+						ACP_HARNESS_PREFIX,
+					)
 		except AcpAgentError:
 			raise
 		except Exception as e:  # noqa: BLE001 - a truncated/garbled download is one install error
@@ -1058,6 +1099,7 @@ def install_acp_release(
 			"archive": archive,
 			"args": args,
 			"path": str(final),
+			"harness": harness_name,
 		}
 		(d / ACP_VERSION_FILE).write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
 	finally:
