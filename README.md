@@ -378,18 +378,40 @@ salvage the Z.AI provider uses.
 
 Setup:
 
-1. Get the official agent from the ACP Registry
-   ([agentclientprotocol.com/get-started/registry](https://agentclientprotocol.com/get-started/registry),
-   entry "antigravity-acp") — e.g.
-   `https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-agy_acp_server_1.1.1-linux-x86_64.zip`,
-   unzip, `chmod +x agy_acp_server.par`.
+1. Get the current release. The versioned link lives in the machine-readable
+   ACP Registry (this is what editors use for auto-install; check it for the
+   current version — the URL embeds it):
+
+   ```bash
+   curl -s https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json \
+     | python3 -c 'import json,sys; a=[x for x in json.load(sys.stdin)["agents"] if x["id"]=="antigravity-acp"][0]; print(a["distribution"]["binary"]["linux-x86_64"]["archive"])'
+   ```
+
+   As of 2026-09 that is 1.1.1 —
+   `https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-agy_acp_server_1.1.1-linux-x86_64.zip`.
+   Unzip it anywhere (e.g. `/opt/agy/`; the path is yours to pick). Inside
+   are two files: **`agy_acp_server.par` — the server itself**, a ~1.9 GB
+   self-contained binary (an ELF despite the extension; run it directly),
+   and `localharness_external` — a tool-execution harness bmf never uses
+   (tools are denied). Some archive managers drop the executable bit:
+
+   ```bash
+   unzip agy-acp-server-...-linux-x86_64.zip -d /opt/agy
+   chmod +x /opt/agy/agy_acp_server.par
+   ```
+
 2. Log in once interactively (e.g. in Zed or the Antigravity IDE) — bmf is
-   headless and cannot run an OAuth flow; when stored credentials are missing
-   it says so and surfaces the agent's stderr (where login URLs land).
-3. Point bmf at the binary and run analyze normally:
+   headless and cannot run an OAuth flow. The agent offers `Log in with
+   Google` (personal), Gemini Enterprise, and a Gemini API key; credentials
+   persist and bmf's `authenticate` handles expiry on its own. When they are
+   missing, bmf says so and surfaces the agent's stderr (where login URLs
+   land).
+
+3. Point bmf at the binary — the `--uid=` argument comes from the registry's
+   launch spec — and run analyze normally:
 
 ```bash
-export BMF_ANTIGRAVITY_CMD=/opt/agy/agy_acp_server.par   # or --antigravity-cmd
+export BMF_ANTIGRAVITY_CMD="/opt/agy/agy_acp_server.par --uid="   # or --antigravity-cmd
 bmf analyze --llm
 ```
 
@@ -403,16 +425,17 @@ the ACP branch; **`off`** disables the LLM stage.
 **The loop's two stages** both default to the subscription: the quick check
 runs on **gemini-flash** and the quality fallback on a **second ACP pool with
 gemini-pro** (model names are family-matched against the agent's own model
-list, so "gemini-flash" picks "gemini-3-flash" and survives generation
-bumps). `BMF_ANTIGRAVITY_FALLBACK=glm` swaps the quality stage to Z.AI's
-flash+paid loop instead (needs `ZAI_API_KEY`; Z.AI's rate machinery applies
-untouched) — with a key configured, the whole loop still stays on Antigravity
-unless you say otherwise.
+list, so they survive generation bumps — on the measured 1.1.1 agent,
+`gemini-flash-low` resolves to `gemini-3.8-flash-low` and `gemini-pro` to
+`gemini-pro-agent`/Gemini 3.1 Pro High). `BMF_ANTIGRAVITY_FALLBACK=glm` swaps
+the quality stage to Z.AI's flash+paid loop instead (needs `ZAI_API_KEY`;
+Z.AI's rate machinery applies untouched) — with a key configured, the whole
+loop still stays on Antigravity unless you say otherwise.
 
 | Knob | CLI | Env | Meaning |
 |---|---|---|---|
-| Agent command | `--antigravity-cmd` | `BMF_ANTIGRAVITY_CMD` (alias `BMF_ACP_COMMAND`) | the ACP agent process to launch (bare names are looked up on PATH) |
-| Fast-tier model | `--antigravity-model` | `BMF_ANTIGRAVITY_MODEL` (alias `BMF_ACP_MODEL`) | family-matched; `gemini-flash` default, empty = the agent's default |
+| Agent command | `--antigravity-cmd` | `BMF_ANTIGRAVITY_CMD` (alias `BMF_ACP_COMMAND`) | the ACP agent process to launch, including the `--uid=` arg (bare names are looked up on PATH) |
+| Fast-tier model | `--antigravity-model` | `BMF_ANTIGRAVITY_MODEL` (alias `BMF_ACP_MODEL`) | family-matched; `gemini-flash-low` default (newest flash at low effort — latency over deliberation), empty = the agent's default |
 | Fallback provider | `--antigravity-fallback` | `BMF_ANTIGRAVITY_FALLBACK` (alias `BMF_ACP_FALLBACK`) | `agy` (default — second ACP pool on the fallback model) or `glm` (Z.AI flash+paid loop; needs a key) |
 | Fallback model | `--antigravity-fallback-model` | `BMF_ANTIGRAVITY_FALLBACK_MODEL` (alias `BMF_ACP_FALLBACK_MODEL`) | agy fallback only; `gemini-pro` default, family-matched |
 | Prompt timeout | — | `BMF_ACP_TIMEOUT` | a hung turn is cancelled (`session/cancel`) after this many seconds (default 300) |

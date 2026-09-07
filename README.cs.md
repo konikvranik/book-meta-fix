@@ -386,18 +386,38 @@ používá provider Z.AI.
 
 Nastavení:
 
-1. Sejměte oficiálního agenta z ACP Registry
-   ([agentclientprotocol.com/get-started/registry](https://agentclientprotocol.com/get-started/registry),
-   položka „antigravity-acp“) — např.
-   `https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-agy_acp_server_1.1.1-linux-x86_64.zip`,
-   rozbalte, `chmod +x agy_acp_server.par`.
+1. Sejměte aktuální release. Verzovaný odkaz je ve strojově čitelném ACP
+   Registry (odtud ho berou editory k auto-instalaci; current verzi tam
+   zjistíte — URL má verzi v sobě):
+
+   ```bash
+   curl -s https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json \
+     | python3 -c 'import json,sys; a=[x for x in json.load(sys.stdin)["agents"] if x["id"]=="antigravity-acp"][0]; print(a["distribution"]["binary"]["linux-x86_64"]["archive"])'
+   ```
+
+   K 2026-09 je to 1.1.1 —
+   `https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-agy_acp_server_1.1.1-linux-x86_64.zip`.
+   Rozbalte kamkoli (např. `/opt/agy/`; cesta je na vás). Uvnitř jsou dva
+   soubory: **`agy_acp_server.par` — server samotný**, ~1,9 GB soběstačná
+   binárka (navzdory příponě ELF; spouští se přímo), a `localharness_external`
+   — harness pro provádění nástrojů, který bmf nepoužívá (nástroje odmítá).
+   Některé archivátory zahodí spustitelný bit:
+
+   ```bash
+   unzip agy-acp-server-...-linux-x86_64.zip -d /opt/agy
+   chmod +x /opt/agy/agy_acp_server.par
+   ```
+
 2. Jednou se přihlaste interaktivně (např. v Zed nebo v IDE Antigravity) —
-   bmf běží bez terminálové relace a OAuth flow neumí; když uložené přihlášení
-   chybí, řekne to a zobrazí stderr agenta (tam přistávají přihlašovací URL).
-3. Nasměrujte bmf na binárku a pusťte analyze jako obvykle:
+   bmf běží bez terminálové relace a OAuth flow neumí. Agent nabízí přihlášení
+   Google (osobní), Gemini Enterprise a Gemini API klíč; přihlášení se
+   ukládá a bmfův `authenticate` si poradcí s vypršením sám. Když chybí,
+   bmf to řekne a zobrazí stderr agenta (tam přistávají přihlašovací URL).
+3. Nasměrujte bmf na binárku — argument `--uid=` pochází ze spouštěcího
+   specu registru — a pusťte analyze jako obvykle:
 
 ```bash
-export BMF_ANTIGRAVITY_CMD=/opt/agy/agy_acp_server.par   # nebo --antigravity-cmd
+export BMF_ANTIGRAVITY_CMD="/opt/agy/agy_acp_server.par --uid="   # nebo --antigravity-cmd
 bmf analyze --llm
 ```
 
@@ -410,15 +430,17 @@ jako rychlou vrstvu, kdykoli je příkaz nastaven; **`zai`** ACP nikdy nedotkne;
 **Obě fáze smyčky** mají výchozí na předplatném: rychlá kontrola běží na
 **gemini-flash** a kvalitní záloha na **druhém ACP poolu s gemini-pro** (názvy
 modelů se párují po rodině proti vlastnímu seznamu modelů agenta, takže
-„gemini-flash“ vybere „gemini-3-flash“ a přežije výměny generací).
-`BMF_ANTIGRAVITY_FALLBACK=glm` naopak předá kvalitní fázi smyčce flash+placené
-Z.AI (potřebuje `ZAI_API_KEY`; Z.AI rate machinery zůstává nedotčená) — s
-nastaveným klíčem zůstává celá smyčka na Antigravity, dokud neřeknete jinak.
+přežívají výměny generací — na změřeném agentu 1.1.1 `gemini-flash-low`
+vyřeší `gemini-3.8-flash-low` a `gemini-pro` `gemini-pro-agent`/Gemini 3.1
+Pro High). `BMF_ANTIGRAVITY_FALLBACK=glm` naopak předá kvalitní fázi smyčce
+flash+placené Z.AI (potřebuje `ZAI_API_KEY`; Z.AI rate machinery zůstává
+nedotčená) — s nastaveným klíčem zůstává celá smyčka na Antigravity, dokud
+neřeknete jinak.
 
 | Volba | CLI | Env | Význam |
 |---|---|---|---|
-| Příkaz agenta | `--antigravity-cmd` | `BMF_ANTIGRAVITY_CMD` (alias `BMF_ACP_COMMAND`) | spouštěný ACP agentní proces (holá jména se hledají na PATH) |
-| Model rychlé vrstvy | `--antigravity-model` | `BMF_ANTIGRAVITY_MODEL` (alias `BMF_ACP_MODEL`) | párovaný po rodině; výchozí `gemini-flash`, prázdné = výchozí volba agenta |
+| Příkaz agenta | `--antigravity-cmd` | `BMF_ANTIGRAVITY_CMD` (alias `BMF_ACP_COMMAND`) | spouštěný ACP agentní proces včetně argumentu `--uid=` (holá jména se hledají na PATH) |
+| Model rychlé vrstvy | `--antigravity-model` | `BMF_ANTIGRAVITY_MODEL` (alias `BMF_ACP_MODEL`) | párovaný po rodině; výchozí `gemini-flash-low` (nejnovější flash na low effort — rychlost před dumováním), prázdné = výchozí volba agenta |
 | Provider zálohy | `--antigravity-fallback` | `BMF_ANTIGRAVITY_FALLBACK` (alias `BMF_ACP_FALLBACK`) | `agy` (výchozí — druhý ACP pool na fallback modelu) nebo `glm` (smyčka flash+placené Z.AI; potřebuje klíč) |
 | Model zálohy | `--antigravity-fallback-model` | `BMF_ANTIGRAVITY_FALLBACK_MODEL` (alias `BMF_ACP_FALLBACK_MODEL`) | jen pro zálohu agy; výchozí `gemini-pro`, párováno po rodině |
 | Timeout promptu | — | `BMF_ACP_TIMEOUT` | zaseknutý tah se po tolika sekundách zruší (`session/cancel`, výchozí 300) |

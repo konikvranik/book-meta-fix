@@ -181,6 +181,34 @@ class TestMatchModelOption:
 		assert match_model_option("gpt-4", self.OPTS) is None
 		assert match_model_option("", self.OPTS) is None
 
+	# The option list the REAL agent served (agy_acp_server 1.1.1, measured
+	# 2026-09-07) — locks in how bmf's defaults resolve against it.
+	REAL_OPTS = [
+		{"value": v, "name": n}
+		for v, n in [
+			("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)"),
+			("gemini-3.8-flash-medium", "Gemini 3.8 Flash (Medium)"),
+			("gemini-3.8-flash-low", "Gemini 3.8 Flash (Low)"),
+			("gemini-3.7-flash-high", "Gemini 3.7 Flash (High)"),
+			("gemini-3.7-flash-medium", "Gemini 3.7 Flash (Medium)"),
+			("gemini-3.7-flash-low", "Gemini 3.7 Flash (Low)"),
+			("gemini-3.6-flash-high", "Gemini 3.6 Flash (High)"),
+			("gemini-3.6-flash-medium", "Gemini 3.6 Flash (Medium)"),
+			("gemini-3.6-flash-low", "Gemini 3.6 Flash (Low)"),
+			("gemini-pro-agent", "Gemini 3.1 Pro (High)"),
+			("gemini-3.1-pro-low", "Gemini 3.1 Pro (Low)"),
+		]
+	]
+
+	def test_bmf_defaults_resolve_on_the_real_agent_list(self):
+		# Fast tier default: the newest flash at LOW effort.
+		assert match_model_option("gemini-flash-low", self.REAL_OPTS) == "gemini-3.8-flash-low"
+		# Quality stage default: the Pro model (its "High" agent variant —
+		# fewer extra tokens than gemini-3.1-pro-low).
+		assert match_model_option("gemini-pro", self.REAL_OPTS) == "gemini-pro-agent"
+		# A bare family name still resolves (to the first listed flash).
+		assert match_model_option("gemini-flash", self.REAL_OPTS) == "gemini-3.8-flash-high"
+
 
 class TestAntigravityAcpProvider:
 	def test_reconcile_parses_json_reply(self):
@@ -389,7 +417,7 @@ class TestGetProviderSelection:
 		assert isinstance(p._acp_fallback, AntigravityAcpProvider)
 		assert p._zai_fallback is None
 		assert p.fallback_model == "gemini-pro"
-		assert p.model == "gemini-flash"
+		assert p.model == "gemini-flash-low"
 		# The fallback pool runs the fallback model.
 		assert p._acp_fallback.model == "gemini-pro"
 
@@ -401,12 +429,13 @@ class TestGetProviderSelection:
 		assert p._zai_fallback is None
 
 	def test_config_defaults(self):
-		"""The requested defaults: quick check = agy gemini-flash, quality
-		stage = agy gemini-pro."""
+		"""The requested defaults: quick check = agy gemini flash (low
+		effort — the real agent serves flash as -high|medium|low variants
+		and the quick tier wants latency), quality stage = agy gemini-pro."""
 		from book_meta_fix.config import Config
 
 		cfg = Config()
-		assert cfg.acp_model == "gemini-flash"
+		assert cfg.acp_model == "gemini-flash-low"
 		assert cfg.acp_fallback_model == "gemini-pro"
 		assert cfg.acp_fallback_provider == "agy"
 

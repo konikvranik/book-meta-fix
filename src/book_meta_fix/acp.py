@@ -535,31 +535,37 @@ def match_model_option(model: str, options: list[dict[str, Any]]) -> str | None:
 	"""Match *model* against an agent's model config-option candidates.
 
 	Agents name their models with generation numbers that shift monthly
-	("gemini-3-flash", "Gemini 2.5 Pro"), while the user (and bmf's defaults)
-	say the FAMILY: "gemini-flash", "gemini-pro". Exact value/name match wins;
-	otherwise a token-subset family match applies — {gemini, flash} ⊆
-	{gemini, 3, flash} with the candidate's digit-only tokens skippable —
-	preferring the candidate with the fewest extra tokens (gemini-3-flash
-	over gemini-3-flash-preview). Returns the option VALUE or None.
+	("gemini-3.8-flash-low", "Gemini 2.5 Pro"), while the user (and bmf's
+	defaults) say the FAMILY: "gemini-flash", "gemini-pro". Exact value/name
+	match wins; otherwise a token-subset family match applies — {gemini,
+	flash} ⊆ {gemini, 3, 8, flash} with digit-only tokens skippable —
+	preferring the candidate with the fewest extra tokens. VALUE tokens are
+	scored first (agents repeat the model id there; display names add
+	decoration like "(High)" that would skew the distance), names only serve
+	as the fallback pass for agents whose values are opaque ids. Returns the
+	option VALUE or None.
 	"""
 	if not model:
 		return None
 	ml = model.lower()
 	tokens = _model_tokens(model)
-	best: tuple[int, str] | None = None
-	for cand in options or []:
-		value = str(cand.get("value") or "")
-		name = str(cand.get("name") or "")
-		if not value:
-			continue
-		if value.lower() == ml or (name and name.lower() == ml):
-			return value
-		base = _model_tokens(value) | (_model_tokens(name) if name else set())
-		if tokens and tokens <= base:
-			extra = len(base - tokens)
-			if best is None or extra < best[0]:
-				best = (extra, value)
-	return best[1] if best is not None else None
+	for base_of in ("value", "name"):
+		best: tuple[int, str] | None = None
+		for cand in options or []:
+			value = str(cand.get("value") or "")
+			name = str(cand.get("name") or "")
+			if not value:
+				continue
+			if value.lower() == ml or (name and name.lower() == ml):
+				return value
+			base = _model_tokens(value if base_of == "value" else name)
+			if tokens and base and tokens <= base:
+				extra = len(base - tokens)
+				if best is None or extra < best[0]:
+					best = (extra, value)
+		if best is not None:
+			return best[1]
+	return None
 
 
 def resolve_acp_command(command: str | None) -> list[str] | None:

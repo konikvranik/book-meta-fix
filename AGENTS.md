@@ -161,8 +161,14 @@ src/book_meta_fix/
                    logins are refused with guidance — headless bmf cannot run them); model chosen
                    through session/set_config_option (category "model", best-effort). Model names
                    are FAMILY-matched against the agent's own options (match_model_option:
-                   "gemini-flash" → "gemini-3-flash", digit tokens skippable) — defaults
-                   gemini-flash (fast tier) + gemini-pro (quality stage). Pool of connections =
+                   exact value/name, else token subset with digit tokens skippable — measured on
+                   the real 1.1.1 agent, whose options are gemini-3.8/3.7/3.6-flash-
+                   high|medium|low + gemini-pro-agent/gemini-3.1-pro-low: "gemini-flash-low"
+                   → gemini-3.8-flash-low, "gemini-pro" → gemini-pro-agent); defaults
+                   gemini-flash-low (fast tier) + gemini-pro (quality stage). The launch
+                   command needs the registry's --uid= arg; the distributed .par IS the
+                   server (a ~1.9 GB self-contained ELF — chmod +x when an archive manager
+                   drops the bit; localharness_external in the zip is unused by bmf). Pool of connections =
                    the in-flight cap (BMF_ACP_MAX_INFLIGHT, default 2), transport errors retry
                    once on a fresh process, THREE consecutive failures disable the fast tier for
                    the run (the quality stage takes over per book). reconcile_loop mirrors

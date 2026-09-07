@@ -185,11 +185,13 @@ class Config:
 	acp_command: str = ""
 	# Model the ACP agent should serve the fast tier with. Matched against
 	# the agent's own session config options by exact value/name or by token
-	# family ("gemini-flash" picks "gemini-3-flash"); empty (via
-	# BMF_ANTIGRAVITY_MODEL=) = the agent's default pick. Default
-	# "gemini-flash" — the quick-check tier. Override via
-	# BMF_ANTIGRAVITY_MODEL (alias: BMF_ACP_MODEL).
-	acp_model: str | None = "gemini-flash"
+	# family; explicitly empty (via BMF_ANTIGRAVITY_MODEL=) = the agent's
+	# default pick. Default "gemini-flash-low": the real agent (measured on
+	# agy_acp_server 1.1.1) offers flash as gemini-3.8/3.7/3.6-flash-
+	# high|medium|low — the family match resolves to the NEWEST flash at LOW
+	# effort, which is what a quick-check tier wants (latency, not
+	# deliberation). Override via BMF_ANTIGRAVITY_MODEL (alias: BMF_ACP_MODEL).
+	acp_model: str | None = "gemini-flash-low"
 	# The loop's QUALITY (fallback) stage when the ACP agent is the fast
 	# tier: 'agy' (default — a SECOND ACP pool on acp_fallback_model, so the
 	# whole loop stays on the subscription) or 'glm' (the Z.AI flash+paid
