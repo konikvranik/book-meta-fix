@@ -258,11 +258,18 @@ for `analyze`). Enable them with the flags below; results are cached in
 |---|---|---|---|
 | `--databazeknih` | databazeknih.cz | **Best for CZ/SK**. Returns genres (broad categories + user tags), ISBN, publisher, language, description, cover. | Scraping (no API key). 2 requests/book. Fuzzy title match gates the result so the wrong book's genres aren't attached. |
 | `--legie` | legie.info | **Best for CZ/SK sci-fi/fantasy**. Indexes short stories ("povídky") and the series/universe a work belongs to, which databazeknih's book search misses. Strong for identity (title + author + original title). | Scraping (no API key). No ISBN/Year/Publisher (identity only). Tried after databazeknih. |
-| `--abs-czech URL` | self-hosted [audiobookshelf_czech_metadata](https://github.com/stecik/audiobookshelf_czech_metadata) | **Audio-edition CZ/SK metadata.** Your own instance aggregates ~17 CZ audiobook storefronts (Alza, Audiolibrix, Audioteka, Kosmas, Radioteka, Rozhlas, …) behind ABS's custom-provider `/search` API — publisher/year/cover/genres of the *audio* edition, ideal for an audiobook library. Fast (no third-party scraping from bmf's side). | Opt-in via base URL (`BMF_ABS_CZECH_URL`; token via `BMF_ABS_CZECH_TOKEN` for instances with `AUDIOBOOKSHELF_AUTH_TOKEN`). No ISBN endpoint — title+author only. Narrator/duration are not modeled by bmf and dropped. Tried after databazeknih-by-ISBN, before its title search. |
-| *(always on when enrichment enabled)* | OpenLibrary | ISBN + title search, international editions | Weak CZ coverage (~10%) |
+| `--abs-czech URL` | self-hosted [audiobookshelf_czech_metadata](https://github.com/stecik/audiobookshelf_czech_metadata) | **Audio-edition CZ/SK metadata.** Your own instance aggregates ~17 CZ audiobook storefronts (Alza, Audiolibrix, Audioteka, Kosmas, Radioteka, Rozhlas, …) behind ABS's custom-provider `/search` API — publisher/year/cover/genres of the *audio* edition, ideal for an audiobook library. Fast (no third-party scraping from bmf's side). | Opt-in via base URL (`BMF_ABS_CZECH_URL`; token via `BMF_ABS_CZECH_TOKEN` for instances with `AUDIOBOOKSHELF_AUTH_TOKEN`). No ISBN endpoint — title+author only. Narrator/duration are not modeled by bmf and dropped. Junk-tolerant: the provider's keyword search (and its Rozhlas/podcast rows with a `?` author) yields loose matches, so a conflicting author is always rejected and an author-less match needs a near-exact title (≥ 90). Tried after databazeknih-by-ISBN, before its title search. || *(always on when enrichment enabled)* | OpenLibrary | ISBN + title search, international editions | Weak CZ coverage (~10%) |
 | *(always on when enrichment enabled)* | Google Books | ISBN lookup | Often rate-limited without an API key |
 
 Lookup order when enrichment is on: **databazeknih by ISBN (if enabled) → the self-hosted CZ provider by title (if a URL is configured) → databazeknih by title (if enabled) → legie.info (if enabled) → OpenLibrary by ISBN → Google Books by ISBN → OpenLibrary by title**. First hit wins.
+
+**Cover resolution preference**: when the same book comes back several times
+from the provider (multiple storefronts list it) or both CZ sources know it,
+bmf probes the candidate covers by streaming just the image header (the image
+body is never downloaded) and keeps the highest-resolution one — the
+cross-source comparison runs for books with a cover diagnosis (C11 /
+MISSING_COVER), and only the `cover_url` is swapped; the identity-anchored
+metadata stays from the winning lookup.
 
 ```bash
 # Enrich with CZ/SK genres only (no international fallbacks needed for a CZ library)

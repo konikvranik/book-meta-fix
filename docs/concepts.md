@@ -216,7 +216,12 @@ is on — **first hit wins**:
    [audiobookshelf_czech_metadata](https://github.com/stecik/audiobookshelf_czech_metadata)
    instance aggregating ~17 CZ audiobook storefronts behind ABS's
    custom-provider `/search` API. Audio-edition metadata (publisher, year,
-   cover, genres, language); no ISBN endpoint (title+author only).
+   cover, genres, language); no ISBN endpoint (title+author only). The
+   provider's keyword search yields loose matches (Rozhlas/podcast rows with
+   a `?` author), so a conflicting author always rejects a match and an
+   author-less one needs a near-exact title (≥ 90). When
+   several storefronts list the same book, the highest-resolution cover wins
+   (probed via a streaming image-header read).
 3. **databazeknih.cz by title** (if `--databazeknih`) — fuzzy title match
    gates the result so the wrong book's genres aren't attached; prefers a
    year-matching edition.
@@ -225,6 +230,11 @@ is on — **first hit wins**:
 5. **OpenLibrary by ISBN** — international editions; weak CZ coverage (~10%).
 6. **Google Books by ISBN** — often rate-limited without an API key.
 7. **OpenLibrary by title**.
+
+For a book with a cover diagnosis (C11 / MISSING_COVER) the two CZ sources
+also compare covers against each other: the higher-resolution one wins, and
+only the `cover_url` is swapped — the identity-anchored metadata stays from
+the winning lookup.
 
 ## Placement patterns
 

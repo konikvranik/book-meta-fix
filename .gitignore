@@ -36,3 +36,4 @@ deletion_snapshot_*.tar.gz
 .DS_Store
 Thumbs.db
 
+/uv.lock

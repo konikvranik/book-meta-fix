@@ -639,16 +639,102 @@ def _abs_search_url(base_url: str) -> str:
 	return base + "/search"
 
 
+def probe_image_size(url: str, *, timeout: float = 6.0) -> tuple[int, int] | None:
+	"""Stream just enough bytes for Pillow to read the image header and return
+	(width, height) — the image body is never downloaded (Pillow's open is
+	lazy: size comes from the header, no pixel decode). None when Pillow is
+	unavailable, the server errors, or the header does not parse from the
+	first ~128 KB (rare: a JPEG whose size marker sits behind a very long
+	EXIF block). A probe must never raise into the lookup — every failure is
+	a plain None."""
+	import io
+
+	try:
+		from PIL import Image
+	except ImportError:  # pragma: no cover — Pillow is a hard dependency
+		return None
+	try:
+		r = requests.get(url, timeout=timeout, stream=True, headers={"User-Agent": USER_AGENT, "Accept": "image/*,*/*"})
+		if r.status_code != 200:
+			return None
+		buf = b""
+		for chunk in r.iter_content(8192):
+			buf += chunk
+			if len(buf) >= 128 * 1024:
+				break
+		r.close()
+		img = Image.open(io.BytesIO(buf))
+		return (int(img.size[0]), int(img.size[1]))
+	except Exception:  # noqa: BLE001
+		return None
+
+
+# Same book listed by several storefronts: title-score window within which
+# matches are considered equivalent (their title strings differ only by
+# storefront decorations like "1984 (audiokniha)"), and a cap on cover probes
+# per lookup so a pathological match list cannot turn into a CDN crawl.
+_ABS_TIE_MARGIN = 3
+_ABS_MAX_COVER_PROBES = 5
+
+
+def _best_cover_among(ties: list[dict], *, fallback: dict) -> dict:
+	"""Among near-tied matches of the same book, return the one whose cover
+	probes to the most pixels; *fallback* (the ranked winner) keeps its place
+	otherwise. The winner's own cover that fails to probe is an UNKNOWN, not
+	a small image — it is not displaced by a lesser KNOWN cover. A tie without
+	any cover never wins; a winner without a cover loses to the first
+	probeable tie cover (a cover beats no cover)."""
+	fb_url = (fallback.get("cover") or "").strip()
+	probes = 0
+
+	def _probe(u: str) -> tuple[int, int] | None:
+		nonlocal probes
+		if probes >= _ABS_MAX_COVER_PROBES:
+			return None
+		probes += 1
+		return probe_image_size(u)
+
+	if not fb_url:
+		for m in ties:
+			u = (m.get("cover") or "").strip()
+			if u and _probe(u) is not None:
+				return m
+		return fallback
+	fb_size = _probe(fb_url)
+	if fb_size is None:
+		return fallback
+	best, best_area = fallback, fb_size[0] * fb_size[1]
+	for m in ties:
+		u = (m.get("cover") or "").strip()
+		if not u or u == fb_url:
+			continue
+		size = _probe(u)
+		if size is None:
+			continue
+		if size[0] * size[1] > best_area:
+			best, best_area = m, size[0] * size[1]
+	return best
+
+
 def _pick_abs_match(matches: list[dict], title: str, author: str | None) -> dict | None:
 	"""Pick the best entry from the provider's ranked match list.
 
-	Title must fuzzy-match (>= 70); among the survivors an entry whose author
-	agrees (>= 80 token_sort) is preferred over an author-less or disagreeing
-	one, then the best title score wins. Returns None when nothing clears the
-	title floor — an empty/weak match list must not produce a proposal."""
+	Gates, in order: title must fuzzy-match (>= 70); when *author* is known,
+	a match whose author CONFLICTS (< 80) is never returned — storefront
+	search is keyword-based and the provider also mixes in Rozhlas/podcast
+	rows whose author is '?' or empty, so a title-similar row is how an
+	irrelevant record (and its cover) slips in. An AUTHOR-LESS match is only
+	a fallback at a near-exact title (>= 90): a merely title-similar row
+	without an author cannot be told apart from junk. With no author signal
+	at all on the query side, the title floor stays the only gate (as
+	before). Within the winning pool, author-agreeing entries rank first and
+	the best title score wins; near-ties are decided by cover resolution
+	(_best_cover_among). Returns None when nothing clears the gates — an
+	empty/weak match list must not produce a proposal."""
 	from rapidfuzz import fuzz
 
-	best: tuple[bool, int, dict] | None = None
+	agreeing: list[tuple[int, dict]] = []
+	absent: list[tuple[int, dict]] = []
 	for m in matches:
 		mtitle = (m.get("title") or "").strip()
 		if not mtitle:
@@ -656,12 +742,28 @@ def _pick_abs_match(matches: list[dict], title: str, author: str | None) -> dict
 		tscore = fuzz.token_sort_ratio(title.lower(), mtitle.lower())
 		if tscore < 70:
 			continue
-		agrees = True
-		if author and m.get("author"):
-			agrees = fuzz.token_sort_ratio(author.lower(), str(m["author"]).lower()) >= 80
-		if best is None or (agrees, tscore) > (best[0], best[1]):
-			best = (agrees, tscore, m)
-	return best[2] if best is not None else None
+		mauth = str(m.get("author") or "").strip()
+		if not author or not mauth:
+			absent.append((tscore, m))
+		elif fuzz.token_sort_ratio(author.lower(), mauth.lower()) >= 80:
+			agreeing.append((tscore, m))
+		# else: author conflict — never a candidate
+	if agreeing:
+		pool = agreeing
+	elif author:
+		pool = [c for c in absent if c[0] >= 90]
+	else:
+		pool = absent
+	if not pool:
+		return None
+	# Best title score within the pool (stable sort keeps the provider's own
+	# ranking on equal scores).
+	pool.sort(key=lambda c: c[0], reverse=True)
+	winner = pool[0]
+	ties = [c[1] for c in pool if c[0] >= winner[0] - _ABS_TIE_MARGIN]
+	if len(ties) > 1:
+		return _best_cover_among(ties, fallback=winner[1])
+	return winner[1]
 
 
 def _abs_match_to_meta(m: dict) -> EnrichedMeta:
@@ -716,6 +818,27 @@ def lookup_abs_czech(*, base_url: str, title: str, author: str | None = None, to
 	if not em.title:
 		return None
 	return em
+
+
+def _cover_same_book(alt: EnrichedMeta, title: str, author: str | None) -> bool:
+	"""Fuzzy same-book gate before borrowing another source's cover: title
+	must reach >= 70, and when *author* is known the alternative must either
+	carry an AGREEING author (>= 80) or be author-less with a near-exact
+	title (>= 90) — a conflicting author always rejects. This is what keeps
+	an irrelevant cover (a keyword-similar junk row with a huge CDN image)
+	from being glued onto the record."""
+	from rapidfuzz import fuzz
+
+	if not alt.title:
+		return False
+	tscore = fuzz.token_sort_ratio(title.lower(), alt.title.lower())
+	if tscore < 70:
+		return False
+	if not author:
+		return True
+	if alt.authors:
+		return fuzz.token_sort_ratio(author.lower(), alt.authors[0].lower()) >= 80
+	return tscore >= 90
 
 
 # ---------------------------------------------------------------------------
@@ -827,6 +950,56 @@ class Enricher:
 			result = lookup_openlibrary_title(title, author)
 
 		self._cache_put(cache_key, result)
+		return result
+
+	def upgrade_cover(self, result: EnrichedMeta, *, title: str, author: str | None = None, year: int | None = None) -> EnrichedMeta:
+		"""Cross-source cover upgrade for a book with a cover diagnosis
+		(C11 / MISSING_COVER): probe *result*'s cover and the OTHER enabled CZ
+		source's cover for the same book (databazeknih ↔ the abs_czech
+		provider — the only two sources that carry CZ covers) and swap in a
+		strictly larger one. databazeknih's obalky/kosmas images are often
+		smaller than the storefront CDNs behind the provider, and vice versa.
+
+		Only ``cover_url`` may change — the identity-anchored metadata stays
+		from *result* — and the alternative must itself fuzzy-match the same
+		book (_cover_same_book) before its cover is considered. The winner's
+		unprobeable cover is an unknown, not a small image, and is not
+		displaced. The alternative lookup is cached under its own "coveralt:"
+		key so re-runs never re-scrape databazeknih for the same book.
+		"""
+		if result.source not in ("databazeknih", "abs_czech") or not title:
+			return result
+		if result.source == "abs_czech":
+			alt_source = "databazeknih"
+			if not self.databazeknih_enabled:
+				return result
+		else:
+			alt_source = "abs_czech"
+			if not self.abs_czech_url:
+				return result
+		key = "coveralt:" + self._cache_key(isbn=None, title=title, author=author, year=year)
+		cached = self._cache_get(key)
+		if cached == "__NOT_FOUND__":
+			return result
+		alt: EnrichedMeta | None = cached  # a hit: EnrichedMeta; a miss: None
+		if alt is None:
+			if alt_source == "databazeknih":
+				alt = lookup_databazeknih(title=title, author=author, year=year)
+			else:
+				alt = lookup_abs_czech(base_url=self.abs_czech_url, title=title, author=author, token=self.abs_czech_token)
+			self._cache_put(key, alt)
+		if alt is None or not alt.cover_url or not _cover_same_book(alt, title, author):
+			return result
+		alt_size = probe_image_size(alt.cover_url)
+		if alt_size is None:
+			return result
+		if not result.cover_url:
+			result.cover_url = alt.cover_url  # any probeable cover beats none
+			return result
+		cur_size = probe_image_size(result.cover_url)
+		if cur_size is not None and alt_size[0] * alt_size[1] > cur_size[0] * cur_size[1]:
+			log.debug("cover upgrade for %r: %s -> %s cover (%dx%d)", title, result.source, alt_source, *alt_size)
+			result.cover_url = alt.cover_url
 		return result
 
 	def close(self) -> None:

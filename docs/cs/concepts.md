@@ -225,7 +225,12 @@ při zapnutém obohacení — **první zásah vyhrává**:
    [audiobookshelf_czech_metadata](https://github.com/stecik/audiobookshelf_czech_metadata),
    která agreguje ~17 CZ audioknihových e-shopů za ABS custom-provider API
    `/search`. Metadata audio vydání (nakladatelství, rok, obálka, žánry,
-   jazyk); bez ISBN endpointu (jen titul+autor).
+   jazyk); bez ISBN endpointu (jen titul+autor). Keyword vyhledávání
+   provideru vrací volné shody (Rozhlas/podcast řádky s autorem `?`), proto
+   konfliktní autor match vždy odmítne a match bez autora vyžaduje téměř
+   přesný titul (≥ 90). Když stejnou knihu nabízí
+   více e-shopů, vyhrává obálka v nejvyšším rozlišení (změřená průtokovým
+   přečtením hlavičky obrázku).
 3. **databazeknih.cz podle názvu** (při `--databazeknih`) — fuzzy shoda
    názvu hlídá výsledek, takže se nepřipojí žánry špatné knihy; upřednostňuje
    vydání ze shodného roku.
@@ -235,6 +240,10 @@ při zapnutém obohacení — **první zásah vyhrává**:
    (~10 %).
 6. **Google Books podle ISBN** — často rate-limitované bez API klíče.
 7. **OpenLibrary podle názvu**.
+
+Kniha s cover diagnózou (C11 / MISSING_COVER) navíc porovná obálky obou CZ
+zdrojů mezi sebou: vyhrává vyšší rozlišení a vyměňuje se pouze `cover_url` —
+metadata z vítězného vyhledávání zůstávají.
 
 ## Vzory pro umísťování
 

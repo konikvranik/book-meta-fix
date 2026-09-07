@@ -87,7 +87,17 @@ src/book_meta_fix/
                    provider (opt-in via BMF_ABS_CZECH_URL, aggregates ~17 CZ audiobook
                    storefronts behind ABS's /search contract; source key "abs_czech",
                    no ISBN endpoint — title+author only, narrator/duration unmodelled)
-                   / OpenLibrary / Google Books → EnrichedMeta
+                   / OpenLibrary / Google Books → EnrichedMeta. Cover resolution
+                   preference: equivalent provider matches (near-tied title+author)
+                   are decided by probe_image_size (streaming image-HEADER read, no
+                   body download), and Enricher.upgrade_cover cross-compares the two
+                   CZ sources for cover-diagnosed books (pipeline want_cover plumbing
+                   through _online_fill) — strictly-better cover_url only, identity-
+                   anchored fields never change; alternative cached under "coveralt:".
+                   Junk-tolerant match picking: the provider's keyword search (and its
+                   Rozhlas rows with author "?") yields loose hits, so a CONFLICTING
+                   author never wins and an author-less match needs a near-exact title
+                   (>= 90) — same gates in _cover_same_book for borrowed covers
   pipeline.py      orchestration: ThreadPoolExecutor, per-book state machine +
                    apply_review (metadata writes + PLACEMENT — the former organize)
   llm.py           Z.AI provider: LeakyBucket + global 429 cooldown + reconcile_loop + tolerant JSON

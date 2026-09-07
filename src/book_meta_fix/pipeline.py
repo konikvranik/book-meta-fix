@@ -550,8 +550,12 @@ def _try_deterministic_fix(
 		return None
 
 	# Online fill, anchored to the verified identity (ISBN exact, or title+
-	# author with an author-match filter).
-	online = _online_fill(identity, enricher, skip_enrich)
+	# author with an author-match filter). want_cover: the book carries a
+	# cover diagnosis (C11/MISSING_COVER), so after the first hit the other
+	# CZ source's cover may upgrade the result's (resolution preference —
+	# only cover_url changes, never the identity-anchored fields).
+	want_cover = any(d.category in _COVER_CATEGORIES for d in all_diagnoses(diag))
+	online = _online_fill(identity, enricher, skip_enrich, want_cover)
 	if online is not None:
 		online.identity_confirmed = True
 		return online
@@ -572,10 +576,12 @@ def _online_matches_identity(online: EnrichedMeta, identity: IdentityResult) -> 
 	return True  # no author to compare — trust the title search
 
 
-def _online_fill(identity: IdentityResult, enricher: Enricher | None, skip_enrich: bool) -> EnrichedMeta | None:  # noqa: F821
+def _online_fill(identity: IdentityResult, enricher: Enricher | None, skip_enrich: bool, want_cover: bool = False) -> EnrichedMeta | None:  # noqa: F821
 	"""Fill metadata online, anchored to the verified identity: exact by ISBN,
 	or title+author with an author-match filter. Returns None if nothing found
-	or the result doesn't match the identity."""
+	or the result doesn't match the identity. *want_cover* (the book carries a
+	C11/MISSING_COVER diagnosis) lets the enricher compare the OTHER CZ
+	source's cover and keep the higher-resolution one — cover_url only."""
 	if enricher is None or skip_enrich:
 		return None
 	if identity.has_isbn:
@@ -592,6 +598,13 @@ def _online_fill(identity: IdentityResult, enricher: Enricher | None, skip_enric
 	if identity.has_title_author and not _online_matches_identity(online, identity):
 		log.debug("online result rejected (author mismatch) for identity %r", identity.title)
 		return None
+	if want_cover:
+		online = enricher.upgrade_cover(
+			online,
+			title=identity.title or "",
+			author=identity.authors[0] if identity.authors else None,
+			year=identity.year,
+		)
 	return online
 
 

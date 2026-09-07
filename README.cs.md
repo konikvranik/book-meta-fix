@@ -260,7 +260,7 @@ do cache `bmf_cache.db`, takže opakované běhy znovu nezatěžují síť.
 |---|---|---|---|
 | `--databazeknih` | databazeknih.cz | **Nejlepší pro CZ/SK**. Vrací žánry (široké kategorie + uživatelské štítky), ISBN, nakladatelství, jazyk, popis, obálku. | Scraping (bez API klíče). 2 požadavky/kniha. Fuzzy shoda titulu výsledek hlídá, takže se nepřiřadí žánry jiné knihy. |
 | `--legie` | legie.info | **Nejlepší pro CZ/SK sci-fi/fantasy**. Indexuje povídky („povídky“) a sérii/vesmír, do nichž dílo patří, což vyhledávání knih na databazeknih přehlíží. Silný pro identitu (titul + autor + původní titul). | Scraping (bez API klíče). Bez ISBN/roku/nakladatele (jen identita). Zkouší se po databazeknih. |
-| `--abs-czech URL` | vlastní [audiobookshelf_czech_metadata](https://github.com/stecik/audiobookshelf_czech_metadata) | **Metadata AUDIO vydání pro CZ/SK.** Vaše vlastní instance agreguje ~17 CZ audioknihových e-shopů (Alza, Audiolibrix, Audioteka, Kosmas, Radioteka, Rozhlas, …) za ABS custom-provider API `/search` — nakladatelství/rok/obálku/žánry *audio* vydání, ideální pro audioknihovou knihovnu. Rychlé (bmf ascrapuje třetí strany). | Opt-in přes base URL (`BMF_ABS_CZECH_URL`; token `BMF_ABS_CZECH_TOKEN` pro instance s `AUDIOBOOKSHELF_AUTH_TOKEN`). Bez ISBN endpointu — jen titul+autor. Narrator/duration bmf nemodeluje a zahazuje. Zkouší se po databazeknih-podle-ISBN, před jeho hledáním podle titulu. |
+| `--abs-czech URL` | vlastní [audiobookshelf_czech_metadata](https://github.com/stecik/audiobookshelf_czech_metadata) | **Metadata AUDIO vydání pro CZ/SK.** Vaše vlastní instance agreguje ~17 CZ audioknihových e-shopů (Alza, Audiolibrix, Audioteka, Kosmas, Radioteka, Rozhlas, …) za ABS custom-provider API `/search` — nakladatelství/rok/obálku/žánry *audio* vydání, ideální pro audioknihovou knihovnu. Rychlé (bmf nescrapuje třetí strany). | Opt-in přes base URL (`BMF_ABS_CZECH_URL`; token `BMF_ABS_CZECH_TOKEN` pro instance s `AUDIOBOOKSHELF_AUTH_TOKEN`). Bez ISBN endpointu — jen titul+autor. Narrator/duration bmf nemodeluje a zahazuje. Odolné vůči junku: keyword vyhledávání provideru (a jeho Rozhlas/podcast řádky s autorem `?`) vrací volné shody, proto se konfliktní autor vždy odmítá a match bez autora vyžaduje téměř přesný titul (≥ 90). Zkouší se po databazeknih-podle-ISBN, před jeho hledáním podle titulu. |
 | *(vždy zapnuto při povoleném obohacení)* | OpenLibrary | ISBN + vyhledávání podle titulu, mezinárodní vydání | Slabé pokrytí CZ (~10 %) |
 | *(vždy zapnuto při povoleném obohacení)* | Google Books | Dotaz podle ISBN | Často rate-limit bez API klíče |
 
@@ -269,6 +269,13 @@ zapnuto) → vlastní CZ provider podle titulu (pokud je nastaveno URL) →
 databazeknih podle titulu (pokud je zapnuto) → legie.info (pokud je zapnuto)
 → OpenLibrary podle ISBN → Google Books podle
 ISBN → OpenLibrary podle titulu**. První úspěch vyhrává.
+
+**Preference rozlišení obálky**: když provider vrátí stejnou knihu vícekrát
+(více e-shopů ji nabízí) nebo ji znají oba CZ zdroje, bmf naměří rozlišení
+kandidátských obálek průtokovým přečtením hlavičky obrázku (tělo se nikdy
+nestahuje) a ponechá největší — mezizdrojové porovnání běží jen pro knihy s
+cover diagnózou (C11 / MISSING_COVER) a vyměňuje se pouze `cover_url`;
+metadata z vítězného vyhledávání zůstávají.
 
 ```bash
 # Enrich with CZ/SK genres only (no international fallbacks needed for a CZ library)
