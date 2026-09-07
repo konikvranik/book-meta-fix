@@ -262,8 +262,8 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--recheck-ok", "recheck_ok", is_flag=True, help=_("Clear the `verified` flag (see review.yaml / the GUI checkbox) from every book, returning user-confirmed books to normal detection. Undo of a too-hasty OK."))
 @click.option("--output", "-o", type=click.Path(path_type=Path), default=None, help=_("Output review file (default: review.yaml)"))
 @click.option("--llm", "use_llm", is_flag=True, help=_("Enable LLM reconciliation (needs ZAI_API_KEY, BMF_ANTIGRAVITY_CMD, or BMF_LLM_MOCK=1)"))
-@click.option("--llm-provider", "llm_provider", default=None, type=click.Choice(["antigravity", "acp", "agy", "zai", "mock", "off"], case_sensitive=False), help=_("Force the LLM provider branch (default: auto — Antigravity ACP when BMF_ANTIGRAVITY_CMD is set, else Z.AI when ZAI_API_KEY is set). 'antigravity' = the ACP agent is the fast tier and Z.AI (if a key exists) only the paid fallback; 'zai' never uses ACP."))
-@click.option("--antigravity-cmd", "antigravity_cmd", default=None, help=_("Command that launches an Agent Client Protocol agent process (ACP v1 over stdio) — a Google Antigravity subscription as the FAST LLM tier. The official agent is `agy_acp_server.par` from the ACP Registry (release zips need chmod +x); any ACP agent works, e.g. `gemini --acp`. When set, it replaces the glm-flash first attempts of the loop; Z.AI stays the paid fallback if a key exists. Same as BMF_ANTIGRAVITY_CMD."))
+@click.option("--llm-provider", "llm_provider", default=None, type=click.Choice(["antigravity", "acp", "agy", "zai", "mock", "off"], case_sensitive=False), help=_("Force the LLM provider branch (default: auto — Antigravity ACP when an agent is configured or cached, else Z.AI when ZAI_API_KEY is set). 'antigravity' = the ACP agent is the fast tier and Z.AI (if a key exists) only the paid fallback; 'zai' never uses ACP."))
+@click.option("--antigravity-cmd", "antigravity_cmd", default=None, help=_("Command that launches an Agent Client Protocol agent process (ACP v1 over stdio) — a Google Antigravity subscription as the FAST LLM tier. The official agent is `agy_acp_server.par` from the ACP Registry (release zips need chmod +x); any ACP agent works, e.g. `gemini --acp`. 'auto' (or empty) = bmf's SELF-MANAGED agent: the run checks the registry, downloads (~700 MB / 1.9 GB unpacked, into ~/.cache/book-meta-fix/acp) and upgrades it itself; an explicit path manages it manually. Same as BMF_ANTIGRAVITY_CMD."))
 @click.option("--antigravity-model", "antigravity_model", default=None, help=_("Model the ACP agent should serve the fast tier with (matched against the agent's session config options by exact value/name or token family, so 'gemini-flash' picks 'gemini-3.8-flash-high'; empty = the agent's default pick). Default gemini-flash-low — the newest flash at low effort (the quick check wants latency, not deliberation). Same as BMF_ANTIGRAVITY_MODEL."))
 @click.option("--antigravity-fallback", "antigravity_fallback", default=None, type=click.Choice(["agy", "acp", "antigravity", "glm", "zai"], case_sensitive=False), help=_("Who serves the loop's QUALITY stage when the ACP agent is the fast tier: 'agy' (default — a second ACP pool on the fallback model, the whole loop stays on the subscription) or 'glm' (the Z.AI flash+paid loop; needs ZAI_API_KEY). Same as BMF_ANTIGRAVITY_FALLBACK."))
 @click.option("--antigravity-fallback-model", "antigravity_fallback_model", default=None, help=_("Model for the agy quality stage, family-matched like --antigravity-model (empty = the agent's default pick). Default gemini-pro. Ignored with --antigravity-fallback glm. Same as BMF_ANTIGRAVITY_FALLBACK_MODEL."))
@@ -355,6 +355,16 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 			proc_task = progress.add_task(_("processing"), total=total)
 		progress.update(proc_task, completed=done)
 
+	# The ACP agent self-install (first agy run / outdated cache) streams its
+	# ~700 MB download through this task inside the SAME transient bar.
+	acp_task: TaskID | None = None
+
+	def _acp_dl_cb(done: int, total: int) -> None:
+		nonlocal acp_task
+		if acp_task is None:
+			acp_task = progress.add_task(_("Downloading the ACP agent"), total=total or None)
+		progress.update(acp_task, total=total or None, completed=done)
+
 	enricher = None
 	llm_provider = None
 	review_writer = None
@@ -431,7 +441,12 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 				cfg.acp_fallback_provider = antigravity_fallback.lower()
 			if antigravity_fallback_model is not None:
 				cfg.acp_fallback_model = antigravity_fallback_model
-			llm_provider = get_provider(cfg)
+			llm_provider = get_provider(cfg, progress_cb=_acp_dl_cb)
+			# The download task (if any fired) is done — take it out of the bar
+			# before the scan/processing phases take it over.
+			if acp_task is not None:
+				progress.remove_task(acp_task)
+				acp_task = None
 			if llm_provider is None:
 				console.print("[yellow]" + _("--llm given but no provider available (set ZAI_API_KEY, BMF_ANTIGRAVITY_CMD, or BMF_LLM_MOCK=1)") + "[/yellow]")
 			elif llm_provider.name == "antigravity-acp":

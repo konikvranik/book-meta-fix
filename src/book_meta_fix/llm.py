@@ -1219,7 +1219,7 @@ def _build_zai(config: Any, api_key: str) -> ZaiProvider:
 	)
 
 
-def _build_acp(config: Any, zai_fallback: ZaiProvider | None) -> Any:
+def _build_acp(config: Any, zai_fallback: ZaiProvider | None, command: list[str] | None = None) -> Any:
 	"""Construct the Antigravity ACP provider with its QUALITY stage.
 
 	BMF_ANTIGRAVITY_FALLBACK picks who serves the loop's second stage:
@@ -1228,10 +1228,14 @@ def _build_acp(config: Any, zai_fallback: ZaiProvider | None) -> Any:
 	  loop stays on the subscription; a configured Z.AI key is NOT used;
 	  'glm' — the ZaiProvider's flash+paid loop (needs ZAI_API_KEY, reuses
 	  Z.AI's measured rate machinery untouched).
+
+	*command* overrides cfg.acp_command — get_provider passes the RESOLVED
+	argv when the agent came from the self-managed cache (ensure_acp_agent),
+	which is not expressible in the config string.
 	"""
 	from .acp import AntigravityAcpProvider
 
-	command = shlex.split(getattr(config, "acp_command", "") or "")
+	command = command if command is not None else shlex.split(getattr(config, "acp_command", "") or "")
 	# The agent's cwd is informational only (bmf grants no fs access); the
 	# library is the natural choice but must not BREAK the provider when it
 	# is a stale/unmounted path (Popen with a missing cwd fails outright).
@@ -1268,8 +1272,11 @@ def _build_acp(config: Any, zai_fallback: ZaiProvider | None) -> Any:
 	)
 
 
-def get_provider(config: Any) -> LLMProvider | None:  # noqa: ANN001
+def get_provider(config: Any, *, progress_cb: Any = None) -> LLMProvider | None:  # noqa: ANN001
 	"""Construct the configured LLM provider, or None if disabled/unavailable.
+
+	*progress_cb(done, total)* is forwarded to the ACP agent self-install
+	(the implicit ~700 MB download on a cold cache) so the CLI can render it.
 
 	Resolution (BMF_LLM_PROVIDER / --llm-provider picks the branch):
 		- 'off'  → None (the LLM stage is disabled)
@@ -1277,11 +1284,16 @@ def get_provider(config: Any) -> LLMProvider | None:  # noqa: ANN001
 		- 'zai'  → ZaiProvider; requires ZAI_API_KEY, ACP never used
 		- 'acp' (aliases 'antigravity'/'agy') → the Antigravity ACP agent as
 		  the fast tier, with ZaiProvider (if ZAI_API_KEY exists) as the
-		  loop's paid fallback; requires BMF_ANTIGRAVITY_CMD
-		- '' (auto) → the historical chain, extended one step: ZaiProvider
-		  when ZAI_API_KEY is set, EXCEPT the ACP agent takes the fast tier
-		  when BMF_ANTIGRAVITY_CMD is configured (Z.AI drops to fallback);
-		  else BMF_LLM_MOCK=1 → MockProvider; else None
+		  loop's paid fallback; the agent comes from BMF_ANTIGRAVITY_CMD —
+		  an explicit path, or empty/'auto' = bmf's SELF-MANAGED cache:
+		  the run checks the registry and downloads/upgrades the agent
+		  itself (see acp.ensure_acp_agent)
+		- '' (auto) → the historical chain, extended one step: the ACP agent
+		  when one is configured — an explicit path, the 'auto' sentinel
+		  (opt-in to the self-managed cache), or an ALREADY-CACHED install
+		  (kept current; a Z.AI-only user who never opted in never triggers
+		  a download) — else ZaiProvider when ZAI_API_KEY is set; else
+		  BMF_LLM_MOCK=1 → MockProvider; else None
 	"""
 	pref_raw = (getattr(config, "llm_provider", "") or "").strip().lower()
 	pref = PROVIDER_ALIASES.get(pref_raw, pref_raw)
@@ -1302,21 +1314,41 @@ def get_provider(config: Any) -> LLMProvider | None:  # noqa: ANN001
 			return zai
 		log.warning("BMF_LLM_PROVIDER=zai but no ZAI_API_KEY — no LLM provider")
 		return None
-	# 'acp' (explicit) or auto with a configured command. resolve_acp_command
-	# validates the executable and logs WHY it rejected a broken command.
-	from .acp import resolve_acp_command
+	# 'acp' (explicit) or auto with an agent. The command resolves in order:
+	# an explicit BMF_ANTIGRAVITY_CMD path (validated by resolve_acp_command,
+	# which logs WHY it rejected a broken one); else the SELF-MANAGED cache:
+	# an explicit agy opt-in (provider 'acp' or the 'auto' sentinel)
+	# downloads/updates the agent on demand, while plain auto with an EMPTY
+	# command adopts an EXISTING cache (and then keeps it current) but never
+	# downloads for someone who never opted into agy.
+	from .acp import ensure_acp_agent, installed_acp_release, resolve_acp_command
 
-	command = resolve_acp_command(getattr(config, "acp_command", "") or "") if pref in ("", "acp") else None
+	command: list[str] | None = None
+	if pref in ("", "acp"):
+		raw_cmd = (getattr(config, "acp_command", "") or "").strip()
+		if raw_cmd and raw_cmd.lower() != "auto":
+			command = resolve_acp_command(raw_cmd)
+		else:
+			opted_in = pref == "acp" or raw_cmd.lower() == "auto"
+			if opted_in or installed_acp_release() is not None:
+				ensured = ensure_acp_agent(progress_cb=progress_cb)
+				if ensured is not None:
+					command = ensured[0]
+					log.debug("ACP: using the self-managed agent %s (%s)", ensured[1], ensured[0][0])
+			else:
+				log.info(
+					"ACP: no agent configured — set BMF_LLM_PROVIDER=antigravity (or BMF_ANTIGRAVITY_CMD=auto) and bmf will download and keep the official agent itself"
+				)
 	if pref == "acp":
 		if command is None:
-			log.warning("BMF_LLM_PROVIDER=antigravity but no usable ACP agent command — set BMF_ANTIGRAVITY_CMD (e.g. /opt/agy/agy_acp_server.par)")
+			log.warning("BMF_LLM_PROVIDER=antigravity but no usable ACP agent — the self-managed install failed (registry/network?) and no explicit BMF_ANTIGRAVITY_CMD path is set")
 			return None
-		return _build_acp(config, zai)
+		return _build_acp(config, zai, command)
 	# Auto: a configured ACP agent takes the fast tier (Z.AI, when a key
 	# exists, drops to the loop's paid fallback); otherwise the historical
 	# Z.AI → mock → none chain.
 	if command is not None:
-		return _build_acp(config, zai)
+		return _build_acp(config, zai, command)
 	if zai is not None:
 		return zai
 	if os.environ.get("BMF_LLM_MOCK"):

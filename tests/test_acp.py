@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from book_meta_fix import acp as acp_module
 from book_meta_fix.acp import AcpAgentConnection, AcpAgentError, AntigravityAcpProvider, match_model_option
 from book_meta_fix.extractors import ExtractedMeta
 from book_meta_fix.llm import ReconciledMeta, get_provider
@@ -379,8 +380,14 @@ class TestAntigravityAcpProvider:
 class TestGetProviderSelection:
 	@pytest.fixture(autouse=True)
 	def _clean_env(self, monkeypatch):
-		for key in ("ZAI_API_KEY", "BMF_LLM_PROVIDER", "BMF_ANTIGRAVITY_CMD", "BMF_ACP_COMMAND", "BMF_ANTIGRAVITY_MODEL", "BMF_LLM_MOCK"):
+		for key in ("ZAI_API_KEY", "BMF_LLM_PROVIDER", "BMF_ANTIGRAVITY_CMD", "BMF_ACP_COMMAND", "BMF_ANTIGRAVITY_MODEL", "BMF_LLM_MOCK", "BMF_ACP_CACHE_DIR"):
 			monkeypatch.delenv(key, raising=False)
+		# The self-managed-agent seams default to "nothing installed, ensure
+		# refuses": selection tests stay offline and deterministic regardless
+		# of a real ~/.cache install on the dev machine. Individual tests
+		# override these with scripted returns.
+		monkeypatch.setattr(acp_module, "installed_acp_release", lambda *a, **k: None)
+		monkeypatch.setattr(acp_module, "ensure_acp_agent", lambda *a, **k: None)
 
 	def _cfg(self, **kw):
 		from book_meta_fix.config import Config
@@ -453,6 +460,50 @@ class TestGetProviderSelection:
 		assert get_provider(self._cfg(llm_provider="antigravity", acp_command="")) is None
 		assert get_provider(self._cfg(llm_provider="antigravity", acp_command="/nonexistent/agent.par")) is None
 
+	def test_antigravity_uses_the_self_managed_agent(self, monkeypatch, tmp_path):
+		"""Explicit agy + empty command: the run installs/updates the agent
+		itself (ensure_acp_agent) and launches the RESOLVED argv — including
+		the registry's --uid= arg."""
+		binary = tmp_path / "agy_acp_server.par"
+		ensured: list[dict] = []
+		monkeypatch.setattr(
+			acp_module,
+			"ensure_acp_agent",
+			lambda **kw: (ensured.append(kw) or ([str(binary), "--uid="], "9.9.9")),
+		)
+		p = get_provider(self._cfg(llm_provider="antigravity", acp_command=""))
+		assert isinstance(p, AntigravityAcpProvider)
+		assert p.command == [str(binary), "--uid="]
+
+	def test_auto_sentinel_opts_into_self_management(self, monkeypatch, tmp_path):
+		"""BMF_ANTIGRAVITY_CMD=auto is an explicit opt-in: the agent is
+		ensured (downloaded when needed) even in plain auto mode."""
+		monkeypatch.setattr(acp_module, "ensure_acp_agent", lambda **kw: ([str(tmp_path / "agy_acp_server.par")], "1.0"))
+		p = get_provider(self._cfg(acp_command="auto"))
+		assert isinstance(p, AntigravityAcpProvider)
+
+	def test_auto_adopts_and_updates_existing_cache(self, monkeypatch, tmp_path):
+		"""Plain auto + empty command + an ALREADY-CACHED agent → the cache is
+		adopted (and would be kept current); no opt-in needed because the
+		cache itself proves agy usage."""
+		calls: list[str] = []
+		monkeypatch.setattr(acp_module, "installed_acp_release", lambda *a, **k: {"version": "1.0", "args": ["--uid="], "path": tmp_path / "agy.par"})
+		monkeypatch.setattr(acp_module, "ensure_acp_agent", lambda **kw: (calls.append("ensure") or ([str(tmp_path / "agy.par"), "--uid="], "1.0")))
+		p = get_provider(self._cfg(acp_command=""))
+		assert isinstance(p, AntigravityAcpProvider)
+		assert calls == ["ensure"]
+
+	def test_auto_never_downloads_without_optin_or_cache(self, monkeypatch):
+		"""A Z.AI-only user (no agy opt-in, no cache) must never trigger the
+		~700 MB download: ensure is not even called."""
+
+		def forbidden(**kw):
+			raise AssertionError("ensure_acp_agent called without opt-in")
+
+		monkeypatch.setattr(acp_module, "ensure_acp_agent", forbidden)
+		p = get_provider(self._cfg(zai_api_key="k", acp_command=""))
+		assert type(p).__name__ == "ZaiProvider"
+
 	def test_auto_prefers_acp_fast_tier_when_command_set(self):
 		"""Auto + ZAI_API_KEY + configured agent = ACP fast tier; the quality
 		stage follows the fallback knob (agy default)."""
@@ -482,3 +533,159 @@ class TestGetProviderSelection:
 		monkeypatch.delenv("BMF_ANTIGRAVITY_CMD")
 		monkeypatch.setenv("BMF_ACP_COMMAND", f"{sys.executable} -c pass")
 		assert isinstance(get_provider(self._cfg(llm_provider="acp")), AntigravityAcpProvider)
+
+
+class TestEnsureAcpAgent:
+	"""The self-managed agent lifecycle (ensure_acp_agent + install_acp_release).
+
+	Every network seam is faked (registry JSON getter, archive getter) and
+	the "agent" is a tiny in-memory zip — no real download, ever."""
+
+	@pytest.fixture(autouse=True)
+	def _pin_platform(self, monkeypatch):
+		monkeypatch.setattr(acp_module, "_registry_platform", lambda: "linux-x86_64")
+
+	def _registry_json(self, version: str) -> dict:
+		return {
+			"agents": [
+				{
+					"id": "antigravity-acp",
+					"version": version,
+					"distribution": {
+						"binary": {
+							"linux-x86_64": {
+								"archive": "https://example.com/dist.zip",
+								"cmd": "./agy_acp_server.par",
+								"args": ["--uid="],
+							}
+						}
+					},
+				}
+			]
+		}
+
+	@staticmethod
+	def _zip_bytes(payload: str) -> bytes:
+		import io
+		import zipfile
+
+		buf = io.BytesIO()
+		with zipfile.ZipFile(buf, "w") as zf:
+			zf.writestr("agy_acp_server.par", f"#!/bin/sh\n# {payload}\n")
+			zf.writestr("localharness_external", "tool harness bmf never uses")
+		return buf.getvalue()
+
+	class _FakeResp:
+		def __init__(self, data: bytes):
+			self.headers = {"Content-Length": str(len(data))}
+			self._data = data
+
+		def iter_content(self, chunk_size: int = 1024):
+			for i in range(0, len(self._data), chunk_size):
+				yield self._data[i : i + chunk_size]
+
+	def _seed_cache(self, tmp_path, version: str) -> Path:
+		"""A pre-installed release older/newer than whatever the registry says."""
+		d = tmp_path / "cache"
+		d.mkdir(parents=True, exist_ok=True)
+		binary = d / "agy_acp_server.par"
+		binary.write_text(f"#!/bin/sh\n# installed {version}\n")
+		binary.chmod(0o755)
+		(d / "version.json").write_text(json.dumps({"version": version, "args": ["--uid="], "path": str(binary)}))
+		return d
+
+	def test_cold_install_downloads_and_extracts_only_the_server(self, tmp_path):
+		"""Empty cache → the registry release is fetched, the zip streamed,
+		ONLY agy_acp_server.par kept (exec bit set), version.json written with
+		the registry launch args, argv returned."""
+		zip_data = self._zip_bytes("registry 9.9.9")
+		downloads: list[str] = []
+		progress: list[tuple[int, int]] = []
+
+		def fake_get(url, **kw):
+			downloads.append(url)
+			return self._FakeResp(zip_data)
+
+		result = acp_module.ensure_acp_agent(
+			cache_dir=tmp_path / "cache",
+			http_get_json=lambda url: self._registry_json("9.9.9"),
+			http_get=fake_get,
+			progress_cb=lambda done, total: progress.append((done, total)),
+		)
+		assert downloads == ["https://example.com/dist.zip"]
+		assert result is not None
+		argv, version = result
+		assert version == "9.9.9"
+		assert argv == [str(tmp_path / "cache" / "agy_acp_server.par"), "--uid="]
+		binary = tmp_path / "cache" / "agy_acp_server.par"
+		assert binary.is_file() and os.access(binary, os.X_OK)
+		assert "# registry 9.9.9" in binary.read_text()
+		# localharness_external is NOT extracted (bmf denies tools).
+		assert not (tmp_path / "cache" / "localharness_external").exists()
+		sidecar = json.loads((tmp_path / "cache" / "version.json").read_text())
+		assert sidecar["version"] == "9.9.9" and sidecar["args"] == ["--uid="]
+		# Progress reported monotonically, with the total.
+		assert progress and progress[-1][0] == progress[-1][1] == len(zip_data)
+
+	def test_outdated_cache_is_upgraded_atomically(self, tmp_path):
+		"""Installed 1.0.0, registry 2.0.0 → the new binary replaces the old
+		one and version.json follows."""
+		self._seed_cache(tmp_path, "1.0.0")
+
+		result = acp_module.ensure_acp_agent(
+			cache_dir=tmp_path / "cache",
+			http_get_json=lambda url: self._registry_json("2.0.0"),
+			http_get=lambda url, **kw: self._FakeResp(self._zip_bytes("registry 2.0.0")),
+		)
+		assert result is not None
+		argv, version = result
+		assert version == "2.0.0"
+		assert "# registry 2.0.0" in Path(argv[0]).read_text()
+		assert json.loads((tmp_path / "cache" / "version.json").read_text())["version"] == "2.0.0"
+
+	def test_current_cache_is_not_redownloaded(self, tmp_path):
+		"""Installed == registry version → zero archive requests."""
+		self._seed_cache(tmp_path, "9.9.9")
+
+		def no_download(url, **kw):
+			raise AssertionError("re-downloaded an up-to-date agent")
+
+		result = acp_module.ensure_acp_agent(
+			cache_dir=tmp_path / "cache",
+			http_get_json=lambda url: self._registry_json("9.9.9"),
+			http_get=no_download,
+		)
+		assert result is not None and result[1] == "9.9.9"
+
+	def test_offline_keeps_the_installed_agent(self, tmp_path):
+		"""Registry unreachable → the installed agent is served as-is (a run
+		must not lose its LLM tier to a DNS blip)."""
+
+		def offline(url):
+			raise OSError("no network")
+
+		self._seed_cache(tmp_path, "1.0.0")
+		result = acp_module.ensure_acp_agent(cache_dir=tmp_path / "cache", http_get_json=offline)
+		assert result is not None and result[1] == "1.0.0"
+
+	def test_offline_and_cold_returns_none(self, tmp_path):
+		def offline(url):
+			raise OSError("no network")
+
+		assert acp_module.ensure_acp_agent(cache_dir=tmp_path / "cache", http_get_json=offline) is None
+
+	def test_failed_upgrade_keeps_previous_version(self, tmp_path):
+		"""A broken download must not destroy the working install (atomic
+		swap) — the previous version keeps serving."""
+		self._seed_cache(tmp_path, "1.0.0")
+
+		def broken_zip(url, **kw):
+			return self._FakeResp(b"this is not a zip")
+
+		result = acp_module.ensure_acp_agent(
+			cache_dir=tmp_path / "cache",
+			http_get_json=lambda url: self._registry_json("2.0.0"),
+			http_get=broken_zip,
+		)
+		assert result is not None and result[1] == "1.0.0"
+		assert "# installed 1.0.0" in Path(result[0][0]).read_text()

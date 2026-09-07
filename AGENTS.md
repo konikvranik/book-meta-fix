@@ -176,7 +176,16 @@ src/book_meta_fix/
                    BMF_ANTIGRAVITY_FALLBACK: 'agy' (default — a second AntigravityAcpProvider
                    pool on gemini-pro, ONE attempt, llm:high on verify pass / llm:low) or 'glm'
                    (the injected zai_fallback.reconcile_loop(max_flash=1) — Z.AI's measured rate
-                   machinery stays untouched for exactly the calls that need it)
+                   machinery stays untouched for exactly the calls that need it).
+                   SELF-MANAGED agent (no separate install command): ensure_acp_agent — used by
+                   get_provider when BMF_ANTIGRAVITY_CMD is empty/'auto' with an agy opt-in
+                   (provider antigravity or the sentinel) or an existing cache — checks the ACP
+                   Registry, downloads (~700 MB streamed, progress_cb renders it inside analyze's
+                   bar) / upgrades atomically (os.replace; a failed download keeps the previous
+                   version), extracts ONLY the agy_acp_server member (drops localharness_external),
+                   chmod +x, and serves argv incl. the registry's --uid= arg; offline keeps the
+                   installed agent. Cache: ~/.cache/book-meta-fix/acp (BMF_ACP_CACHE_DIR/XDG) with
+                   a version.json sidecar. Plain auto NEVER downloads without opt-in or cache
   review_writer.py streaming review.yaml writer (queue + writer thread)
   review.py        parse review.yaml (multi-doc + legacy list) + update_paths
                    + merge_normalizations (bmf normalize --apply merges C15/C16

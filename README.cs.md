@@ -384,48 +384,53 @@ vmíchala důkazy jedné knihy do druhé), odmítá nástroje i přístup k soub
 (důkazy už jsou v promptu) a odpověď parsuje stejnou JSON záchrannou, jakou
 používá provider Z.AI.
 
-Nastavení:
+Nastavení — krátká cesta (agenta si bmf spravuje sám):
 
-1. Sejměte aktuální release. Verzovaný odkaz je ve strojově čitelném ACP
-   Registry (odtud ho berou editory k auto-instalaci; current verzi tam
-   zjistíte — URL má verzi v sobě):
-
-   ```bash
-   curl -s https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json \
-     | python3 -c 'import json,sys; a=[x for x in json.load(sys.stdin)["agents"] if x["id"]=="antigravity-acp"][0]; print(a["distribution"]["binary"]["linux-x86_64"]["archive"])'
-   ```
-
-   K 2026-09 je to 1.1.1 —
-   `https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-agy_acp_server_1.1.1-linux-x86_64.zip`.
-   Rozbalte kamkoli (např. `/opt/agy/`; cesta je na vás). Uvnitř jsou dva
-   soubory: **`agy_acp_server.par` — server samotný**, ~1,9 GB soběstačná
-   binárka (navzdory příponě ELF; spouští se přímo), a `localharness_external`
-   — harness pro provádění nástrojů, který bmf nepoužívá (nástroje odmítá).
-   Některé archivátory zahodí spustitelný bit:
+1. Optujte se a spusťte; příkaz, který agy potřebuje, si při prvním použití
+   oficiálního agenta sám stáhne a dále ho drží aktuálního (při každém běhu
+   kontrola registru, při novější verzi aktualizace; offline běh používá
+   nainstalovaného):
 
    ```bash
-   unzip agy-acp-server-...-linux-x86_64.zip -d /opt/agy
-   chmod +x /opt/agy/agy_acp_server.par
+   export BMF_LLM_PROVIDER=antigravity   # nebo: BMF_ANTIGRAVITY_CMD=auto
+   bmf analyze --llm
    ```
+
+   První běh streamuje ~700 MB (1,9 GB rozbalené) do
+   `~/.cache/book-meta-fix/acp` — s progress barem uvnitř normálního baru
+   analyze; `XDG_CACHE_HOME` a `BMF_ACP_CACHE_DIR` umístění přesouvají.
+   Uchovává se jen binárka `agy_acp_server` (harness pro nástroje se zahodí
+   — bmf nástroje odmítá), spustitelný bit se nastaví sám a aktualizace
+   vymění binárku atomicky (rozbitý download nikdy nezničí funkční verzi).
+   Prostý auto režim (bez explicitního opt-in do agy) existující cache
+   převezme, ale sám nikdy nestahuje.
 
 2. Jednou se přihlaste interaktivně (např. v Zed nebo v IDE Antigravity) —
    bmf běží bez terminálové relace a OAuth flow neumí. Agent nabízí přihlášení
    Google (osobní), Gemini Enterprise a Gemini API klíč; přihlášení se
-   ukládá a bmfův `authenticate` si poradcí s vypršením sám. Když chybí,
+   ukládá a bmfův `authenticate` si poradí s vypršením sám. Když chybí,
    bmf to řekne a zobrazí stderr agenta (tam přistávají přihlašovací URL).
-3. Nasměrujte bmf na binárku — argument `--uid=` pochází ze spouštěcího
-   specu registru — a pusťte analyze jako obvykle:
+
+Ruční cesta — vlastní binárka, žádná cache, žádné auto-update:
 
 ```bash
-export BMF_ANTIGRAVITY_CMD="/opt/agy/agy_acp_server.par --uid="   # nebo --antigravity-cmd
+# aktuální verzovaný odkaz ze strojově čitelného registru (zdroj editorů):
+curl -s https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json \
+  | python3 -c 'import json,sys; a=[x for x in json.load(sys.stdin)["agents"] if x["id"]=="antigravity-acp"][0]; print(a["distribution"]["binary"]["linux-x86_64"]["archive"])'
+# k 2026-09: .../agy-acp-server-agy_acp_server_1.1.1-linux-x86_64.zip —
+# uvnitř je agy_acp_server.par = server samotný (~1,9 GB soběstačný ELF;
+# chmod +x, když archivátor zahodí bit; localharness_external není potřeba).
+# Spouštěcí spec registru přidává argument --uid=:
+export BMF_ANTIGRAVITY_CMD="/opt/agy/agy_acp_server.par --uid="
 bmf analyze --llm
 ```
 
 Stejně tak funguje jakýkoli ACP agent — např. `BMF_ANTIGRAVITY_CMD="gemini
 --acp"` (ACP režim Gemini CLI, samostatné Google přihlášení). Výběr provideru
-(`BMF_LLM_PROVIDER` / `--llm-provider`): **auto** (výchozí) použije ACP agenta
-jako rychlou vrstvu, kdykoli je příkaz nastaven; **`zai`** ACP nikdy nedotkne;
-**`antigravity`/`acp`/`agy`** větev ACP vynutí; **`off`** fázi LLM vypne.
+(`BMF_LLM_PROVIDER` / `--llm-provider`): **auto** (výchozí) použije ACP agenta,
+když je nastaven nebo už nakešován; **`zai`** ACP nikdy nedotkne;
+**`antigravity`/`acp`/`agy`** větev ACP vynutí (agenta spravuje samostatně —
+včetně downloadu); **`off`** fázi LLM vypne.
 
 **Obě fáze smyčky** mají výchozí na předplatném: rychlá kontrola běží na
 **gemini-flash** a kvalitní záloha na **druhém ACP poolu s gemini-pro** (názvy
@@ -439,7 +444,8 @@ neřeknete jinak.
 
 | Volba | CLI | Env | Význam |
 |---|---|---|---|
-| Příkaz agenta | `--antigravity-cmd` | `BMF_ANTIGRAVITY_CMD` (alias `BMF_ACP_COMMAND`) | spouštěný ACP agentní proces včetně argumentu `--uid=` (holá jména se hledají na PATH) |
+| Příkaz agenta | `--antigravity-cmd` | `BMF_ANTIGRAVITY_CMD` (alias `BMF_ACP_COMMAND`) | explicitní cesta (+ `--uid=`) = ruční správa; `auto`/prázdné = samosprávná cache (download + auto-update; viz Nastavení) |
+| Umístění cache | — | `BMF_ACP_CACHE_DIR` (nebo `XDG_CACHE_HOME`) | kde bydlí samosprávný agent (výchozí `~/.cache/book-meta-fix/acp`) |
 | Model rychlé vrstvy | `--antigravity-model` | `BMF_ANTIGRAVITY_MODEL` (alias `BMF_ACP_MODEL`) | párovaný po rodině; výchozí `gemini-flash-low` (nejnovější flash na low effort — rychlost před dumováním), prázdné = výchozí volba agenta |
 | Provider zálohy | `--antigravity-fallback` | `BMF_ANTIGRAVITY_FALLBACK` (alias `BMF_ACP_FALLBACK`) | `agy` (výchozí — druhý ACP pool na fallback modelu) nebo `glm` (smyčka flash+placené Z.AI; potřebuje klíč) |
 | Model zálohy | `--antigravity-fallback-model` | `BMF_ANTIGRAVITY_FALLBACK_MODEL` (alias `BMF_ACP_FALLBACK_MODEL`) | jen pro zálohu agy; výchozí `gemini-pro`, párováno po rodině |

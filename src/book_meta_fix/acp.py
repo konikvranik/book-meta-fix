@@ -47,6 +47,7 @@ import subprocess
 import threading
 from collections import deque
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -862,3 +863,249 @@ class AntigravityAcpProvider:
 			last_result.confidence = "low"
 			return last_result, "llm:low"
 		return None, ""
+
+
+# ---------------------------------------------------------------------------
+# Auto-install of the official agent (ACP Registry)
+# ---------------------------------------------------------------------------
+
+# The registry's machine-readable index — the same source editors use for
+# auto-install. It carries the CURRENT versioned archive URL per platform, so
+# bmf never needs a hardwired version.
+ACP_REGISTRY_URL = "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json"
+ACP_REGISTRY_ID = "antigravity-acp"
+
+# version.json sidecar of an auto-installed release.
+ACP_VERSION_FILE = "version.json"
+
+# The download is ~700 MB zipped / ~1.9 GB unpacked — bmf refuses to start it
+# with less than this free (zip + unpacked + headroom for the atomic replace).
+ACP_INSTALL_MIN_FREE_BYTES = 4 * 1024**3
+
+
+def acp_cache_dir() -> Path:
+	"""Where bmf keeps the auto-installed agent: ~/.cache/book-meta-fix/acp
+	(XDG_CACHE_HOME respected); BMF_ACP_CACHE_DIR overrides."""
+	if override := os.environ.get("BMF_ACP_CACHE_DIR"):
+		return Path(override).expanduser()
+	base = os.environ.get("XDG_CACHE_HOME") or "~/.cache"
+	return Path(base).expanduser() / "book-meta-fix" / "acp"
+
+
+def _registry_platform() -> str | None:
+	"""Map this machine onto a registry distribution key (linux-x86_64, …)."""
+	import platform
+
+	system = platform.system().lower()
+	machine = platform.machine().lower()
+	if machine in ("x86_64", "amd64"):
+		arch = "x86_64"
+	elif machine in ("aarch64", "arm64"):
+		arch = "aarch64"
+	else:
+		return None
+	key = f"{system}-{arch}"
+	return key if system in ("linux", "darwin", "windows") else None
+
+
+def fetch_registry_release(*, http_get_json: Callable[..., Any] | None = None) -> dict[str, Any]:
+	"""The CURRENT registry release for this platform.
+
+	Returns {"version", "archive", "cmd", "args"} — *args* is the launch
+	argument list the registry prescribes (linux: ``--uid=``). *http_get_json*
+	is the no-network test seam (called with the registry URL). Raises
+	AcpAgentError on network, schema, or platform failure.
+	"""
+	if http_get_json is None:
+		import requests
+
+		def http_get_json(url: str) -> Any:  # noqa: F811 - local seam default
+			resp = requests.get(url, timeout=20)
+			resp.raise_for_status()
+			return resp.json()
+
+	key = _registry_platform()
+	if key is None:
+		raise AcpAgentError("unsupported platform for the ACP registry (no distribution matches this system/arch)")
+	try:
+		data = http_get_json(ACP_REGISTRY_URL)
+		agent = next(a for a in data.get("agents", []) if a.get("id") == ACP_REGISTRY_ID)
+		dist = agent["distribution"]["binary"][key]
+	except Exception as e:  # noqa: BLE001 - any shape/network problem is one error
+		raise AcpAgentError(f"cannot read the ACP registry ({e})") from e
+	return {
+		"version": str(agent.get("version") or ""),
+		"archive": str(dist.get("archive") or ""),
+		"cmd": str(dist.get("cmd") or ""),
+		"args": [str(a) for a in dist.get("args") or []],
+	}
+
+
+def _version_tuple(v: str) -> tuple[int, ...]:
+	return tuple(int(p) for p in re.findall(r"\d+", v)[:3]) or (0,)
+
+
+def installed_acp_release(cache_dir: Path | None = None) -> dict[str, Any] | None:
+	"""The auto-installed release: {"version", "args", "path"} or None.
+
+	Stale sidecars (binary deleted / exec bit lost / unreadable json)
+	degrade to None — the caller then treats it as not-installed."""
+	d = (cache_dir or acp_cache_dir())
+	sidecar = d / ACP_VERSION_FILE
+	binary = d / "agy_acp_server.par"
+	try:
+		info = json.loads(sidecar.read_text(encoding="utf-8"))
+	except (OSError, json.JSONDecodeError):
+		return None
+	if not isinstance(info, dict) or not info.get("version"):
+		return None
+	bin_path = Path(info.get("path") or binary)
+	if not (bin_path.is_file() and os.access(bin_path, os.X_OK)):
+		return None
+	return {"version": str(info["version"]), "args": [str(a) for a in info.get("args") or []], "path": bin_path}
+
+
+def install_acp_release(
+	release: dict[str, Any] | None = None,
+	*,
+	cache_dir: Path | None = None,
+	force: bool = False,
+	progress_cb: Callable[[int, int], None] | None = None,
+	http_get_json: Callable[..., Any] | None = None,
+	http_get: Callable[..., Any] | None = None,
+) -> tuple[Path, str, bool]:
+	"""Ensure the CURRENT official agent is installed in the cache.
+
+	Returns (binary_path, version, downloaded) — downloaded=False when the
+	installed version already matched and *force* was not set. The zip is
+	streamed to a temp file, ONLY the ``agy_acp_server.*`` member is
+	extracted (localharness_external — the tool-execution harness bmf never
+	uses — stays out, saving ~130 MB), the exec bit is set, the binary is
+	moved into place with os.replace (an atomic same-fs swap, so a failed
+	run never destroys the previous version), and version.json records the
+	version + registry launch args.
+
+	*http_get_json* / *http_get* are the no-network test seams.
+	"""
+	if release is None:
+		release = fetch_registry_release(http_get_json=http_get_json)
+	version = release.get("version") or ""
+	archive = release.get("archive") or ""
+	cmd = release.get("cmd") or "./agy_acp_server.par"
+	args = list(release.get("args") or [])
+	if not archive:
+		raise AcpAgentError("the ACP registry entry carries no archive URL")
+	# The member to extract = the registry cmd's basename (agy_acp_server.par
+	# on posix, agy_acp_server.exe on windows).
+	member_name = os.path.basename(cmd.replace("\\", "/"))
+
+	d = (cache_dir or acp_cache_dir())
+	d.mkdir(parents=True, exist_ok=True)
+	installed = installed_acp_release(d)
+	if installed and not force and _version_tuple(installed["version"]) >= _version_tuple(version):
+		return installed["path"], installed["version"], False
+
+	free = shutil.disk_usage(d).free
+	if free < ACP_INSTALL_MIN_FREE_BYTES:
+		log.warning(
+			"ACP install: only %.1f GB free under %s (the download needs ~2.7 GB transiently) — proceeding anyway",
+			free / 1024**3,
+			d,
+		)
+
+	if http_get is None:
+		import requests
+
+		def http_get(url: str) -> Any:  # noqa: F811 - local seam default
+			return requests.get(url, stream=True, timeout=(10, 600))
+
+	zip_path = d / f".{member_name}.download.zip"
+	try:
+		resp = http_get(archive)
+		total = 0
+		try:
+			total = int(resp.headers.get("Content-Length") or 0)
+		except (TypeError, ValueError):
+			total = 0
+		done = 0
+		with open(zip_path, "wb") as fh:
+			for chunk in resp.iter_content(chunk_size=1024 * 1024):
+				if not chunk:
+					continue
+				fh.write(chunk)
+				done += len(chunk)
+				if progress_cb is not None:
+					progress_cb(done, total)
+		import zipfile
+
+		try:
+			with zipfile.ZipFile(zip_path) as zf:
+				matches = [n for n in zf.namelist() if os.path.basename(n) == member_name]
+				if not matches:
+					raise AcpAgentError(f"the downloaded archive carries no {member_name} (members: {', '.join(zf.namelist())})")
+				new_bin = d / f".{member_name}.new"
+				with zf.open(matches[0]) as src, open(new_bin, "wb") as dst:
+					shutil.copyfileobj(src, dst, 1024 * 1024)
+				os.chmod(new_bin, 0o755)
+				final = d / member_name
+				os.replace(new_bin, final)
+		except AcpAgentError:
+			raise
+		except Exception as e:  # noqa: BLE001 - a truncated/garbled download is one install error
+			raise AcpAgentError(f"processing the downloaded archive failed: {e}") from e
+		sidecar = {
+			"version": version,
+			"archive": archive,
+			"args": args,
+			"path": str(final),
+		}
+		(d / ACP_VERSION_FILE).write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
+	finally:
+		zip_path.unlink(missing_ok=True)
+	log.info("ACP: installed the official agent %s -> %s", version, final)
+	return final, version, True
+
+
+def ensure_acp_agent(
+	*,
+	progress_cb: Callable[[int, int], None] | None = None,
+	http_get_json: Callable[..., Any] | None = None,
+	http_get: Callable[..., Any] | None = None,
+	cache_dir: Path | None = None,
+) -> tuple[list[str], str] | None:
+	"""Self-managed agent lifecycle for commands that need agy: ensure the
+	cached copy EXISTS and MATCHES the registry's current version,
+	downloading/installing/upgrading on demand (there is no separate install
+	command — the run that wants the agent fetches it itself).
+
+	Returns (argv, version) — argv includes the registry-prescribed launch
+	args (linux: ``--uid=``) — or None when nothing is installed AND the
+	registry cannot be reached (a genuinely cold offline machine).
+
+	Offline resilience: an installed agent is used AS-IS when the registry
+	check fails (a warning says so) — a run must not lose its LLM tier to a
+	DNS blip. The ~700 MB download streams through *progress_cb(done, total)*
+	when provided; *http_get_json* / *http_get* are the no-network test seams.
+	"""
+	installed = installed_acp_release(cache_dir)
+	try:
+		release = fetch_registry_release(http_get_json=http_get_json)
+	except Exception as e:  # noqa: BLE001 - advisory lookup, never fatal here
+		if installed is not None:
+			log.warning("ACP: cannot check the registry for updates (%s) — using the installed agent %s as-is", e, installed["version"])
+			return [str(installed["path"]), *installed["args"]], installed["version"]
+		log.warning("ACP: cannot reach the registry and no cached agent is installed (%s)", e)
+		return None
+	if installed is not None and _version_tuple(installed["version"]) >= _version_tuple(release["version"]):
+		return [str(installed["path"]), *installed["args"]], installed["version"]
+	try:
+		path, version, _downloaded = install_acp_release(release, cache_dir=cache_dir, force=False, progress_cb=progress_cb, http_get_json=http_get_json, http_get=http_get)
+	except AcpAgentError as e:
+		# The swap is atomic — a failed upgrade leaves the previous version
+		# usable, so prefer it over nothing.
+		if installed is not None:
+			log.error("ACP: agent upgrade failed (%s) — keeping the installed %s", e, installed["version"])
+			return [str(installed["path"]), *installed["args"]], installed["version"]
+		log.error("ACP: agent install failed (%s)", e)
+		return None
+	return [str(path), *(release.get("args") or [])], version

@@ -376,29 +376,26 @@ bleed one book's evidence into the next), denies tools and file access (the
 evidence is already in the prompt), and parses the answer with the same JSON
 salvage the Z.AI provider uses.
 
-Setup:
+Setup — the short way (bmf manages the agent itself):
 
-1. Get the current release. The versioned link lives in the machine-readable
-   ACP Registry (this is what editors use for auto-install; check it for the
-   current version — the URL embeds it):
-
-   ```bash
-   curl -s https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json \
-     | python3 -c 'import json,sys; a=[x for x in json.load(sys.stdin)["agents"] if x["id"]=="antigravity-acp"][0]; print(a["distribution"]["binary"]["linux-x86_64"]["archive"])'
-   ```
-
-   As of 2026-09 that is 1.1.1 —
-   `https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-agy_acp_server_1.1.1-linux-x86_64.zip`.
-   Unzip it anywhere (e.g. `/opt/agy/`; the path is yours to pick). Inside
-   are two files: **`agy_acp_server.par` — the server itself**, a ~1.9 GB
-   self-contained binary (an ELF despite the extension; run it directly),
-   and `localharness_external` — a tool-execution harness bmf never uses
-   (tools are denied). Some archive managers drop the executable bit:
+1. Opt in and run; the command that needs agy downloads the official agent
+   itself on first use and keeps it current afterwards (registry check each
+   run, upgrade when a newer version appears; offline runs keep the
+   installed one):
 
    ```bash
-   unzip agy-acp-server-...-linux-x86_64.zip -d /opt/agy
-   chmod +x /opt/agy/agy_acp_server.par
+   export BMF_LLM_PROVIDER=antigravity   # or: BMF_ANTIGRAVITY_CMD=auto
+   bmf analyze --llm
    ```
+
+   The first run streams ~700 MB (1.9 GB unpacked) into
+   `~/.cache/book-meta-fix/acp` — shown as a progress bar inside the normal
+   analyze bar; `XDG_CACHE_HOME` and `BMF_ACP_CACHE_DIR` relocate it. Only
+   the `agy_acp_server` binary is kept (the bundled tool-execution harness is
+   dropped — bmf denies tools), the exec bit is set automatically, and an
+   upgrade swaps the binary atomically (a failed download never destroys the
+   working version). Plain auto mode (no explicit agy opt-in) adopts an
+   EXISTING cache but never downloads on its own.
 
 2. Log in once interactively (e.g. in Zed or the Antigravity IDE) — bmf is
    headless and cannot run an OAuth flow. The agent offers `Log in with
@@ -407,20 +404,26 @@ Setup:
    missing, bmf says so and surfaces the agent's stderr (where login URLs
    land).
 
-3. Point bmf at the binary — the `--uid=` argument comes from the registry's
-   launch spec — and run analyze normally:
+The manual way — pin your own binary, no cache, no auto-updates:
 
 ```bash
-export BMF_ANTIGRAVITY_CMD="/opt/agy/agy_acp_server.par --uid="   # or --antigravity-cmd
+# current versioned link from the machine-readable registry (what editors use):
+curl -s https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json \
+  | python3 -c 'import json,sys; a=[x for x in json.load(sys.stdin)["agents"] if x["id"]=="antigravity-acp"][0]; print(a["distribution"]["binary"]["linux-x86_64"]["archive"])'
+# as of 2026-09: .../agy-acp-server-agy_acp_server_1.1.1-linux-x86_64.zip —
+# inside, agy_acp_server.par IS the server (a ~1.9 GB self-contained ELF;
+# chmod +x when your archive manager drops the bit; localharness_external is
+# not needed). The registry's launch spec adds the --uid= argument:
+export BMF_ANTIGRAVITY_CMD="/opt/agy/agy_acp_server.par --uid="
 bmf analyze --llm
 ```
 
 Any ACP agent works the same way — e.g. `BMF_ANTIGRAVITY_CMD="gemini --acp"`
 (Gemini CLI's ACP mode, a separate Google login). Provider selection
 (`BMF_LLM_PROVIDER` / `--llm-provider`): **auto** (default) uses the ACP agent
-as the fast tier whenever the command is configured, demoting Z.AI to the
-fallback; **`zai`** never touches ACP; **`antigravity`/`acp`/`agy`** forces
-the ACP branch; **`off`** disables the LLM stage.
+when one is configured or already cached; **`zai`** never touches ACP;
+**`antigravity`/`acp`/`agy`** forces the ACP branch (and self-manages the
+agent download); **`off`** disables the LLM stage.
 
 **The loop's two stages** both default to the subscription: the quick check
 runs on **gemini-flash** and the quality fallback on a **second ACP pool with
@@ -434,7 +437,8 @@ loop still stays on Antigravity unless you say otherwise.
 
 | Knob | CLI | Env | Meaning |
 |---|---|---|---|
-| Agent command | `--antigravity-cmd` | `BMF_ANTIGRAVITY_CMD` (alias `BMF_ACP_COMMAND`) | the ACP agent process to launch, including the `--uid=` arg (bare names are looked up on PATH) |
+| Agent command | `--antigravity-cmd` | `BMF_ANTIGRAVITY_CMD` (alias `BMF_ACP_COMMAND`) | explicit path (+ `--uid=` arg) = manual management; `auto`/empty = the self-managed cache (download + auto-update; see Setup) |
+| Cache location | — | `BMF_ACP_CACHE_DIR` (or `XDG_CACHE_HOME`) | where the self-managed agent lives (default `~/.cache/book-meta-fix/acp`) |
 | Fast-tier model | `--antigravity-model` | `BMF_ANTIGRAVITY_MODEL` (alias `BMF_ACP_MODEL`) | family-matched; `gemini-flash-low` default (newest flash at low effort — latency over deliberation), empty = the agent's default |
 | Fallback provider | `--antigravity-fallback` | `BMF_ANTIGRAVITY_FALLBACK` (alias `BMF_ACP_FALLBACK`) | `agy` (default — second ACP pool on the fallback model) or `glm` (Z.AI flash+paid loop; needs a key) |
 | Fallback model | `--antigravity-fallback-model` | `BMF_ANTIGRAVITY_FALLBACK_MODEL` (alias `BMF_ACP_FALLBACK_MODEL`) | agy fallback only; `gemini-pro` default, family-matched |
