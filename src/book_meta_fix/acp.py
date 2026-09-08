@@ -26,6 +26,13 @@ already in the prompt, and a library-repair tool must never run inside the
 model's sandbox), and permission requests are answered "cancelled" so an
 agent that insists on a tool simply answers without it. JSON in the reply is
 salvaged by the same ``_parse_llm_json`` pipeline the Z.AI provider uses.
+Google's prompt-level safety filter sometimes answers with boilerplate
+INSTEAD of a model turn (the verbatim first-page text of a few books trips
+the Prohibited Use classifier); that is detected and answered with ONE
+retry on the same evidence WITHOUT the page text — the one prompt part bmf
+does not author — and a still-blocked prompt gives up without burning the
+quality stage on the same wall (a GLM fallback is a different provider with
+a different filter and still runs).
 
 The provider implements the full ``reconcile_loop`` contract: fast attempts
 go to the agent, and the QUALITY stage is configurable — by default a SECOND
@@ -80,6 +87,28 @@ EXECUTION RULES for this request (highest priority):
   directories; the working directory is UNRELATED to this task.
 - No preamble, no explanation, no step-by-step reasoning out loud.
 - Reply IMMEDIATELY with the JSON object and nothing else."""
+
+# Google's prompt-level safety filter answers INSTEAD of a model turn with
+# this boilerplate (measured 2026-09-08 on a CZ sci-fi/fantasy library: the
+# verbatim first-page text of a few books trips the Prohibited Use
+# classifier). It is deterministic per prompt — a blocked prompt blocks
+# again on every retry and on both Gemini pools — so the reaction is
+# EVIDENCE REDUCTION, not retries: drop the page text (the one prompt part
+# bmf does not author) and try once; a still-blocked prompt gives up
+# without burning the quality stage on the same wall.
+PROMPT_BLOCK_MARKERS = (
+	"could not be submitted",
+	"prohibited use policy",
+)
+PROMPT_BLOCKED_ERROR = "prompt blocked by Google's safety filter"
+
+
+def _reply_is_prompt_blocked(reply: str) -> bool:
+	"""True when the agent's answer is Google's prompt-block boilerplate
+	rather than a model answer. Both boilerplate phrases must match — a
+	model quoting one of them alone in prose stays a model answer."""
+	low = reply.lower()
+	return all(marker in low for marker in PROMPT_BLOCK_MARKERS)
 
 
 class AcpAgentError(Exception):
@@ -977,6 +1006,21 @@ class AntigravityAcpProvider:
 			return None, self._disabled
 		from .llm import SYSTEM_PROMPT, _parse_llm_json, build_user_prompt
 
+		def _send_counted(text: str) -> str:
+			"""One prompt with the transport-failure bookkeeping (consecutive
+			failures disable the fast tier for the run) — shared by both
+			prompt variants below."""
+			try:
+				reply = self._send_prompt(text)
+			except AcpAgentError as e:
+				self._transport_failures += 1
+				if self._transport_failures >= self.MAX_TRANSPORT_FAILURES:
+					self._disabled = f"Antigravity ACP disabled for this run after {self._transport_failures} consecutive failures: {e}"
+					log.warning("%s", self._disabled)
+				raise
+			self._transport_failures = 0
+			return reply
+
 		self._bucket.acquire()
 		# ACP has no system role — the metadata-repair contract travels as one
 		# message. Reusing the exact Z.AI system prompt keeps the two tiers'
@@ -984,16 +1028,28 @@ class AntigravityAcpProvider:
 		# preamble rides FIRST (see ACP_NO_TOOLS_PREAMBLE): the addressee is
 		# an autonomous agent that would otherwise tool-explore its way
 		# through ~30 model round-trips per book.
-		text = ACP_NO_TOOLS_PREAMBLE + "\n\n" + SYSTEM_PROMPT + "\n\n---\n\n" + build_user_prompt(evidence)
+		def _compose(ev: dict[str, Any]) -> str:
+			return ACP_NO_TOOLS_PREAMBLE + "\n\n" + SYSTEM_PROMPT + "\n\n---\n\n" + build_user_prompt(ev)
+
 		try:
-			reply = self._send_prompt(text)
+			reply = _send_counted(_compose(evidence))
 		except AcpAgentError as e:
-			self._transport_failures += 1
-			if self._transport_failures >= self.MAX_TRANSPORT_FAILURES:
-				self._disabled = f"Antigravity ACP disabled for this run after {self._transport_failures} consecutive failures: {e}"
-				log.warning("%s", self._disabled)
 			return None, str(e)
-		self._transport_failures = 0
+		if _reply_is_prompt_blocked(reply):
+			# The verbatim page text is the one prompt part whose content bmf
+			# does not control — drop it and try once more before giving up.
+			# A blocked prompt is deterministic, so this is not a retry on the
+			# same text but a genuinely different (smaller) prompt.
+			label = (evidence.get("current") or {}).get("title")
+			log.warning("ACP: prompt blocked by Google's safety filter; retrying without the page text (title: %r)", label)
+			sanitized = {k: v for k, v in evidence.items() if k != "first_page_text"}
+			try:
+				reply = _send_counted(_compose(sanitized))
+			except AcpAgentError as e:
+				return None, str(e)
+			if _reply_is_prompt_blocked(reply):
+				log.warning("ACP: prompt still blocked by Google's safety filter without the page text; LLM skipped (title: %r)", label)
+				return None, PROMPT_BLOCKED_ERROR
 		result = _parse_llm_json(reply, model="antigravity-acp")
 		if result is None:
 			return None, "invalid JSON in ACP agent reply"
@@ -1073,6 +1129,7 @@ class AntigravityAcpProvider:
 		verifier_fn = verifier or _default_verifier
 		last_result = None
 		fb = ""
+		blocked = False
 		for attempt in range(max_flash):
 			attempt_ev = dict(evidence)
 			if fb:
@@ -1089,7 +1146,15 @@ class AntigravityAcpProvider:
 				log.debug("ACP fast attempt %d failed verify: %s", attempt + 1, new_fb[:120])
 				continue
 			log.debug("ACP fast attempt %d failed: %s", attempt + 1, error)
+			blocked = error == PROMPT_BLOCKED_ERROR
 			break
+		if blocked and self._acp_fallback is not None:
+			# The quality stage is the SAME Gemini API behind the SAME prompt
+			# filter and _run_fallback feeds it the SAME evidence (often with
+			# an even LONGER page text) — a prompt blocked after the page-text
+			# reduction blocks there too. Only the GLM fallback below (a
+			# different provider, a different filter) still gets a chance.
+			return None, ""
 		result, src = self._run_fallback(evidence, extracted, verifier_fn, fb)
 		if result is not None:
 			return result, src

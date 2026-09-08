@@ -17,11 +17,28 @@ from pathlib import Path
 import pytest
 
 from book_meta_fix import acp as acp_module
-from book_meta_fix.acp import AcpAgentConnection, AcpAgentError, AntigravityAcpProvider, match_model_option
+from book_meta_fix.acp import (
+	PROMPT_BLOCKED_ERROR,
+	AcpAgentConnection,
+	AcpAgentError,
+	AntigravityAcpProvider,
+	match_model_option,
+)
 from book_meta_fix.extractors import ExtractedMeta
 from book_meta_fix.llm import ReconciledMeta, get_provider
 
 FIXTURE = Path(__file__).parent / "fixtures" / "acp_mock_agent.py"
+
+# Google's prompt-level safety-filter boilerplate — the verbatim reply the
+# agent surfaces when the Prohibited Use classifier stops the prompt BEFORE
+# any model turn (measured 2026-09-08 on a CZ sci-fi/fantasy library).
+BLOCK_REPLY = (
+	"The prompt could not be submitted. The prompt contains sensitive words "
+	"that violate Google's [Generative AI Prohibited Use policy]"
+	"(https://policies.google.com/terms/generative-ai/use-policy). "
+	"Try rephrasing the prompt. If you think this was an error, "
+	"[send feedback](https://ai.google.dev/gemini-api/docs/troubleshooting)."
+)
 
 
 def agent_command(mode: str, **extra_env: str) -> list[str]:
@@ -222,6 +239,89 @@ class TestAntigravityAcpProvider:
 		assert r is not None
 		assert r.title == "Rok 1984"
 		assert r.authors == ["George Orwell"]
+
+	def test_prompt_block_retries_without_page_text(self):
+		"""Google's filter answers INSTEAD of a model turn with boilerplate
+		(verbatim first-page text of a few books trips it). The prompt is
+		deterministic — a blocked prompt blocks forever — so the reaction is
+		EVIDENCE REDUCTION, not retries: one more prompt WITHOUT the page
+		text, the one prompt part bmf does not author."""
+		seen: list[str] = []
+
+		def fake(text: str) -> str:
+			seen.append(text)
+			return BLOCK_REPLY if len(seen) == 1 else '{"title": "Oči", "authors": ["J"], "confidence": "high"}'
+
+		p = make_provider()
+		p._send_prompt = fake
+		result, error = p._call({"current": {"title": "Oči"}, "first_page_text": "BYLA-JEDNOU-MARKER"})
+		assert error is None
+		assert result is not None and result.title == "Oči"
+		assert len(seen) == 2
+		assert "BYLA-JEDNOU-MARKER" in seen[0]
+		assert "BYLA-JEDNOU-MARKER" not in seen[1]
+
+	def test_prompt_block_without_page_text_gives_up_with_marker(self):
+		"""Still blocked without the page text → a DISTINCT error marker
+		(not "invalid JSON", which used to log the boilerplate as a broken
+		model answer), and exactly one reduction retry — no herding of the
+		fallback pool with the same blocked content."""
+		seen: list[str] = []
+
+		def fake(text: str) -> str:
+			seen.append(text)
+			return BLOCK_REPLY
+
+		p = make_provider()
+		p._send_prompt = fake
+		result, error = p._call({"current": {"title": "X"}, "first_page_text": "BYLA-JEDNOU-MARKER"})
+		assert result is None
+		assert error == PROMPT_BLOCKED_ERROR
+		assert len(seen) == 2
+		assert "BYLA-JEDNOU-MARKER" in seen[0]
+		assert "BYLA-JEDNOU-MARKER" not in seen[1]
+
+	def test_hard_block_skips_the_agy_quality_stage(self):
+		"""A prompt blocked even without the page text would block on the
+		SECOND ACP pool too (same Gemini API, same prompt filter, same
+		evidence) — the loop skips it instead of burning its calls on the
+		same wall."""
+		fb_seen: list[str] = []
+
+		def fb_fake(text: str) -> str:
+			fb_seen.append(text)
+			return '{"title": "Pro answer", "authors": ["A"], "confidence": "high"}'
+
+		fb = make_provider()
+		fb._send_prompt = fb_fake
+		p = make_provider()
+		p._send_prompt = lambda text: BLOCK_REPLY
+		p._acp_fallback = fb
+		result, src = p.reconcile_loop({"current": {}, "first_page_text": "BYLA-JEDNOU-MARKER"})
+		assert result is None
+		assert src == ""
+		assert fb_seen == []
+
+	def test_hard_block_still_runs_the_glm_fallback(self):
+		"""Z.AI is a DIFFERENT provider with a DIFFERENT filter — a prompt
+		Google refuses may still be served there, so the GLM fallback runs
+		(only the same-family agy stage is skipped)."""
+		calls: list[dict] = []
+
+		class StubZai:
+			fallback_model = "glm-5.3"
+
+			def reconcile_loop(self, evidence, extracted=None, *, max_flash=2, verifier=None):
+				calls.append({"max_flash": max_flash})
+				return ReconciledMeta(title="From Z.AI", authors=["A"], confidence="high"), "llm:high"
+
+		p = make_provider()
+		p._send_prompt = lambda text: BLOCK_REPLY
+		p._zai_fallback = StubZai()
+		result, src = p.reconcile_loop({"current": {}})
+		assert calls == [{"max_flash": 1}]
+		assert src == "llm:high"
+		assert result.title == "From Z.AI"
 
 	def test_system_prompt_is_in_the_message(self):
 		"""ACP has no system role — the metadata-repair contract must travel

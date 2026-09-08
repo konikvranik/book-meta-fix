@@ -15,6 +15,7 @@ htmlcov/
 .idea/
 .vscode/
 .zcode/
+.sessions/
 
 # BMF runtime artifacts
 bmf_cache.db

@@ -169,6 +169,16 @@ src/book_meta_fix/
                    and every session pins a ~150 MB localharness child until the server
                    process exits — graceful close reaps the children (verified: no orphans),
                    so recycling bounds the leak per pool slot.
+                   Google's PROMPT-LEVEL safety filter answers with Prohibited Use
+                   boilerplate INSTEAD of a model turn (the verbatim first-page text
+                   of a few CZ sci-fi/fantasy books trips it; deterministic per
+                   prompt — a blocked prompt blocks on every retry and on both Gemini
+                   pools): detected in _call via PROMPT_BLOCK_MARKERS, answered with
+                   ONE retry on the same evidence WITHOUT first_page_text (the one
+                   prompt part bmf does not author), and a still-blocked prompt
+                   returns the PROMPT_BLOCKED_ERROR marker so reconcile_loop SKIPS
+                   the agy quality stage (same filter, same evidence) while a GLM
+                   fallback (different provider, different filter) still runs.
                    Auth handled once via the -32000 → authenticate dance (terminal-type
                    logins are refused with guidance — headless bmf cannot run them); model chosen
                    through session/set_config_option (category "model", best-effort). Model names
