@@ -147,6 +147,18 @@ class ReviewWriter:
 		"""
 		self._queue.put(result)
 
+	def decided_ids(self) -> set:
+		"""Uuids of prior entries the user (or a pre-fill) already decided.
+
+		Call BEFORE run_pipeline starts: the pipeline uses the set to skip the
+		LLM for those books — ``_handle`` carries a decided prior verbatim, so
+		a fresh LLM proposal would be discarded unread. Without this, every
+		re-run of analyze before apply re-buys the same answers (measured
+		2026-09-08: hundreds of decided entries re-LLM'd per run, the single
+		biggest token sink in the whole workflow).
+		"""
+		return {uid for uid, e in self._prior.items() if e.get("action") is not None}
+
 	# ------------------------------------------------------------------
 	# Writer thread
 	# ------------------------------------------------------------------
@@ -192,6 +204,22 @@ class ReviewWriter:
 			entry = dict(prior_entry)
 			entry["current"] = _build_current(meta)
 			entry["path"] = _relative_path(meta, self.library_root)
+			# Close-the-loop pre-fill, the carried twin of the fresh-entry one
+			# (see _build_entry): an ACCEPTED entry whose proposal projects to
+			# a detector-clean state is finished the moment apply writes it —
+			# stamp verified so ONE apply fixes AND closes the book and it
+			# never re-enters review. keep is exempt (its whole point is to
+			# stay re-reviewable), delete never writes metadata. The same
+			# unconfirmed-LLM guard as the fresh path applies: an LLM proposal
+			# that changed identity without online confirmation must not be
+			# auto-closed just because it was accepted (many accepts are the
+			# analyzer's own pre-fill, not a human decision).
+			if entry.get("action") == "accept" and not entry.get("verified"):
+				proposed = entry.get("proposed") or {}
+				is_unconfirmed_llm = str(proposed.get("source") or "").startswith("llm:")
+				if (self._projected_clean(meta, proposed) and not is_unconfirmed_llm) or self._identity_verified(meta, proposed, enriched, "accept"):
+					entry["verified"] = True
+					self._verified_prefilled += 1
 			self._append_entry(entry)
 			self._processed.add(bid)
 			return

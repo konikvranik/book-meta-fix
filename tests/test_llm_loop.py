@@ -172,6 +172,51 @@ class TestPipelineLoopIntegration:
 		assert provider.reconcile_calls["n"] == 0
 		assert stats["llm_final_fixed"] == 1
 
+	def test_pipeline_skips_llm_for_decided_prior(self):
+		"""A book whose prior review entry is already decided must not pay for
+		an LLM call: the review writer carries the prior entry verbatim, so a
+		fresh proposal would be discarded unread. Without this gate every
+		analyze re-run before apply re-buys the same answers — the single
+		biggest token sink in the workflow."""
+		from book_meta_fix.models import BookMeta, Confidence, Diagnosis, Verdict
+
+		meta = BookMeta(calibre_id=1, uuid="decided-1", title="x", authors=["A"], path="/x/1", primary_file=None)
+		extracted = ExtractedMeta(first_page_text="Neznámý GREGORY BENFORD JÁDRO GALAXIE text")
+		stats = {"ok": 0, "needs_review": 0, "det_fixed": 0, "online_fixed": 0, "llm_fixed": 0,
+			"llm_flash_fixed": 0, "llm_final_fixed": 0, "llm_low_confidence": 0,
+			"llm_skipped_no_text": 0, "llm_skipped_decided": 0, "llm_no_result": 0,
+			"llm_error": 0, "unfixed": 0, "errors": 0, "content_mismatch": 0}
+		from book_meta_fix import pipeline as pmod
+
+		class StubProvider:
+			name = "stub"
+			calls = {"n": 0}
+
+			def reconcile_loop(self, evidence, extracted, **kwargs):
+				self.calls["n"] += 1
+				return _reconciled("Jádro Galaxie", "Gregory Benford", "high"), "llm:high"
+
+			def reconcile(self, evidence):
+				self.calls["n"] += 1
+				return _reconciled("X", "Y")
+
+		provider = StubProvider()
+
+		def fake_detect(m):
+			return Diagnosis(category="C2", reason="x", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
+
+		with patch.object(pmod, "detect_fn", fake_detect), \
+			 patch.object(pmod, "safe_extract", lambda m: extracted), \
+			 patch.object(pmod, "has_usable_text", lambda t: True), \
+			 patch.object(pmod, "_try_deterministic_fix", lambda *a, **kw: None):
+			_process_book(
+				meta, enricher=None, skip_enrich=True, skip_verify=True,
+				llm_provider=provider, llm_categories=("ALL",), stats=stats,
+				llm_loop=True, llm_skip_ids={"decided-1"},
+			)
+		assert provider.calls["n"] == 0
+		assert stats["llm_skipped_decided"] == 1
+
 	def test_no_llm_loop_falls_back_to_reconcile(self):
 		"""With llm_loop=False, _process_book calls reconcile (single call)."""
 		from book_meta_fix.models import BookMeta, Confidence, Diagnosis, Verdict

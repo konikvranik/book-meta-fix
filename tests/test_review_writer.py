@@ -849,6 +849,113 @@ class TestIdentityVerified:
 		assert summary["verified_prefilled"] == 0
 
 
+class TestDecidedPriorCarry:
+	"""A DECIDED prior entry is carried verbatim on re-run — and two behaviors
+	make the analyze→apply loop converge instead of re-burning LLM tokens:
+
+	1. decided_ids(): the pipeline skips the LLM for those books (the fresh
+	   proposal would be discarded unread — the writer carries the prior).
+	2. An accepted prior whose proposal projects detector-clean gets
+	   verified: true stamped AT CARRY TIME, so one apply fixes AND closes
+	   the book — the carried twin of the fresh-entry pre-fill.
+	"""
+
+	def _book_folder(self, tmp_path, *, with_year=False, uuid="book-u7"):
+		import json as _json
+
+		from book_meta_fix.readers import read_book_folder
+
+		folder = tmp_path / "lib" / "Jan Novak" / "Kniha (7)"
+		folder.mkdir(parents=True)
+		manifest = {"title": "Kniha", "authors": ["Jan Novak"], "isbn": "9788020403117"}
+		if uuid:
+			manifest["uuid"] = uuid
+		if with_year:
+			manifest["publishedYear"] = "2001"
+		(folder / "metadata.json").write_text(_json.dumps(manifest), encoding="utf-8")
+		(folder / "book.epub").write_text("x", encoding="utf-8")
+		(folder / "cover.jpg").write_bytes(b"cover")
+		return read_book_folder(folder)
+
+	def _seed_prior(self, tmp_path, body: str) -> None:
+		(tmp_path / "review.yaml").write_text(body, encoding="utf-8")
+
+	def test_decided_ids_lists_only_action_entries(self, tmp_path):
+		self._seed_prior(tmp_path, (
+			"---\nid: 1\nuuid: u1\ncurrent: {title: A}\naction: accept\n"
+			"---\nid: 2\nuuid: u2\ncurrent: {title: B}\naction: null\n"
+			"---\nid: 3\nuuid: u3\ncurrent: {title: C}\naction: keep\n"
+		))
+		w = ReviewWriter(tmp_path / "review.yaml")
+		assert w.decided_ids() == {"u1", "u3"}
+		w.finish()
+
+	def test_carried_accept_completing_proposal_gets_verified(self, tmp_path):
+		"""Prior: decided accept with a year proposal for a MISSING_YEAR book.
+		The projection is detector-clean once applied → carried entry is born
+		verified, so apply fixes AND closes it in one pass."""
+		meta = self._book_folder(tmp_path)  # no year on disk
+		self._seed_prior(tmp_path, (
+			"---\nid: 7\nuuid: book-u7\ncurrent: {title: Kniha}\naction: accept\n"
+			"proposed:\n  year: 2001\n"
+		))
+		w = ReviewWriter(tmp_path / "review.yaml")
+		diag = Diagnosis(category="MISSING_YEAR", reason="no year", confidence=Confidence.LOW, verdict=Verdict.AUTO_FIXABLE)
+		summary = _submit_all_and_finish(w, [(meta, diag, None, None)])
+		parsed = parse_review(tmp_path / "review.yaml")
+		assert parsed[0].action == "accept"
+		assert parsed[0].verified is True
+		assert summary["verified_prefilled"] == 1
+
+	def test_carried_accept_llm_proposal_stays_unverified(self, tmp_path):
+		"""Same as above but the prior proposal carries an llm: source: the
+		fresh-entry pre-fill refuses to auto-close unconfirmed LLM identity
+		changes, and so must the carried one (many accepts are analyzer
+		pre-fills, not human decisions)."""
+		meta = self._book_folder(tmp_path)
+		self._seed_prior(tmp_path, (
+			"---\nid: 7\nuuid: book-u7\ncurrent: {title: Kniha}\naction: accept\n"
+			"proposed:\n  year: 2001\n  source: llm:flash\n"
+		))
+		w = ReviewWriter(tmp_path / "review.yaml")
+		diag = Diagnosis(category="MISSING_YEAR", reason="no year", confidence=Confidence.LOW, verdict=Verdict.AUTO_FIXABLE)
+		summary = _submit_all_and_finish(w, [(meta, diag, None, None)])
+		parsed = parse_review(tmp_path / "review.yaml")
+		assert parsed[0].action == "accept"
+		assert parsed[0].verified is False
+		assert summary["verified_prefilled"] == 0
+
+	def test_carried_keep_stays_unverified(self, tmp_path):
+		"""keep = apply-but-stay-in-review; auto-freezing it behind the
+		verified skip would defeat the action's whole point."""
+		meta = self._book_folder(tmp_path)
+		self._seed_prior(tmp_path, (
+			"---\nid: 7\nuuid: book-u7\ncurrent: {title: Kniha}\naction: keep\n"
+			"proposed:\n  year: 2001\n"
+		))
+		w = ReviewWriter(tmp_path / "review.yaml")
+		diag = Diagnosis(category="MISSING_YEAR", reason="no year", confidence=Confidence.LOW, verdict=Verdict.AUTO_FIXABLE)
+		_submit_all_and_finish(w, [(meta, diag, None, None)])
+		parsed = parse_review(tmp_path / "review.yaml")
+		assert parsed[0].action == "keep"
+		assert parsed[0].verified is False
+
+	def test_carried_accept_incomplete_proposal_stays_open(self, tmp_path):
+		"""A decided accept whose proposal does NOT clean the projection (the
+		book stays flagged after apply) must not be verified — it would hide
+		a standing problem behind the analyze skip."""
+		meta = self._book_folder(tmp_path)  # MISSING_YEAR stays missing
+		self._seed_prior(tmp_path, (
+			"---\nid: 7\nuuid: book-u7\ncurrent: {title: Kniha}\naction: accept\n"
+		))
+		w = ReviewWriter(tmp_path / "review.yaml")
+		diag = Diagnosis(category="MISSING_YEAR", reason="no year", confidence=Confidence.LOW, verdict=Verdict.AUTO_FIXABLE)
+		summary = _submit_all_and_finish(w, [(meta, diag, None, None)])
+		parsed = parse_review(tmp_path / "review.yaml")
+		assert parsed[0].verified is False
+		assert summary["verified_prefilled"] == 0
+
+
 class TestC14PrefillAndTolerance:
 	"""C14 (series order glued into the name): pre-fills accept via
 	diag.proposed (the C6 mechanism), and is tolerated as a C13 extra

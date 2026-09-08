@@ -546,6 +546,9 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 			skip_enrich=skip_enrich, skip_verify=skip_verify,
 			llm_provider=llm_provider,
 			llm_categories=tuple(c.strip() for c in llm_categories.split(",") if c.strip()) if use_llm else (),
+			# Decided priors must not re-pay the LLM: the writer carries them
+			# verbatim, so a fresh proposal would be discarded unread.
+			llm_skip_ids=review_writer.decided_ids(),
 			limit=limit,
 			workers=workers,
 			scan_workers=cfg.scan_workers,

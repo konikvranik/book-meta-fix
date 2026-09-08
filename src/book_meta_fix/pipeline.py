@@ -85,6 +85,7 @@ def run_pipeline(
 	strict_verify: bool = True,
 	llm_loop: bool = True,
 	accept_missing_if_identified: bool = True,
+	llm_skip_ids: set | None = None,
 	stats: dict | None = None,
 ) -> list[tuple[BookMeta, Diagnosis, Verification | None, EnrichedMeta | None]]:  # noqa: F821
 	"""Run the full pipeline over the whole library.
@@ -113,6 +114,13 @@ def run_pipeline(
 	*strict_verify* (default True): only meaningful with *verify_ok*. When
 	True, UNCERTAIN (fuzzy title match 0.5–0.8) is also treated as a
 	mismatch and reclassified; when False only a clear MISMATCH (< 0.5) is.
+
+	*llm_skip_ids* (default None): uuids whose prior review.yaml entry is
+	already DECIDED (action set). The pipeline still detects and refreshes
+	those books, but never asks the LLM: the review writer carries a decided
+	prior verbatim, so a fresh proposal would be discarded unread — without
+	this, every analyze re-run before apply re-buys the same answers. The
+	analyzer pre-fills this from the ReviewWriter's priors (cli.py).
 
 	If *limit* is given, it caps the number of books processed AFTER the
 	only_needs_review filter. So `--limit 500` means "process at most 500
@@ -202,13 +210,17 @@ def run_pipeline(
 	if limit is not None:
 		books = books[:limit]
 	total = len(books)
+	if llm_skip_ids:
+		# Visibility for the biggest token saver: re-running analyze before
+		# apply no longer re-buys LLM answers for already-decided entries.
+		log.info("pipeline: %d book(s) have a decided review entry — LLM skipped for them", len(llm_skip_ids))
 	# Per-source fix counters, filled as books are processed. When the caller
 	# passes a stats dict we merge into it (so the CLI can print a summary
 	# table); otherwise we keep a throwaway local dict for the log line.
 	_stats = {
 		"ok": 0, "needs_review": 0, "det_fixed": 0, "online_fixed": 0,
 		"llm_fixed": 0, "llm_flash_fixed": 0, "llm_final_fixed": 0, "llm_low_confidence": 0,
-		"llm_skipped_no_text": 0, "llm_no_result": 0, "llm_error": 0,
+		"llm_skipped_no_text": 0, "llm_skipped_decided": 0, "llm_no_result": 0, "llm_error": 0,
 		"unfixed": 0, "errors": 0, "content_mismatch": 0,
 		"covers_generated": 0, "covers_missing": 0,
 		# Online fix source breakdown (sub-rows of online_fixed).
@@ -236,6 +248,7 @@ def run_pipeline(
 			llm_provider=llm_provider, llm_categories=llm_categories, stats=stats_ref,
 			verify_ok=verify_ok, strict_verify=strict_verify, llm_loop=llm_loop,
 			accept_missing_if_identified=accept_missing_if_identified,
+			llm_skip_ids=llm_skip_ids or (),
 			detect=_detect, cache=cache,
 		)
 
@@ -331,10 +344,10 @@ def run_pipeline(
 	if interrupted:
 		log.warning("pipeline interrupted: returning %d partial results (of %d books) for review", len(results), total)
 	log.info(
-		"pipeline: %d ok, %d needs_review (content_mismatch=%d, det=%d, online=%d, llm_flash=%d, llm_final=%d, llm_low=%d, llm_other=%d, llm_skipped=%d, llm_no_result=%d, unfixed=%d, covers_gen=%d, covers_missing=%d, errors=%d)%s",
+		"pipeline: %d ok, %d needs_review (content_mismatch=%d, det=%d, online=%d, llm_flash=%d, llm_final=%d, llm_low=%d, llm_other=%d, llm_skipped=%d, llm_skipped_decided=%d, llm_no_result=%d, unfixed=%d, covers_gen=%d, covers_missing=%d, errors=%d)%s",
 		stats_ref["ok"], stats_ref["needs_review"], stats_ref["content_mismatch"], stats_ref["det_fixed"], stats_ref["online_fixed"],
 		stats_ref["llm_flash_fixed"], stats_ref["llm_final_fixed"], stats_ref["llm_low_confidence"], stats_ref["llm_fixed"],
-		stats_ref["llm_skipped_no_text"], stats_ref["llm_no_result"], stats_ref["unfixed"],
+		stats_ref["llm_skipped_no_text"], stats_ref["llm_skipped_decided"], stats_ref["llm_no_result"], stats_ref["unfixed"],
 		stats_ref["covers_generated"], stats_ref["covers_missing"], stats_ref["errors"],
 		" [INTERRUPTED]" if interrupted else "",
 	)
@@ -354,6 +367,7 @@ def _process_book(
 	strict_verify: bool = True,
 	llm_loop: bool = True,
 	accept_missing_if_identified: bool = True,
+	llm_skip_ids: set | frozenset = frozenset(),
 	detect: Any = None,
 	cache: Cache | None = None,
 ) -> tuple[BookMeta, Diagnosis, Verification | None, EnrichedMeta | None]:  # noqa: F821
@@ -473,11 +487,17 @@ def _process_book(
 		# PRIMARY), not cover_shadowed: an LLM recovers metadata, never a
 		# cover, so a misplaced C13+C11 book must not pay for a call.
 		if is_needs_review and enriched is None and llm_provider is not None and _llm_wants(diag.category, llm_categories):
+			if meta.uuid in llm_skip_ids:
+				# The prior review entry is already DECIDED: the review writer
+				# will carry it verbatim and discard whatever fresh proposal
+				# this call produced. The single biggest token saver — before
+				# this gate, every analyze re-run before apply re-paid the LLM
+				# for the whole decided pool.
+				stats["llm_skipped_decided"] += 1
 			# Pre-filter: skip LLM if no first-page text or only CSS noise.
 			# This is the #1 cost saver — books with empty/CSS-only content
 			# would waste an API call for nothing.
-			first_page = extracted.first_page_text if extracted is not None else None
-			if not has_usable_text(first_page):
+			elif not has_usable_text(extracted.first_page_text if extracted is not None else None):
 				stats["llm_skipped_no_text"] += 1
 			else:
 				def _llm_attempt(ev):

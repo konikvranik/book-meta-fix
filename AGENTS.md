@@ -141,7 +141,11 @@ src/book_meta_fix/
                    The incremental OK-filter (_filter_not_ok) fans its detect()
                    calls over the same pool — C11 cover decode dominates it and
                    Pillow releases the GIL — and covers.analyze_cover's memo +
-                   persistent cache make repeat decodes free
+                   persistent cache make repeat decodes free. llm_skip_ids
+                   (analyze feeds it ReviewWriter.decided_ids()) drops the LLM
+                   for books whose prior review entry is already decided —
+                   detection/enrichment still run (the entry needs its refresh),
+                   only the token-costly call is skipped
   llm.py           Z.AI provider: LeakyBucket + global 429 cooldown + reconcile_loop + tolerant
                    JSON salvage + get_provider (the provider FACTORY: BMF_LLM_PROVIDER picks the
                    branch — auto/Z.AI/antigravity-ACP/mock/off; the Antigravity branch composes
@@ -227,7 +231,18 @@ src/book_meta_fix/
                    registry's --uid= arg; offline keeps the
                    installed agent. Cache: ~/.cache/book-meta-fix/acp (BMF_ACP_CACHE_DIR/XDG) with
                    a version.json sidecar. Plain auto NEVER downloads without opt-in or cache
-  review_writer.py streaming review.yaml writer (queue + writer thread)
+  review_writer.py streaming review.yaml writer (queue + writer thread);
+                   decided_ids() exposes the prior entries with action set so
+                   run_pipeline's llm_skip_ids can skip the LLM for them (the
+                   writer carries a decided prior VERBATIM — a fresh proposal
+                   would be discarded unread; without the skip every analyze
+                   re-run before apply re-buys the whole decided pool, measured
+                   2026-09-08: ~538 decided entries re-LLM'd per run), and the
+                   decided-carry branch stamps verified: true on an ACCEPTED
+                   prior whose proposal projects detector-clean (the carried
+                   twin of _projected_clean's fresh-entry pre-fill; keep stays
+                   exempt — it must remain re-reviewable — and llm:-source
+                   proposals without online confirmation are never auto-closed)
   review.py        parse review.yaml (multi-doc + legacy list) + update_paths
                    + merge_normalizations (bmf normalize --apply merges C15/C16
                    proposals IN PLACE: pending entries get proposed.authors/
@@ -475,6 +490,13 @@ src/book_meta_fix/
   overridden it), and the projected state may keep only benign leftovers
   (OK-verdict or MISSING_*); a NEEDS_REVIEW leftover or EMPTY_BOOK blocks
   the pre-fill. Counted as `verified_prefilled` in the analyze summary.
+  The DECIDED-prior carry path in `review_writer._handle` stamps the same
+  flag on an already-accepted prior whose proposal projects clean (same
+  guards: `keep` exempt, unconfirmed `llm:` proposals never auto-closed) —
+  so a decided book that a re-analyze re-flags gets closed by the NEXT
+  apply instead of cycling forever. Related: analyze skips the LLM
+  entirely for decided priors (`llm_skip_ids`) — re-running analyze
+  before apply must not re-buy the answers the entry already holds.
 - **EMPTY_BOOK (dead record) is the FIRST rule and routes to
   `needfix/empty/`.** `rule_empty_book` fires when the folder holds only
   metadata sidecars / their `.bak`/`.tmp` backups / `cover.jpg` — no ebook
