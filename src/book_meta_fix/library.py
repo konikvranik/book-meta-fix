@@ -264,7 +264,7 @@ class Cache:
 		"""Return True if the exact author exists on any `verified` book in the library."""
 		with self._lock:
 			cur = self.conn.execute('''
-				SELECT 1 
+				SELECT 1
 				FROM books, json_each(json_extract(payload, '$.authors'))
 				WHERE json_extract(payload, '$.verified') = 1
 				  AND lower(value) = lower(?)
@@ -274,15 +274,14 @@ class Cache:
 
 	def is_verified_series(self, name: str) -> bool:
 		"""Return True if the exact series exists on any `verified` book in the library."""
+		from .models import series_entry_pair
+
 		with self._lock:
 			cur = self.conn.execute('''
 				SELECT json_extract(payload, '$.series')
 				FROM books
 				WHERE json_extract(payload, '$.verified') = 1
 			''')
-			import json
-			from .models import series_entry_pair
-			
 			name_lower = name.lower()
 			for (series_json,) in cur:
 				if not series_json:
@@ -359,6 +358,7 @@ class Cache:
 				"INSERT OR REPLACE INTO covers(path, mtime_ns, size, payload) VALUES (?,?,?,?)",
 				(str(Path(path)), mtime_ns, size, json.dumps(payload, ensure_ascii=False)),
 			)
+			self.conn.commit()
 
 	def invalidate(self, path: str | Path) -> None:
 		"""Drop the cached entry for *path* so the next scan re-parses it.
@@ -368,6 +368,7 @@ class Cache:
 		"""
 		with self._lock:
 			self.conn.execute("DELETE FROM books WHERE path = ?", (str(Path(path)),))
+			self.conn.commit()
 
 	def invalidate_many(self, paths) -> None:
 		"""Drop cached entries for several paths at once."""
@@ -375,6 +376,7 @@ class Cache:
 		if keys:
 			with self._lock:
 				self.conn.executemany("DELETE FROM books WHERE path = ?", keys)
+				self.conn.commit()
 
 	def repoint(self, src_path: str | Path, dst_path: str | Path) -> bool:
 		"""Re-attach a cached entry from *src_path* to *dst_path* (folder moved).

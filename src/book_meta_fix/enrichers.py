@@ -907,7 +907,7 @@ class Enricher:
 		cached = self._cache_get(key)
 		if cached is not None:
 			return cached != "__NOT_FOUND__"
-		
+
 		# Databazeknih
 		if self.databazeknih_enabled:
 			from urllib.parse import quote_plus
@@ -916,7 +916,7 @@ class Enricher:
 			if html and "jsme bohužel nenašli žádného" not in html and ("autbox" in html or "zivotopis" in html.lower() or "/autori/" in html.lower()):
 				self._cache_put(key, EnrichedMeta(source="author_exists"))
 				return True
-		
+
 		# Legie
 		if self.legie_enabled:
 			from urllib.parse import quote_plus

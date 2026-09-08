@@ -525,3 +525,25 @@ class TestAnalyzeEndToEnd:
 		text = review.read_text(encoding="utf-8")
 		assert "Autor1/Kniha1 (1)" in text
 		assert "Autor2/Kniha2 (2)" in text
+
+
+class TestScanCommand:
+	"""bmf scan traverses library and prints scan summary."""
+
+	def test_scan_prints_summary(self, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+		import json as _json
+
+		lib = tmp_path / "lib"
+		folder = lib / "Autor" / "Kniha (1)"
+		folder.mkdir(parents=True)
+		(folder / "metadata.json").write_text(_json.dumps({
+			"title": "Kniha",
+			"authors": ["Autor"],
+		}), encoding="utf-8")
+		monkeypatch.setenv("BMF_CACHE", str(tmp_path / "cache.db"))
+
+		result = CliRunner().invoke(main, ["scan", "--library", str(lib)])
+		assert result.exit_code == 0
+		assert "Scan summary" in result.output
+		assert "Found 1 books" in result.output
+
