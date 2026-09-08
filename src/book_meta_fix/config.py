@@ -216,6 +216,16 @@ class Config:
 	# the subscription's concurrency on the user's account; one server is
 	# ~320 MB RSS, measured). Override via BMF_ACP_MAX_INFLIGHT.
 	acp_max_inflight: int = 4
+	# In-flight cap for the agy QUALITY pool only. Deliberately 1 (a serialized
+	# lane books queue on): fallback traffic is the exception (books the fast
+	# tier failed to verify), so one slot covers it while leaving the
+	# subscription's concurrency — where the real queuing lives; measured
+	# 2026-09-08, prompt turns spike 30–100 s server-side under load — to the
+	# parallel flash pool. Prompt turns stay serialized per connection anyway
+	# (an ACP session is one conversation), so extra fallback slots only add
+	# memory, not throughput, when calls are rare. Override via
+	# BMF_ANTIGRAVITY_FALLBACK_MAX_INFLIGHT (alias BMF_ACP_FALLBACK_MAX_INFLIGHT).
+	acp_fallback_max_inflight: int = 1
 	# Minimum seconds between ACP prompt starts (politeness drip; 0 = as fast
 	# as the in-flight cap allows). Override via BMF_ACP_MIN_INTERVAL.
 	acp_min_interval: float = 0.0
@@ -373,6 +383,11 @@ class Config:
 		if (v := os.environ.get("BMF_ACP_MAX_INFLIGHT")) is not None:
 			try:
 				cfg.acp_max_inflight = max(1, int(v))
+			except ValueError:
+				pass
+		if (v := os.environ.get("BMF_ANTIGRAVITY_FALLBACK_MAX_INFLIGHT") or os.environ.get("BMF_ACP_FALLBACK_MAX_INFLIGHT")) is not None:
+			try:
+				cfg.acp_fallback_max_inflight = max(1, int(v))
 			except ValueError:
 				pass
 		if (v := os.environ.get("BMF_ACP_MIN_INTERVAL")) is not None:

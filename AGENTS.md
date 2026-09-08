@@ -186,7 +186,13 @@ src/book_meta_fix/
                    agent's startup resolves the harness beside argv[0] and every session/new
                    of a harness-less install dies with -32603 Internal error — session
                    creation builds the connection on it even though bmf denies tools). Pool of connections =
-                   the in-flight cap (BMF_ACP_MAX_INFLIGHT, default 2), transport errors retry
+                   the in-flight cap (BMF_ACP_MAX_INFLIGHT, default 4; the AGY FALLBACK pool is a
+                   separate ONE-slot lane by default — BMF_ANTIGRAVITY_FALLBACK_MAX_INFLIGHT, books
+                   queue on it: fallback is the exception path and measured 2026-09-08 prompt turns
+                   spike 30–100 s SERVER-side under load — degraded turns even echo mojibake and
+                   self-report as gemini-2.0-flash, so parallel fallback slots buy latency-queueing,
+                   not throughput; the model RESETS to the agent default at every session/new, which
+                   is why set_model runs per prompt), transport errors retry
                    once on a fresh process, THREE consecutive failures disable the fast tier for
                    the run (the quality stage takes over per book). reconcile_loop mirrors
                    ZaiProvider's contract/source labels; the QUALITY stage (_run_fallback) is

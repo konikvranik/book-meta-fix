@@ -453,7 +453,8 @@ loop still stays on Antigravity unless you say otherwise.
 | Fallback provider | `--antigravity-fallback` | `BMF_ANTIGRAVITY_FALLBACK` (alias `BMF_ACP_FALLBACK`) | `agy` (default — second ACP pool on the fallback model) or `glm` (Z.AI flash+paid loop; needs a key) |
 | Fallback model | `--antigravity-fallback-model` | `BMF_ANTIGRAVITY_FALLBACK_MODEL` (alias `BMF_ACP_FALLBACK_MODEL`) | agy fallback only; `gemini-flash-high` default, family-matched (`gemini-pro` = 16–37 s of deliberation, 0 rescues measured) |
 | Prompt timeout | — | `BMF_ACP_TIMEOUT` | a hung turn is cancelled (`session/cancel`) after this many seconds (default 300) |
-| In-flight agents | — | `BMF_ACP_MAX_INFLIGHT` | concurrent agent processes per pool (default 4; one agent ≈ 320 MB RSS, measured) |
+| In-flight agents | — | `BMF_ACP_MAX_INFLIGHT` | concurrent agent processes in the FAST pool (default 4; one agent ≈ 320 MB RSS, measured) |
+| Fallback in-flight | — | `BMF_ANTIGRAVITY_FALLBACK_MAX_INFLIGHT` (alias `BMF_ACP_FALLBACK_MAX_INFLIGHT`) | agy quality pool size, default 1 — a serialized lane books queue on (fallback is the exception path, and prompt turns spike 30–100 s server-side under load, so parallel fallback slots buy little) |
 | Politeness drip | — | `BMF_ACP_MIN_INTERVAL` | minimum seconds between prompt starts (default 0) |
 
 Three consecutive transport failures (deleted binary, expired login) park the

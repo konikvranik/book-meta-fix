@@ -491,6 +491,16 @@ class TestGetProviderSelection:
 		# The fallback pool runs the fallback model.
 		assert p._acp_fallback.model == "gemini-flash-high"
 
+	def test_fallback_pool_is_serialized_by_default(self):
+		"""The agy quality stage is ONE lane by default (books queue on it) —
+		fallback traffic is the exception path, so its slot budget goes to the
+		parallel fast pool instead; the knob can widen it when needed."""
+		p = get_provider(self._cfg(llm_provider="antigravity", acp_command=f"{sys.executable} -c pass"))
+		assert p._max_inflight == 4  # fast pool: Config.acp_max_inflight default
+		assert p._acp_fallback._max_inflight == 1
+		p2 = get_provider(self._cfg(llm_provider="antigravity", acp_command=f"{sys.executable} -c pass", acp_fallback_max_inflight=3))
+		assert p2._acp_fallback._max_inflight == 3
+
 	def test_glm_fallback_without_key_has_no_fallback(self):
 		p = get_provider(self._cfg(llm_provider="antigravity", acp_command=f"{sys.executable} -c pass", acp_fallback_provider="glm"))
 		assert isinstance(p, AntigravityAcpProvider)

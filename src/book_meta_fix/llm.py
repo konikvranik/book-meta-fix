@@ -1254,7 +1254,11 @@ def _build_acp(config: Any, zai_fallback: ZaiProvider | None, command: list[str]
 			cwd=cwd,
 			model=getattr(config, "acp_fallback_model", None),
 			prompt_timeout=getattr(config, "acp_prompt_timeout", 300.0),
-			max_inflight=getattr(config, "acp_max_inflight", 2),
+			# ONE serialized lane by default (acp_fallback_max_inflight): the
+			# quality stage is the exception path, and a single slot keeps the
+			# subscription's concurrency for the parallel flash pool. Threads
+			# queue on the pool — deliberate, see Config.acp_fallback_max_inflight.
+			max_inflight=getattr(config, "acp_fallback_max_inflight", 1),
 			min_interval=getattr(config, "acp_min_interval", 0.0),
 		)
 	elif zai_fallback is None:

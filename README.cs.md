@@ -456,9 +456,10 @@ neřeknete jinak.
 | Umístění cache | — | `BMF_ACP_CACHE_DIR` (nebo `XDG_CACHE_HOME`) | kde bydlí samosprávný agent (výchozí `~/.cache/book-meta-fix/acp`) |
 | Model rychlé vrstvy | `--antigravity-model` | `BMF_ANTIGRAVITY_MODEL` (alias `BMF_ACP_MODEL`) | párovaný po rodině; výchozí `gemini-flash-low` (nejnovější flash na low effort — rychlost před dumováním), prázdné = výchozí volba agenta |
 | Provider zálohy | `--antigravity-fallback` | `BMF_ANTIGRAVITY_FALLBACK` (alias `BMF_ACP_FALLBACK`) | `agy` (výchozí — druhý ACP pool na fallback modelu) nebo `glm` (smyčka flash+placené Z.AI; potřebuje klíč) |
-| Model zálohy | `--antigravity-fallback-model` | `BMF_ANTIGRAVITY_FALLBACK_MODEL` (alias `BMF_ACP_FALLBACK_MODEL`) | jen pro zálohu agy; výchozí `gemini-pro-low`, párováno po rodině |
+| Model zálohy | `--antigravity-fallback-model` | `BMF_ANTIGRAVITY_FALLBACK_MODEL` (alias `BMF_ACP_FALLBACK_MODEL`) | jen pro zálohu agy; výchozí `gemini-flash-high`, párováno po rodině (`gemini-pro` = 16–37 s dumování, 0 záchran změřeno) |
 | Timeout promptu | — | `BMF_ACP_TIMEOUT` | zaseknutý tah se po tolika sekundách zruší (`session/cancel`, výchozí 300) |
-| Souběžní agenti | — | `BMF_ACP_MAX_INFLIGHT` | souběžné agentní procesy na pool (výchozí 4; jeden agent ≈ 320 MB RSS, změřeno) |
+| Souběžní agenti | — | `BMF_ACP_MAX_INFLIGHT` | souběžné agentní procesy FAST poolu (výchozí 4; jeden agent ≈ 320 MB RSS, změřeno) |
+| Souběžní fallback | — | `BMF_ANTIGRAVITY_FALLBACK_MAX_INFLIGHT` (alias `BMF_ACP_FALLBACK_MAX_INFLIGHT`) | velikost agy kvalitního poolu, výchozí 1 — serializovaná dráha, na které knihy čekají ve frontě (záloha je výjimečná cesta a prompt turny pod zátěží serveru špičkují 30–100 s, takže paralelní fallback sloty nedávají mnoho) |
 | Slušnost kapání | — | `BMF_ACP_MIN_INTERVAL` | minimální sekundy mezi starty promptů (výchozí 0) |
 
 Tři po sobě jdoucí transportní selhání (smazaná binárka, vypršené přihlášení)
