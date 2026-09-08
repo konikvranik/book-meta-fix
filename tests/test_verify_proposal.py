@@ -255,3 +255,59 @@ class TestIdentityAgrees:
 		a = _Proposal("Zastaveny Prival", ["Eduard Storch"])
 		b = _Proposal("Zastavený příval", ["Eduard Štorch"])
 		assert identity_agrees(a, b) is True
+
+
+class TestTitlePositionalPenalty:
+	"""The positional check in _title_in_text: titles near the top of the text
+	are trusted at full score; matches only deep in the text get penalised to
+	suppress chapter-heading false positives from the LLM."""
+
+	def _early_text(self, title: str) -> str:
+		"""Return text where *title* appears in the early window (first ~700 chars)."""
+		return title + " " + "x" * 800
+
+	def _deep_text(self, title: str) -> str:
+		"""Return text where *title* appears only DEEP (past 700 chars)."""
+		return "A" * 800 + " " + title + " " + "x" * 200
+
+	def test_title_in_early_window_passes(self):
+		"""Title found near the top of the text: full score, passes verify."""
+		from book_meta_fix.verifier import _title_in_text
+		text = self._early_text("Zastavený příval")
+		score = _title_in_text("Zastavený příval", text)
+		assert score >= 0.80
+
+	def test_chapter_heading_only_in_deep_text_is_penalised(self):
+		"""A chapter heading ('Prolog') appearing only deep in the text gets a
+		score penalty — it should land below the fuzzy_strong threshold."""
+		from book_meta_fix.verifier import _title_in_text
+		# 'Prolog' appears only at position >800 — typical chapter-heading scenario.
+		text = "Tady začíná příběh: " + "a " * 380 + "Prolog " + "b " * 200
+		score = _title_in_text("Prolog", text)
+		# With penalty (0.80×) a deep exact match yields 0.80; we check it's
+		# strictly below the 0.90 title-only-strong threshold so it won't
+		# silently confirm identity.
+		assert score <= 0.80
+
+	def test_exact_substring_deep_gets_penalized(self):
+		"""Exact substring match deep in the text receives the penalty too —
+		LLM hallucinating a chapter heading creates an exact substring match,
+		so it cannot bypass the positional check."""
+		from book_meta_fix.verifier import _title_in_text
+		text = "x" * 800 + " Zastavený příval " + "y" * 200
+		score = _title_in_text("Zastavený příval", text)
+		# 1.0 full score * 0.80 penalty = 0.80
+		assert score == 0.80
+
+	def test_chapter_heading_llm_proposal_fails_verify(self):
+		"""Integration: LLM proposes a chapter heading found only in the body
+		text as the title — verify_proposal should now reject it."""
+		# 800 chars of body text, then 'Prolog' as a chapter heading.
+		body_prefix = "Byl jednou jeden hrad " * 36  # ~792 chars
+		text = body_prefix + "Prolog\n\nZačalo to ráno..." + " text " * 100
+		ext = ExtractedMeta(first_page_text=text)
+		# LLM hallucinated 'Prolog' as the title (common false positive).
+		prop = _Proposal("Prolog", ["Neznámý Autor"])
+		passed, fb = verify_proposal(prop, ext)
+		assert passed is False
+		assert "Prolog" in fb or "title" in fb.lower()

@@ -365,9 +365,9 @@ Re-run the experiment yourself as Z.AI's lineup evolves:
 If you have a **Google Antigravity** subscription, its Gemini models can serve
 the loop's *fast* tier through Google's official **Agent Client Protocol**
 agent — instead of glm-flash's chronically crowded free pool. The whole loop
-can stay on the subscription (quick check on gemini-flash, quality fallback
-on gemini-pro), or hand the quality stage to Z.AI when a `ZAI_API_KEY` also
-exists — see the fallback knob below.
+can stay on the subscription (quick check on gemini-flash at low effort,
+quality fallback on gemini-flash-high), or hand the quality stage to Z.AI when
+a `ZAI_API_KEY` also exists — see the fallback knob below.
 
 bmf speaks ACP v1 natively (JSON-RPC 2.0, one message per line over the agent
 process's stdio — no extra dependency): it launches the agent, creates a

@@ -40,7 +40,9 @@ def make_conn(mode: str, *, timeout: float = 30.0, cancel_grace: float = 5.0, **
 
 def make_provider(mode: str = "basic", *, model: str | None = None, **kw) -> AntigravityAcpProvider:
 	"""A provider against the mock agent with a small in-flight cap so the
-	pool logic runs, but fast timeouts for the failure tests."""
+	pool logic runs, but fast timeouts for the failure tests. The warmer is
+	OFF by default so pool-level tests stay deterministic (no background
+	re-heating races); warmer-behaviour tests pass warm=True explicitly."""
 	return AntigravityAcpProvider(
 		agent_command(mode),
 		cwd=Path(__file__).parent,
@@ -48,6 +50,7 @@ def make_provider(mode: str = "basic", *, model: str | None = None, **kw) -> Ant
 		max_inflight=kw.pop("max_inflight", 2),
 		prompt_timeout=kw.pop("prompt_timeout", 30.0),
 		agent_env={"MOCK_ACP_MODE": mode},
+		warm=kw.pop("warm", False),
 		**kw,
 	)
 
@@ -324,7 +327,7 @@ class TestAntigravityAcpProvider:
 
 	def test_loop_falls_back_to_acp_fallback(self):
 		"""Fast tier dies → the SECOND ACP pool (the agy quality stage,
-		gemini-pro) answers — labelled llm:high, not llm:flash (it is the
+		fallback model) answers — labelled llm:high, not llm:flash (it is the
 		quality model, not the quick one)."""
 		fb = make_provider()
 		fb._send_prompt = lambda text: '{"title": "Pro answer", "authors": ["A"], "confidence": "high"}'
@@ -340,7 +343,7 @@ class TestAntigravityAcpProvider:
 		assert result.title == "Pro answer"
 
 	def test_acp_fallback_verify_fail_returns_low(self):
-		"""The gemini-pro answer that fails verify still reaches the human —
+		"""The quality-stage answer that fails verify still reaches the human —
 		low confidence, source llm:low."""
 		fb = make_provider()
 		fb._send_prompt = lambda text: '{"title": "Pro answer", "authors": ["A"], "confidence": "high"}'
@@ -356,6 +359,57 @@ class TestAntigravityAcpProvider:
 		assert src == "llm:low"
 		assert result.title == "Pro answer"
 		assert result.confidence == "low"
+
+	def test_loop_passes_verify_feedback_to_the_acp_fallback(self):
+		"""The quality stage learns WHY the fast tier failed: the verifier's
+		rejection reason rides into the fallback evidence, so the stronger
+		model corrects instead of repeating the rejected answer."""
+		seen: list[str] = []
+
+		def fallback_answer(text: str) -> str:
+			seen.append(text)
+			return '{"title": "Jádro Galaxie", "authors": ["Gregory Benford"], "confidence": "high"}'
+
+		fb = make_provider()
+		fb._send_prompt = fallback_answer
+
+		def wrong_answer(text: str) -> str:
+			return '{"title": "Špatný Název", "authors": ["X"], "confidence": "high"}'
+
+		p = make_provider()
+		p._send_prompt = wrong_answer
+		p._acp_fallback = fb
+		ext = ExtractedMeta(first_page_text="Neznámý GREGORY BENFORD JÁDRO GALAXIE")
+		result, src = p.reconcile_loop({"current": {}}, ext)
+		assert src == "llm:high"
+		assert result.title == "Jádro Galaxie"
+		# The fast tier burned both attempts; the ONE fallback prompt carried
+		# the rejection feedback (build_user_prompt renders it as
+		# "Your previous answer was REJECTED because:").
+		assert len(seen) == 1
+		assert "REJECTED" in seen[0]
+
+	def test_loop_passes_verify_feedback_to_the_glm_fallback(self):
+		"""glm branch: the ZaiProvider loop is pre-seeded with the verifier
+		rejection from the ACP fast tier — its first flash attempt starts
+		from the accumulated knowledge, not from scratch."""
+		calls: list[dict] = []
+
+		class StubZai:
+			fallback_model = "glm-5.3"
+
+			def reconcile_loop(self, evidence, extracted=None, *, max_flash=2, verifier=None):
+				calls.append(dict(evidence))
+				return ReconciledMeta(title="From Z.AI", authors=["A"], confidence="high"), "llm:high"
+
+		p = make_provider()
+		p._send_prompt = lambda text: '{"title": "Špatný Název", "authors": ["X"], "confidence": "high"}'
+		p._zai_fallback = StubZai()
+		ext = ExtractedMeta(first_page_text="Neznámý GREGORY BENFORD JÁDRO GALAXIE")
+		result, src = p.reconcile_loop({"current": {}}, ext)
+		assert src == "llm:high"
+		assert len(calls) == 1
+		assert calls[0].get("feedback")
 
 	def test_transport_failures_disable_the_fast_tier(self):
 		"""Three consecutive transport failures park the fast tier for the
@@ -388,6 +442,55 @@ class TestAntigravityAcpProvider:
 				r = p.reconcile({"current": {}})
 				assert r is not None
 			assert p._created == 1
+		finally:
+			p.close()
+
+	def test_used_lane_is_reheated_before_reuse(self):
+		"""A lane that served a prompt carries that book's context — its
+		session must NEVER serve another book. After checkin the lane sits
+		COLD; a warm pass re-heats it (fresh session, model re-selected — the
+		agent resets the model at every session/new, measured on 1.1.1) and
+		parks it hot, so the next book pays only the prompt turn."""
+		p = make_provider("pid", model="gemini-3-flash", max_inflight=1)
+		try:
+			pid1 = int(p.reconcile({"current": {}}).title)
+			assert len(p._cold) == 1, "used lane must sit cold, never idle"
+			lane = p._cold[0]
+			assert lane.session_hot is False
+			p._warm_pass()
+			assert lane.session_hot is True
+			assert lane.session_id is not None
+			assert p._idle.get_nowait() is lane
+			p._idle.put(lane)
+			pid2 = int(p.reconcile({"current": {}}).title)
+			assert pid1 == pid2, "the same (re-heated) process serves the next book"
+		finally:
+			p.close()
+
+	def test_warmer_tops_the_pool_up_after_demand(self):
+		"""A warm pass fills the pool to the in-flight cap once the run has
+		seen LLM traffic — the ~4 s process spawn (and the session+model
+		ceremony) never lands on a waiting book. Before demand, nothing
+		spawns (an unused provider holds no processes)."""
+		p = make_provider(max_inflight=2)
+		try:
+			p._warm_pass()
+			assert p._created == 0, "no eager spawn before the first LLM call"
+			assert p.reconcile({"current": {}}) is not None
+			p._warm_pass()
+			assert p._created == 2, "one lane served the book, one pre-warmed spare"
+		finally:
+			p.close()
+
+	def test_warmer_thread_keeps_prompts_working(self):
+		"""With the background warmer ON (the production default), sequential
+		prompts keep answering regardless of which lane — re-heated or
+		pre-warmed spare — serves them, and close() joins the warmer
+		cleanly."""
+		p = make_provider("pid", warm=True, max_inflight=2)
+		try:
+			pids = [int(p.reconcile({"current": {}}).title) for _ in range(4)]
+			assert all(pids)
 		finally:
 			p.close()
 

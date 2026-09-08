@@ -373,9 +373,9 @@ Zopakujte experiment sami, jak se nabídka Z.AI vyvíjí:
 Když máte **předplatné Google Antigravity**, jeho modely Gemini mohou skrze
 oficiální **Agent Client Protocol** agenta obsluhovat *rychlou* vrstvu smyčky
 — místo chronicky přetíženého bezplatného bazénu glm-flash. Celá smyčka může
-zůstat na předplatném (rychlá kontrola na gemini-flash, kvalitní záloha na
-gemini-pro), nebo kvalitní fázi předat Z.AI, pokud existuje i `ZAI_API_KEY`
-— viz volba zálohy níže.
+zůstat na předplatném (rychlá kontrola na gemini-flash s nízkým effortem,
+kvalitní záloha na gemini-flash-high), nebo kvalitní fázi předat Z.AI, pokud
+existuje i `ZAI_API_KEY` — viz volba zálohy níže.
 
 bmf mluví ACP v1 přímo (JSON-RPC 2.0, jedna zpráva na řádek přes stdio
 agentního procesu — bez nové závislosti): spustí agenta, pro každou knihu

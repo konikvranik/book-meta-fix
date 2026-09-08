@@ -29,10 +29,13 @@ salvaged by the same ``_parse_llm_json`` pipeline the Z.AI provider uses.
 
 The provider implements the full ``reconcile_loop`` contract: fast attempts
 go to the agent, and the QUALITY stage is configurable — by default a SECOND
-ACP pool on the fallback model (gemini-pro, so the whole loop stays on the
-subscription); ``BMF_ANTIGRAVITY_FALLBACK=glm`` swaps in the Z.AI flash+paid
-loop instead (ZaiProvider, keeping the long-measured Z.AI rate machinery for
-exactly the calls that need it).
+ACP pool on the fallback model (gemini-flash-high, so the whole loop stays on
+the subscription); ``BMF_ANTIGRAVITY_FALLBACK=glm`` swaps in the Z.AI
+flash+paid loop instead (ZaiProvider, keeping the long-measured Z.AI rate
+machinery for exactly the calls that need it). When the fast tier fails
+verify, the verifier's rejection reason travels into the quality stage's
+evidence — a stronger model that does not know WHY the previous answer was
+rejected tends to repeat it against the same evidence.
 """
 from __future__ import annotations
 
@@ -154,6 +157,12 @@ class AcpAgentConnection:
 		self.agent_env = agent_env
 		self.proc: subprocess.Popen[str] | None = None
 		self.session_id: str | None = None
+		# Lane warmth: True while this connection holds a FRESH, unused session
+		# with the provider's model already selected. Set by the pool's warmer
+		# (or the synchronous fallback in _send_prompt) and CLEARED after the
+		# first prompt turn — that session now carries the book's context and
+		# must never serve another one.
+		self.session_hot = False
 		self.agent_info: dict[str, Any] = {}
 		self.config_options: list[dict[str, Any]] = []
 		self._next_id = 0
@@ -637,7 +646,9 @@ class AntigravityAcpProvider:
 	Antigravity account, whose limits Google does not publish — 2 is polite
 	and still fast), and an optional leaky-bucket drip spaces call starts.
 	All the Z.AI 429 machinery is unnecessary here: ACP agents answer or
-	fail, they do not cascade-throttle.
+	fail, they do not cascade-throttle. A background WARMER keeps lanes hot
+	(fresh session + model pre-selected) and replaces recycled processes off
+	the per-book path — the in-flight cap bounds the pool, not the latency.
 
 	Transport failures are forgiving (one retry on a fresh process — the
 	agent may have died between books) but THREE consecutive failures
@@ -656,7 +667,8 @@ class AntigravityAcpProvider:
 	# server process's lifetime — a 2 700-book run would pile one per book.
 	# Recycling the PROCESS (graceful exit reaps its children — verified:
 	# no orphans after probe runs) bounds the leak to this many harnesses
-	# per pool slot.
+	# per pool slot. The warmer spawns the replacement lane in the
+	# background, so retirement costs the next book nothing.
 	PROMPTS_PER_PROCESS = 8
 
 	def __init__(
@@ -672,6 +684,7 @@ class AntigravityAcpProvider:
 		acp_fallback: AntigravityAcpProvider | None = None,
 		agent_env: dict[str, str] | None = None,
 		recycle_after: int | None = None,
+		warm: bool = True,
 	) -> None:
 		self.command = list(command)
 		self.cwd = cwd
@@ -702,8 +715,21 @@ class AntigravityAcpProvider:
 
 		self._bucket = LeakyBucket(capacity=1.0, interval=max(0.0, min_interval))
 		self._sem = threading.Semaphore(self._max_inflight)
+		# HOT lanes (fresh unused session + model selected) wait in _idle; a
+		# lane that just served a prompt carries that book's context, so it
+		# goes to _cold for re-heating before it may serve again. The warmer
+		# thread (warm=True, the production default) does that re-heating —
+		# and the process spawn + initialize for recycled/new lanes — OFF the
+		# per-book path, so a waiting book pays only the prompt turn.
 		self._idle: queue.LifoQueue[AcpAgentConnection] = queue.LifoQueue()
+		self._cold: list[AcpAgentConnection] = []
 		self._created = 0
+		self._out = 0
+		self._active = False
+		self._warm = warm
+		self._closing = False
+		self._warm_kick = threading.Event()
+		self._warmer: threading.Thread | None = None
 		self._pool_lock = threading.Lock()
 		self._transport_failures = 0
 		self._disabled: str | None = None
@@ -713,7 +739,8 @@ class AntigravityAcpProvider:
 		self._scratch: str | None = None
 
 	# ------------------------------------------------------------------
-	# Connection pool (lazy: processes cost memory; spawn on demand)
+	# Connection pool: HOT lanes (warmed in the background), cold lanes
+	# (re-heated on checkout as the deterministic fallback), lazy spawn.
 	# ------------------------------------------------------------------
 
 	def _session_scratch(self) -> str:
@@ -724,45 +751,157 @@ class AntigravityAcpProvider:
 				self._scratch = tempfile.mkdtemp(prefix="bmf-acp-")
 			return self._scratch
 
+	def _heat(self, conn: AcpAgentConnection) -> None:
+		"""Bring a lane to HOT: a FRESH session with the provider's model
+		already selected. Book-independent by construction (empty session,
+		neutral scratch cwd, provider-wide model) — which is what lets the
+		warmer run it any time, so a waiting book pays only the prompt turn.
+		Raises AcpAgentError when the agent refuses or died."""
+		conn.new_session()
+		conn.set_model(self._model or "")
+		conn.session_hot = True
+
+	def _pop_cold(self) -> AcpAgentConnection | None:
+		with self._pool_lock:
+			return self._cold.pop() if self._cold else None
+
 	def _checkout(self) -> AcpAgentConnection:
+		"""Take a lane: a HOT one when available, else a cold one (heated by
+		the CALLER — the deterministic pre-warmer behaviour), else a fresh
+		process; a bounded wait last."""
 		while True:
+			conn = None
 			try:
-				return self._idle.get_nowait()
+				conn = self._idle.get_nowait()
 			except queue.Empty:
-				pass
-			with self._pool_lock:
-				if self._created < self._max_inflight:
-					self._created += 1
-					create = True
-				else:
-					create = False
-			if create:
-				conn = AcpAgentConnection(
-					self.command,
-					cwd=self.cwd,
-					prompt_timeout=self._prompt_timeout,
-					agent_env=self._agent_env,
-					session_cwd=self._session_scratch(),
-				)
-				try:
-					conn.start()
-				except AcpAgentError:
-					with self._pool_lock:
-						self._created -= 1
-					raise
+				conn = self._pop_cold()
+			if conn is None:
+				with self._pool_lock:
+					create = self._created < self._max_inflight
+					if create:
+						self._created += 1
+				if create:
+					conn = AcpAgentConnection(
+						self.command,
+						cwd=self.cwd,
+						prompt_timeout=self._prompt_timeout,
+						agent_env=self._agent_env,
+						session_cwd=self._session_scratch(),
+					)
+					try:
+						conn.start()
+					except AcpAgentError:
+						with self._pool_lock:
+							self._created -= 1
+						raise
+			if conn is not None:
+				with self._pool_lock:
+					self._out += 1
+				self._kick_warmer()
 				return conn
-			# Pool exhausted — wait for a return. Bounded so a leaked slot
-			# cannot park a worker forever; loop re-checks.
+			# Pool exhausted — wait for the warmer / a caller to return a hot
+			# lane. Bounded so a leaked slot cannot park a worker forever.
 			try:
-				return self._idle.get(timeout=120.0)
+				conn = self._idle.get(timeout=120.0)
 			except queue.Empty:
 				continue
+			with self._pool_lock:
+				self._out += 1
+			return conn
 
 	def _checkin(self, conn: AcpAgentConnection, *, broken: bool = False) -> None:
+		with self._pool_lock:
+			self._out = max(0, self._out - 1)
 		# Retirement = the same mechanics as a broken connection: the process
 		# is closed (its session-pinned harness children go down with it) and
-		# the next checkout spawns a fresh one.
-		if broken or (self._recycle_after and conn.prompts_served >= self._recycle_after):
+		# the warmer replaces it off the per-book path.
+		if broken or self._closing or (self._recycle_after and conn.prompts_served >= self._recycle_after):
+			conn.close()
+			with self._pool_lock:
+				self._created -= 1
+		else:
+			# The lane's session just carried a book's evidence — re-heating
+			# (a FRESH session) is required before it may serve again.
+			with self._pool_lock:
+				self._cold.append(conn)
+		self._kick_warmer()
+
+	# -- Background warmer ------------------------------------------------
+
+	def _kick_warmer(self) -> None:
+		"""Wake the warmer for a pass (idempotent; starts it on first demand).
+		No-op when the pool runs warm=False — checkout then heats inline and
+		spawns synchronously, which keeps pool-level tests deterministic."""
+		if not self._warm or self._closing:
+			return
+		with self._pool_lock:
+			if self._warmer is None:
+				self._warmer = threading.Thread(target=self._warmer_loop, daemon=True, name="acp-warmer")
+				self._warmer.start()
+		self._warm_kick.set()
+
+	def _warmer_loop(self) -> None:
+		while True:
+			self._warm_kick.wait()
+			self._warm_kick.clear()
+			if self._closing:
+				return
+			try:
+				self._warm_pass()
+			except Exception:  # noqa: BLE001 - the warmer must never take the pool down
+				log.exception("ACP warmer pass failed")
+
+	def _warm_pass(self) -> None:
+		"""One warmer pass: re-heat every cold lane, then (once the run has
+		seen LLM traffic) top the pool back up to the in-flight cap — the
+		measured ~4 s process spawn and the session+model ceremony then never
+		land on a waiting book. Also the test seam: warm=False providers
+		invoke it directly, without the thread."""
+		while not self._closing:
+			conn = self._pop_cold()
+			if conn is None:
+				break
+			try:
+				self._heat(conn)
+			except AcpAgentError as e:
+				# Unheatable lane (agent refused / died mid-heat): retire it
+				# and stop this pass — the synchronous checkout path surfaces
+				# the error to _call, which owns the disable logic.
+				log.debug("ACP warmer: lane re-heat failed: %s", e)
+				conn.close()
+				with self._pool_lock:
+					self._created -= 1
+				return
+			self._park(conn)
+		while not self._closing:
+			with self._pool_lock:
+				want = self._active and self._created < self._max_inflight
+				if want:
+					self._created += 1  # count the in-progress spawn so checkout cannot overshoot
+			if not want:
+				return
+			conn = AcpAgentConnection(
+				self.command,
+				cwd=self.cwd,
+				prompt_timeout=self._prompt_timeout,
+				agent_env=self._agent_env,
+				session_cwd=self._session_scratch(),
+			)
+			try:
+				conn.start()
+				self._heat(conn)
+			except AcpAgentError as e:
+				log.debug("ACP warmer: lane spawn failed: %s", e)
+				conn.close()
+				with self._pool_lock:
+					self._created -= 1
+				return
+			self._park(conn)
+
+	def _park(self, conn: AcpAgentConnection) -> None:
+		"""Offer a heated lane to waiters — unless the provider closed under
+		us, in which case the lane dies here (never leak a process)."""
+		if self._closing:
 			conn.close()
 			with self._pool_lock:
 				self._created -= 1
@@ -774,20 +913,28 @@ class AntigravityAcpProvider:
 		this; analyze also ends naturally through it)."""
 		if self._acp_fallback is not None:
 			self._acp_fallback.close()
+		self._closing = True
+		self._warm_kick.set()
+		if self._warmer is not None:
+			self._warmer.join(timeout=5.0)
 		while True:
 			try:
 				self._idle.get_nowait().close()
 			except queue.Empty:
 				break
 		with self._pool_lock:
+			cold, self._cold = self._cold, []
 			# Connections currently checked out are closed by their callers'
-			# _checkin(broken=True) path after close() — set the counter so
-			# nothing new spawns.
+			# _checkin path after close() (_closing routes it to retirement)
+			# — set the counter so nothing new spawns.
 			self._created = 0
 			self._disabled = self._disabled or "provider closed"
+		for conn in cold:
+			conn.close()
 		if self._scratch is not None:
 			shutil.rmtree(self._scratch, ignore_errors=True)
 			self._scratch = None
+
 
 	# ------------------------------------------------------------------
 	# LLMProvider contract
@@ -796,21 +943,29 @@ class AntigravityAcpProvider:
 	def _send_prompt(self, text: str) -> str:
 		"""Prompt the agent and return its message text. The transport seam:
 		tests monkeypatch this. Fresh session per prompt (stateless Q&A — see
-		the module docstring); a transport error marks the connection broken
-		and is retried ONCE on a fresh process before surfacing."""
+		the module docstring): the pool serves it PRE-WARMED when it can (a
+		HOT lane already holds the fresh session + model — both are
+		book-independent), and heats a cold lane inline as the deterministic
+		fallback. A transport error marks the connection broken and is
+		retried ONCE on a fresh process before surfacing."""
 		last: AcpAgentError | None = None
+		self._active = True
+		self._kick_warmer()
 		for attempt in (1, 2):
 			conn = self._checkout()
 			broken = False
 			try:
-				conn.new_session()
-				conn.set_model(self._model or "")
+				if not conn.session_hot:
+					self._heat(conn)
 				return conn.prompt(text, timeout=self._prompt_timeout)
 			except AcpAgentError as e:
 				broken = True
 				last = e
 				log.debug("ACP prompt attempt %d failed: %s", attempt, e)
 			finally:
+				# Whatever happened, the lane's session must never serve
+				# another book — force re-heating before the next checkout.
+				conn.session_hot = False
 				self._checkin(conn, broken=broken)
 		raise last if last else AcpAgentError("ACP prompt failed")
 
@@ -851,18 +1006,30 @@ class AntigravityAcpProvider:
 			log.warning("Antigravity ACP reconcile gave up: %s", error)
 		return result
 
-	def _run_fallback(self, evidence: dict[str, Any], extracted: Any, verifier_fn: Any) -> tuple[Any, str]:
+	def _run_fallback(self, evidence: dict[str, Any], extracted: Any, verifier_fn: Any, feedback: str = "") -> tuple[Any, str]:
 		"""The loop's QUALITY stage, per BMF_ANTIGRAVITY_FALLBACK:
 
-		  agy (default) — ONE attempt on the second ACP pool (gemini-pro): a
-		  quality model does not need cheap retries, verify decides;
-		  labelled llm:high on pass, llm:low passthrough on verify fail.
+		  agy (default) — ONE attempt on the second ACP pool (the fallback
+		  model, default gemini-flash-high): a quality model does not need
+		  cheap retries, verify decides; labelled llm:high on pass, llm:low
+		  passthrough on verify fail.
 		  glm — the ZaiProvider's own loop with max_flash=1 (one free flash
 		  try, then the paid model), inside Z.AI's measured rate machinery;
 		  its source labels travel through unchanged.
+
+		*feedback* is the verifier's reason the fast tier was rejected. It
+		travels into BOTH branches' evidence: a stronger model that does not
+		know why the previous answer failed tends to repeat it against the
+		same evidence — the rejection reason is the one thing this retry can
+		offer that the fast tier did not have. Empty when the fast tier died
+		before producing a verifiable answer (transport, bad JSON): there is
+		nothing to report, the fallback runs on plain evidence.
 		"""
+		fb_ev = dict(evidence)
+		if feedback:
+			fb_ev["feedback"] = feedback
 		if self._acp_fallback is not None:
-			result, error = self._acp_fallback._call(evidence)
+			result, error = self._acp_fallback._call(fb_ev)
 			if result is None:
 				log.debug("ACP fallback attempt failed: %s", error)
 				return None, ""
@@ -874,7 +1041,7 @@ class AntigravityAcpProvider:
 			result.confidence = "low"
 			return result, "llm:low"
 		if self._zai_fallback is not None:
-			return self._zai_fallback.reconcile_loop(evidence, extracted, max_flash=1, verifier=verifier_fn)
+			return self._zai_fallback.reconcile_loop(fb_ev, extracted, max_flash=1, verifier=verifier_fn)
 		return None, ""
 
 	def reconcile_loop(self, evidence: dict[str, Any], extracted: Any = None, *, max_flash: int = 2, verifier: Any = None) -> tuple[Any, str]:
@@ -886,7 +1053,9 @@ class AntigravityAcpProvider:
 		  1. the agent up to *max_flash* times, injecting verifier feedback
 		     between attempts (sources llm:flash / llm:loop);
 		  2. on any fast-tier failure (unusable, refused, bad JSON, disabled)
-		     the configured quality stage runs — see _run_fallback;
+		     the configured quality stage runs — see _run_fallback, which
+		     carries the LAST verifier feedback along so the stronger model
+		     knows why the fast answer was rejected;
 		  3. with no quality stage configured, the last fast proposal goes
 		     out low-confidence (llm:low) or nothing ('').
 
@@ -916,7 +1085,7 @@ class AntigravityAcpProvider:
 				continue
 			log.debug("ACP fast attempt %d failed: %s", attempt + 1, error)
 			break
-		result, src = self._run_fallback(evidence, extracted, verifier_fn)
+		result, src = self._run_fallback(evidence, extracted, verifier_fn, fb)
 		if result is not None:
 			return result, src
 		if last_result is not None:

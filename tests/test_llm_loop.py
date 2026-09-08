@@ -87,8 +87,19 @@ class TestReconcileLoop:
 		result, src = p.reconcile_loop({"current": {}}, ext)
 		assert src == "llm:high"
 		assert result.title == "Jádro Galaxie"
-		# 2 Flash + 1 final.
-		assert calls == [("flash", False), ("flash", True), ("final", False)]
+		# 2 Flash + 1 final; the final call carried the verify feedback too —
+		# the stronger model must know why the flash answers were rejected.
+		assert calls == [("flash", False), ("flash", True), ("final", True)]
+
+	def test_rate_limited_flash_falls_back_without_feedback(self):
+		"""Flash unusable (rate limit) before any verify ran: there is no
+		rejection reason to report, so the paid model runs on plain evidence."""
+		calls = []
+		p = self._provider([], _reconciled("Jádro Galaxie", "Gregory Benford", "high"), calls)
+		ext = _extracted("Jádro Galaxie", "Gregory Benford")
+		result, src = p.reconcile_loop({"current": {}}, ext)
+		assert src == "llm:high"
+		assert calls == [("flash", False), ("final", False)]
 
 	def test_everything_fails_returns_low_confidence(self):
 		"""When Flash and final both fail verify, the last proposal is returned
@@ -135,7 +146,7 @@ class TestPipelineLoopIntegration:
 			loop_calls = {"n": 0}
 			reconcile_calls = {"n": 0}
 
-			def reconcile_loop(self, evidence, extracted):
+			def reconcile_loop(self, evidence, extracted, **kwargs):
 				self.loop_calls["n"] += 1
 				return _reconciled("Jádro Galaxie", "Gregory Benford", "high"), "llm:high"
 

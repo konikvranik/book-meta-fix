@@ -481,7 +481,20 @@ def _process_book(
 			else:
 				def _llm_attempt(ev):
 					"""One reconcile_loop attempt. Returns (enriched, llm_src) or (None, None)."""
-					reconciled, src = _llm_reconcile_with_loop(llm_provider, ev, extracted, loop=llm_loop)
+					def custom_verifier(proposal, ext):
+						from .verifier import identity_agrees, verify_proposal
+						# If the proposal is additive-only (preserves the current identity
+						# strongly), we don't need to prove the title exists in the text
+						# again — it's already the book's known title. This saves safe
+						# genre/year additions from failing just because a short title
+						# string didn't hit the fuzzy_strong threshold in the page text.
+						if identity_agrees(proposal, meta, floor=0.95):
+							return True, ""
+						return verify_proposal(proposal, ext)
+
+					reconciled, src = _llm_reconcile_with_loop(
+						llm_provider, ev, extracted, loop=llm_loop, verifier=custom_verifier
+					)
 					if reconciled is None or not _reconciled_is_useful(reconciled, meta):
 						return None, None
 					em = _reconciled_to_enriched(reconciled, source=src)
@@ -859,7 +872,7 @@ def _reconciled_to_enriched(r, *, source: str | None = None) -> EnrichedMeta:  #
 	)
 
 
-def _llm_reconcile_with_loop(provider: Any, evidence: dict, extracted: Any, *, loop: bool = True) -> tuple[Any, str]:  # noqa: F821
+def _llm_reconcile_with_loop(provider: Any, evidence: dict, extracted: Any, *, loop: bool = True, verifier: Any = None) -> tuple[Any, str]:  # noqa: F821
 	"""Run the LLM, preferring the self-correction loop when available.
 
 	When *loop* is False (config BMF_LLM_LOOP=0 or --no-llm-loop), a single
@@ -870,7 +883,8 @@ def _llm_reconcile_with_loop(provider: Any, evidence: dict, extracted: Any, *, l
 	llm:flash / llm:loop / llm:high / llm:low / llm:medium / ''.
 	"""
 	if loop and hasattr(provider, "reconcile_loop"):
-		return provider.reconcile_loop(evidence, extracted)
+		kwargs = {"verifier": verifier} if verifier else {}
+		return provider.reconcile_loop(evidence, extracted, **kwargs)
 	result = provider.reconcile(evidence)
 	return result, ("llm:medium" if result is not None else "")
 

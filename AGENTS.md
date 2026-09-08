@@ -146,8 +146,8 @@ src/book_meta_fix/
                    JSON salvage + get_provider (the provider FACTORY: BMF_LLM_PROVIDER picks the
                    branch — auto/Z.AI/antigravity-ACP/mock/off; the Antigravity branch composes
                    AntigravityAcpProvider with a quality stage per BMF_ANTIGRAVITY_FALLBACK: agy
-                   (default — a second ACP pool on gemini-pro) or glm (a ZaiProvider loop), so a
-                   ZAI_API_KEY alone no longer means the Z.AI fast tier)
+                   (default — a second ACP pool on gemini-flash-high) or glm (a ZaiProvider loop),
+                   so a ZAI_API_KEY alone no longer means the Z.AI fast tier)
   acp.py           AntigravityAcpProvider — a Google Antigravity subscription as the loop's FAST
                    tier via the Agent Client Protocol (the official `agy_acp_server.par` from the
                    ACP Registry; any ACP agent works — the command is user-configured,
@@ -177,7 +177,7 @@ src/book_meta_fix/
                    the real 1.1.1 agent, whose options are gemini-3.8/3.7/3.6-flash-
                    high|medium|low + gemini-pro-agent/gemini-3.1-pro-low: "gemini-flash-low"
                    → gemini-3.8-flash-low, "gemini-pro" → gemini-pro-agent); defaults
-                   gemini-flash-low (fast tier) + gemini-pro (quality stage). The launch
+                   gemini-flash-low (fast tier) + gemini-flash-high (quality stage). The launch
                    command needs the registry's --uid= arg (value stays EMPTY — the
                    Google launcher reads it as a GROUP NAME for setgid; a filled uid crashes
                    the process at startup); the distributed .par IS the
@@ -197,8 +197,12 @@ src/book_meta_fix/
                    the run (the quality stage takes over per book). reconcile_loop mirrors
                    ZaiProvider's contract/source labels; the QUALITY stage (_run_fallback) is
                    BMF_ANTIGRAVITY_FALLBACK: 'agy' (default — a second AntigravityAcpProvider
-                   pool on gemini-pro, ONE attempt, llm:high on verify pass / llm:low) or 'glm'
-                   (the injected zai_fallback.reconcile_loop(max_flash=1) — Z.AI's measured rate
+                   pool on gemini-flash-high, ONE attempt carrying the verifier's rejection
+                   reason from the failed fast attempts in the evidence feedback — a stronger
+                   model without it repeats the rejected answer, llm:high on verify pass /
+                   llm:low) or 'glm'
+                   (the injected zai_fallback.reconcile_loop(max_flash=1), pre-seeded with the
+                   same feedback — Z.AI's measured rate
                    machinery stays untouched for exactly the calls that need it).
                    SELF-MANAGED agent (no separate install command): ensure_acp_agent — used by
                    get_provider when BMF_ANTIGRAVITY_CMD is empty/'auto' with an agy opt-in

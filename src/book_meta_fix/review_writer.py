@@ -398,6 +398,22 @@ class ReviewWriter:
 		# confirmed and nothing was recovered. `bmf apply` then prunes it.
 		if action is None and enriched is not None and getattr(enriched, "identity_confirmed", False) and not proposed:
 			action = "accept"
+		# MISSING_*-only with no proposal and no enricher: identity could NOT
+		# be confirmed against content (no ISBN in text, title not found on
+		# first page), but there is no real metadata problem — just a missing
+		# ISBN/year that no source could supply. Showing the entry with
+		# action: null is noise: the user cannot do anything with it except
+		# manually find the ISBN. Pre-fill accept so `bmf apply` prunes it
+		# (proposed is null → apply writes nothing, just removes from review).
+		# Guard: no co-occurring NEEDS_REVIEW diagnosis (C11 etc.) must be
+		# present — that would mean there IS an actionable problem to fix.
+		if (
+			action is None
+			and not proposed
+			and diag.category in ("MISSING_ISBN", "MISSING_YEAR")
+			and not any(d.verdict == Verdict.NEEDS_REVIEW for d in all_diagnoses(diag))
+		):
+			action = "accept"
 		# Location-led (C13 primary) and dead records (EMPTY_BOOK): the
 		# metadata is FINE, the book merely sits in the wrong folder. The move
 		# is mechanical and identity-safe (apply recomputes the target from

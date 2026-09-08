@@ -169,7 +169,7 @@ class TestAbsRescan:
 	"""
 
 	_MINI_OPF = TestStripCovers._MINI_OPF
-	_ENV = {"BMF_ABS_URL": "http://abs.lan:13378", "BMF_ABS_TOKEN": "s3cret"}
+	_ENV = {"BMF_ABS_URL": "http://abs.lan:13378", "BMF_ABS_TOKEN": "s3cret", "BMF_ABS_LIBRARY": ""}
 
 	def _make_library(self, root: Path) -> tuple[Path, Path]:
 		a = root / "Autor A/Kniha (1)"

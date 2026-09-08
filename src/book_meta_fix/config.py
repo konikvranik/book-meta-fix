@@ -200,12 +200,16 @@ class Config:
 	acp_fallback_provider: str = "agy"
 	# Model for the agy quality stage, family-matched like acp_model.
 	# Default "gemini-flash-high": a step up in EFFORT from the flash-low
-	# fast tier at the same latency (measured 2026-09-07: flash-high 1.6–2.6 s
-	# vs Pro (High) 16–37 s — and bare "gemini-pro" family-matches the Pro
-	# (High) agent). In the measured run the pro fallback rescued 0 of 50
-	# LLM books (flash already passes verify 96 % of the time), so the
-	# verifier — not the model tier — is the quality gate; pro stays one env
-	# var away. Override via BMF_ANTIGRAVITY_FALLBACK_MODEL (alias:
+	# fast tier (measured 2026-09-07: flash-high 1.6–2.6 s vs Pro (High)
+	# 16–37 s — and bare "gemini-pro" family-matches the Pro (High) agent).
+	# The effort step is not FREE under load: a paired probe on 2026-09-08
+	# had flash-high ~1.5–2× flash-low (6–10 s vs 10.6–14.4 s), and prompt
+	# turns spike 30–100 s server-side — which is exactly why the higher
+	# effort serves the EXCEPTION path (the serialized one-lane fallback
+	# pool), not every book. In the measured run the pro fallback rescued
+	# 0 of 50 LLM books (flash already passes verify 96 % of the time), so
+	# the verifier — not the model tier — is the quality gate; pro stays one
+	# env var away. Override via BMF_ANTIGRAVITY_FALLBACK_MODEL (alias:
 	# BMF_ACP_FALLBACK_MODEL).
 	acp_fallback_model: str | None = "gemini-flash-high"
 	# Seconds before a hung ACP prompt turn is cancelled (session/cancel)

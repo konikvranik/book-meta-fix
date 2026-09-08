@@ -169,16 +169,38 @@ def _title_in_text(title: str, text: str, window: int = 4000) -> float:
 	Returns the best fuzzy ratio found when sliding the title over the text.
 	Uses partial_ratio which is well-suited for finding a short query string
 	inside a longer text.
+
+	Positional penalty: titles appear at the TOP of a title page. If a match
+	is found ONLY deep in the text (past the first _TITLE_EARLY_WINDOW chars),
+	it is more likely a chapter heading or body-text fragment than a real
+	title. We apply a 20 % penalty to deep-only scores to push typical
+	chapter-heading false positives (score ~1.0 anywhere → 0.80 with penalty)
+	right to the boundary of fuzzy_strong (0.8 default), where the author
+	check usually rejects them as well. Exact substring matches still return
+	1.0 regardless of depth — verbatim presence is trusted unconditionally.
 	"""
 	title_norm = _normalize(title)
 	text_norm = _normalize(text[:window])
 	if not title_norm or not text_norm:
 		return 0.0
-	# Quick path: exact substring (after normalization)
-	if title_norm in text_norm:
+
+	early = text_norm[:_TITLE_EARLY_WINDOW]
+	# Quick path: exact substring in the early window is trusted unconditionally.
+	if title_norm in early:
 		return 1.0
-	# Fuzzy: use partial_ratio which handles substrings well
-	return fuzz.partial_ratio(title_norm, text_norm) / 100.0
+
+	# Fuzzy early match.
+	early_score = fuzz.partial_ratio(title_norm, early) / 100.0 if early else 0.0
+	if early_score >= 0.80:
+		return early_score
+
+	# Deep-only match: apply penalty to suppress chapter-heading selection.
+	# Even an exact substring ('Prolog') gets the penalty if it's only deep.
+	if title_norm in text_norm:
+		full_score = 1.0
+	else:
+		full_score = fuzz.partial_ratio(title_norm, text_norm) / 100.0
+	return full_score * _TITLE_DEEP_PENALTY
 
 
 def _author_in_text(author: str, text: str, window: int = 4000) -> float:
@@ -241,6 +263,15 @@ def _content_windows(extracted: ExtractedMeta) -> list[str]:
 # chars) title before trusting the title without the author.
 _TITLE_ONLY_STRONG = 0.90
 _TITLE_ONLY_MIN_LEN = 10
+
+# Positional constants for _title_in_text. The title appears at the TOP of the
+# title page, so we grant full score to matches in the first _TITLE_EARLY_WINDOW
+# normalised characters. Matches found ONLY deeper in the text get a
+# _TITLE_DEEP_PENALTY multiplier — enough to push a "Prolog" chapter heading
+# (score 1.0 full-window) to 0.80, right at the edge of the default fuzzy_strong
+# threshold, where it will typically also fail the author check.
+_TITLE_EARLY_WINDOW: int = 700
+_TITLE_DEEP_PENALTY: float = 0.80
 
 
 def _title_only_confirms(title: str | None, windows: list[str], title_strong: float) -> bool:

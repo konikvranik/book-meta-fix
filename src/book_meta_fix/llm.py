@@ -254,6 +254,22 @@ Rules:
     Do NOT guess based on the filename alone.
   - Always use proper Czech/Slovak diacritics (á č ď é ě í ň ó ř š ť ú ů ý ž).
   - If you cannot determine a field with reasonable confidence, omit it.
+
+CRITICAL — title and author extraction:
+  - The TITLE is the book's main title as it appears on the TITLE PAGE —
+    typically the FIRST prominent text element (large font, first lines).
+    Do NOT use as the title: chapter headings (e.g. "Kapitola 1", "Prolog",
+    "Úvod", "Část první"), table-of-contents entries, section headers,
+    character names, publisher descriptions, copyright notices, or any phrase
+    that appears only in the middle of a paragraph or sentence.
+    If the first-page text begins directly with story/body text (no title
+    page visible), OMIT the title field — do not invent one from body text.
+  - The AUTHOR is a person's name (surname + given name or initials) that
+    appears on the title page, typically just below the title or above it.
+    Do NOT use translator names, editor names, series names, or publisher
+    names as the author. If multiple names appear, use the one most likely
+    to be the author (not "Přeložil", "Edited by", "Ilustroval").
+    If you cannot identify the author with confidence, omit the field.
 """
 
 
@@ -1050,7 +1066,9 @@ class ZaiProvider(LLMProvider):
 		     429/1305 overloaded with the retry budget spent, 429/1308 quota
 		     exhausted, 429/1113 no balance) or still fails verify after
 		     *max_flash* attempts, the paid fallback_model (default glm-5.3
-		     low) is tried once.
+		     low) is tried once, carrying the verifier feedback from the
+		     failed loop attempts — a stronger model that does not know WHY
+		     they were rejected tends to repeat the same answer.
 		  3. If the fallback model also fails verify (or there is no text to
 		     verify against), the last non-empty proposal is returned with
 		     confidence="low" so the human reviewer still sees something.
@@ -1094,8 +1112,13 @@ class ZaiProvider(LLMProvider):
 				else:
 					log.info("Loop model unusable (%s); falling back to %s", error, self.fallback_model)
 				break
-		# Final fallback: the paid high-quality model, one attempt.
-		result, error = self._call(self.fallback_model, evidence)
+		# Final fallback: the paid high-quality model, one attempt — carrying
+		# the verifier feedback from the failed loop attempts when there is
+		# any (empty after e.g. a rate-limit bail: nothing to report).
+		fallback_ev = dict(evidence)
+		if fb:
+			fallback_ev["feedback"] = fb
+		result, error = self._call(self.fallback_model, fallback_ev)
 		if result is None and error and "paused for another" in error:
 			# BOTH models are paused — the LLM stage is idle until a pause
 			# expires. Say so once a minute, not once per book.

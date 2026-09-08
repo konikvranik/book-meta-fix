@@ -380,13 +380,33 @@ class TestAutoFixable:
 		assert parsed[0].proposed is not None
 		assert parsed[0].proposed.get("reason") == "duplicate of a Word lock file"
 
-	def test_missing_isbn_no_pre_filled_action(self, tmp_path):
-		"""MISSING_ISBN is AUTO_FIXABLE but has no diag.proposed["action"] — it
-		lands in review.yaml with action: null (enrichment fills proposed)."""
+	def test_missing_isbn_no_proposal_pre_fills_accept(self, tmp_path):
+		"""MISSING_ISBN with no proposal and no NEEDS_REVIEW co-diagnosis gets
+		action: accept pre-filled — unactionable noise for the user (nothing
+		to apply); accept is a no-op prune in bmf apply."""
 		out = tmp_path / "review.yaml"
 		w = ReviewWriter(out)
 		meta = _meta(1, title="Real Book")
 		diag = Diagnosis(category="MISSING_ISBN", reason="no isbn", confidence=Confidence.LOW, verdict=Verdict.AUTO_FIXABLE)
+		summary = _submit_all_and_finish(w, [(meta, diag, None, None)])
+		assert summary["written"] == 1
+		parsed = parse_review(out)
+		assert len(parsed) == 1 and parsed[0].action == "accept"
+
+	def test_missing_isbn_with_needs_review_codiag_stays_null(self, tmp_path):
+		"""MISSING_ISBN blocked by a NEEDS_REVIEW co-diagnosis must NOT get
+		auto-accept — the user still needs to deal with the co-diagnosis."""
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		meta = _meta(1, title="Real Book")
+		cover_diag = Diagnosis(
+			category="C11", reason="generated cover", confidence=Confidence.HIGH,
+			verdict=Verdict.NEEDS_REVIEW,
+		)
+		diag = Diagnosis(
+			category="MISSING_ISBN", reason="no isbn", confidence=Confidence.LOW,
+			verdict=Verdict.AUTO_FIXABLE, additional=[cover_diag],
+		)
 		summary = _submit_all_and_finish(w, [(meta, diag, None, None)])
 		assert summary["written"] == 1
 		parsed = parse_review(out)
