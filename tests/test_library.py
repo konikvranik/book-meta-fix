@@ -349,3 +349,55 @@ class TestCoversTable:
 		)
 		assert cache.get_cover(cover, 1, 2) is None
 		cache.close()
+
+
+class TestVerifiedQueries:
+	"""Tests for get_verified_authors/series and find_similar_verified_authors/series."""
+
+	def test_find_similar_verified_authors_and_series(self, tmp_path: Path) -> None:
+		from book_meta_fix.models import BookMeta
+
+		cache = Cache(tmp_path / "cache.db")
+		# Book 1: verified
+		b1 = BookMeta(
+			uuid="u1",
+			path=str(tmp_path / "Arthur C. Clarke" / "2001 (1)"),
+			title="2001: Vesmírná odysea",
+			authors=["Arthur C. Clarke"],
+			series=["Vesmírná odysea"],
+			verified=True,
+		)
+		# Book 2: unverified
+		b2 = BookMeta(
+			uuid="u2",
+			path=str(tmp_path / "Unverified Author" / "Book (2)"),
+			title="Kniha",
+			authors=["Unverified Author"],
+			series=["Unverified Series"],
+			verified=False,
+		)
+		cache.put(b1)
+		cache.put(b2)
+		cache.commit()
+
+		# Verified author should be found by exact or fuzzy query
+		assert cache.get_verified_authors() == ["Arthur C. Clarke"]
+		similar = cache.find_similar_verified_authors("Arthur Charles Clarke")
+		assert similar == ["Arthur C. Clarke"]
+
+		# Similar author with low match ratio is not returned
+		assert cache.find_similar_verified_authors("Stephen King") == []
+
+		# Unverified author must NOT be returned
+		assert cache.find_similar_verified_authors("Unverified Author") == []
+
+		# Verified series should be found
+		assert cache.get_verified_series() == ["Vesmírná odysea"]
+		similar_s = cache.find_similar_verified_series("Odysea")
+		assert similar_s == ["Vesmírná odysea"]
+
+		# Unverified series must NOT be returned
+		assert cache.find_similar_verified_series("Unverified Series") == []
+
+		cache.close()
+

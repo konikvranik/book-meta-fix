@@ -213,3 +213,114 @@ class TestPipelineLoopIntegration:
 			)
 		assert provider.reconcile_calls["n"] == 1
 		assert provider.loop_calls["n"] == 0
+
+
+class TestPromptEnhancements:
+	def test_build_user_prompt_with_all_enhancements(self):
+		from book_meta_fix.llm import build_user_prompt
+
+		evidence = {
+			"category": "C1",
+			"current": {"title": "Wrong Title", "authors": ["Wrong Author"]},
+			"file_name": "book.epub",
+			"author_folder": "Author",
+			"title_folder": "Title",
+			"first_page_text": "A" * 7000,
+			"max_text_len": 6000,
+			"known_authors": ["Isaac Asimov"],
+			"known_series": ["Nadace"],
+			"online_candidate": {
+				"title": "Nadace a Říše",
+				"authors": ["Isaac Asimov"],
+				"year": 1952,
+				"source": "databazeknih",
+			},
+			"feedback": "title mismatch",
+		}
+		prompt = build_user_prompt(evidence)
+		assert "Known verified author spellings in this library:" in prompt
+		assert "  - Isaac Asimov" in prompt
+		assert "Known verified series in this library:" in prompt
+		assert "  - Nadace" in prompt
+		assert "Unconfirmed online match (source: databazeknih):" in prompt
+		assert "Nadace a Říše" in prompt
+		assert "Your previous answer was REJECTED because:" in prompt
+		assert "title mismatch" in prompt
+		# Text length should be capped at max_text_len (6000), not 2000
+		assert "A" * 6000 in prompt
+		assert "A" * 6001 not in prompt
+
+	def test_reconcile_loop_fallback_uses_broader_text_and_large_window(self):
+		p = ZaiProvider("k", min_interval=0.0, burst=10.0)
+		p.model = "flash"
+		p.fallback_model = "final"
+
+		recorded_evidence = []
+
+		def fake_call(model, evidence, *, max_retries=3):
+			recorded_evidence.append((model, dict(evidence)))
+			if model == "flash":
+				return (_reconciled("Bad Title", "X"), None)
+			return (_reconciled("Real Title", "Isaac Asimov", "high"), None)
+
+		p._call = fake_call
+		ext = ExtractedMeta(
+			first_page_text="Neznámý krátký text",
+			broader_text="Neznámý ISAAC ASIMOV REAL TITLE " + "obsah " * 500,
+		)
+		result, src = p.reconcile_loop({"current": {}}, ext)
+		assert src == "llm:high"
+		assert result.title == "Real Title"
+		# Check fallback call evidence
+		assert len(recorded_evidence) == 3  # 2 flash + 1 final
+		final_call = recorded_evidence[-1]
+		assert final_call[0] == "final"
+		assert final_call[1]["max_text_len"] == 6000
+		assert final_call[1]["first_page_text"] == ext.broader_text
+
+	def test_build_llm_evidence_gathers_verified_and_online(self, tmp_path):
+		from unittest.mock import MagicMock
+
+		from book_meta_fix.enrichers import EnrichedMeta
+		from book_meta_fix.library import Cache
+		from book_meta_fix.models import BookMeta, Confidence, Diagnosis, Verdict
+		from book_meta_fix.pipeline import _build_llm_evidence
+
+		cache = Cache(tmp_path / "cache.db")
+		b = BookMeta(
+			uuid="u1",
+			path=str(tmp_path / "Isaac Asimov" / "Nadace (1)"),
+			title="Nadace",
+			authors=["Isaac Asimov"],
+			series=["Nadace"],
+			verified=True,
+		)
+		cache.put(b)
+		cache.commit()
+
+		diag = Diagnosis(category="C1", reason="swap", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
+		meta = BookMeta(
+			calibre_id=2,
+			title="Nadace a Říše",
+			authors=["Asimov"],
+			series=["Nadace #2"],
+			path="/books/2",
+			primary_file="nadace.epub",
+		)
+		ext = ExtractedMeta(first_page_text="ukázka")
+
+		enricher = MagicMock()
+		enricher.lookup.return_value = EnrichedMeta(
+			title="Nadace a Říše",
+			authors=["Isaac Asimov"],
+			year=1952,
+			source="databazeknih",
+		)
+
+		evidence = _build_llm_evidence(meta, diag, ext, cache=cache, enricher=enricher, skip_enrich=False)
+		assert evidence["known_authors"] == ["Isaac Asimov"]
+		assert evidence["known_series"] == ["Nadace"]
+		assert evidence["online_candidate"]["title"] == "Nadace a Říše"
+		assert evidence["online_candidate"]["source"] == "databazeknih"
+		cache.close()
+

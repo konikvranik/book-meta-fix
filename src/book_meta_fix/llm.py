@@ -270,6 +270,11 @@ CRITICAL — title and author extraction:
     names as the author. If multiple names appear, use the one most likely
     to be the author (not "Přeložil", "Edited by", "Ilustroval").
     If you cannot identify the author with confidence, omit the field.
+  - If "Known verified author spellings" or "Known verified series" are provided,
+    prefer those canonical spellings if they match the book's content.
+  - If an "Unconfirmed online match" is provided, verify it against the book text.
+    If the text confirms it, you may use its title, author, and publication year.
+    If the text clearly shows a different work, ignore the online match.
 """
 
 
@@ -277,7 +282,8 @@ def build_user_prompt(evidence: dict[str, Any]) -> str:
 	"""Build the user-turn prompt from the evidence dict."""
 	cat = evidence.get("category", "?")
 	current = evidence.get("current", {})
-	first_page = (evidence.get("first_page_text") or "")[:2000]
+	max_text_len = evidence.get("max_text_len", 2000)
+	first_page = (evidence.get("first_page_text") or "")[:max_text_len]
 	file_name = evidence.get("file_name", "")
 	author_folder = evidence.get("author_folder", "")
 	title_folder = evidence.get("title_folder", "")
@@ -296,6 +302,43 @@ def build_user_prompt(evidence: dict[str, Any]) -> str:
 		f"Author folder: {author_folder!r}",
 		f"Title folder: {title_folder!r}",
 		"",
+	]
+
+	# Known verified author spellings in this library
+	known_authors = evidence.get("known_authors")
+	if known_authors:
+		lines += [
+			"Known verified author spellings in this library:",
+			*(f"  - {a}" for a in known_authors),
+			"If the text confirms this person, use this canonical spelling.",
+			"",
+		]
+
+	# Known verified series in this library
+	known_series = evidence.get("known_series")
+	if known_series:
+		lines += [
+			"Known verified series in this library:",
+			*(f"  - {s}" for s in known_series),
+			"If the book belongs to this series, use this exact series name.",
+			"",
+		]
+
+	# Unconfirmed online match (if any)
+	online_cand = evidence.get("online_candidate")
+	if online_cand and (online_cand.get("title") or online_cand.get("authors")):
+		cand_lines = [f"Unconfirmed online match (source: {online_cand.get('source', 'online')}):"]
+		if online_cand.get("title"):
+			cand_lines.append(f"  title: {online_cand['title']!r}")
+		if online_cand.get("authors"):
+			cand_lines.append(f"  authors: {online_cand['authors']!r}")
+		if online_cand.get("year"):
+			cand_lines.append(f"  year: {online_cand['year']!r}")
+		cand_lines.append("IMPORTANT: This online match is UNCONFIRMED. Check whether it matches the text below.")
+		cand_lines.append("If the text clearly shows a different book, IGNORE this match.")
+		lines += cand_lines + [""]
+
+	lines += [
 		"First-page text from the book (most reliable source):",
 		"---",
 		first_page,
@@ -1118,6 +1161,11 @@ class ZaiProvider(LLMProvider):
 		fallback_ev = dict(evidence)
 		if fb:
 			fallback_ev["feedback"] = fb
+		if extracted is not None:
+			broader = getattr(extracted, "broader_text", None)
+			if broader and len(broader) > len(fallback_ev.get("first_page_text") or ""):
+				fallback_ev["first_page_text"] = broader
+		fallback_ev["max_text_len"] = 6000
 		result, error = self._call(self.fallback_model, fallback_ev)
 		if result is None and error and "paused for another" in error:
 			# BOTH models are paused — the LLM stage is idle until a pause

@@ -115,6 +115,7 @@ zůstane zachován, abyste mohli obnovit stav před během.
 | `bmf crosscheck --apply` | Skutečně přesune nesouhlasící soubory formátů |
 | `bmf clean` | Sjednocené čištění knihovny: odstranění nevalidních/generovaných obálek a audit nepotvrzených `verified` příznaků (dry-run) |
 | `bmf clean --apply` | Skutečně přejmenuje vadné obálky na `.bak`, odstřihne embedded placeholder obálky a odebere příznak `verified` u knih bez ISBN, jejichž autor/série neexistuje online |
+| `bmf clean --apply --clear-all-verified` | Navíc bezpodmínečně vymaže příznak `verified` ze VŠECH knih (vrátí je všechny do review) |
 | `bmf strip-covers` | Odstraní vygenerované obálky (dry-run: jen vypíše postižené knihy) |
 | `bmf strip-covers --apply` | Skutečně je odstraní: `cover.jpg` → `.bak` a vysoupne embedded obálky EPUB |
 | `bmf strip-covers --invalid` | Místo toho odstraní NEVALIDNÍ obálky: soubory s obrázkovou příponou / `cover.*`, které žádný dekodér nepřečte (příčina chyb „Invalid data found“ u ffmpeg v ABS) |

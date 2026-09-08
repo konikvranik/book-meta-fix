@@ -112,6 +112,7 @@ can recover the pre-run state.
 | `bmf crosscheck --apply` | Actually move the mismatched format files |
 | `bmf clean` | Unified library cleanup: strip invalid/generated covers and audit unconfirmed `verified` flags (dry-run) |
 | `bmf clean --apply` | Actually rename bad covers to `.bak`, strip embedded placeholder covers, and clear `verified` flags on books with no ISBN whose author/series cannot be confirmed online |
+| `bmf clean --apply --clear-all-verified` | Also clear `verified` flags from ALL books unconditionally (resetting them to review) |
 | `bmf strip-covers` | Remove generated covers (dry-run: list affected books) |
 | `bmf strip-covers --apply` | Actually remove them: `cover.jpg` → `.bak` + embedded EPUB covers stripped |
 | `bmf strip-covers --invalid` | Remove INVALID covers instead: image-extension / `cover.*` files no decoder can read (behind ABS's ffmpeg "Invalid data found" errors) |

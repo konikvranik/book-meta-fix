@@ -96,13 +96,47 @@ def _set_language(ctx: click.Context, param: click.Parameter, value: str | None)
 		init_language(value)
 
 
-def _setup_logging(verbose: bool) -> None:
-	level = logging.DEBUG if verbose else logging.INFO
-	logging.basicConfig(
-		level=level,
-		format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+class _ConsoleLogHandler(logging.Handler):
+	"""Emit log records through the shared rich console, above progress bars.
+
+	A plain stderr handler and the progress bars both write the terminal
+	mid-line, interleaving into the bar (both write the SAME tty from two
+	different outputs). Rich prints text ABOVE an active Live display only
+	when the print goes through the SAME Console the Progress renders on
+	(Live registers itself as a console render hook and prepends a cursor
+	reset), so every record is routed through `cli.console` — the bar
+	redraws intact under the log line. Without a running bar the output is
+	identical to the old StreamHandler; markup/highlight stay off so log
+	text renders verbatim (paths with brackets must not parse as markup)
+	and soft_wrap keeps long lines uncropped like a raw stream write.
+	"""
+
+	def __init__(self, console: Console) -> None:
+		super().__init__()
+		self._console = console
+
+	def emit(self, record: logging.LogRecord) -> None:
+		try:
+			self._console.print(
+				self.format(record), markup=False, highlight=False, soft_wrap=True
+			)
+		except Exception:
+			self.handleError(record)
+
+
+def _log_formatter() -> logging.Formatter:
+	"""The one-line log layout (shared by _setup_logging and the tests)."""
+	return logging.Formatter(
+		"%(asctime)s %(levelname)-7s %(name)s: %(message)s",
 		datefmt="%H:%M:%S",
 	)
+
+
+def _setup_logging(verbose: bool) -> None:
+	level = logging.DEBUG if verbose else logging.INFO
+	handler = _ConsoleLogHandler(console)
+	handler.setFormatter(_log_formatter())
+	logging.basicConfig(level=level, handlers=[handler])
 	# Silence chatty third-party HTTP/SDK loggers unless --verbose. These log
 	# every request at INFO (httpx) and every retry at INFO (openai), which
 	# drowns the progress bar and our own logs during LLM runs.
@@ -327,47 +361,56 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 		strict = not no_strict_verify
 		console.print(f"  [cyan]--verify-ok[/cyan] {_('--verify-ok audit: OK books checked against content (strict={strict})').format(strict=strict)}")
 
-	# Two-phase progress under one transient bar: the library scan (minutes on
-	# NFS) gets its own labelled task fed by scan_library's callbacks, and the
-	# per-book processing task appears only when processing actually starts —
-	# run_pipeline announces (0, total) before the first book, so the bar shows
+	# Two-phase progress: the library scan (minutes on NFS) uses a YELLOW bar
+	# (shared with all scan operations in bmf). When processing actually starts,
+	# a CYAN bar takes over — each bmf command has its own colour so the user
+	# sees at a glance which phase is running.
+	# run_pipeline fires (0, total) before the first book, so the bar shows
 	# its total and ETA immediately instead of pulsing at 0/None until the
 	# first (LLM-bound) book completes.
-	progress = Progress(
-		SpinnerColumn(),
-		TextColumn("[progress.description]{task.description}"),
-		BarColumn(complete_style="bright_yellow", finished_style="bright_yellow", pulse_style="bright_yellow"),
-		TextColumn("{task.completed}/{task.total}"),
-		TimeRemainingColumn(),
-		console=console,
-		transient=True,
-	)
-	scan_task = progress.add_task(_("Reading library"), total=None)
+	def _make_progress(bar_style: str) -> Progress:
+		return Progress(
+			SpinnerColumn(),
+			TextColumn("[progress.description]{task.description}"),
+			BarColumn(complete_style=bar_style, finished_style=bar_style, pulse_style=bar_style),
+			TextColumn("{task.completed}/{task.total}"),
+			TimeRemainingColumn(),
+			console=console,
+			transient=True,
+		)
+
+	scan_progress = _make_progress("bright_yellow")
+	proc_progress = _make_progress("cyan")
+	# Current active progress (starts as scan phase).
+	progress = scan_progress
+	scan_task = scan_progress.add_task(_("Reading library"), total=None)
 	proc_task: TaskID | None = None
 
 	def _scan_cb(done: int, total: int) -> None:
 		# total is re-set on every call — the --recheck-ok pre-scan below and
 		# run_pipeline's own scan both feed this task.
-		progress.update(scan_task, total=total, completed=done)
+		scan_progress.update(scan_task, total=total, completed=done)
 
 	def _proc_cb(done: int, total: int) -> None:
-		nonlocal proc_task
+		nonlocal proc_task, progress
 		if proc_task is None:
-			# First processing callback = the scan phase is over; swap the
-			# tasks so the bar always names what is actually running.
-			progress.remove_task(scan_task)
-			proc_task = progress.add_task(_("processing"), total=total)
-		progress.update(proc_task, completed=done)
+			# First processing callback = the scan phase is over; stop the
+			# yellow scan bar and switch to the cyan analysis bar.
+			scan_progress.stop()
+			proc_progress.start()
+			progress = proc_progress
+			proc_task = proc_progress.add_task(_("Analysing"), total=total)
+		proc_progress.update(proc_task, completed=done)
 
 	# The ACP agent self-install (first agy run / outdated cache) streams its
-	# ~700 MB download through this task inside the SAME transient bar.
+	# ~700 MB download through this task inside the scan (yellow) bar.
 	acp_task: TaskID | None = None
 
 	def _acp_dl_cb(done: int, total: int) -> None:
 		nonlocal acp_task
 		if acp_task is None:
-			acp_task = progress.add_task(_("Downloading the ACP agent"), total=total or None)
-		progress.update(acp_task, total=total or None, completed=done)
+			acp_task = scan_progress.add_task(_("Downloading the ACP agent"), total=total or None)
+		scan_progress.update(acp_task, total=total or None, completed=done)
 
 	enricher = None
 	llm_provider = None
@@ -1101,83 +1144,33 @@ def _print_crosscheck_summary(results, move_results, do_apply: bool) -> None:  #
 _STRIP_SCOPES = ("external", "embedded", "both")
 
 
-@main.command()
+@main.command(name="strip-covers", deprecated=True, hidden=True)
 @click.option("--library", "library", type=click.Path(file_okay=False, path_type=Path), help=_("Library root"))
 @click.option("--no-cache", is_flag=True, help=_("Disable SQLite cache"))
 @click.option("--limit", type=int, default=None, help=_("Process only the first N books"))
-@click.option("--generated", "generated", type=click.Choice(_STRIP_SCOPES), is_flag=False, flag_value="both", default=None, help=_("Remove GENERATED covers (Calibre placeholders). Optional scope: external (sidecar files), embedded (inside EPUBs) or both (default)"))
-@click.option("--invalid", "invalid", type=click.Choice(_STRIP_SCOPES), is_flag=False, flag_value="both", default=None, help=_("Remove INVALID covers — image-extension or cover.* files no decoder can read (they trigger ABS ffmpeg 'Invalid data found' errors). Optional scope: external, embedded or both (default)"))
-@click.option("--apply", "do_apply", is_flag=True, help=_("Actually remove the covers (default: dry-run)"))
-def strip_covers(library: Path | None, no_cache: bool, limit: int | None, do_apply: bool,
-		generated: str | None, invalid: str | None) -> None:
-	"""Remove auto-generated (Calibre placeholder) and/or invalid covers.
-
-	Two selectors, each an optional-scope flag: `--generated` (C11 pixel
-	analysis: cover.jpg sidecar renamed to cover.jpg.bak — never
-	hard-deleted — and embedded EPUB covers stripped surgically) and
-	`--invalid` (cover files no image decoder can read: an HTML page saved
-	as .jpg, cover.html — Audiobookshelf still picks those as item covers
-	by extension, which is what its ffmpeg "Invalid data found" resize
-	errors come from; renamed to .bak as well). Each flag takes an optional
-	value external/embedded/both; bare = both. Without either flag the
-	command keeps its original behaviour (generated, both scopes).
-	Non-EPUB format files are untouched — their covers live in binary EXTH
-	headers with no safe removal path. After a write run the next
-	`bmf analyze` sees MISSING_COVER and refetches a real cover.
-	"""
-	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
-
-	from .covers import strip_generated_covers
-
-	cfg = Config.from_env()
-	if library is not None:
-		cfg.library = library
-
-	# Bare `bmf strip-covers` keeps the original behaviour: generated only,
-	# both scopes. Passing either selector limits the run to what was asked.
+@click.option("--generated", "generated", type=click.Choice(_STRIP_SCOPES), is_flag=False, flag_value="both", default=None)
+@click.option("--invalid", "invalid", type=click.Choice(_STRIP_SCOPES), is_flag=False, flag_value="both", default=None)
+@click.option("--apply", "do_apply", is_flag=True)
+@click.pass_context
+def strip_covers(ctx: click.Context, library: Path | None, no_cache: bool, limit: int | None,
+		do_apply: bool, generated: str | None, invalid: str | None) -> None:
+	"""Deprecated alias for `bmf clean --covers`. Use `bmf clean` instead."""
+	console.print("[yellow]" + _("strip-covers is deprecated — use `bmf clean --covers` (with optional --generated/--invalid) instead.") + "[/yellow]")
+	# Bare call keeps the old default: generated=both, no invalid stripping.
 	if generated is None and invalid is None:
 		generated = "both"
-
-	_validate_library(cfg.library)
-	console.print(f"[bold]{_('Stripping covers')}[/bold] [cyan]{cfg.library}[/cyan] [{'WRITE' if do_apply else 'DRY-RUN'}]", highlight=False)
-	console.print("[dim]" + _("generated: {generated}, invalid: {invalid}").format(
-		generated=generated or _("off"), invalid=invalid or _("off"),
-	) + "[/dim]")
-
-	cache = _open_cache(cfg.cache_db, no_cache=no_cache)
-	try:
-		books = _scan_library_with_progress(cfg, cache, no_cache=no_cache)
-		if limit is not None:
-			books = books[:limit]
-
-		results: list = []
-		with Progress(
-			SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-			BarColumn(complete_style="bright_yellow", finished_style="bright_yellow", pulse_style="bright_yellow"), TextColumn("{task.completed}/{task.total}"),
-			TimeRemainingColumn(), console=console, transient=True,
-		) as progress:
-			task_id = progress.add_task(_("Stripping covers"), total=len(books))
-			for meta in books:
-				try:
-					results.append(strip_generated_covers(
-						meta.path, dry_run=not do_apply, generated=generated, invalid=invalid,
-					))
-				except Exception as e:  # noqa: BLE001
-					log.warning("cover strip failed for %s: %s", meta.path, e)
-				progress.update(task_id, advance=1)
-
-		# Only a WRITE run changes folders (a dry-run leaves mtimes alone, so
-		# the rows stay fresh); drop the touched ones so the next scan re-parses.
-		if do_apply:
-			touched = [r.path for r in results if r.touched]
-			if touched and cache is not None:
-				cache.invalidate_many(touched)
-				cache.commit()
-	finally:
-		if cache is not None:
-			cache.close()
-
-	_print_strip_covers_summary(results, do_apply)
+	ctx.invoke(
+		clean,
+		library=library,
+		no_cache=no_cache,
+		limit=limit,
+		do_apply=do_apply,
+		clean_covers=True,
+		generated=generated,
+		invalid=invalid,
+		clean_unverified=False,
+		clear_all_verified=False,
+	)
 
 
 def _print_strip_covers_summary(results, do_apply: bool) -> None:  # noqa: ANN001
@@ -1220,23 +1213,31 @@ def _print_strip_covers_summary(results, do_apply: bool) -> None:  # noqa: ANN00
 		if not do_apply:
 			console.print("[dim]" + _("Dry-run: nothing removed. Re-run with --apply to strip the covers.") + "[/dim]")
 
-
 @main.command()
 @click.option("--library", "library", type=click.Path(file_okay=False, path_type=Path), help=_("Library root"))
 @click.option("--no-cache", is_flag=True, help=_("Disable SQLite cache"))
 @click.option("--limit", type=int, default=None, help=_("Process only the first N books"))
 @click.option("--apply", "do_apply", is_flag=True, help=_("Actually modify the library (default: dry-run)"))
 @click.option("--covers/--no-covers", "clean_covers", default=True, help=_("Clean invalid and generated covers (default: yes)"))
+@click.option("--generated", "generated", type=click.Choice(_STRIP_SCOPES), is_flag=False, flag_value="both", default=None, help=_("Scope of generated-cover removal: external (sidecar files), embedded (inside EPUBs) or both (default). Implies --covers."))
+@click.option("--invalid", "invalid", type=click.Choice(_STRIP_SCOPES), is_flag=False, flag_value="both", default=None, help=_("Scope of invalid-cover removal — files no image decoder can read (HTML saved as .jpg, cover.html). Scope: external, embedded or both (default). Implies --covers."))
 @click.option("--unverified/--no-unverified", "clean_unverified", default=True, help=_("Clear `verified` flag from books whose author/series cannot be confirmed online (default: yes)"))
-def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: bool, clean_covers: bool, clean_unverified: bool) -> None:
+@click.option("--clear-all-verified", "clear_all_verified", is_flag=True, help=_("Clear `verified` flag from ALL books unconditionally (default: no)"))
+def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: bool,
+		clean_covers: bool, generated: str | None, invalid: str | None,
+		clean_unverified: bool, clear_all_verified: bool) -> None:
 	"""Clean invalid data and unconfirmed verified flags from the library.
 
 	Unifies cleanup operations in a single pass (dry-run by default):
 	1. --covers: Renames generated Calibre placeholder covers and unreadable
 	   image files (HTML saved as .jpg) to .bak, and strips them from EPUBs.
+	   Use --generated / --invalid with optional scope (external/embedded/both)
+	   to select which type and where; both default to both scopes.
 	2. --unverified: Audits books marked as `verified: true`. If a book has no
 	   ISBN and its author/series does not exist online (suspected LLM hallucination),
 	   its `verified` flag is cleared, returning it to review.
+	3. --clear-all-verified: Clears `verified` flag unconditionally from all
+	   books, returning the entire library to review.
 	"""
 	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 
@@ -1250,16 +1251,32 @@ def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: boo
 	_validate_library(cfg.library)
 
 	console.print("[bold]" + _("Cleaning library") + f"[/bold] [cyan]{cfg.library}[/cyan] [{'WRITE' if do_apply else 'DRY-RUN'}]", highlight=False)
-	console.print("[dim]" + _("covers: {covers}, unverified: {unverified}").format(covers=clean_covers, unverified=clean_unverified) + "[/dim]")
+	# --generated / --invalid imply --covers even if --no-covers was passed.
+	if generated is not None or invalid is not None:
+		clean_covers = True
+	# If neither scope flag was given and covers are active, default to both=both
+	# (the pre-existing "clean everything" behaviour). If only ONE scope flag was
+	# given, leave the other as None so the targeted type is preserved.
+	if clean_covers and generated is None and invalid is None:
+		eff_generated: str | None = "both"
+		eff_invalid: str | None = "both"
+	else:
+		eff_generated = generated
+		eff_invalid = invalid
+	unverified_desc = "all" if clear_all_verified else str(clean_unverified)
+	covers_desc = f"generated={eff_generated or 'off'}, invalid={eff_invalid or 'off'}" if clean_covers else _("off")
+	console.print("[dim]" + _("covers: {covers}, unverified: {unverified}").format(covers=covers_desc, unverified=unverified_desc) + "[/dim]")
 
 	cache = _open_cache(cfg.cache_db, no_cache=no_cache)
+	need_audit = (clean_unverified or clear_all_verified)
+	need_enricher = clean_unverified and not clear_all_verified
 	enricher = Enricher(
 		cache_db=cfg.cache_db,
 		databazeknih_enabled=cfg.databazeknih_enabled,
 		legie_enabled=cfg.legie_enabled,
 		abs_czech_url=cfg.abs_czech_url or None,
 		abs_czech_token=cfg.abs_czech_token,
-	) if clean_unverified else None
+	) if need_enricher else None
 
 	try:
 		books = _scan_library_with_progress(cfg, cache, no_cache=no_cache)
@@ -1271,7 +1288,7 @@ def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: boo
 
 		with Progress(
 			SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-			BarColumn(complete_style="bright_yellow", finished_style="bright_yellow", pulse_style="bright_yellow"), TextColumn("{task.completed}/{task.total}"),
+			BarColumn(complete_style="bright_blue", finished_style="bright_blue", pulse_style="bright_blue"), TextColumn("{task.completed}/{task.total}"),
 			TimeRemainingColumn(), console=console, transient=True,
 		) as progress:
 			task_id = progress.add_task(_("Cleaning"), total=len(books))
@@ -1280,31 +1297,34 @@ def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: boo
 				if clean_covers:
 					try:
 						cover_results.append(strip_generated_covers(
-							meta.path, dry_run=not do_apply, generated="both", invalid="both",
+							meta.path, dry_run=not do_apply, generated=eff_generated, invalid=eff_invalid,
 						))
 					except Exception as e:  # noqa: BLE001
 						log.warning("cover strip failed for %s: %s", meta.path, e)
 
 				# 2. Audit unverified books
-				if clean_unverified and meta.verified:
-					# First, if it has an ISBN, it's generally safe
-					is_safe = False
-					if meta.isbn:
-						is_safe = True
+				if need_audit and meta.verified:
+					if clear_all_verified:
+						is_safe = False
 					else:
-						# Check author or series
-						author = meta.authors[0] if meta.authors else None
-						series = meta.series[0] if meta.series else None
-						if isinstance(series, dict):
-							series = str(series.get("name") or "")
-						elif isinstance(series, str):
-							from .models import series_entry_pair
-							series, _series_idx = series_entry_pair(series)
+						# First, if it has an ISBN, it's generally safe
+						is_safe = False
+						if meta.isbn:
+							is_safe = True
+						else:
+							# Check author or series
+							author = meta.authors[0] if meta.authors else None
+							series = meta.series[0] if meta.series else None
+							if isinstance(series, dict):
+								series = str(series.get("name") or "")
+							elif isinstance(series, str):
+								from .models import series_entry_pair
+								series, _series_idx = series_entry_pair(series)
 
-						if author and enricher is not None and enricher.author_exists(author):
-							is_safe = True
-						elif not author and series and enricher is not None and enricher.series_exists(series):
-							is_safe = True
+							if author and enricher is not None and enricher.author_exists(author):
+								is_safe = True
+							elif not author and series and enricher is not None and enricher.series_exists(series):
+								is_safe = True
 
 					if not is_safe:
 						unverified_cleared.append(meta.path)
@@ -1326,7 +1346,7 @@ def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: boo
 	if clean_covers:
 		_print_strip_covers_summary(cover_results, do_apply)
 
-	if clean_unverified:
+	if need_audit:
 		console.print()
 		t = Table(title=_("Unverified Audit Summary"), show_header=True, header_style="bold cyan")
 		t.add_column(_("Metric"), style="bold")
@@ -1541,7 +1561,7 @@ def abs_rescan(library: Path | None, since: str, url: str | None, abs_library: s
 	def _new_progress() -> Progress:
 		return Progress(
 			SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-			BarColumn(complete_style="cyan", finished_style="cyan", pulse_style="cyan"), TextColumn("{task.completed}/{task.total}"),
+			BarColumn(complete_style="steel_blue", finished_style="steel_blue", pulse_style="steel_blue"), TextColumn("{task.completed}/{task.total}"),
 			TimeRemainingColumn(), console=console,
 		)
 

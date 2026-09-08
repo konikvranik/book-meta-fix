@@ -736,6 +736,15 @@ src/book_meta_fix/
 - **Every command runs an internal scan** via the SQLite cache — `bmf scan` is
   only for summary stats, not a prerequisite.
 - **Every mutating command is dry-run by default** (`--apply` to write).
+- **CLI logging routes through the shared rich console** (`cli._ConsoleLogHandler`
+  installed by `_setup_logging`): every progress bar renders on the module-level
+  `cli.console`, and rich prints text ABOVE an active Live display only when the
+  print goes through the SAME console the Progress uses — a raw stderr
+  StreamHandler interleaved with and corrupted the bar. The handler emits the
+  formatted record via `console.print(..., markup=False, highlight=False,
+  soft_wrap=True)` (verbatim text, no width crop, stream semantics preserved).
+  Never add a second `Console` for bars and never write logs straight to
+  stderr in CLI paths — one console keeps bars and log lines coordinated.
 
 ## Working with the code
 

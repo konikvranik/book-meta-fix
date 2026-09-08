@@ -1028,6 +1028,11 @@ class AntigravityAcpProvider:
 		fb_ev = dict(evidence)
 		if feedback:
 			fb_ev["feedback"] = feedback
+		if extracted is not None:
+			broader = getattr(extracted, "broader_text", None)
+			if broader and len(broader) > len(fb_ev.get("first_page_text") or ""):
+				fb_ev["first_page_text"] = broader
+		fb_ev["max_text_len"] = 6000
 		if self._acp_fallback is not None:
 			result, error = self._acp_fallback._call(fb_ev)
 			if result is None:

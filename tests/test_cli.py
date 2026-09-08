@@ -1,9 +1,11 @@
 """Tests for CLI commands: completion installer, shims, strip-covers, abs-rescan."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from click.testing import CliRunner
+from rich.console import Console
 from test_abs_client import _DeleteRecorder, _GetRecorder, _PostRecorder, _Resp
 from test_covers import (
 	_HTML_BYTES,
@@ -15,6 +17,7 @@ from test_covers import (
 )
 
 from book_meta_fix import abs_client
+from book_meta_fix import cli as cli_mod
 from book_meta_fix.cli import main
 from book_meta_fix.covers import epub_cover_image
 
@@ -547,3 +550,149 @@ class TestScanCommand:
 		assert "Scan summary" in result.output
 		assert "Found 1 books" in result.output
 
+
+class TestCleanCommand:
+	"""bmf clean tests: dry-run, --apply, and --clear-all-verified."""
+
+	def _make_book(self, folder: Path, *, verified: bool = False, isbn: str | None = None, author: str = "Neznámý") -> Path:
+		import json as _json
+
+		folder.mkdir(parents=True, exist_ok=True)
+		meta = {
+			"title": "Kniha",
+			"authors": [author],
+		}
+		if verified:
+			meta["verified"] = True
+		if isbn:
+			meta["isbn"] = isbn
+		(folder / "metadata.json").write_text(_json.dumps(meta), encoding="utf-8")
+		return folder
+
+	def test_clean_dry_run_does_not_clear_verified(self, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+		import json as _json
+
+		lib = tmp_path / "lib"
+		b = self._make_book(lib / "Autor" / "Kniha (1)", verified=True, author="FakeAuthorXYZ")
+		monkeypatch.setenv("BMF_CACHE", str(tmp_path / "cache.db"))
+		monkeypatch.setattr("book_meta_fix.enrichers.Enricher.author_exists", lambda self, name: False)
+
+		result = CliRunner().invoke(main, ["clean", "--library", str(lib), "--no-covers"])
+		assert result.exit_code == 0
+		assert "Unverified Audit Summary" in result.output
+		assert "Dry-run: verified flags were NOT cleared" in result.output
+
+		data = _json.loads((b / "metadata.json").read_text(encoding="utf-8"))
+		assert data.get("verified") is True
+
+	def test_clean_apply_clears_unconfirmed_verified(self, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+		import json as _json
+
+		lib = tmp_path / "lib"
+		# Book 1 has ISBN -> safe, verified kept
+		b1 = self._make_book(lib / "Autor1" / "Kniha (1)", verified=True, isbn="9788020401052", author="Autor1")
+		# Book 2 has no ISBN and fake author -> unsafe, verified cleared
+		b2 = self._make_book(lib / "FakeAuthorXYZ" / "Kniha (2)", verified=True, author="FakeAuthorXYZ")
+		monkeypatch.setenv("BMF_CACHE", str(tmp_path / "cache.db"))
+		monkeypatch.setattr("book_meta_fix.enrichers.Enricher.author_exists", lambda self, name: False)
+
+		result = CliRunner().invoke(main, ["clean", "--library", str(lib), "--apply", "--no-covers"])
+		assert result.exit_code == 0
+		assert "verified flags cleared" in result.output
+
+		d1 = _json.loads((b1 / "metadata.json").read_text(encoding="utf-8"))
+		assert d1.get("verified") is True
+
+		d2 = _json.loads((b2 / "metadata.json").read_text(encoding="utf-8"))
+		assert "verified" not in d2 or d2.get("verified") is False
+
+	def test_clean_clear_all_verified(self, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+		import json as _json
+
+		lib = tmp_path / "lib"
+		# Both books should have verified cleared under --clear-all-verified, even the one with ISBN
+		b1 = self._make_book(lib / "Autor1" / "Kniha (1)", verified=True, isbn="9788020401052", author="Autor1")
+		b2 = self._make_book(lib / "Autor2" / "Kniha (2)", verified=True, author="Autor2")
+		monkeypatch.setenv("BMF_CACHE", str(tmp_path / "cache.db"))
+
+		result = CliRunner().invoke(main, ["clean", "--library", str(lib), "--apply", "--no-covers", "--clear-all-verified"])
+		assert result.exit_code == 0
+
+		d1 = _json.loads((b1 / "metadata.json").read_text(encoding="utf-8"))
+		assert "verified" not in d1 or d1.get("verified") is False
+
+		d2 = _json.loads((b2 / "metadata.json").read_text(encoding="utf-8"))
+		assert "verified" not in d2 or d2.get("verified") is False
+
+
+
+class TestConsoleLogHandler:
+	"""CLI logging must route through the shared rich console.
+
+	Only prints through the SAME console a Progress renders on land ABOVE
+	the live bar (rich hooks Live into console.print); a raw stream handler
+	would keep corrupting the bar.
+	"""
+
+	def _record(self, msg: str) -> logging.LogRecord:
+		return logging.LogRecord(
+			"book_meta_fix.test", logging.WARNING, __file__, 1, msg, None, None
+		)
+
+	def test_formats_record_through_console(self) -> None:
+		import io
+		import re
+
+		buf = io.StringIO()
+		handler = cli_mod._ConsoleLogHandler(Console(file=buf, no_color=True, force_terminal=False))
+		handler.setFormatter(cli_mod._log_formatter())
+		handler.emit(self._record("overwriting stale review.yaml.bak"))
+
+		line = buf.getvalue().strip()
+		assert re.fullmatch(
+			r"\d\d:\d\d:\d\d WARNING book_meta_fix\.test: overwriting stale review\.yaml\.bak", line
+		)
+
+	def test_long_line_not_cropped_and_markup_untouched(self) -> None:
+		import io
+
+		msg = "path with [bold]brackets[/bold] " + "x" * 100
+		buf = io.StringIO()
+		# A narrow console would crop a normal print to width; the handler
+		# must keep the raw stream semantics (soft_wrap, no markup parsing).
+		handler = cli_mod._ConsoleLogHandler(Console(file=buf, no_color=True, width=40, force_terminal=False))
+		handler.setFormatter(cli_mod._log_formatter())
+		handler.emit(self._record(msg))
+
+		assert msg in buf.getvalue()
+
+	def test_console_failure_does_not_raise(self, monkeypatch) -> None:  # noqa: ANN001
+		captured: list[logging.LogRecord] = []
+		monkeypatch.setattr(logging.Handler, "handleError", lambda self, rec: captured.append(rec))
+
+		class _Boom:
+			def print(self, *args: object, **kwargs: object) -> None:
+				raise OSError("console gone")
+
+		handler = cli_mod._ConsoleLogHandler(_Boom())  # type: ignore[arg-type]
+		handler.setFormatter(cli_mod._log_formatter())
+		handler.emit(self._record("boom"))  # must not raise
+		assert captured and captured[0].getMessage() == "boom"
+
+	def test_setup_logging_installs_handler_on_root(self, monkeypatch) -> None:  # noqa: ANN001
+		root = logging.getLogger()
+		saved = root.handlers[:]
+		saved_level = root.level
+		try:
+			# pytest pre-arms root with its capture handler and basicConfig
+			# no-ops on a configured root — clear inside the sandbox so the
+			# real code path runs (a plain `bmf` start has a bare root).
+			root.handlers.clear()
+			cli_mod._setup_logging(False)
+			ours = [h for h in root.handlers if isinstance(h, cli_mod._ConsoleLogHandler)]
+			assert len(ours) == 1
+			# The formatter must keep the historical one-line layout.
+			assert ours[0].formatter._fmt == "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
+		finally:
+			root.handlers[:] = saved
+			root.setLevel(saved_level)

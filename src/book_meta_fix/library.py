@@ -187,6 +187,8 @@ class Cache:
 	def __init__(self, db_path: Path):
 		self.db_path = Path(db_path)
 		self._lock = threading.Lock()
+		self._verified_authors_cache: list[str] | None = None
+		self._verified_series_cache: list[str] | None = None
 		try:
 			if not self.db_path.parent.exists():
 				try:
@@ -298,6 +300,102 @@ class Cache:
 					continue
 			return False
 
+	def get_verified_authors(self) -> list[str]:
+		"""Return list of distinct author names from books marked verified."""
+		with self._lock:
+			if self._verified_authors_cache is not None:
+				return self._verified_authors_cache
+			cur = self.conn.execute('''
+				SELECT DISTINCT value
+				FROM books, json_each(json_extract(payload, '$.authors'))
+				WHERE json_extract(payload, '$.verified') = 1
+			''')
+			authors = [str(r[0]).strip() for r in cur if r[0] and str(r[0]).strip()]
+			self._verified_authors_cache = authors
+			return authors
+
+	def get_verified_series(self) -> list[str]:
+		"""Return list of distinct series names from books marked verified."""
+		from .models import series_entry_pair
+
+		with self._lock:
+			if self._verified_series_cache is not None:
+				return self._verified_series_cache
+			cur = self.conn.execute('''
+				SELECT json_extract(payload, '$.series')
+				FROM books
+				WHERE json_extract(payload, '$.verified') = 1
+			''')
+			names: set[str] = set()
+			for (series_json,) in cur:
+				if not series_json:
+					continue
+				try:
+					series_arr = json.loads(series_json)
+					if isinstance(series_arr, list):
+						for s in series_arr:
+							s_name, _ = series_entry_pair(s)
+							if s_name and s_name.strip():
+								names.add(s_name.strip())
+				except json.JSONDecodeError:
+					continue
+			series_list = sorted(names)
+			self._verified_series_cache = series_list
+			return series_list
+
+	def find_similar_verified_authors(self, query: str, limit: int = 3, cutoff: int = 75) -> list[str]:
+		"""Find verified authors similar to *query* using token sort ratio."""
+		from rapidfuzz import fuzz, process, utils
+
+		if not query or not query.strip():
+			return []
+		authors = self.get_verified_authors()
+		if not authors:
+			return []
+		q = query.strip()
+		matches = process.extract(
+			q,
+			authors,
+			scorer=fuzz.token_sort_ratio,
+			processor=utils.default_process,
+			limit=limit,
+			score_cutoff=cutoff,
+		)
+		results = [m[0] for m in matches]
+		# If query is a single word (e.g. surname "Asimov"), also match verified authors
+		# who have this surname (first or last token).
+		q_tokens = q.split()
+		if len(q_tokens) == 1 and len(q) >= 3 and len(results) < limit:
+			q_norm = q.lower()
+			for a in authors:
+				if a in results:
+					continue
+				a_tokens = [t.rstrip(".,").lower() for t in a.split() if t]
+				if a_tokens and (a_tokens[0] == q_norm or a_tokens[-1] == q_norm):
+					results.append(a)
+					if len(results) >= limit:
+						break
+		return results
+
+	def find_similar_verified_series(self, query: str, limit: int = 3, cutoff: int = 75) -> list[str]:
+		"""Find verified series similar to *query* using token set ratio."""
+		from rapidfuzz import fuzz, process, utils
+
+		if not query or not query.strip():
+			return []
+		series_list = self.get_verified_series()
+		if not series_list:
+			return []
+		matches = process.extract(
+			query.strip(),
+			series_list,
+			scorer=fuzz.token_set_ratio,
+			processor=utils.default_process,
+			limit=limit,
+			score_cutoff=cutoff,
+		)
+		return [m[0] for m in matches]
+
 	def get(self, folder: Path) -> BookMeta | None:
 		"""Return cached BookMeta if folder mtime/size unchanged, else None."""
 		with self._lock:
@@ -367,6 +465,8 @@ class Cache:
 		normalised to ``str(Path(path))`` to match get()/put().
 		"""
 		with self._lock:
+			self._verified_authors_cache = None
+			self._verified_series_cache = None
 			self.conn.execute("DELETE FROM books WHERE path = ?", (str(Path(path)),))
 			self.conn.commit()
 
@@ -375,6 +475,8 @@ class Cache:
 		keys = [(str(Path(p)),) for p in paths]
 		if keys:
 			with self._lock:
+				self._verified_authors_cache = None
+				self._verified_series_cache = None
 				self.conn.executemany("DELETE FROM books WHERE path = ?", keys)
 				self.conn.commit()
 

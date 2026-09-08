@@ -516,7 +516,9 @@ def _process_book(
 						stats["llm_fixed"] += 1
 
 				try:
-					evidence = _build_llm_evidence(meta, diag, extracted)
+					evidence = _build_llm_evidence(
+						meta, diag, extracted, cache=cache, enricher=enricher, skip_enrich=skip_enrich,
+					)
 					# Attempt 1: first-page text.
 					enriched, llm_src = _llm_attempt(evidence)
 					# Attempt 2 (only if the first page wasn't enough): retry with a
@@ -525,7 +527,7 @@ def _process_book(
 						broader = getattr(extracted, "broader_text", None)
 						first = extracted.first_page_text
 						if broader and has_usable_text(broader) and (not first or len(broader) > len(first)):
-							enriched, llm_src = _llm_attempt({**evidence, "first_page_text": broader})
+							enriched, llm_src = _llm_attempt({**evidence, "first_page_text": broader, "max_text_len": 6000})
 							if enriched is not None:
 								stats["llm_broader_fixed"] = stats.get("llm_broader_fixed", 0) + 1
 					if enriched is not None:
@@ -843,10 +845,92 @@ def _strip_diacritics(s: str) -> str:
 	return s.translate(repl)
 
 
-def _build_llm_evidence(meta: BookMeta, diag: Diagnosis, extracted: ExtractedMeta | None) -> dict:  # noqa: F821
+def _build_llm_evidence(
+	meta: BookMeta,
+	diag: Diagnosis,  # noqa: F821
+	extracted: ExtractedMeta | None,  # noqa: F821
+	*,
+	cache: Cache | None = None,
+	enricher: Enricher | None = None,
+	skip_enrich: bool = False,
+) -> dict:
 	"""Assemble the evidence dict passed to the LLM provider."""
 	first_page = extracted.first_page_text if extracted is not None else None
 	series_name, series_index = meta.series_pair()
+
+	known_authors: list[str] = []
+	known_series: list[str] = []
+	if cache is not None:
+		author_queries: list[str] = []
+		if meta.authors:
+			author_queries.extend(meta.authors)
+		if meta.author_folder:
+			author_queries.append(meta.author_folder)
+		if extracted and extracted.authors_from_text:
+			author_queries.extend(extracted.authors_from_text)
+
+		seen_authors: set[str] = set()
+		for q in author_queries:
+			for a in cache.find_similar_verified_authors(q, limit=3, cutoff=75):
+				if a not in seen_authors:
+					seen_authors.add(a)
+					known_authors.append(a)
+					if len(known_authors) >= 3:
+						break
+			if len(known_authors) >= 3:
+				break
+
+		series_queries: list[str] = []
+		if series_name:
+			series_queries.append(series_name)
+		if meta.series:
+			from .models import series_entry_pair
+
+			for s in meta.series:
+				name, _ = series_entry_pair(s) if isinstance(s, (str, dict)) else ("", None)
+				if name and name not in series_queries:
+					series_queries.append(name)
+
+		seen_series: set[str] = set()
+		for q in series_queries:
+			for s in cache.find_similar_verified_series(q, limit=3, cutoff=75):
+				if s not in seen_series:
+					seen_series.add(s)
+					known_series.append(s)
+					if len(known_series) >= 3:
+						break
+			if len(known_series) >= 3:
+				break
+
+	online_cand: dict[str, Any] | None = None
+	if enricher is not None and not skip_enrich:
+		cand = None
+		content_isbn = (extracted.isbn_from_text or extracted.isbn) if extracted else None
+		lookup_isbn = content_isbn or meta.isbn
+		if lookup_isbn:
+			try:
+				cand = enricher.lookup(isbn=lookup_isbn)
+			except Exception:  # noqa: BLE001
+				pass
+		if cand is None:
+			lookup_title = (extracted.title_from_text if extracted else None) or meta.title
+			lookup_author = (
+				(extracted.authors_from_text[0] if extracted and extracted.authors_from_text else None)
+				or (meta.authors[0] if meta.authors else None)
+			)
+			if lookup_title and lookup_author:
+				try:
+					cand = enricher.lookup(title=lookup_title, author=lookup_author, year=meta.year)
+				except Exception:  # noqa: BLE001
+					pass
+		if cand is not None and (cand.title or cand.authors):
+			online_cand = {
+				"title": cand.title,
+				"authors": cand.authors,
+				"year": cand.year,
+				"source": cand.source,
+			}
+
 	return {
 		"category": diag.category,
 		"current": {
@@ -864,6 +948,9 @@ def _build_llm_evidence(meta: BookMeta, diag: Diagnosis, extracted: ExtractedMet
 		"file_name": meta.primary_file,
 		"author_folder": meta.author_folder,
 		"title_folder": meta.title_folder,
+		"known_authors": known_authors or None,
+		"known_series": known_series or None,
+		"online_candidate": online_cand,
 	}
 
 
