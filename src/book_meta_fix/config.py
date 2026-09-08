@@ -42,8 +42,8 @@ class Config:
 	obalkyknih_enabled: bool = True
 	google_books_enabled: bool = True
 	openlibrary_enabled: bool = True
-	databazeknih_enabled: bool = False  # scraping, opt-in
-	legie_enabled: bool = False  # legie.info scraping (CZ/SK sci-fi/fantasy), opt-in
+	databazeknih_enabled: bool = True  # databazeknih.cz lookup, default enabled
+	legie_enabled: bool = True  # legie.info lookup (CZ/SK sci-fi/fantasy), default enabled
 	# Self-hosted audiobookshelf_czech_metadata instance (an aggregator over
 	# ~17 CZ audiobook storefronts speaking ABS's custom-provider contract;
 	# github.com/stecik/audiobookshelf_czech_metadata). Empty URL = disabled;

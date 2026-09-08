@@ -901,6 +901,101 @@ class Enricher:
 			)
 			self._cache_conn.commit()
 
+	def author_exists(self, name: str) -> bool:
+		"""Check if the author exists online (databazeknih, legie)."""
+		key = f"author_exists:{name.lower()}"
+		cached = self._cache_get(key)
+		if cached is not None:
+			return cached != "__NOT_FOUND__"
+		
+		# Databazeknih
+		if self.databazeknih_enabled:
+			from urllib.parse import quote_plus
+			url = f"https://www.databazeknih.cz/vyhledavani/autori?q={quote_plus(name)}"
+			html = _http_get_html(url)
+			if html and "jsme bohužel nenašli žádného" not in html and ("autbox" in html or "zivotopis" in html.lower() or "/autori/" in html.lower()):
+				self._cache_put(key, EnrichedMeta(source="author_exists"))
+				return True
+		
+		# Legie
+		if self.legie_enabled:
+			from urllib.parse import quote_plus
+			url = f"https://www.legie.info/index.php?search_text={quote_plus(name)}"
+			html = _http_get_html(url)
+			if html and "Nevyhledán žádný výsledek" not in html and ("autor/" in html.lower()):
+				self._cache_put(key, EnrichedMeta(source="author_exists"))
+				return True
+
+		# abs-czech provider (audiobookshelf_czech_metadata)
+		if self.abs_czech_url:
+			from rapidfuzz import fuzz
+			params = {"query": name, "author": name}
+			headers = {"Authorization": f"Bearer {self.abs_czech_token}"} if self.abs_czech_token else None
+			r = _http_get(_abs_search_url(self.abs_czech_url), params=params, timeout=10.0, rate=0.5, headers=headers)
+			if r is not None and r.status_code == 200:
+				try:
+					data = r.json()
+					matches = data.get("matches") if isinstance(data, dict) else None
+					if isinstance(matches, list):
+						for m in matches:
+							m_auth = m.get("author")
+							if m_auth and fuzz.token_sort_ratio(name.lower(), str(m_auth).lower()) >= 80:
+								self._cache_put(key, EnrichedMeta(source="author_exists"))
+								return True
+				except Exception:  # noqa: BLE001
+					pass
+
+		self._cache_put(key, None)
+		return False
+
+	def series_exists(self, name: str) -> bool:
+		"""Check if the series exists online (databazeknih, legie, abs_czech)."""
+		key = f"series_exists:{name.lower()}"
+		cached = self._cache_get(key)
+		if cached is not None:
+			return cached != "__NOT_FOUND__"
+
+		# Databazeknih
+		if self.databazeknih_enabled:
+			from urllib.parse import quote_plus
+			url = f"https://www.databazeknih.cz/vyhledavani/serie?q={quote_plus(name)}"
+			html = _http_get_html(url)
+			if html and "serie/" in html.lower():
+				self._cache_put(key, EnrichedMeta(source="series_exists"))
+				return True
+
+		# Legie
+		if self.legie_enabled:
+			from urllib.parse import quote_plus
+			url = f"https://www.legie.info/index.php?search_text={quote_plus(name)}"
+			html = _http_get_html(url)
+			if html and "Nevyhledán žádný výsledek" not in html and ("serie/" in html.lower()):
+				self._cache_put(key, EnrichedMeta(source="series_exists"))
+				return True
+
+		# abs-czech provider (audiobookshelf_czech_metadata)
+		if self.abs_czech_url:
+			from rapidfuzz import fuzz
+			params = {"query": name}
+			headers = {"Authorization": f"Bearer {self.abs_czech_token}"} if self.abs_czech_token else None
+			r = _http_get(_abs_search_url(self.abs_czech_url), params=params, timeout=10.0, rate=0.5, headers=headers)
+			if r is not None and r.status_code == 200:
+				try:
+					data = r.json()
+					matches = data.get("matches") if isinstance(data, dict) else None
+					if isinstance(matches, list):
+						for m in matches:
+							m_series = m.get("series")
+							if m_series and fuzz.token_sort_ratio(name.lower(), str(m_series).lower()) >= 80:
+								self._cache_put(key, EnrichedMeta(source="series_exists"))
+								return True
+				except Exception:  # noqa: BLE001
+					pass
+
+		self._cache_put(key, None)
+		return False
+
+
 	def lookup(self, *, isbn: str | None = None, title: str | None = None, author: str | None = None, year: int | None = None) -> EnrichedMeta | None:
 		"""Try sources in order. Returns first hit or None.
 

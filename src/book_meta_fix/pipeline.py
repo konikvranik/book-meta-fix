@@ -236,7 +236,7 @@ def run_pipeline(
 			llm_provider=llm_provider, llm_categories=llm_categories, stats=stats_ref,
 			verify_ok=verify_ok, strict_verify=strict_verify, llm_loop=llm_loop,
 			accept_missing_if_identified=accept_missing_if_identified,
-			detect=_detect,
+			detect=_detect, cache=cache,
 		)
 
 	def _process_safe(meta: BookMeta):
@@ -355,6 +355,7 @@ def _process_book(
 	llm_loop: bool = True,
 	accept_missing_if_identified: bool = True,
 	detect: Any = None,
+	cache: Cache | None = None,
 ) -> tuple[BookMeta, Diagnosis, Verification | None, EnrichedMeta | None]:  # noqa: F821
 	"""Process one book end-to-end. Thread-safe (no shared mutable state except *stats*).
 
@@ -528,6 +529,45 @@ def _process_book(
 							if enriched is not None:
 								stats["llm_broader_fixed"] = stats.get("llm_broader_fixed", 0) + 1
 					if enriched is not None:
+						if not skip_verify:
+							# LLM proposal passed text verifier.
+							# Verify author/series or try full online match to get cover/tags.
+							from .verifier import IdentityResult
+							ident = IdentityResult(title=enriched.title or "", author=enriched.authors[0] if enriched.authors else None, isbn=enriched.isbn)
+							want_cover = any(d.category in _COVER_CATEGORIES for d in all_diagnoses(diag))
+							# 1. Try full book lookup online:
+							online = _online_fill(ident, enricher, skip_enrich, want_cover)
+							if online is not None:
+								# Book exists online! Adopt the rich metadata and auto-accept.
+								online.identity_confirmed = True
+								enriched = online
+								llm_src = online.source
+							elif not skip_enrich:
+								# 2. Book not found online. Check if author or series exists to filter hallucinations.
+								author = enriched.authors[0] if enriched.authors else None
+								series = enriched.series
+								author_ok = False
+								series_ok = False
+
+								if author:
+									author_ok = (
+										(enricher is not None and enricher.author_exists(author)) or
+										(cache is not None and cache.is_verified_author(author))
+									)
+								if series:
+									series_ok = (
+										(enricher is not None and enricher.series_exists(series)) or
+										(cache is not None and cache.is_verified_series(series))
+									)
+
+								# If there's an author, it MUST be confirmed. If no author but series, series MUST be confirmed.
+								if author and not author_ok:
+									enriched.source = "llm:low"
+									llm_src = "llm:low"
+								elif not author and series and not series_ok:
+									enriched.source = "llm:low"
+									llm_src = "llm:low"
+
 						_bucket(llm_src)
 					else:
 						stats["llm_no_result"] += 1

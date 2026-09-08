@@ -468,7 +468,13 @@ class ReviewWriter:
 		# projected post-apply state is detector-clean), so pre-fill the
 		# persistent OK mark — apply then fixes AND closes it in one pass.
 		# The user can still untick the checkbox in the GUI.
-		if self._projected_clean(meta, proposed):
+		# EXCLUDE LLM proposals that change identity without online confirmation!
+		is_unconfirmed_llm = (
+			enriched is not None
+			and enriched.source.startswith("llm:")
+			and enriched.source not in _ONLINE_SOURCES
+		)
+		if self._projected_clean(meta, proposed) and not is_unconfirmed_llm:
 			entry["verified"] = True
 		elif self._identity_verified(meta, proposed, enriched, action):
 			# Relaxed twin: identity confirmed against content AND an online

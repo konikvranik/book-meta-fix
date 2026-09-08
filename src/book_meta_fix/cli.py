@@ -249,10 +249,10 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--library", "library", type=click.Path(file_okay=False, path_type=Path), help=_("Library root"))
 @click.option("--no-cache", is_flag=True, help=_("Disable SQLite cache (force full re-parse)"))
 @click.option("--limit", type=int, default=None, help=_("Process only the first N books (for testing)"))
-@click.option("--skip-enrich", is_flag=True, default=True, help=_("Skip online enrichment (offline mode)"))
-@click.option("--databazeknih", "use_databazeknih", is_flag=True, help=_("Enable databazeknih.cz lookup (CZ/SK genres + metadata). Implies --no-skip-enrich."))
-@click.option("--legie", "use_legie", is_flag=True, help=_("Enable legie.info lookup (CZ/SK sci-fi/fantasy — short stories & series databazeknih misses). Implies --no-skip-enrich."))
-@click.option("--abs-czech", "abs_czech_url", default=None, help=_("Use a self-hosted audiobookshelf_czech_metadata instance at this base URL (aggregates ~17 CZ audiobook storefronts — audio-edition metadata). Implies --no-skip-enrich. Also settable via BMF_ABS_CZECH_URL."))
+@click.option("--skip-enrich", is_flag=True, default=False, help=_("Skip online enrichment (offline mode)"))
+@click.option("--databazeknih/--no-databazeknih", "use_databazeknih", default=True, help=_("Enable/disable databazeknih.cz lookup (default: enabled)"))
+@click.option("--legie/--no-legie", "use_legie", default=True, help=_("Enable/disable legie.info lookup (default: enabled)"))
+@click.option("--abs-czech", "abs_czech_url", default=None, help=_("Use a self-hosted audiobookshelf_czech_metadata instance at this base URL (aggregates ~17 CZ audiobook storefronts — audio-edition metadata). Also settable via BMF_ABS_CZECH_URL."))
 @click.option("--skip-verify", is_flag=True, help=_("Skip content verification"))
 @click.option("--verify-ok", "verify_ok", is_flag=True, help=_("Audit: also verify books the detectors marked OK against their content. Reads every OK book's file (slower). A MISMATCH reclassifies it to NEEDS_REVIEW and seeks a fix (enrichment + LLM). Use periodically to catch corruption the structural detectors miss."))
 @click.option("--no-strict-verify", "no_strict_verify", is_flag=True, help=_("With --verify-ok: only reclassify a clear MISMATCH (fuzzy title < 0.5). By default (without this flag) UNCERTAIN (0.5–0.8) is also reclassified."))
@@ -261,7 +261,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--no-check-location", "no_check_location", is_flag=True, help=_("Skip the C13 location check (analyze metadata only, no placement proposals)."))
 @click.option("--recheck-ok", "recheck_ok", is_flag=True, help=_("Clear the `verified` flag (see review.yaml / the GUI checkbox) from every book, returning user-confirmed books to normal detection. Undo of a too-hasty OK."))
 @click.option("--output", "-o", type=click.Path(path_type=Path), default=None, help=_("Output review file (default: review.yaml)"))
-@click.option("--llm", "use_llm", is_flag=True, help=_("Enable LLM reconciliation (needs ZAI_API_KEY, BMF_ANTIGRAVITY_CMD, or BMF_LLM_MOCK=1)"))
+@click.option("--llm/--no-llm", "use_llm", default=True, help=_("Enable/disable LLM reconciliation (default: enabled if provider configured)"))
 @click.option("--llm-provider", "llm_provider", default=None, type=click.Choice(["antigravity", "acp", "agy", "zai", "mock", "off"], case_sensitive=False), help=_("Force the LLM provider branch (default: auto — Antigravity ACP when an agent is configured or cached, else Z.AI when ZAI_API_KEY is set). 'antigravity' = the ACP agent is the fast tier and Z.AI (if a key exists) only the paid fallback; 'zai' never uses ACP."))
 @click.option("--antigravity-cmd", "antigravity_cmd", default=None, help=_("Command that launches an Agent Client Protocol agent process (ACP v1 over stdio) — a Google Antigravity subscription as the FAST LLM tier. The official agent is `agy_acp_server.par` from the ACP Registry (release zips need chmod +x); any ACP agent works, e.g. `gemini --acp`. 'auto' (or empty) = bmf's SELF-MANAGED agent: the run checks the registry, downloads (~700 MB / 1.9 GB unpacked, into ~/.cache/book-meta-fix/acp) and upgrades it itself; an explicit path manages it manually. Same as BMF_ANTIGRAVITY_CMD."))
 @click.option("--antigravity-model", "antigravity_model", default=None, help=_("Model the ACP agent should serve the fast tier with (matched against the agent's session config options by exact value/name or token family, so 'gemini-flash' picks 'gemini-3.8-flash-high'; empty = the agent's default pick). Default gemini-flash-low — the newest flash at low effort (the quick check wants latency, not deliberation). Same as BMF_ANTIGRAVITY_MODEL."))
@@ -297,28 +297,24 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 	cache = _open_cache(cfg.cache_db, no_cache=no_cache)
 	out = output or cfg.review_file
 
-	# --databazeknih turns enrichment on (and opts the CZ/SK scraper in).
-	if use_databazeknih:
-		skip_enrich = False
-		cfg.databazeknih_enabled = True
-	# --legie opts the CZ/SK sci-fi/fantasy scraper in (also needs enrichment).
-	if use_legie:
-		skip_enrich = False
-		cfg.legie_enabled = True
-	# --abs-czech points at a self-hosted audiobookshelf_czech_metadata
-	# instance (CZ audiobook storefront aggregator) and enables its lookup.
+	if not use_databazeknih:
+		cfg.databazeknih_enabled = False
+	if not use_legie:
+		cfg.legie_enabled = False
 	if abs_czech_url:
-		skip_enrich = False
 		cfg.abs_czech_url = abs_czech_url
 
 	console.print(f"[bold]{_('Running pipeline')}[/bold] {cfg.library} ({_('workers')}: {workers})", highlight=False)
-	if cfg.databazeknih_enabled:
-		console.print("  [cyan]databazeknih.cz[/cyan] " + _("lookup enabled (genres + metadata)"))
-		console.print("  [cyan]" + _("cover replacement") + "[/cyan] " + _("enabled (C11 generated / MISSING_COVER → databazeknih cover_url)"))
-	if cfg.legie_enabled:
-		console.print("  [cyan]legie.info[/cyan] " + _("lookup enabled (sci-fi/fantasy — short stories & series)"))
-	if cfg.abs_czech_url:
-		console.print(f"  [cyan]{cfg.abs_czech_url}[/cyan] " + _("CZ audiobook provider lookup enabled (storefront aggregator)"))
+	if not skip_enrich:
+		if cfg.databazeknih_enabled:
+			console.print("  [cyan]databazeknih.cz[/cyan] " + _("lookup enabled (genres + metadata)"))
+			console.print("  [cyan]" + _("cover replacement") + "[/cyan] " + _("enabled (C11 generated / MISSING_COVER → databazeknih cover_url)"))
+		if cfg.legie_enabled:
+			console.print("  [cyan]legie.info[/cyan] " + _("lookup enabled (sci-fi/fantasy — short stories & series)"))
+		if cfg.abs_czech_url:
+			console.print(f"  [cyan]{cfg.abs_czech_url}[/cyan] " + _("CZ audiobook provider lookup enabled (storefront aggregator)"))
+	else:
+		console.print("  [dim]" + _("online enrichment disabled (--skip-enrich)") + "[/dim]")
 	if verify_ok:
 		strict = not no_strict_verify
 		console.print(f"  [cyan]--verify-ok[/cyan] {_('--verify-ok audit: OK books checked against content (strict={strict})').format(strict=strict)}")
@@ -448,7 +444,7 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 				progress.remove_task(acp_task)
 				acp_task = None
 			if llm_provider is None:
-				console.print("[yellow]" + _("--llm given but no provider available (set ZAI_API_KEY, BMF_ANTIGRAVITY_CMD, or BMF_LLM_MOCK=1)") + "[/yellow]")
+				log.debug("No LLM provider available (set ZAI_API_KEY, BMF_ANTIGRAVITY_CMD, or BMF_LLM_MOCK=1)")
 			elif llm_provider.name == "antigravity-acp":
 				# ACP fast tier: the informative knobs are the agent command,
 				# the model pick, and who serves the quality stage.
@@ -1255,6 +1251,146 @@ def _print_strip_covers_summary(results, do_apply: bool) -> None:  # noqa: ANN00
 			console.print("[yellow]" + _("Some EPUB covers probed as generated but could not be stripped (corrupt zip / unparseable OPF); see the list above.") + "[/yellow]")
 		if not do_apply:
 			console.print("[dim]" + _("Dry-run: nothing removed. Re-run with --apply to strip the covers.") + "[/dim]")
+
+
+@main.command()
+@click.option("--library", "library", type=click.Path(file_okay=False, path_type=Path), help=_("Library root"))
+@click.option("--no-cache", is_flag=True, help=_("Disable SQLite cache"))
+@click.option("--limit", type=int, default=None, help=_("Process only the first N books"))
+@click.option("--apply", "do_apply", is_flag=True, help=_("Actually modify the library (default: dry-run)"))
+@click.option("--covers/--no-covers", "clean_covers", default=True, help=_("Clean invalid and generated covers (default: yes)"))
+@click.option("--unverified/--no-unverified", "clean_unverified", default=True, help=_("Clear `verified` flag from books whose author/series cannot be confirmed online (default: yes)"))
+def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: bool, clean_covers: bool, clean_unverified: bool) -> None:
+	"""Clean invalid data and unconfirmed verified flags from the library.
+
+	Unifies cleanup operations in a single pass (dry-run by default):
+	1. --covers: Renames generated Calibre placeholder covers and unreadable
+	   image files (HTML saved as .jpg) to .bak, and strips them from EPUBs.
+	2. --unverified: Audits books marked as `verified: true`. If a book has no
+	   ISBN and its author/series does not exist online (suspected LLM hallucination),
+	   its `verified` flag is cleared, returning it to review.
+	"""
+	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
+
+	from .covers import strip_generated_covers
+	from .enrichers import Enricher
+	from .writers import clear_verified
+
+	cfg = Config.from_env()
+	if library is not None:
+		cfg.library = library
+	_validate_library(cfg.library)
+
+	console.print(f"[bold]{_('Cleaning library')}[/bold] [cyan]{cfg.library}[/cyan] [{'WRITE' if do_apply else 'DRY-RUN'}]", highlight=False)
+	console.print("[dim]" + _("covers: {covers}, unverified: {unverified}").format(covers=clean_covers, unverified=clean_unverified) + "[/dim]")
+
+	cache = _open_cache(cfg.cache_db, no_cache=no_cache)
+	enricher = Enricher(
+		cache_db=cfg.cache_db,
+		databazeknih_enabled=cfg.databazeknih_enabled,
+		legie_enabled=cfg.legie_enabled,
+		abs_czech_url=cfg.abs_czech_url or None,
+		abs_czech_token=cfg.abs_czech_token,
+	) if clean_unverified else None
+
+	try:
+		with Progress(
+			SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+			BarColumn(complete_style="bright_yellow", finished_style="bright_yellow", pulse_style="bright_yellow"), TextColumn("{task.completed}/{task.total}"),
+			TimeRemainingColumn(), console=console, transient=True,
+		) as progress:
+			task_id = progress.add_task(_("Reading library"), total=None)
+
+			def _scan_cb(done: int, total: int) -> None:
+				if progress.tasks[0].total is None and total:
+					progress.update(task_id, total=total)
+				progress.update(task_id, completed=done)
+
+			books = scan_library(cfg.library, cache=cache, use_cache=not no_cache, progress_callback=_scan_cb, workers=cfg.scan_workers)
+		if limit is not None:
+			books = books[:limit]
+
+		cover_results: list = []
+		unverified_cleared: list[str] = []
+
+		with Progress(
+			SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+			BarColumn(complete_style="bright_yellow", finished_style="bright_yellow", pulse_style="bright_yellow"), TextColumn("{task.completed}/{task.total}"),
+			TimeRemainingColumn(), console=console, transient=True,
+		) as progress:
+			task_id = progress.add_task(_("Cleaning"), total=len(books))
+			for meta in books:
+				# 1. Clean covers
+				if clean_covers:
+					try:
+						cover_results.append(strip_generated_covers(
+							meta.path, dry_run=not do_apply, generated="both", invalid="both",
+						))
+					except Exception as e:  # noqa: BLE001
+						log.warning("cover strip failed for %s: %s", meta.path, e)
+
+				# 2. Audit unverified books
+				if clean_unverified and meta.verified:
+					# First, if it has an ISBN, it's generally safe
+					is_safe = False
+					if meta.isbn:
+						is_safe = True
+					else:
+						# Check author or series
+						author = meta.authors[0] if meta.authors else None
+						series = meta.series[0] if meta.series else None
+						if isinstance(series, dict):
+							series = str(series.get("name") or "")
+						elif isinstance(series, str):
+							from .models import series_entry_pair
+							series, _series_idx = series_entry_pair(series)
+						
+						if author and enricher is not None and enricher.author_exists(author):
+							is_safe = True
+						elif not author and series and enricher is not None and enricher.series_exists(series):
+							is_safe = True
+
+					if not is_safe:
+						unverified_cleared.append(meta.path)
+						if do_apply:
+							clear_verified(Path(meta.path))
+
+				progress.update(task_id, advance=1)
+
+		if do_apply:
+			touched = [r.path for r in cover_results if getattr(r, "touched", False)] + unverified_cleared
+			if touched and cache is not None:
+				cache.invalidate_many(touched)
+				cache.commit()
+
+	finally:
+		if cache is not None:
+			cache.close()
+
+	if clean_covers:
+		_print_strip_covers_summary(cover_results, do_apply)
+
+	if clean_unverified:
+		console.print()
+		t = Table(title=_("Unverified Audit Summary"), show_header=True, header_style="bold cyan")
+		t.add_column(_("Metric"), style="bold")
+		t.add_column(_("Count"), justify="right")
+		t.add_row(_("books scanned"), str(len(books)), style="dim")
+		t.add_row(_("verified flags cleared"), str(len(unverified_cleared)))
+		console.print(t)
+
+		if unverified_cleared:
+			console.print()
+			t = Table(title=_("Unverified Books (first 25)"), show_header=True, header_style="bold cyan")
+			t.add_column(_("Book folder"))
+			for p in unverified_cleared[:25]:
+				t.add_row(Path(p).name[:80])
+			if len(unverified_cleared) > 25:
+				t.add_row("…", f"({len(unverified_cleared) - 25} more)")
+			console.print(t)
+
+		if not do_apply:
+			console.print("[dim]" + _("Dry-run: verified flags were NOT cleared. Re-run with --apply to clear them.") + "[/dim]")
 
 
 @main.command()

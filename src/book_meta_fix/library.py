@@ -260,6 +260,45 @@ class Cache:
 		# "database is locked" at Enricher.__init__.
 		self.conn.commit()
 
+	def is_verified_author(self, name: str) -> bool:
+		"""Return True if the exact author exists on any `verified` book in the library."""
+		with self._lock:
+			cur = self.conn.execute('''
+				SELECT 1 
+				FROM books, json_each(json_extract(payload, '$.authors'))
+				WHERE json_extract(payload, '$.verified') = 1
+				  AND lower(value) = lower(?)
+				LIMIT 1
+			''', (name,))
+			return cur.fetchone() is not None
+
+	def is_verified_series(self, name: str) -> bool:
+		"""Return True if the exact series exists on any `verified` book in the library."""
+		with self._lock:
+			cur = self.conn.execute('''
+				SELECT json_extract(payload, '$.series')
+				FROM books
+				WHERE json_extract(payload, '$.verified') = 1
+			''')
+			import json
+			from .models import series_entry_pair
+			
+			name_lower = name.lower()
+			for (series_json,) in cur:
+				if not series_json:
+					continue
+				try:
+					series_arr = json.loads(series_json)
+					if not isinstance(series_arr, list):
+						continue
+					for s in series_arr:
+						s_name, _ = series_entry_pair(s)
+						if s_name.lower() == name_lower:
+							return True
+				except json.JSONDecodeError:
+					continue
+			return False
+
 	def get(self, folder: Path) -> BookMeta | None:
 		"""Return cached BookMeta if folder mtime/size unchanged, else None."""
 		with self._lock:
