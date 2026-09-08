@@ -109,6 +109,20 @@ src/book_meta_fix/
                    wild); different first-name initials NEVER merge (homonym
                    guard: Karel vs Josef Čapek)
   extractors.py    per-format content extraction → ExtractedMeta
+  filecheck.py     CONTENT-PROBE validity of ebook files — the engine of `bmf clean --files`
+                   (C17 invalid-file delete proposals). Safety model: a file is
+                   deletable ONLY when its content is recognizable as NO book format
+                   (file_content_kind probes zip/pdf/mobi/rar/palmdb/text on the content;
+                   a valid book under a wrong extension — an EPUB named .pdf — is
+                   RECOGNIZED and never proposed; "unrecognized" implies invalid only for
+                   _FULLY_PROBED_SUFFIXES, elsewhere it stays unknown). Calibre veto:
+                   calibre_reads_file = ebook-meta exit 0 AND EMPTY stderr (measured: it
+                   exits 0 with a traceback on garbage, filename fallback). Deliberate
+                   misses: truncated PDFs / text junk stay unflagged (safety > recall).
+                   scan_invalid_files + merge_file_deletions write `action: delete`
+                   entries (proposed.delete_files) into review.yaml via the
+                   merge_normalizations contract (decided never touched, pending only
+                   overlaid); apply re-checks each file before unlink and snapshots it
   text_meta.py     offline page-text mining (1st stage of fix cascade)
   encoding.py      mojibake detection + repair
   isbn.py          ISBN extract/canonicalize/validate
@@ -130,8 +144,14 @@ src/book_meta_fix/
                    author never wins and an author-less match needs a near-exact title
                    (>= 90) — same gates in _cover_same_book for borrowed covers
   pipeline.py      orchestration: ThreadPoolExecutor, per-book state machine +
-                   apply_review (metadata writes + PLACEMENT — the former organize).
-                   Progress contract: progress_callback fires (0, total) once the
+                   apply_review (metadata writes + PLACEMENT — the former organize;
+                   the delete action has TWO shapes: folder rmtree (C6 default) and
+                   C17 file-level deletion — action delete + proposed.delete_files
+                   removes ONLY the named files after a per-file RE-CHECK
+                   (filecheck.file_is_invalid; a file that became valid or vanished
+                   since the proposal is skipped and recorded in
+                   summary[skipped_files]), everything lands in the same
+                   deletion_snapshot tar.gz). Progress contract: progress_callback fires (0, total) once the
                    processing set is known — BEFORE the first book, so a bar shows
                    its total/ETA immediately instead of pulsing at 0/None until
                    the first LLM-bound completion — then (done, total) per book;
@@ -335,7 +355,15 @@ src/book_meta_fix/
                   (execute_bulk_cover_delete — sidecar cover.jpg/.bak + embedded EPUB strip,
                   immediate like the single-book path, AND drops proposed.cover_url rebind-
                   style: apply re-downloads it for C11/MISSING_COVER, so keeping the URL
-                  would undo the deletion), and Ctrl+J merge-selected (execute_merge +
+                  would undo the deletion), Ctrl+Shift+D bulk decision-clear
+                  (apply_bulk_action(..., None) — the mass VETO for pre-filled
+                  delete/accept; C17 entries arrive action: delete, the user filters
+                  by the delete state and un-decides what should survive), and
+                  Ctrl+Shift+R remove-from-review (confirm dialog → drop selected
+                  entries entirely — no files touched, neither delete nor accept;
+                  prunes _lib_uuids/_lib_index/thumbs like a merge and saves
+                  review.yaml IMMEDIATELY; a book whose problem persists gets
+                  re-flagged by the next analyze/clean), and Ctrl+J merge-selected (execute_merge +
                   merge_selected dialog + _after_merge): the dialog picks the SURVIVOR
                   (default = focus row; same_book mismatch only warns — the user decides,
                   unlike the automatic placement merge) and every other selected book is
@@ -368,7 +396,11 @@ src/book_meta_fix/
                   two selectors as --generated/--invalid optional-value flags — click
                   is_flag=False + flag_value="both": bare flag = both, a value
                   external/embedded narrows, NO flag at all falls back to generated-only
-                  so bare `bmf strip-covers` keeps its historical behaviour; analyze
+                  so bare `bmf strip-covers` keeps its historical behaviour; clean hosts
+                  a THIRD selector --files (default OFF, plain boolean flag — the C17
+                  file probes are opt-in): dry-run only reports, --apply writes the
+                  delete proposals into cfg.review_file via filecheck.merge_file_deletions
+                  (deletion itself is apply's job); analyze
                   takes --llm-provider/--antigravity-cmd/--antigravity-model and closes
                   the provider in its finally block — only the ACP provider actually
                   holds subprocesses)

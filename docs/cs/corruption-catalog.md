@@ -1,6 +1,6 @@
 [English](../corruption-catalog.md) | **Čeština**
 
-# Katalog poškození (C1–C16)
+# Katalog poškození (C1–C17)
 
 Odvozeno empiricky z CZ/SK calibre knihovny s ~5 440 knihami. Každá kategorie
 má reálné příklady (calibre_id, author_folder, title) nalezené během
@@ -237,6 +237,39 @@ falešné (Afrika→Amerika, vlaky→války, etika→erotika). Dlouhý ocas
 
 **Verdikt:** AUTO_FIXABLE (výměna celého seznamu přes `proposed.genres` /
 `proposed.tags`)
+
+## C17 — Neplatný soubor e-knihy (nezachovatelný obsah)
+
+Soubor e-knihy, jehož OBSAH nelze rozpoznat jako žádný formát knihy:
+0 bajtů, binární šum bez signatury (žádný ZIP / `%PDF-` / `BOOKMOBI` /
+`Rar!` / struktura PalmDB, není čitelným textem), čitelný ZIP bez
+knižního obsahu (bez `META-INF/container.xml`, bez obrázků, bez čitelných
+textových položek), nebo zkrácený ZIP se ztraceným centrálním adresářem.
+
+Emituje POUZE `bmf clean --files` (opt-in; nikdy `bmf analyze` —
+platnost souborů záměrně zůstává mimo tok autokorekcí). Sondy jsou
+obsahové, ne podle přípony: platná kniha uložená pod špatnou příponou
+(EPUB pojmenované `.pdf`) se rozpozná a nikdy se nenavrhuje — přípona
+pouze rozhoduje, zda *nerozpoznaný* obsah smí být vůbec prohlášen za
+neplatný (`_FULLY_PROBED_SUFFIXES` v `filecheck.py`; formáty s variantami,
+které bmf nedokáže spolehlivě identifikovat, jako `.prc`/`.pdb`, se
+nikdy neflagují). Záměrné mezery, bezpečnost před úplností: zkrácené PDF
+stále začíná `%PDF-`, textový odpad (HTML chybová stránka uložená jako
+`.epub`) se stále jeví jako zachovatelný text. Když soubor čistě přečte
+calibre `ebook-meta` (exit 0 a prázdný stderr — změřeno: u smetí končí 0
+s tracebackem a fallbackem na název souboru), soubor NEPLATNÍ není.
+
+Nové položky přichází s předvyplněným `action: delete` a
+`proposed.delete_files`; GUI filtruje podle stavu delete a Ctrl+Shift+D
+hromadně ruší rozhodnutí (Ctrl+Shift+R odebírá položky z review).
+`bmf apply` maže jen pojmenované SOUBORY (složka a zdravé formáty v ní
+zůstávají), těsně před smazáním každý soubor překontroluje (soubor,
+který se stal platným — nebo zmizel — se přeskočí) a vše archivuje do
+`deletion_snapshot_*.tar.gz`. Smazání jediného knižního souboru
+kaskáduje: další běh nahlásí EMPTY_BOOK a přesune složku do
+`needfix/empty/`.
+
+**Verdikt:** NEEDS_REVIEW (návrh smazání; vždy schvaluje člověk, nikdy se neaplikuje automaticky)
 
 ## EMPTY_BOOK — Mrtvý záznam (knižní soubor chybí)
 

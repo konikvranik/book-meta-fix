@@ -994,3 +994,127 @@ class TestEmptyBookPlacement:
 		assert summary["already_placed"] == 1
 		assert (library / "needfix" / "empty" / "Jan Novak" / "Kniha (7)" / "metadata.json").is_file()
 		assert not (library / "needfix" / "empty" / "needfix").exists()
+
+
+class TestDeleteFiles:
+	"""C17 file-level deletion (`proposed.delete_files` + action: delete):
+	only the named invalid files go, the folder stays, and every file is
+	RE-CHECKED at apply time — a proposal can never delete a healthy file."""
+
+	GARBAGE = b"\xde\xad\xbe\xef" * 1000  # binary noise, no NULs on purpose
+
+	def _valid_epub(self, path: Path) -> None:
+		import zipfile
+
+		with zipfile.ZipFile(path, "w") as zf:
+			zf.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+			zf.writestr(
+				"META-INF/container.xml",
+				'<?xml version="1.0"?><container version="1.0" '
+				'xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles>'
+				'<rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>'
+				"</rootfiles></container>",
+			)
+			zf.writestr("OEBPS/content.opf", '<package xmlns="http://www.idpf.org/2007/opf" version="2.0"/>')
+			zf.writestr("OEBPS/index.xhtml", "<html><body>Kniha</body></html>")
+
+	def _no_calibre(self, monkeypatch):
+		import book_meta_fix.filecheck as fc
+
+		monkeypatch.setattr(fc, "calibre_reads_file", lambda p: False)
+
+	def test_removes_only_the_named_file_and_snapshots_it(self, tmp_path, monkeypatch):
+		self._no_calibre(monkeypatch)
+		library = tmp_path / "lib"
+		folder = library / "Autor" / "Kniha (1)"
+		folder.mkdir(parents=True)
+		(folder / "kniha.epub").write_bytes(self.GARBAGE)
+		(folder / "dobra.txt").write_text("Kapitola prvni, text knihy v poradku.\n" * 5, encoding="utf-8")
+		(folder / "metadata.json").write_text("{}\n", encoding="utf-8")
+		review = tmp_path / "review.yaml"
+		_write_review(review, [{
+			"id": 1, "uuid": "u1", "path": "Autor/Kniha (1)",
+			"current": {"title": "Kniha"},
+			"proposed": {"delete_files": ["kniha.epub"], "source": "filecheck"},
+			"action": "delete",
+		}])
+		import os
+
+		cwd = os.getcwd()
+		os.chdir(tmp_path)
+		try:
+			summary = apply_review(review, library, dry_run=False, place=False)
+		finally:
+			os.chdir(cwd)
+		assert summary["files_deleted"] == 1
+		assert summary["deleted"] == 0  # no FOLDER deletion
+		# The folder and its healthy content survive; only the invalid file is gone.
+		assert folder.is_dir()
+		assert (folder / "dobra.txt").is_file()
+		assert (folder / "metadata.json").is_file()
+		assert not (folder / "kniha.epub").exists()
+		# The deleted FILE rides the tar.gz snapshot.
+		snap = tmp_path / Path(summary["snapshot"]).name
+		assert snap.is_file()
+		with tarfile.open(snap, "r:gz") as tar:
+			assert any("kniha.epub" in n for n in tar.getnames())
+		# Entry pruned after a successful file deletion.
+		assert parse_review(review) == []
+
+	def test_recheck_veto_keeps_now_valid_file(self, tmp_path, monkeypatch):
+		"""The user replaced the file between clean and apply — the re-check
+		recognizes the content and MUST refuse the deletion."""
+		self._no_calibre(monkeypatch)
+		library = tmp_path / "lib"
+		folder = library / "Autor" / "Kniha (1)"
+		folder.mkdir(parents=True)
+		self._valid_epub(folder / "kniha.epub")
+		review = tmp_path / "review.yaml"
+		_write_review(review, [{
+			"id": 1, "uuid": "u1", "path": "Autor/Kniha (1)",
+			"current": {"title": "Kniha"},
+			"proposed": {"delete_files": ["kniha.epub"]},
+			"action": "delete",
+		}])
+		summary = apply_review(review, library, dry_run=False, place=False)
+		assert summary["files_deleted"] == 0
+		assert (folder / "kniha.epub").is_file()
+		assert summary["skipped_files"] and "now reads as valid" in summary["skipped_files"][0]
+		# Fully-skipped entry stays in review for a re-decision.
+		assert len(parse_review(review)) == 1
+
+	def test_missing_file_reported_and_entry_kept(self, tmp_path, monkeypatch):
+		self._no_calibre(monkeypatch)
+		library = tmp_path / "lib"
+		folder = library / "Autor" / "Kniha (1)"
+		folder.mkdir(parents=True)
+		(folder / "metadata.json").write_text("{}\n", encoding="utf-8")
+		review = tmp_path / "review.yaml"
+		_write_review(review, [{
+			"id": 1, "uuid": "u1", "path": "Autor/Kniha (1)",
+			"current": {"title": "Kniha"},
+			"proposed": {"delete_files": ["gone.epub"]},
+			"action": "delete",
+		}])
+		summary = apply_review(review, library, dry_run=False, place=False)
+		assert summary["files_deleted"] == 0
+		assert summary["skipped_files"] and "already gone" in summary["skipped_files"][0]
+		assert len(parse_review(review)) == 1
+
+	def test_dry_run_touches_nothing(self, tmp_path, monkeypatch):
+		self._no_calibre(monkeypatch)
+		library = tmp_path / "lib"
+		folder = library / "Autor" / "Kniha (1)"
+		folder.mkdir(parents=True)
+		(folder / "kniha.epub").write_bytes(self.GARBAGE)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [{
+			"id": 1, "uuid": "u1", "path": "Autor/Kniha (1)",
+			"current": {"title": "Kniha"},
+			"proposed": {"delete_files": ["kniha.epub"]},
+			"action": "delete",
+		}])
+		summary = apply_review(review, library, dry_run=True, place=False)
+		assert summary["files_deleted"] == 1  # the honest dry-run count
+		assert (folder / "kniha.epub").is_file()
+		assert summary["snapshot"] is None

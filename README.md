@@ -17,7 +17,7 @@ Audiobookshelf and Kavita pick up the fixes on rescan.
 | [docs/architecture.md](docs/architecture.md) | Module map, data flow, concurrency model, caching, atomicity |
 | [docs/concepts.md](docs/concepts.md) | Verdict buckets, verification philosophy, fix cascade, LLM loop, review.yaml format |
 | [docs/how-to/](docs/how-to/index.md) | Step-by-step recipes (run a batch, tune the rate limit, debug, …) |
-| [docs/corruption-catalog.md](docs/corruption-catalog.md) | The C1–C16 categories with real examples |
+| [docs/corruption-catalog.md](docs/corruption-catalog.md) | The C1–C17 categories with real examples |
 | [AGENTS.md](AGENTS.md) | Guide for AI agents editing this codebase (conventions, layout, gotchas) |
 
 ## Status
@@ -690,7 +690,7 @@ $EDITOR src/book_meta_fix/locales/cs/LC_MESSAGES/bmf.po
 make i18n-compile   # .po -> .mo
 ```
 
-## Corruption categories (C1–C16)
+## Corruption categories (C1–C17)
 
 See [`docs/corruption-catalog.md`](docs/corruption-catalog.md) for the full
 catalog with real examples. Summary:
@@ -713,6 +713,7 @@ catalog with real examples. Summary:
 | C14 | series order glued into the series name (`Mark Stone #73`) | AUTO_FIXABLE (split) |
 | C15 | author-name variants / swapped order — library-level, emitted by `bmf normalize` only | AUTO_FIXABLE / NEEDS_REVIEW |
 | C16 | genre/tag name variants (case, word order, EN/CZ, spelling) — library-level, emitted by `bmf normalize` only | AUTO_FIXABLE |
+| C17 | invalid ebook file (content matches no book format) — emitted by `bmf clean --files` only | NEEDS_REVIEW (delete proposal) |
 | — | EMPTY_BOOK (only metadata/backups/cover — the book file is gone) | AUTO_FIXABLE (`needfix/empty/`) |
 | — | MISSING_ISBN / MISSING_YEAR | AUTO_FIXABLE (enrich) |
 | — | MISSING_COVER (no `cover.jpg` sidecar) | AUTO_FIXABLE (download) |

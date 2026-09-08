@@ -1836,3 +1836,90 @@ class TestDialogConfirmParent:
 			assert captured.get("parent") is win
 		finally:
 			root.destroy()
+
+
+class TestBulkClearAndRemove:
+	"""Ctrl+Shift+D (mass veto → pending) and Ctrl+Shift+R (drop from review)."""
+
+	def _bare_app(self, selection=("0",)):
+		import types
+
+		app = gui.ReviewEditorApp.__new__(gui.ReviewEditorApp)
+		app.entries = [
+			{"uuid": "a", "current": {"title": "Alpha"}, "action": "delete",
+			 "proposed": {"delete_files": ["a.epub"]}},
+			{"uuid": "b", "current": {"title": "Beta"}, "action": "keep"},
+		]
+		app.tree = types.SimpleNamespace(
+			selection_get=lambda: selection,
+			selection_set=lambda *a, **kw: None,
+			see=lambda *a: None,
+		)
+		app._cur = 0
+		app._loading = False
+		app._dirty = False
+		app.calls = []
+		app._set_status = lambda extra="": None
+		app._collect_current = lambda: app.calls.append("collect")
+		app._load_book = lambda idx: app.calls.append(("load", idx))
+		app.refresh_list = lambda: app.calls.append("refresh")
+		app.flashes = []
+		app._flash = lambda msg, seconds=None: app.flashes.append(msg)
+		app._mark_dirty = lambda: setattr(app, "_dirty", True)
+		app._do_save = lambda: app.calls.append("save") or True
+		app._lib_uuids = {"a": "hay-a"}
+		app._thumbs_pil = {}
+		app._thumbs_photo = {}
+		app._big_thumbs = {}
+		app._lib_index = [({"uuid": "a"}, "hay-a")]
+		return app
+
+	def test_bulk_clear_returns_delete_to_pending(self):
+		app = self._bare_app(("0", "1"))
+		app.bulk_clear_action()
+		assert [e["action"] for e in app.entries] == [None, None]
+		assert app.flashes == ["bulk decision cleared: 2 books"]
+		assert app._dirty is True
+
+	def test_bulk_clear_without_selection_flashes(self):
+		app = self._bare_app(())
+		app.bulk_clear_action()
+		assert app.entries[0]["action"] == "delete"
+		assert app.flashes == ["select books first (Ctrl+click, Shift+click)"]
+
+	def test_remove_from_review_drops_entries_and_saves(self, monkeypatch):
+		monkeypatch.setattr(gui.messagebox, "askyesno", lambda *a, **kw: True)
+		app = self._bare_app(("0",))
+		app.remove_from_review()
+		assert [e["uuid"] for e in app.entries] == ["b"]  # only the selected gone
+		assert "save" in app.calls  # saved IMMEDIATELY, not at the next Ctrl+S
+		assert "a" not in app._lib_uuids  # the library index cannot re-serve it
+		assert app._lib_index == []
+		assert app.flashes == ["removed 1 entries from review"]
+
+	def test_remove_from_review_cancelled_touches_nothing(self, monkeypatch):
+		monkeypatch.setattr(gui.messagebox, "askyesno", lambda *a, **kw: False)
+		app = self._bare_app(("0",))
+		app.remove_from_review()
+		assert len(app.entries) == 2
+		assert "save" not in app.calls
+
+	def test_remove_last_entry_leaves_empty_review(self, monkeypatch):
+		monkeypatch.setattr(gui.messagebox, "askyesno", lambda *a, **kw: True)
+		app = self._bare_app(("0", "1"))
+		app.remove_from_review()
+		assert app.entries == []
+		assert app.flashes == ["review is empty"]
+		assert "save" in app.calls
+
+	def test_shift_plus_d_and_r_dispatch(self):
+		import types
+
+		app = gui.ReviewEditorApp.__new__(gui.ReviewEditorApp)
+		app.root = types.SimpleNamespace(grab_current=lambda: None)
+		app.calls = []
+		for name in ("bulk_clear_action", "remove_from_review"):
+			setattr(app, name, (lambda n: lambda: app.calls.append(n))(name))
+		assert app._on_ctrl_key(type("E", (), {"keysym": "D", "state": 0x0001})()) == "break"
+		assert app._on_ctrl_key(type("E", (), {"keysym": "R", "state": 0x0001})()) == "break"
+		assert app.calls == ["bulk_clear_action", "remove_from_review"]

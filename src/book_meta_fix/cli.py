@@ -1224,11 +1224,12 @@ def _print_strip_covers_summary(results, do_apply: bool) -> None:  # noqa: ANN00
 @click.option("--covers/--no-covers", "clean_covers", default=True, help=_("Clean invalid and generated covers (default: yes)"))
 @click.option("--generated", "generated", type=click.Choice(_STRIP_SCOPES), is_flag=False, flag_value="both", default=None, help=_("Scope of generated-cover removal: external (sidecar files), embedded (inside EPUBs) or both (default). Implies --covers."))
 @click.option("--invalid", "invalid", type=click.Choice(_STRIP_SCOPES), is_flag=False, flag_value="both", default=None, help=_("Scope of invalid-cover removal — files no image decoder can read (HTML saved as .jpg, cover.html). Scope: external, embedded or both (default). Implies --covers."))
+@click.option("--files/--no-files", "clean_files", default=False, help=_("Probe ebook files for unrecoverable content (recognized as no book format at all) and propose deletion in review.yaml (C17). Content-based detection: a valid book with a wrong extension is never proposed; every file is re-checked at apply time. Default: no."))
 @click.option("--unverified/--no-unverified", "clean_unverified", default=True, help=_("Clear `verified` flag from books whose author/series cannot be confirmed online (default: yes)"))
 @click.option("--clear-all-verified", "clear_all_verified", is_flag=True, help=_("Clear `verified` flag from ALL books unconditionally (default: no)"))
 def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: bool,
 		clean_covers: bool, generated: str | None, invalid: str | None,
-		clean_unverified: bool, clear_all_verified: bool) -> None:
+		clean_files: bool, clean_unverified: bool, clear_all_verified: bool) -> None:
 	"""Clean invalid data and unconfirmed verified flags from the library.
 
 	Unifies cleanup operations in a single pass (dry-run by default):
@@ -1236,16 +1237,23 @@ def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: boo
 	   image files (HTML saved as .jpg) to .bak, and strips them from EPUBs.
 	   Use --generated / --invalid with optional scope (external/embedded/both)
 	   to select which type and where; both default to both scopes.
-	2. --unverified: Audits books marked as `verified: true`. If a book has no
+	2. --files: Probes ebook files whose CONTENT is recognizable as no book
+	   format (binary garbage, 0 bytes, archives without book content) and —
+	   with --apply — writes `action: delete` proposals (C17) into review.yaml.
+	   A valid book saved under a wrong extension is recognized by its content
+	   and never proposed; deletion itself happens in `bmf apply`, which
+	   re-checks every file and snapshots it into the deletion tar.gz.
+	3. --unverified: Audits books marked as `verified: true`. If a book has no
 	   ISBN and its author/series does not exist online (suspected LLM hallucination),
 	   its `verified` flag is cleared, returning it to review.
-	3. --clear-all-verified: Clears `verified` flag unconditionally from all
+	4. --clear-all-verified: Clears `verified` flag unconditionally from all
 	   books, returning the entire library to review.
 	"""
 	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 
 	from .covers import strip_generated_covers
 	from .enrichers import Enricher
+	from .filecheck import merge_file_deletions, scan_invalid_files
 	from .writers import clear_verified
 
 	cfg = Config.from_env()
@@ -1268,7 +1276,8 @@ def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: boo
 		eff_invalid = invalid
 	unverified_desc = "all" if clear_all_verified else str(clean_unverified)
 	covers_desc = f"generated={eff_generated or 'off'}, invalid={eff_invalid or 'off'}" if clean_covers else _("off")
-	console.print("[dim]" + _("covers: {covers}, unverified: {unverified}").format(covers=covers_desc, unverified=unverified_desc) + "[/dim]")
+	files_desc = _("on") if clean_files else _("off")
+	console.print("[dim]" + _("covers: {covers}, files: {files}, unverified: {unverified}").format(covers=covers_desc, files=files_desc, unverified=unverified_desc) + "[/dim]")
 
 	cache = _open_cache(cfg.cache_db, no_cache=no_cache)
 	need_audit = (clean_unverified or clear_all_verified)
@@ -1288,6 +1297,8 @@ def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: boo
 
 		cover_results: list = []
 		unverified_cleared: list[str] = []
+		file_findings: list = []
+		file_notes: list[str] = []
 
 		with Progress(
 			SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
@@ -1304,6 +1315,15 @@ def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: boo
 						))
 					except Exception as e:  # noqa: BLE001
 						log.warning("cover strip failed for %s: %s", meta.path, e)
+
+				# 2. Probe ebook files for unrecoverable content (C17).
+				if clean_files:
+					try:
+						findings, notes = scan_invalid_files([meta], library_root=cfg.library)
+						file_findings.extend(findings)
+						file_notes.extend(notes)
+					except Exception as e:  # noqa: BLE001
+						log.warning("file probe failed for %s: %s", meta.path, e)
 
 				# 2. Audit unverified books
 				if need_audit and meta.verified:
@@ -1348,6 +1368,47 @@ def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: boo
 
 	if clean_covers:
 		_print_strip_covers_summary(cover_results, do_apply)
+
+	if clean_files:
+		files_merge = None
+		if do_apply and file_findings:
+			files_merge = merge_file_deletions(cfg.review_file, file_findings, books, library_root=cfg.library)
+		console.print()
+		t = Table(title=_("Invalid Ebook Files (C17)"), show_header=True, header_style="bold cyan")
+		t.add_column(_("Metric"), style="bold")
+		t.add_column(_("Count"), justify="right")
+		t.add_row(_("books scanned"), str(len(books)), style="dim")
+		t.add_row(_("books with invalid files"), str(len(file_findings)))
+		t.add_row(_("invalid files"), str(sum(len(f.files) for f in file_findings)))
+		if files_merge is not None:
+			t.add_row(_("review entries added"), str(files_merge["added"]))
+			t.add_row(_("review entries updated"), str(files_merge["updated"]))
+			t.add_row(_("decided entries skipped"), str(files_merge["skipped_decided"]), style="dim")
+		console.print(t)
+
+		if file_findings:
+			console.print()
+			t = Table(title=_("Affected books (first 25)"), show_header=True, header_style="bold cyan")
+			t.add_column(_("Book folder"))
+			t.add_column(_("Invalid files"))
+			for f in file_findings[:25]:
+				t.add_row(Path(f.path).name[:80], ", ".join(f.files))
+			if len(file_findings) > 25:
+				t.add_row("…", f"({len(file_findings) - 25} more)")
+			console.print(t)
+
+		if file_notes:
+			console.print()
+			t = Table(title=_("Wrong-extension notes (recognized content, no action)"), show_header=True, header_style="bold cyan")
+			t.add_column(_("Note"))
+			for note in file_notes[:25]:
+				t.add_row(note[:120])
+			if len(file_notes) > 25:
+				t.add_row("…", f"({len(file_notes) - 25} more)")
+			console.print(t)
+
+		if not do_apply:
+			console.print("[dim]" + _("Dry-run: nothing written to review.yaml. Re-run with --apply to write the delete proposals; `bmf apply` then deletes (after re-checking every file, with a tar.gz snapshot).") + "[/dim]")
 
 	if need_audit:
 		console.print()

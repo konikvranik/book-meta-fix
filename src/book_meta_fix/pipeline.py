@@ -1223,6 +1223,9 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cach
 	succeeded_uuids: set = set()  # uuids of entries committed this run → pruned
 	# delete collects (folder, uuid) so removal success can be tracked per entry.
 	deletions: list[tuple[Path, str | None]] = []
+	# C17 file-level deletions collect (folder, uuid, [file names]) — only the
+	# named invalid files go, the folder and its remaining content stay.
+	file_deletions: list[tuple[Path, str | None, list[str]]] = []
 	# uuid → new relative path for retained (keep) entries whose book moved —
 	# their review.yaml entry survives, so its `path` must follow the folder.
 	kept_moves: dict[str, str] = {}
@@ -1252,7 +1255,11 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cach
 		# delete: just collect — actual removal happens after a single tar.gz
 		# snapshot is taken, so the whole batch can be rolled back together.
 		if item.action == "delete":
-			deletions.append((folder, item.uuid))
+			del_files = (item.proposed or {}).get("delete_files")
+			if del_files:
+				file_deletions.append((folder, item.uuid, [str(f) for f in del_files]))
+			else:
+				deletions.append((folder, item.uuid))
 			continue
 
 		# Build the desired metadata
@@ -1335,24 +1342,59 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cach
 		progress_callback(total, total)
 
 	# Deletion pass: snapshot then remove. Dry-run reports without touching disk.
-	if deletions:
-		deleted_paths = [p for p, _ in deletions]
-		summary["deleted"] = len(deleted_paths)
-		if not dry_run:
-			snap = _snapshot_deletions(deleted_paths, library)
-			summary["snapshot"] = str(snap) if snap else None
-			for folder, did in deletions:
-					try:
-						import shutil
+	# File-level deletions (C17) are RE-CHECKED first: a proposal can never
+	# delete a file that is healthy (or already gone) at apply time — the user
+	# may have replaced it since `clean --files` ran.
+	snapshot_paths = [p for p, _ in deletions]
+	if file_deletions:
+		from .filecheck import file_is_invalid
 
-						shutil.rmtree(folder)
-						if did is not None:
-							succeeded_uuids.add(did)
-						# Folder is gone — drop its cache entry too.
-						if cache is not None:
-							cache.invalidate(folder)
-					except OSError as e:
-						summary["errors"].append(f"delete failed for {folder}: {e}")
+		files_removed: list[Path] = []
+		removed_by_entry: dict[int, bool] = {}
+		for idx, (folder, _did, names) in enumerate(file_deletions):
+			for name in names:
+				target = folder / name
+				if not target.is_file():
+					summary.setdefault("skipped_files", []).append(f"{folder.name}/{name}: already gone")
+					continue
+				if not file_is_invalid(target):
+					summary.setdefault("skipped_files", []).append(f"{folder.name}/{name}: now reads as valid")
+					continue
+				files_removed.append(target)
+				removed_by_entry[idx] = True
+		summary["files_deleted"] = len(files_removed)
+		snapshot_paths.extend(files_removed)
+	if deletions:
+		summary["deleted"] = len(deletions)
+	if snapshot_paths and not dry_run:
+		snap = _snapshot_deletions(snapshot_paths, library)
+		summary["snapshot"] = str(snap) if snap else None
+		if file_deletions:
+			for target in files_removed:
+				try:
+					target.unlink()
+				except OSError as e:
+					summary["errors"].append(f"file delete failed for {target}: {e}")
+			for idx, (folder, did, _names) in enumerate(file_deletions):
+				if removed_by_entry.get(idx):
+					# Prune only when something actually went — a fully-skipped
+					# entry stays in review for the user to re-decide.
+					if did is not None:
+						succeeded_uuids.add(did)
+					if cache is not None:
+						cache.invalidate(folder)
+		for folder, did in deletions:
+				try:
+					import shutil
+
+					shutil.rmtree(folder)
+					if did is not None:
+						succeeded_uuids.add(did)
+					# Folder is gone — drop its cache entry too.
+					if cache is not None:
+						cache.invalidate(folder)
+				except OSError as e:
+					summary["errors"].append(f"delete failed for {folder}: {e}")
 
 	# Pruning: drop successfully-applied entries from review.yaml. Only in WRITE
 	# mode — dry-run must leave the file untouched.
@@ -1454,8 +1496,9 @@ def _place_applied_book(meta: BookMeta, placement: str, dest: Path, *, dry_run: 
 	return move_book(src, dest, dry_run=dry_run, library=library)
 
 
-def _snapshot_deletions(folders: list[Path], library: Path) -> Path | None:
-	"""Bundle *folders* (whole book dirs) into a tar.gz next to the library.
+def _snapshot_deletions(paths: list[Path], library: Path) -> Path | None:
+	"""Bundle *paths* (whole book dirs and/or individual deleted files) into
+    a tar.gz next to the library.
 
     Returns the snapshot path, or None if there was nothing to archive or the
     archive could not be written (errors are logged, not raised — the caller
@@ -1464,15 +1507,15 @@ def _snapshot_deletions(folders: list[Path], library: Path) -> Path | None:
 	import tarfile
 	from datetime import datetime
 
-	if not folders:
+	if not paths:
 		return None
 	stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 	output = Path(f"deletion_snapshot_{stamp}.tar.gz")
 	try:
 		with tarfile.open(output, "w:gz") as tar:
-			for folder in folders:
-				tar.add(folder, arcname=str(folder.relative_to(library)) if folder.is_relative_to(library) else folder.name)
-		log.info("deletion snapshot: %d folders -> %s", len(folders), output)
+			for p in paths:
+				tar.add(p, arcname=str(p.relative_to(library)) if p.is_relative_to(library) else p.name)
+		log.info("deletion snapshot: %d paths -> %s", len(paths), output)
 		return output
 	except OSError as e:
 		log.warning("could not write deletion snapshot %s: %s", output, e)

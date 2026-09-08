@@ -18,7 +18,7 @@ při opětovném prohledání.
 | [docs/cs/architecture.md](docs/cs/architecture.md) | Mapa modulů, tok dat, model souběžnosti, cache, atomicita |
 | [docs/cs/concepts.md](docs/cs/concepts.md) | Skupiny verdiktů, filozofie verifikace, kaskáda oprav, smyčka LLM, formát review.yaml |
 | [docs/cs/how-to/](docs/cs/how-to/index.md) | Návody krok za krokem (spustit dávku, vyladit rate limit, ladit, …) |
-| [docs/cs/corruption-catalog.md](docs/cs/corruption-catalog.md) | Kategorie C1–C16 s reálnými příklady |
+| [docs/cs/corruption-catalog.md](docs/cs/corruption-catalog.md) | Kategorie C1–C17 s reálnými příklady |
 | [AGENTS.md](AGENTS.md) | Průvodce pro AI agenty upravující tento kód (konvence, rozložení, zádrhele) |
 
 ## Stav
@@ -698,7 +698,7 @@ $EDITOR src/book_meta_fix/locales/cs/LC_MESSAGES/bmf.po
 make i18n-compile   # .po -> .mo
 ```
 
-## Kategorie poškození (C1–C16)
+## Kategorie poškození (C1–C17)
 
 Úplný katalog s reálnými příklady najdete v
 [`docs/cs/corruption-catalog.md`](docs/cs/corruption-catalog.md). Souhrn:
@@ -721,6 +721,7 @@ make i18n-compile   # .po -> .mo
 | C14 | pořadí série zalepené v názvu série (`Mark Stone #73`) | AUTO_FIXABLE (rozdělení) |
 | C15 | varianty jména autora / prohozené pořadí — úroveň knihovny, emituje jen `bmf normalize` | AUTO_FIXABLE / NEEDS_REVIEW |
 | C16 | varianty názvů žánrů/tagů (velikost písmen, pořadí slov, EN/CZ, pravopis) — úroveň knihovny, emituje jen `bmf normalize` | AUTO_FIXABLE |
+| C17 | neplatný soubor e-knihy (obsah neodpovídá žádnému formátu knihy) — emituje jen `bmf clean --files` | NEEDS_REVIEW (návrh smazání) |
 | — | EMPTY_BOOK (jen metadata/zálohy/obálka — knižní soubor chybí) | AUTO_FIXABLE (`needfix/empty/`) |
 | — | MISSING_ISBN / MISSING_YEAR | AUTO_FIXABLE (obohacení) |
 | — | MISSING_COVER (chybí přiložený `cover.jpg`) | AUTO_FIXABLE (stažení) |

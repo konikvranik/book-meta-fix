@@ -1,4 +1,4 @@
-# Corruption Catalog (C1–C16)
+# Corruption Catalog (C1–C17)
 
 **English** | [Čeština](cs/corruption-catalog.md)
 
@@ -233,6 +233,40 @@ library's 1,621 distinct names, distance-2 "typos" were ~50% false pairs
 
 **Verdict:** AUTO_FIXABLE (whole-list replace via `proposed.genres` /
 `proposed.tags`)
+
+## C17 — Invalid ebook file (unrecoverable content)
+
+An ebook file whose CONTENT is recognizable as no book format at all:
+0 bytes, binary noise matching no signature (no ZIP / `%PDF-` /
+`BOOKMOBI` / `Rar!` / PalmDB structure, not readable text), a readable
+ZIP holding no book content (no `META-INF/container.xml`, no images, no
+readable text members), or a truncated ZIP whose central directory is
+gone.
+
+Emitted ONLY by `bmf clean --files` (opt-in; never by `bmf analyze` —
+file validity deliberately stays out of the auto-correction flow). The
+probes are content-based, not extension-based: a valid book saved under a
+wrong extension (an EPUB named `.pdf`) is recognized and never proposed —
+the extension only decides whether *unrecognized* content may be called
+invalid at all (`_FULLY_PROBED_SUFFIXES` in `filecheck.py`; formats with
+variants bmf cannot positively identify, like `.prc`/`.pdb`, are never
+flagged). Deliberate misses, safety over recall: a truncated PDF still
+starts `%PDF-`, text junk (an HTML error page saved as `.epub`) still
+reads as recoverable text. When calibre's `ebook-meta` reads a file
+cleanly (exit 0 and empty stderr — measured: it exits 0 with a traceback
+on garbage, falling back to the filename), the file is NOT invalid.
+
+New entries arrive pre-filled `action: delete` with
+`proposed.delete_files`; the GUI filters by the delete state and
+Ctrl+Shift+D mass-clears the decision (Ctrl+Shift+R drops entries from
+review). `bmf apply` deletes only the named FILES (the folder and
+healthy sibling formats stay), re-checks every file immediately before
+deletion (a file that became valid — or disappeared — is skipped), and
+snapshots everything into `deletion_snapshot_*.tar.gz`. Deleting the only
+book file cascades: the next run reports EMPTY_BOOK and routes the folder
+to `needfix/empty/`.
+
+**Verdict:** NEEDS_REVIEW (delete proposal; review-gated, never auto-applied)
 
 ## EMPTY_BOOK — Dead record (the book file is gone)
 

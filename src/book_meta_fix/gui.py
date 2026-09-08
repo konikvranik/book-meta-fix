@@ -2679,6 +2679,8 @@ class ReviewEditorApp:
 				"a": self.bulk_accept,
 				"o": self.bulk_toggle_verified,
 				"m": self.bulk_delete_covers,
+				"d": self.bulk_clear_action,
+				"r": self.remove_from_review,
 			}
 			handler = shift_dispatch.get(k)
 			if handler is not None:
@@ -3123,12 +3125,17 @@ class ReviewEditorApp:
 			if e.get("uuid") and e["uuid"] in self._lib_uuids:
 				lib_note = "\n" + _(
 					"not in review.yaml — deciding or editing it adds it to review on save")
+			files_note = ""
+			dfiles = (e.get("proposed") or {}).get("delete_files")
+			if dfiles:
+				files_note = "\n" + _("invalid files proposed for deletion: {files}").format(
+					files=", ".join(str(f) for f in dfiles))
 			self._header_lbl.configure(
 				text=_("Entry {i}/{n}   uuid: {uuid}\n"
 				       "diagnosis: {cat} – {reason} [{conf}]{extra}").format(
 					i=idx + 1, n=len(self.entries), uuid=uuid,
 					cat=diag.get("category", "—"), reason=diag.get("reason", ""),
-					conf=diag.get("confidence", "—"), extra=extra) + lib_note,
+					conf=diag.get("confidence", "—"), extra=extra) + lib_note + files_note,
 			)
 			self._path_link.configure(text=path or _("(no path)"))
 			# Fields. Entries prefill proposed > current; the RO column
@@ -3488,6 +3495,83 @@ class ReviewEditorApp:
 		self.refresh_list()
 		self._flash((_("bulk verified: {n} books") if value
 		             else _("bulk verify cleared: {n} books")).format(n=n))
+
+	def bulk_clear_action(self) -> None:
+		"""Ctrl+Shift+D: return every SELECTED list row to pending (action null).
+
+		The mass VETO for pre-filled proposals — C17 file deletions arrive as
+		``action: delete``: filter the list by the delete state, select what
+		should survive, one keystroke un-decides it (the mirror of
+		Ctrl+Shift+A's bulk accept).
+		"""
+		idxs = self._bulk_selection_indices()
+		if not idxs:
+			self._flash(_("select books first (Ctrl+click, Shift+click)"))
+			return
+		self._collect_current()
+		n = apply_bulk_action(self.entries, idxs, None)
+		self._mark_dirty()
+		if 0 <= self._cur < len(self.entries) and self._cur in idxs:
+			self._load_book(self._cur)
+		self.refresh_list()
+		self._flash(_("bulk decision cleared: {n} books").format(n=n))
+
+	def remove_from_review(self) -> None:
+		"""Ctrl+Shift+R: drop every SELECTED entry from review.yaml entirely.
+
+		Neither delete nor accept — the books simply leave the review file
+		(nothing happens on disk; a later analyze/clean re-flags a book whose
+		problem persists). Saved IMMEDIATELY like a merge: the file and the
+		in-memory state must agree, or the next apply would act on entries
+		the user believes are gone.
+		"""
+		idxs = self._bulk_selection_indices()
+		if not idxs:
+			self._flash(_("select books first (Ctrl+click, Shift+click)"))
+			return
+		self._collect_current()
+		sel = [self.entries[i] for i in idxs if 0 <= i < len(self.entries)]
+		if not sel:
+			return
+		preview = "\n".join(
+			str((e.get("current") or {}).get("title") or e.get("path") or "?")
+			for e in sel[:10]
+		)
+		if len(sel) > 10:
+			preview += f"\n… (+{len(sel) - 10})"
+		if not messagebox.askyesno(
+			_("Remove from review"),
+			_("Remove {n} entries from review.yaml?\n"
+			  "No files are touched; a later analyze re-flags a book whose problem persists.\n\n{preview}").format(n=len(sel), preview=preview),
+		):
+			return
+		dropped_uuids = {e["uuid"] for e in sel if e.get("uuid")}
+		drop_idxs = set(idxs)
+		self.entries = [e for i, e in enumerate(self.entries) if i not in drop_idxs]
+		# The in-memory library index must not re-serve the removed entries
+		# through the "+ library" search (same pruning as a merge; the SQLite
+		# cache rows stay — unlike a merge, nothing changed on disk).
+		for u in dropped_uuids:
+			self._lib_uuids.pop(u, None)
+			self._thumbs_pil.pop(u, None)
+			self._thumbs_photo.pop(u, None)
+			self._big_thumbs.pop(u, None)
+		if dropped_uuids:
+			self._lib_index = [(e, hay) for e, hay in self._lib_index
+			                   if e.get("uuid") not in dropped_uuids]
+		if self._do_save():
+			self._dirty = False
+		if not self.entries:
+			self.refresh_list()
+			self._flash(_("review is empty"))
+			return
+		new_cur = min(min(idxs), len(self.entries) - 1)
+		self.refresh_list()
+		self.tree.selection_set(str(new_cur), silent=True)
+		self.tree.see(str(new_cur))
+		self._cur = new_cur
+		self._load_book(new_cur)
+		self._flash(_("removed {n} entries from review").format(n=len(sel)))
 
 	def bulk_delete_covers(self) -> None:
 		"""Ctrl+Shift+M: delete the covers of every SELECTED list row at once.
@@ -4412,6 +4496,8 @@ class ReviewEditorApp:
 			("Ctrl+Shift+A", _("bulk: accept all selected books")),
 			("Ctrl+Shift+O", _("bulk: verified on/off for all selected books")),
 			("Ctrl+Shift+M", _("bulk: delete covers of all selected books")),
+			("Ctrl+Shift+D", _("bulk: clear the decision (→ pending) for all selected books — the mass veto for pre-filled delete/accept")),
+			("Ctrl+Shift+R", _("bulk: remove the selected books from review.yaml (no files touched)")),
 			("Ctrl+J", _("merge the selected books into one (files move to the survivor)")),
 			("∅ / ↺", _("field button: apply the field as EMPTY (wrong proposal, correct value unknown)")),
 			("Ctrl+D", "delete"),

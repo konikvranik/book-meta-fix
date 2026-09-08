@@ -623,7 +623,69 @@ class TestCleanCommand:
 
 		d2 = _json.loads((b2 / "metadata.json").read_text(encoding="utf-8"))
 		assert "verified" not in d2 or d2.get("verified") is False
+	def test_clean_files_dry_run_reports_without_writing(self, tmp_path: Path, monkeypatch) -> None:
+		"""--files probes content and reports; dry-run writes nothing to
+		review.yaml (deletion itself is a later `bmf apply` step)."""
+		import book_meta_fix.filecheck as fc
 
+		monkeypatch.setattr(fc, "calibre_reads_file", lambda p: False)
+		monkeypatch.setenv("BMF_CACHE", str(tmp_path / "cache.db"))
+		monkeypatch.setenv("BMF_REVIEW", str(tmp_path / "review.yaml"))
+		lib = tmp_path / "lib"
+		b = self._make_book(lib / "Autor" / "Kniha (1)")
+		(b / "kniha.epub").write_bytes(b"\xde\xad\xbe\xef" * 1000)
+
+		result = CliRunner().invoke(main, ["clean", "--library", str(lib), "--no-covers", "--files"])
+		assert result.exit_code == 0
+		assert "Invalid Ebook Files (C17)" in result.output
+		assert "books with invalid files" in result.output
+		assert "Dry-run: nothing written to review.yaml" in result.output
+		assert not (tmp_path / "review.yaml").exists()
+
+	def test_clean_files_apply_writes_review_proposals(self, tmp_path: Path, monkeypatch) -> None:
+		import book_meta_fix.filecheck as fc
+
+		monkeypatch.setattr(fc, "calibre_reads_file", lambda p: False)
+		monkeypatch.setenv("BMF_CACHE", str(tmp_path / "cache.db"))
+		monkeypatch.setenv("BMF_REVIEW", str(tmp_path / "review.yaml"))
+		lib = tmp_path / "lib"
+		b = self._make_book(lib / "Autor" / "Kniha (1)")
+		(b / "kniha.epub").write_bytes(b"\xde\xad\xbe\xef" * 1000)
+
+		result = CliRunner().invoke(main, ["clean", "--library", str(lib), "--no-covers", "--files", "--apply"])
+		assert result.exit_code == 0
+		assert "review entries added" in result.output
+		review = tmp_path / "review.yaml"
+		assert review.is_file()
+		from book_meta_fix.review import parse_review
+
+		items = parse_review(review)
+		assert len(items) == 1
+		assert items[0].action == "delete"
+		assert items[0].proposed["delete_files"] == ["kniha.epub"]
+		# Nothing was deleted yet — clean only writes the proposal.
+		assert (b / "kniha.epub").is_file()
+
+	def test_clean_files_default_off(self, tmp_path: Path, monkeypatch) -> None:
+		"""Without --files the probing does not run (opt-in safety)."""
+		import book_meta_fix.filecheck as fc
+
+		calls = {"n": 0}
+		orig = fc.scan_invalid_files
+
+		def counting(books, library_root=None):
+			calls["n"] += 1
+			return orig(books, library_root=library_root)
+
+		monkeypatch.setattr(fc, "scan_invalid_files", counting)
+		monkeypatch.setenv("BMF_CACHE", str(tmp_path / "cache.db"))
+		lib = tmp_path / "lib"
+		self._make_book(lib / "Autor" / "Kniha (1)")
+
+		result = CliRunner().invoke(main, ["clean", "--library", str(lib), "--no-covers"])
+		assert result.exit_code == 0
+		assert calls["n"] == 0
+		assert "Invalid Ebook Files" not in result.output
 
 
 class TestConsoleLogHandler:
