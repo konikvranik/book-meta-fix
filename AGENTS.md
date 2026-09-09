@@ -86,7 +86,16 @@ src/book_meta_fix/
   detectors.py     rules C1–C14 → Diagnosis (C13 = location mismatch; exists only
                    when detect() gets library_root/pattern kwargs; C14 = series
                    order glued into the series NAME "Mark Stone #73" →
-                   split_series_index + pre-filled accept, lossless split)
+                   split_series_index + pre-filled accept, lossless split; C1
+                   gains a POOL pattern when detect() gets known_authors= —
+                   run_pipeline builds a KnownAuthorPool from the whole scan
+                   and threads it through its detect wrapper: the TITLE
+                   string resolving to a known library author fires C1 HIGH
+                   either as a variant pair (title and author are the same
+                   person in two spellings — real title lost) or a classic
+                   swap (author field holds the real title; when it is ITSELF
+                   another known author the reason flags ambiguity — biography
+                   territory). Other callers stay library-blind, same as C13)
   normalize.py     LIBRARY-WIDE pass (`bmf normalize`, the only emitter of C15
                    author-name variants — initials vs full names, diakritika,
                    titles, anonym family, swapped/comma order — and C16 genre/
@@ -107,7 +116,12 @@ src/book_meta_fix/
                    (pending); _given_compat forbids in-position token skipping
                    (it let "Kevin J." match "Poul" — false HIGH merges in the
                    wild); different first-name initials NEVER merge (homonym
-                   guard: Karel vs Josef Čapek)
+                   guard: Karel vs Josef Čapek). Also hosts KnownAuthorPool +
+                   build_known_author_pool — the C1 pool, built by run_pipeline
+                   per analyze over the same clusters (variant spellings land
+                   on the cluster canonical; anonym family excluded; lone
+                   spellings indexed under their own fold key), read-only
+                   after build so worker threads share it freely
   extractors.py    per-format content extraction → ExtractedMeta
   filecheck.py     CONTENT-PROBE validity of ebook files — the engine of `bmf clean --files`
                    (C17 invalid-file delete proposals). Safety model: a file is
@@ -165,7 +179,23 @@ src/book_meta_fix/
                    (analyze feeds it ReviewWriter.decided_ids()) drops the LLM
                    for books whose prior review entry is already decided —
                    detection/enrichment still run (the entry needs its refresh),
-                   only the token-costly call is skipped
+                   only the token-costly call is skipped. Right after the scan
+                   run_pipeline builds the KnownAuthorPool (normalize) over
+                   all_books and threads it into the detect wrapper (C1 pool
+                   pattern) and _process_book (the Step-2d swap-repair tier
+                   _try_known_author_swap: a C1 book whose title resolves to a
+                   known author gets the author from the pool canonical and
+                   the title from its OWN text — title_from_text, else the
+                   weaker embedded title — gated by confirm_identity; a
+                   classic swap is only trusted when the mined title AGREES
+                   with the author field (a biography titled with its subject
+                   has both names in its text and would survive a naive swap
+                   self-test); every failure stays for review with the
+                   raw-swap hint; counted in stats[swap_fixed]. Runs after
+                   _try_deterministic_fix and only when that returned nothing
+                   — _content_proposal's _is_better gate refuses exactly the
+                   stuck clean-looking-but-wrong titles, so the two tiers
+                   complement each other)
   llm.py           Z.AI provider: LeakyBucket + global 429 cooldown + reconcile_loop + tolerant
                    JSON salvage + get_provider (the provider FACTORY: BMF_LLM_PROVIDER picks the
                    branch — auto/Z.AI/antigravity-ACP/mock/off; the Antigravity branch composes
@@ -263,8 +293,11 @@ src/book_meta_fix/
                    twin of _projected_clean's fresh-entry pre-fill; keep stays
                    exempt — it must remain re-reviewable — and llm:-source
                    proposals without identity confirmation are never
-                   auto-closed; _identity_verified admits llm:high only with
-                   identity_confirmed, plus online sources)
+                   auto-closed; _identity_verified admits llm:high and the
+                   accept-missing/text_meta content tier, both only with
+                   identity_confirmed, plus online sources — "content" is what
+                   lets the decided accept-missing pool (~867 books) close on
+                   the first re-analyze instead of re-extracting forever)
   review.py        parse review.yaml (multi-doc + legacy list) + update_paths
                    + merge_normalizations (bmf normalize --apply merges C15/C16
                    proposals IN PLACE: pending entries get proposed.authors/
@@ -470,11 +503,17 @@ src/book_meta_fix/
   then extracting the cover from the book file via
   `covers.recover_cover_from_book`, which rejects generated placeholders) even
   with empty `proposed`. The verdict stays `AUTO_FIXABLE` (in the review
-  inclusion set); a MISSING_ISBN/YEAR book reappears as auto-accept on the next
-  `analyze` because the detector re-fires (the field is genuinely still
-  missing) — that is intended: zero manual work, bulk-pruned by `apply`. A
+  inclusion set). Since the content tier of `_identity_verified` (see the
+  verified bullet) the stamp ALSO closes the book: the entry is born
+  `verified: true`, apply persists the flag, and the next `analyze` skips
+  the book entirely — no more re-firing the same accept every run (the
+  pre-content-tier behaviour: a MISSING_ISBN/YEAR book reappeared as
+  auto-accept on every `analyze` because the detector re-fires, the field
+  being genuinely still missing). A
   MISSING_COVER book whose cover was recovered does NOT re-fire (cover.jpg is
-  now present); one whose cover could not be recovered still re-fires. A co-occurring
+  now present); one whose cover could not be recovered is now closed too —
+  its enricher cover lookup will not be retried unless `--recheck-ok`
+  re-opens the book. A co-occurring
   `NEEDS_REVIEW` diagnosis (e.g. C11 generated cover) blocks the auto-accept
   and keeps the book in review. If any enricher/text_meta DID return data,
   `enriched` is already set and those fields are proposed + applied normally;
@@ -518,17 +557,27 @@ src/book_meta_fix/
   a book the analyzer's proposal completes is fixed AND closed in one apply
   and never re-enters review. The relaxed twin `_identity_verified` (same
   place, runs only when the projection is NOT clean) closes an accepted
-  entry whose FINAL identity is confirmed against the content AND an online
-  source: `enriched.identity_confirmed` with `source` in `_ONLINE_SOURCES`
-  (databazeknih/legie/abs_czech/openlibrary/google_books — the pipeline stamps
-  the flag only after `acquire_identity` + an author-filtered/ISBN-anchored
-  online hit), OR with `source == "llm:high"` — the cached-author tier: the
-  pipeline only keeps llm:high when `confirm_identity` bound the answer to
-  the book's own text AND the post-LLM author/series existence ladder passed
-  (an unconfirmed author is downgraded to llm:low), so the answer carries
-  content-bound identity + a known author even when no bibliographic DB
-  knows the book. The content-only MISSING_* stamp (`source="content"`) and
-  the flash/loop tiers still do NOT count. `verifier.identity_agrees` checks
+  entry whose FINAL identity is confirmed against the content AND an
+  independent record: `enriched.identity_confirmed` with `source` in
+  `_ONLINE_SOURCES` (databazeknih/legie/abs_czech/openlibrary/google_books —
+  the pipeline stamps the flag only after `acquire_identity` + an
+  author-filtered/ISBN-anchored online hit), with `source == "llm:high"` —
+  the cached-author tier: the pipeline only keeps llm:high when
+  `confirm_identity` bound the answer to the book's own text AND the
+  post-LLM author/series existence ladder passed (an unconfirmed author is
+  downgraded to llm:low), so the answer carries content-bound identity + a
+  known author even when no bibliographic DB knows the book — OR with
+  `source == "content"` — the accept-missing stamp / a text_meta fix:
+  `acquire_identity`/`confirm_identity` bound title+author to the book's
+  own PAGE TEXT (never the embedded OPF). Measured 2026-09-09: without the
+  content tier ~867 accepted-missing books re-entered EVERY analyze run
+  (re-extracted over NFS just to re-confirm the identity and be
+  re-accepted); with it the carry path closes them on the first re-analyze
+  and apply persists the flag. The trade the owner accepted: a verified
+  MISSING_COVER book stops re-querying enrichers for a cover —
+  `--recheck-ok` is the (blunt) way back in. "embedded" (calibre-written
+  OPF) and the flash/loop tiers still do NOT count. `verifier.identity_agrees`
+  checks
   the projected identity still agrees with the confirmed record (an
   extracted/C1-swap title must not have overridden it), and the projected
   state may keep only benign leftovers (OK-verdict or MISSING_*), plus a C2

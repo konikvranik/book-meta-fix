@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from book_meta_fix.extractors import ExtractedMeta
 from book_meta_fix.models import BookMeta, Confidence, Diagnosis, Verdict
-from book_meta_fix.pipeline import _is_better, _llm_wants, _looks_broken, _process_book
+from book_meta_fix.pipeline import _is_better, _llm_wants, _looks_broken, _process_book, _try_known_author_swap
 
 
 class TestLooksBroken:
@@ -615,3 +615,130 @@ class TestLocationAwarePipeline:
 		# Books may still be picked up for other reasons (no cover here), but
 		# never with a C13 primary — detection stays location-blind.
 		assert all(r[1].category != "C13" for r in results)
+
+
+class TestKnownAuthorSwap:
+	"""The C1 pool repair tier (_try_known_author_swap + its Step-2d wiring in
+	_process_book): the record's TITLE holds a known library author, so the
+	author comes from the pool canonical and the title from the book's own
+	text, bound by confirm_identity. Every failure stays for review."""
+
+	def _pool(self):
+		from book_meta_fix.normalize import build_known_author_pool
+
+		books = [
+			BookMeta(calibre_id="1", uuid="u1", title="Den zkázy", authors=["Anatolij Dněprov"], path="/lib/1"),
+			BookMeta(calibre_id="2", uuid="u2", title="Návrat", authors=["A. Dněprov"], path="/lib/2"),
+			BookMeta(calibre_id="3", uuid="u3", title="Biografie", authors=["Jan Novák"], path="/lib/3"),
+		]
+		return build_known_author_pool(books)
+
+	def _extract(self, **kw):
+		text = kw.pop(
+			"text",
+			"Den zkázy\nAnatolij Dněprov\nRomán o osudu lidstva, pokračování slavné sci-fi série.",
+		)
+		return ExtractedMeta(first_page_text=text, **kw)
+
+	def test_variant_pair_recovers_title_from_content(self):
+		# title + author are the same person in two spellings: the record
+		# never held the title — it comes from the mined text.
+		meta = BookMeta(calibre_id=1, title="Anatolij Dněprov", authors=["A. Dněprov"], path="/lib/x (1)")
+		r = _try_known_author_swap(meta, self._pool(), self._extract(title_from_text="Den zkázy"))
+		assert r is not None
+		assert r.title == "Den zkázy" and r.authors == ["Anatolij Dněprov"]
+		assert r.source == "content" and r.identity_confirmed is True
+
+	def test_classic_swap_needs_content_agreement(self):
+		# The real title sits in the AUTHOR field — the swap is only trusted
+		# when the book's own text says the same thing.
+		meta = BookMeta(calibre_id=1, title="Anatolij Dněprov", authors=["Den zkázy"], path="/lib/x (1)")
+		pool = self._pool()
+		agree = _try_known_author_swap(meta, pool, self._extract(title_from_text="Den zkázy"))
+		assert agree is not None
+		assert agree.title == "Den zkázy" and agree.authors == ["Anatolij Dněprov"]
+		disagree = _try_known_author_swap(meta, pool, self._extract(title_from_text="Návrat"))
+		assert disagree is None
+
+	def test_biography_vetoed_by_mining_disagreement(self):
+		# A biography titled with its subject has both names in its own text
+		# and would survive a naive swap self-test — the mined title (the
+		# book's REAL title) matches the current title, not the author field,
+		# and the disagreement vetoes the swap.
+		meta = BookMeta(calibre_id=1, title="Anatolij Dněprov", authors=["Jan Novák"], path="/lib/x (1)")
+		ex = self._extract(title_from_text="Anatolij Dněprov")
+		assert _try_known_author_swap(meta, self._pool(), ex) is None
+
+	def test_variant_pair_no_change_vetoed(self):
+		# Mined title == current title: nothing would change (the biography
+		# shape inside a variant pair).
+		meta = BookMeta(calibre_id=1, title="Anatolij Dněprov", authors=["A. Dněprov"], path="/lib/x (1)")
+		ex = self._extract(title_from_text="Anatolij Dněprov")
+		assert _try_known_author_swap(meta, self._pool(), ex) is None
+
+	def test_title_still_the_author_name_vetoed(self):
+		# A mined "title" that is (a fuzzy variant of) the canonical author
+		# repairs nothing — the C1 shape would survive the swap.
+		meta = BookMeta(calibre_id=1, title="Anatolij Dněprov", authors=["A. Dněprov"], path="/lib/x (1)")
+		ex = self._extract(title_from_text="Anatolije Dněprov")
+		assert _try_known_author_swap(meta, self._pool(), ex) is None
+
+	def test_unknown_title_author_no_repair(self):
+		meta = BookMeta(calibre_id=1, title="Vinnetou", authors=["Karel May"], path="/lib/x (1)")
+		assert _try_known_author_swap(meta, self._pool(), self._extract(title_from_text="Vinnetou")) is None
+
+	def test_no_content_no_repair(self):
+		meta = BookMeta(calibre_id=1, title="Anatolij Dněprov", authors=["A. Dněprov"], path="/lib/x (1)")
+		assert _try_known_author_swap(meta, self._pool(), ExtractedMeta()) is None
+
+	def test_process_book_wiring_counts_swap_fixed(self):
+		from book_meta_fix import pipeline as pmod
+
+		meta = BookMeta(calibre_id=1, title="Anatolij Dněprov", authors=["A. Dněprov"], path="/lib/x (1)", primary_file="/lib/x (1)/book.epub")
+
+		def fake_detect(_m):
+			return Diagnosis(category="C1", reason="variant pair", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
+
+		def fake_extract(_m):
+			return ExtractedMeta(
+				title_from_text="Den zkázy",
+				first_page_text="Den zkázy\nAnatolij Dněprov\nRomán o osudu lidstva, pokračování slavné sci-fi série.",
+			)
+
+		with patch.object(pmod, "detect_fn", fake_detect), patch.object(pmod, "safe_extract", fake_extract):
+			stats = _empty_stats()
+			result = _process_book(
+				meta, enricher=None, skip_enrich=True, skip_verify=False,
+				llm_provider=None, llm_categories=("ALL",), stats=stats,
+				known_authors=self._pool(),
+			)
+		enriched = result[3]
+		assert enriched is not None
+		assert enriched.title == "Den zkázy" and enriched.authors == ["Anatolij Dněprov"]
+		assert enriched.identity_confirmed is True
+		assert stats["swap_fixed"] == 1 and stats["unfixed"] == 0
+
+	def test_process_book_without_pool_stays_unfixed(self):
+		# known_authors=None (report/epubgen-style callers): the swap tier
+		# never runs, the C1 book stays for review exactly as before.
+		from book_meta_fix import pipeline as pmod
+
+		meta = BookMeta(calibre_id=1, title="Anatolij Dněprov", authors=["A. Dněprov"], path="/lib/x (1)", primary_file="/lib/x (1)/book.epub")
+
+		def fake_detect(_m):
+			return Diagnosis(category="C1", reason="variant pair", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
+
+		def fake_extract(_m):
+			return ExtractedMeta(
+				title_from_text="Den zkázy",
+				first_page_text="Den zkázy\nAnatolij Dněprov\nRomán o osudu lidstva, pokračování slavné sci-fi série.",
+			)
+
+		with patch.object(pmod, "detect_fn", fake_detect), patch.object(pmod, "safe_extract", fake_extract):
+			stats = _empty_stats()
+			result = _process_book(
+				meta, enricher=None, skip_enrich=True, skip_verify=False,
+				llm_provider=None, llm_categories=("ALL",), stats=stats,
+			)
+		assert result[3] is None
+		assert stats.get("swap_fixed", 0) == 0 and stats["unfixed"] == 1

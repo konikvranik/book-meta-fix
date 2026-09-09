@@ -22,6 +22,20 @@ Often a series where the source listed `<author>=series, <title>=contributor`.
 `proposed` (title ← author, author ← title) when no better source is found;
 adjust the values before accepting if needed
 
+During `analyze` the rule is also **pool-armed**: `run_pipeline` builds a
+known-author pool from the whole library (the same clustering `bmf normalize`
+uses), so a record whose TITLE string resolves to a known library author
+fires C1 with HIGH confidence — either as a *variant pair* (title and author
+are the same person in two spellings, e.g. title `Anatolij Dněprov` /
+author `A. Dněprov` — the real title is lost from the record) or a *classic
+swap* (the author field holds the real title; when it is itself another
+known author the reason flags the ambiguity — biography territory). The
+repair tier (`_try_known_author_swap`) then takes the author from the pool
+canonical and the title from the book's OWN text, bound by `confirm_identity`;
+a classic swap is only trusted when the content-mined title agrees with the
+author field (a biography titled with its subject would survive a naive
+swap self-test). Every failure stays for review with the raw-swap hint.
+
 ## C2 — Filename used as title (diacritics stripped)
 
 Book was imported from a file; the filename became both folder and title.

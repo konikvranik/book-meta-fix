@@ -693,10 +693,13 @@ class TestProjectedVerified:
 
 class TestIdentityVerified:
 	"""Auto `verified` via the identity gate: an accepted entry whose FINAL
-	identity was confirmed against the book's content AND an online source
-	(enriched.identity_confirmed from an _ONLINE_SOURCES source) is closed
-	even when benign fields stay missing — no source has them, so re-running
-	analyze would only re-fire the same accept forever."""
+	identity was confirmed against the book's content AND an independent
+	record — an online source (enriched.identity_confirmed from an
+	_ONLINE_SOURCES source), an llm:high answer (content-bound + cached
+	author), or the content tier itself (accept-missing stamp / text_meta:
+	identity bound to the book's own page text) — is closed even when benign
+	fields stay missing; no source has them, so re-running analyze would only
+	re-fire the same accept forever."""
 
 	def _book_folder(self, tmp_path, *, title="Kniha", isbn=None, with_year=True, with_cover=True, file_name="book.epub"):
 		import json as _json
@@ -797,10 +800,14 @@ class TestIdentityVerified:
 			assert parsed[0].verified is False, src
 			assert summary["verified_prefilled"] == 0, src
 
-	def test_content_stamp_is_not_an_online_source(self, tmp_path):
-		"""The accept-missing stamp (source='content') has no online evidence:
-		those books keep cycling as accept-as-is until closed manually — the
-		documented trade-off of requiring an online confirmation."""
+	def test_content_stamp_verifies(self, tmp_path):
+		"""The accept-missing stamp (source='content', identity bound to the
+		book's own page text by acquire_identity) now closes the book: measured
+		2026-09-09, ~867 accepted-missing books re-entered every analyze run —
+		re-extracted over NFS just to re-confirm the same identity and be
+		re-accepted. The benign-leftover loop stays the guard (see the C2 and
+		C11 tests below); a MISSING_* leftover is exactly the benign shape
+		this tier exists for."""
 		meta = self._book_folder(tmp_path, isbn=None)
 		diag = Diagnosis(category="MISSING_ISBN", reason="no isbn", confidence=Confidence.LOW, verdict=Verdict.AUTO_FIXABLE)
 		enriched = EnrichedMeta(identity_confirmed=True, source="content")
@@ -810,6 +817,38 @@ class TestIdentityVerified:
 		parsed = parse_review(out)
 		assert parsed[0].action == "accept"
 		assert not parsed[0].proposed
+		assert parsed[0].verified is True
+		assert summary["verified_prefilled"] == 1
+
+	def test_content_stamp_without_identity_confirmed_stays_open(self, tmp_path):
+		"""source='content' alone is not enough: without identity_confirmed the
+		stamp never happened (the pipeline only stamps after acquire_identity
+		bound title+author to the page text), so a fabricated content source
+		must not close the book."""
+		meta = self._book_folder(tmp_path, isbn=None)
+		diag = Diagnosis(category="MISSING_ISBN", reason="no isbn", confidence=Confidence.LOW, verdict=Verdict.AUTO_FIXABLE)
+		enriched = EnrichedMeta(source="content")
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		summary = _submit_all_and_finish(w, [(meta, diag, None, enriched)])
+		parsed = parse_review(out)
+		assert parsed[0].action == "accept"
+		assert parsed[0].verified is False
+		assert summary["verified_prefilled"] == 0
+
+	def test_embedded_stays_unverified(self, tmp_path):
+		"""'embedded' (calibre-written OPF metadata) is NOT independent
+		evidence — the verifier never trusts it, and neither does the close
+		gate: an embedded-only fix accepts (high confidence rank) but never
+		closes the book."""
+		meta = self._book_folder(tmp_path, isbn=None)
+		diag = Diagnosis(category="MISSING_ISBN", reason="no isbn", confidence=Confidence.LOW, verdict=Verdict.AUTO_FIXABLE)
+		enriched = EnrichedMeta(identity_confirmed=True, source="embedded", publisher="Argo")
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		summary = _submit_all_and_finish(w, [(meta, diag, None, enriched)])
+		parsed = parse_review(out)
+		assert parsed[0].action == "accept"
 		assert parsed[0].verified is False
 		assert summary["verified_prefilled"] == 0
 

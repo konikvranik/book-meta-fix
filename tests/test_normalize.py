@@ -16,6 +16,7 @@ from book_meta_fix.normalize import (
 	analyze_library,
 	build_author_clusters,
 	build_genre_clusters,
+	build_known_author_pool,
 	fold_genre,
 )
 from book_meta_fix.pipeline import _apply_fields
@@ -143,6 +144,61 @@ class TestAuthorClusters:
 		# frequent-alone (frequency alone would canonise the mangled form).
 		c = _one({"Neznamy": 63, "Neznámý": 24}, "Neznamy")
 		assert c.canonical == "Neznámý"
+
+
+class TestKnownAuthorPool:
+	"""The library-wide author index behind C1's pool pattern ("is the TITLE
+	string a known library author?") — built from the same clustering as
+	`bmf normalize`, so variants resolve to the cluster canonical."""
+
+	def _books(self, **counts):
+		# One BookMeta per (author, index) so book counts are real.
+		books: list[BookMeta] = []
+		i = 0
+		for author, n in counts.items():
+			for _ in range(n):
+				books.append(BookMeta(calibre_id=str(i), uuid=f"u{i}", title=f"Kniha {i}", authors=[author], path=f"/lib/{i}"))
+				i += 1
+		return books
+
+	def test_variants_resolve_to_cluster_canonical_with_total_count(self):
+		pool = build_known_author_pool(self._books(**{"Anatolij Dněprov": 3, "A. Dněprov": 2}))
+		hit = pool.lookup("A. Dněprov")
+		assert hit == ("Anatolij Dněprov", 5)
+
+	def test_lone_spelling_is_its_own_pool_entry(self):
+		# A single-spelling author never forms a C15 cluster (nothing to
+		# change) — the pool indexes it under its own fold key anyway.
+		pool = build_known_author_pool(self._books(**{"Jan Novák": 1}))
+		assert pool.lookup("Jan Novák") == ("Jan Novák", 1)
+
+	def test_anonym_family_excluded(self):
+		# A title "Neznámý" must never match an author — the anonym spellings
+		# (and their mojibake forms) are not persons.
+		pool = build_known_author_pool(self._books(**{"Neznámý": 10, "Neznamy": 4, "Jan Novák": 1}))
+		assert pool.lookup("Neznámý") is None
+		assert pool.lookup("Neznamy") is None
+		assert pool.lookup("NeznAVmA") is None
+
+	def test_same_person_across_variants(self):
+		pool = build_known_author_pool(self._books(**{"Arthur C. Clarke": 4, "Arthur Charles Clarke": 1, "Isaac Asimov": 2}))
+		assert pool.same_person("Arthur C. Clarke", "Arthur Charles Clarke") is True
+		assert pool.same_person("Arthur C. Clarke", "Isaac Asimov") is False
+		assert pool.same_person("Arthur C. Clarke", "Nikdo Známý") is False
+
+	def test_non_name_titles_do_not_match(self):
+		# lookup() gates on _parse_author: multi-author chains, digit bearers
+		# and sentences are not person names, whatever strings the library has.
+		pool = build_known_author_pool(self._books(**{"Jan Novák": 2}))
+		assert pool.lookup("Novák a Nový") is None
+		assert pool.lookup("5 dílů série") is None
+		assert pool.lookup("") is None
+
+	def test_surname_first_order_lookup(self):
+		# The swap key is indexed too: a title written surname-first still
+		# resolves (the same convention C15's swapped-order tier handles).
+		pool = build_known_author_pool(self._books(**{"Jan Novák": 2}))
+		assert pool.lookup("Novák Jan") == ("Jan Novák", 2)
 
 
 class TestGenreClusters:

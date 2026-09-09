@@ -38,7 +38,7 @@ class TestPipelineResilience:
 		def fake_scan(library, cache=None, progress_callback=None, workers=8):
 			return books
 
-		def fake_detect(meta):
+		def fake_detect(meta, **kw):
 			from book_meta_fix.models import Confidence, Diagnosis
 			return Diagnosis(category="C2", reason="test", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
 
@@ -83,7 +83,7 @@ class TestPipelineResilience:
 		def fake_scan(library, cache=None, progress_callback=None, workers=8):
 			return books
 
-		def fake_detect(meta):
+		def fake_detect(meta, **kw):
 			from book_meta_fix.models import Confidence, Diagnosis
 			return Diagnosis(category="C2", reason="test", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
 
@@ -122,7 +122,7 @@ class TestPipelineResilience:
 		def fake_scan(library, cache=None, progress_callback=None, workers=8):
 			return books
 
-		def fake_detect(meta):
+		def fake_detect(meta, **kw):
 			from book_meta_fix.models import Confidence, Diagnosis
 			return Diagnosis(category="C2", reason="test", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
 
@@ -153,7 +153,7 @@ class TestInterruptHandling:
 		def fake_scan(library, cache=None, progress_callback=None, workers=8):
 			return books
 
-		def fake_detect(meta):
+		def fake_detect(meta, **kw):
 			from book_meta_fix.models import Confidence, Diagnosis
 			return Diagnosis(category="C2", reason="test", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
 
@@ -186,7 +186,7 @@ class TestInterruptHandling:
 		def fake_scan(library, cache=None, progress_callback=None, workers=8):
 			return books
 
-		def fake_detect(meta):
+		def fake_detect(meta, **kw):
 			from book_meta_fix.models import Confidence, Diagnosis
 			return Diagnosis(category="C2", reason="test", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
 
@@ -255,7 +255,7 @@ class TestInterruptHandling:
 		def fake_scan(library, cache=None, progress_callback=None, workers=8):
 			return books
 
-		def fake_detect(meta):
+		def fake_detect(meta, **kw):
 			from book_meta_fix.models import Confidence, Diagnosis
 			return Diagnosis(category="C2", reason="test", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
 

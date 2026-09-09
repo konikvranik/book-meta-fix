@@ -22,6 +22,20 @@ knih. Často jde o sérii, kde zdroj uváděl `<author>=series, <title>=contribu
 (title ← author, author ← title), když nenajde lepší zdroj; v případě
 potřeby hodnoty před přijetím upravte
 
+Při `analyze` je pravidlo navíc **pool-armed**: `run_pipeline` postaví
+pool známých autorů z celé knihovny (stejné klastrování jako `bmf
+normalize`), takže záznam, jehož POLE NÁZVU se rozřeší na známého autora
+knihovny, spustí C1 s HIGH jistotou — buď jako *variabilní pár* (název i
+autor jsou táž osoba ve dvou pravopisech, např. název `Anatolij Dněprov` /
+autor `A. Dněprov` — skutečný název se ze záznamu ztratil), nebo jako
+*klasická záměna* (pole autora nese skutečný název; když je samo dalším
+známým autorem, reason značí nejednoznačnost — biografické území). Tier
+opravy (`_try_known_author_swap`) pak vezme autora z kanonického tvaru
+poolu a název z VLASTNÍHO textu knihy, svázané přes `confirm_identity`;
+klasická záměna se věří jen tehdy, když vytěžený název souhlasí s polem
+autora (biografie nazvaná podle svého hrdiny by prošla naivním self-testem
+záměny). Každé selhání zůstává v review s hintem surové záměny.
+
 ## C2 — Název souboru použitý jako název (odstraněná diakritika)
 
 Kniha byla importována ze souboru; název souboru se stal jak složkou, tak

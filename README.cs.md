@@ -711,7 +711,7 @@ make i18n-compile   # .po -> .mo
 
 | Kód | Popis | Typický verdikt |
 |---|---|---|
-| C1 | záměna autora/titulu | NEEDS_REVIEW |
+| C1 | záměna autora/titulu (včetně pool vzoru: titul JE známý autor knihovny) | NEEDS_REVIEW |
 | C2 | název souboru použitý jako titul (ztracena diakritika) | NEEDS_REVIEW |
 | C3 | série/knihovna/nakladatelství použité jako autor | NEEDS_REVIEW |
 | C4 | metadata mají neopravitelné mojibake | NEEDS_REVIEW (LLM) |
@@ -769,11 +769,18 @@ kompletně doplní (projektovaný stav po apply je detektory čistý) — oprave
 kniha se do review už nikdy nevrátí. Předvyplní se i u akceptovaného záznamu,
 jehož FINÁLNÍ identita (titul/autor po aplikování návrhu, případně ISBN) je
 potvrzená proti obsahu knihy A zároveň buď online zdrojem (databazeknih/
-legie/vlastní CZ provider/OpenLibrary/Google Books), nebo odpovědí `llm:high`
-s potvrzenou identitou, jejíž autor/série prošel existenciální kontrolou
-(flash tier a nepotvrzené odpovědi se nepočítají): taková kniha se opraví
-A zavře jedním apply, i když zůstávají benigní chybějící pole (ISBN/rok/
-obálka, které žádný zdroj nemá). Zbylý problém NEEDS_REVIEW předvyplnění
+legie/vlastní CZ provider/OpenLibrary/Google Books), odpovědí `llm:high`
+s potvrzenou identitou, jejíž autor/série prošel existenciální kontrolou,
+nebo samotnou content tierí — stamp accepted-missing / fix z text_meta,
+kde `acquire_identity`/`confirm_identity` vázaly titul+autor k textu
+vlastních stránek knihy (vložené OPF se nikdy nepočítá: Calibre do něj
+mohl zapsat chybu). Právě content tier zavírá knihy, které žádný zdroj
+nezná — záznam s chybějícím ISBN/rokem/obálkou, jehož identitu text
+potvrzuje, se jedním apply opraví A zavře, místo aby se vracel v každém
+běhu (změřeno: ~870 knih se tak každým analyze znovu extrahovalo). Trade:
+verified kniha bez obálky už se enricherů na obálku nedotazuje — znovu
+otevře až `bmf analyze --recheck-ok`. Flash tier odpovědi se nepočítají.
+Zbylý problém NEEDS_REVIEW předvyplnění
 blokuje, aby známý defekt zůstal viditelný — chybějící obálka je benigní a
 může zůstat, podezřelá generovaná obálka Calibre (C11) nikoli. Jeden signál
 C2 se kredituje: titul shodný s (nikdy nepřejmenovaným) názvem souboru knihy

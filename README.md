@@ -702,7 +702,7 @@ catalog with real examples. Summary:
 
 | Code | Description | Typical verdict |
 |---|---|---|
-| C1 | author/title swapped | NEEDS_REVIEW |
+| C1 | author/title swapped (incl. the known-author pool pattern: title IS a known library author) | NEEDS_REVIEW |
 | C2 | filename used as title (diacritics lost) | NEEDS_REVIEW |
 | C3 | series/library/publisher used as author | NEEDS_REVIEW |
 | C4 | metadata has unrepairable mojibake | NEEDS_REVIEW (LLM) |
@@ -762,10 +762,17 @@ detector-clean), so a fixed book never re-enters review. It is also
 pre-filled for an accepted entry whose FINAL identity (the post-proposal
 title/author, plus ISBN when known) is confirmed against the book's content
 AND either an online source (databazeknih/legie/the self-hosted CZ provider/OpenLibrary/Google
-Books) or a content-confirmed `llm:high` answer whose author/series passed the
-existence check (flash-tier and unconfirmed answers do not count): such a book
-is fixed AND closed in one apply even when benign fields stay missing (an
-ISBN/year/cover no source has). A remaining NEEDS_REVIEW problem blocks the
+Books), a content-confirmed `llm:high` answer whose author/series passed the
+existence check, or the content tier itself — an accepted-missing stamp /
+text-mined fix, where `acquire_identity`/`confirm_identity` bound title+author
+to the book's own page text (embedded OPF never counts: Calibre may have
+polluted it). That content tier is what closes the books no source knows —
+a MISSING_ISBN/YEAR/COVER record whose identity the text confirms is both
+accepted AND closed in one apply instead of re-entering every run (measured:
+~870 books were re-extracting themselves through every analyze). The trade:
+a verified book with a missing cover stops re-querying the enrichers —
+`bmf analyze --recheck-ok` re-opens it. Flash-tier LLM answers do not
+count. A remaining NEEDS_REVIEW problem blocks the
 pre-fill so a known defect stays visible — a missing cover is benign and may
 stay, but a suspected generated Calibre cover (C11) is not. One C2 signal is
 credited: a title matching the (never-renamed) ebook filename is noise once

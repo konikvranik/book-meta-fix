@@ -333,8 +333,17 @@ class ReviewWriter:
 		     a content-bound identity AND a known author — the
 		     cached-author tier. (With --skip-verify the existence check
 		     is skipped; identity_confirmed still binds the answer to the
-		     book's own text.)
-		  3. The PROJECTED identity agrees with the online record
+		     book's own text.) OR with source "content": the accept-missing
+		     stamp / a text_meta fix — acquire_identity or confirm_identity
+		     bound title+author to the book's own PAGE TEXT (never the
+		     embedded OPF, which calibre may have polluted). For the empty
+		     accept-missing stamp identity_agrees below is vacuously true
+		     (no fields on the record) — the stamp itself IS the content
+		     confirmation, made against the very meta that stays unchanged;
+		     the benign-leftover loop is what still guards the projected
+		     state. "embedded" stays excluded: embedded metadata is NOT
+		     independent evidence (see the verifier).
+		  3. The PROJECTED identity agrees with the confirmed record
 		     (identity_agrees): the proposal may have carried a different
 		     title (extracted precedence, a C1-swap merge), and then what
 		     would be written is not the identity that was confirmed.
@@ -353,7 +362,7 @@ class ReviewWriter:
 		if action != "accept" or enriched is None:
 			return False
 		src = getattr(enriched, "source", "") or ""
-		if src != "llm:high" and src not in _ONLINE_SOURCES:
+		if src not in _ONLINE_SOURCES and src not in ("llm:high", "content"):
 			return False
 		if not getattr(enriched, "identity_confirmed", False):
 			return False

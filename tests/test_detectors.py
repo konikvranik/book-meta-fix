@@ -19,6 +19,7 @@ from book_meta_fix.detectors import (
 	all_diagnoses,
 	detect,
 	detect_all,
+	rule_c1_swap,
 	rule_c2_filename_title,
 	rule_c9_anonym,
 	rule_c12_bad_author,
@@ -587,3 +588,75 @@ class TestC14SeriesIndexInName:
 		m = _meta(series=[{"name": "Mark Stone #73", "index": ""}])
 		d = detect(m)
 		assert d.category == "C14"
+
+
+class TestC1KnownAuthor:
+	"""The pool-armed C1 pattern: the TITLE field holds a KNOWN LIBRARY
+	author. No per-book heuristic can see this — only the library-wide pool
+	(build_known_author_pool) can answer "is this string an author?"."""
+
+	def _pool(self):
+		from book_meta_fix.normalize import build_known_author_pool
+
+		books = [
+			BookMeta(calibre_id="1", uuid="u1", title="Den zkázy", authors=["Anatolij Dněprov"], path="/lib/1"),
+			BookMeta(calibre_id="2", uuid="u2", title="Návrat", authors=["A. Dněprov"], path="/lib/2"),
+			BookMeta(calibre_id="3", uuid="u3", title="Biografie", authors=["Jan Novák"], path="/lib/3"),
+		]
+		return build_known_author_pool(books)
+
+	def test_variant_pair_fires_c1(self):
+		"""title AND author are the same known person in two spellings —
+		the real title is lost from the record entirely."""
+		m = _meta(authors=["A. Dněprov"], title="Anatolij Dněprov", author_folder="A. Dněprov")
+		d = rule_c1_swap(m, known_authors=self._pool())
+		assert d is not None and d.category == "C1"
+		assert "variant pair" in d.reason
+		assert d.confidence.value == "HIGH" and d.verdict.value == "NEEDS_REVIEW"
+
+	def test_classic_swap_fires_c1(self):
+		"""The title is a known author, the author field holds the real
+		title (not a person from the pool)."""
+		m = _meta(authors=["Setkání s Rámou"], title="Anatolij Dněprov", author_folder="Setkání s Rámou")
+		d = rule_c1_swap(m, known_authors=self._pool())
+		assert d is not None and d.category == "C1"
+		assert "author/title swap" in d.reason
+		assert "ambiguous" not in d.reason
+
+	def test_biography_shape_flags_ambiguity(self):
+		"""Title is a known author AND the author field is ANOTHER known
+		author: possibly a biography titled with its subject — still flagged,
+		but the reason says so (the pipeline never auto-accepts this shape
+		without content agreeing)."""
+		m = _meta(authors=["Jan Novák"], title="Anatolij Dněprov", author_folder="Jan Novák")
+		d = rule_c1_swap(m, known_authors=self._pool())
+		assert d is not None and d.category == "C1"
+		assert "ambiguous" in d.reason
+
+	def test_without_pool_no_new_pattern(self):
+		"""The library-blind rule keeps its historic behaviour: a title that
+		is an author name but shares no ≥5-char token with the author field
+		does not fire without the pool."""
+		m = _meta(authors=["Setkání s Rámou"], title="Anatolij Dněprov", author_folder="Setkání s Rámou")
+		assert rule_c1_swap(m) is None
+
+	def test_unknown_title_author_not_fired(self):
+		# A title that is not any library author never triggers the pool
+		# pattern (here the author shares no token either).
+		m = _meta(authors=["Karel May"], title="Vinnetou", author_folder="Karel May")
+		assert rule_c1_swap(m, known_authors=self._pool()) is None
+
+	def test_detect_passes_pool_through(self):
+		# detect(known_authors=...) threads the pool into the rule (the
+		# run_pipeline wrapper relies on it).
+		m = _meta(authors=["A. Dněprov"], title="Anatolij Dněprov", author_folder="A. Dněprov")
+		d = detect(m, known_authors=self._pool())
+		assert d.category == "C1" and "variant pair" in d.reason
+
+	def test_detect_without_pool_unchanged(self):
+		m = _meta(authors=["A. Dněprov"], title="Anatolij Dněprov", author_folder="A. Dněprov")
+		d = detect(m)
+		# Library-blind: still C1 here (token overlap), but with the generic
+		# heuristic reason — the pool refinement must not leak in.
+		assert d.category == "C1"
+		assert "variant pair" not in d.reason

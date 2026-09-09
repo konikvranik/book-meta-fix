@@ -649,7 +649,7 @@ def _print_pipeline_summary(results, stats: dict | None = None, review_summary: 
 	t.add_row(_("OK (already correct — nothing to do)"), str(ok), style="green")
 	t.add_row(_("Auto-fix (action: accept → `bmf apply`)"), str(acc), style="bold green")
 	if ver:
-		t.add_row(_("Auto-verified (identity confirmed vs content + online source)"), str(ver), style="green")
+		t.add_row(_("Auto-verified (identity confirmed vs book content)"), str(ver), style="green")
 	t.add_row(_("Manual review (action: null)"), str(nul), style="yellow")
 	if oth:
 		t.add_row(_("Other action (delete/keep)"), str(oth))
@@ -688,6 +688,7 @@ def _print_fix_source_summary(stats: dict) -> None:
 		(_("Offline fixes"), offline_total, False),
 		(_("  └ text-mined (content)"), stats.get("offline_content", 0), True),
 		(_("  └ embedded OPF"), stats.get("offline_embedded", 0), True),
+		(_("  └ author pool (C1 swap)"), stats.get("swap_fixed", 0), True),
 		(_("Online fixes"), online_total, False),
 		(_("  └ databazeknih.cz"), stats.get("online_databazeknih", 0), True),
 		(_("  └ legie.info"), stats.get("online_legie", 0), True),

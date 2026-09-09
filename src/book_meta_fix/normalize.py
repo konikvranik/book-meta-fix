@@ -447,6 +447,104 @@ def _finalize_author_cluster(
 
 
 # ---------------------------------------------------------------------------
+# Known-author pool (C1 swap detection)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class KnownAuthorPool:
+	"""Library-wide author index: "is this string a known library author?"
+
+	Built once per analyze run over the whole scan and handed to the C1
+	detector/swap-repair tier. A book whose TITLE field parses as a single
+	person name that the library knows as an author is near-certainly a
+	swapped/lost-title record — no per-book heuristic can see that, only the
+	library-wide pool can ("Anatolij Dněprov" as a title is invisible to C1's
+	patterns, but the pool knows Dněprov is an author with N books).
+
+	Keys are the same fold keys the clustering uses (diacritics-stripped,
+	lowercased, given-first; the surname-first swap key is indexed too), so a
+	title matches the author regardless of spelling variant. The anonym
+	family is excluded — a title "Neznámý" must never match an author.
+	"""
+
+	# fold key (given-first or surname-first) → canonical display string
+	_canonical: dict[str, str]
+	# canonical display string → book count across the library
+	_counts: dict[str, int]
+
+	def lookup(self, name: str) -> tuple[str, int] | None:
+		"""Resolve a name/title to ``(canonical, book_count)``; None = unknown.
+
+		Returns None for strings that are not a single person name (the
+		``_parse_author`` gate rejects multi-author chains, digits, long
+		sentences) — a title that is not name-shaped cannot be a swapped
+		author even when it coincides with some string in the library.
+		"""
+		f = _parse_author(name)
+		if f is None:
+			return None
+		canon = self._canonical.get(f.key)
+		if canon is None and len(f.tokens) > 1:
+			canon = self._canonical.get(_swap_key(f.tokens))
+		if canon is None:
+			return None
+		return canon, self._counts.get(canon, 0)
+
+	def same_person(self, a: str, b: str) -> bool:
+		"""True when both strings resolve to the same pool person (variants incl.)."""
+		la = self.lookup(a)
+		lb = self.lookup(b)
+		return la is not None and lb is not None and la[0] == lb[0]
+
+
+def build_known_author_pool(books: list[BookMeta]) -> KnownAuthorPool:
+	"""Index every author in the scanned library into a KnownAuthorPool.
+
+	Reuse of the C15 machinery: variant spellings are unioned by
+	``build_author_clusters`` so a lookup under ANY spelling lands on the
+	cluster canonical, and lone spellings (no cluster — nothing to change)
+	are indexed under their own fold key. Anonym spellings never enter the
+	pool. Cluster canonicals carry the cluster's total book count, so the
+	detector can say "known library author (N books)".
+	"""
+	counter: Counter[str] = Counter()
+	for b in books:
+		for a in b.authors or []:
+			counter[a] += 1
+	clusters, _multi = build_author_clusters(counter, defaultdict(list))
+
+	canonical: dict[str, str] = {}
+	counts: dict[str, int] = {}
+	clustered_raws: set[str] = set()
+	for cluster in {id(c): c for c in clusters.values()}.values():
+		if cluster.kind == "anonym":
+			continue  # "Neznámý" & spellings are not persons — a title must never match them
+		counts[cluster.canonical] = sum(c for _, c in cluster.variants)
+		for raw, _n in cluster.variants:
+			clustered_raws.add(raw)
+			f = _parse_author(raw)
+			if f is None:
+				continue
+			canonical.setdefault(f.key, cluster.canonical)
+			if len(f.tokens) > 1:
+				canonical.setdefault(_swap_key(f.tokens), cluster.canonical)
+	for raw, n in counter.items():
+		if raw in clustered_raws:
+			continue
+		if _is_anonym_spelling(_nfc(raw).strip()) or _looks_like_neznamy(raw):
+			continue
+		f = _parse_author(raw)
+		if f is None:
+			continue  # multi-author/garbage strings are not pool persons
+		canonical.setdefault(f.key, raw)
+		if len(f.tokens) > 1:
+			canonical.setdefault(_swap_key(f.tokens), raw)
+		counts.setdefault(raw, n)
+	return KnownAuthorPool(canonical, counts)
+
+
+# ---------------------------------------------------------------------------
 # Genre / tag canonicalization
 # ---------------------------------------------------------------------------
 

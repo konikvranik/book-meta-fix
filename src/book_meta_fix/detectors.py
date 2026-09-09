@@ -41,6 +41,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from .models import BookMeta, Confidence, Diagnosis, Verdict
 
@@ -342,7 +343,7 @@ def rule_c7_glued_authors(meta: BookMeta) -> Diagnosis | None:
 	return None
 
 
-def rule_c1_swap(meta: BookMeta) -> Diagnosis | None:
+def rule_c1_swap(meta: BookMeta, *, known_authors: Any | None = None) -> Diagnosis | None:
 	"""C1: author/title swapped. Detects two patterns:
 
 	1. Author name (token ≥5 chars, looks like a real surname) literally appears
@@ -350,7 +351,54 @@ def rule_c1_swap(meta: BookMeta) -> Diagnosis | None:
 	   characters), otherwise this is really a C2 filename-pollution case.
 	2. The author_folder looks like a book title (sentence, not a person name)
 	   AND the title looks like a person name.
+
+	With *known_authors* (a normalize.KnownAuthorPool built from the whole
+	library by run_pipeline) a third, library-wide pattern runs FIRST — it
+	answers a question no per-book heuristic can: is the TITLE string a known
+	library author?
+
+	3a. Title resolves to a known author AND the author field is a variant of
+	    the SAME person ("Anatolij Dněprov" / "A. Dněprov") — the real title is
+	    lost from the record entirely; only the book content can recover it.
+	3b. Title resolves to a known author and the author field is someone/something
+	    else — the classic calibre swap. When the author field is ITSELF another
+	    known author the swap is ambiguous (a biography titled with its subject)
+	    — still flagged, but the reason says so; the pipeline's content gate
+	    decides (a title that never came from the book's text never auto-accepts).
+
+	Both pool patterns stay NEEDS_REVIEW here: the auto path lives in the
+	pipeline (_try_known_author_swap), which validates a recovered title
+	against the book's own text before accepting anything.
 	"""
+	# Pool-armed pattern (3): the title IS a known library author. Strongest
+	# evidence first — library-wide, unlike the token heuristics below.
+	if known_authors is not None and meta.title and meta.authors:
+		hit = known_authors.lookup(meta.title)
+		if hit is not None:
+			canon, n_books = hit
+			first_author = meta.authors[0]
+			if known_authors.same_person(meta.title, first_author):
+				return Diagnosis(
+					category="C1",
+					reason=(
+						f"title and author are both the known library author "
+						f"{canon!r} ({n_books} books) — variant pair, title lost"
+					),
+					confidence=Confidence.HIGH,
+					verdict=Verdict.NEEDS_REVIEW,
+				)
+			note = ""
+			if known_authors.lookup(first_author) is not None:
+				note = "; author field is also a known author — ambiguous, possibly a biography"
+			return Diagnosis(
+				category="C1",
+				reason=(
+					f"title {meta.title!r} is a known library author "
+					f"({canon!r}, {n_books} books) — author/title swap{note}"
+				),
+				confidence=Confidence.HIGH,
+				verdict=Verdict.NEEDS_REVIEW,
+			)
 	# Guard: if the author itself is polluted (filename chars, mojibake), this is
 	# not a swap — it's a C2 filename case. Skip C1.
 	def _is_clean_name(name: str) -> bool:
@@ -773,7 +821,13 @@ ENRICHMENT_RULES: list[Rule] = [
 ]
 
 
-def detect_all(meta: BookMeta, *, library_root: Path | None = None, pattern: str | None = None) -> list[Diagnosis]:
+def detect_all(
+	meta: BookMeta,
+	*,
+	library_root: Path | None = None,
+	pattern: str | None = None,
+	known_authors: Any = None,
+) -> list[Diagnosis]:
 	"""Apply ALL rules and return every match, in priority order (structural
 	rules first, then the location rule, then enrichment rules).
 
@@ -786,6 +840,11 @@ def detect_all(meta: BookMeta, *, library_root: Path | None = None, pattern: str
 	check. Without it no location diagnosis is produced — the historic,
 	location-blind behaviour every pre-existing caller relies on.
 
+	``known_authors`` (a normalize.KnownAuthorPool) opts C1 into its
+	library-wide pattern (title == known library author); like library_root it
+	is threaded by run_pipeline only — every other caller keeps the
+	library-blind C1.
+
 	C13 sits BEFORE the enrichment rules (and after the structural ones): a
 	misplaced-but-otherwise-fine book must get C13 as its PRIMARY diagnosis,
 	so the pipeline routes it down the cheap no-extraction path and the
@@ -795,7 +854,10 @@ def detect_all(meta: BookMeta, *, library_root: Path | None = None, pattern: str
 	"""
 	matches: list[Diagnosis] = []
 	for rule in RULES:
-		d = rule(meta)
+		if known_authors is not None and rule is rule_c1_swap:
+			d = rule(meta, known_authors=known_authors)
+		else:
+			d = rule(meta)
 		if d is not None:
 			matches.append(d)
 	if library_root is not None:
@@ -834,7 +896,13 @@ def all_diagnoses(diag: Diagnosis | None) -> list[Diagnosis]:
 	return [diag, *diag.additional]
 
 
-def detect(meta: BookMeta, *, library_root: Path | None = None, pattern: str | None = None) -> Diagnosis:
+def detect(
+	meta: BookMeta,
+	*,
+	library_root: Path | None = None,
+	pattern: str | None = None,
+	known_authors: Any = None,
+) -> Diagnosis:
 	"""Apply rules in priority order; return the first matching Diagnosis as
 	the primary, with every other match attached as ``.additional``.
 
@@ -845,10 +913,11 @@ def detect(meta: BookMeta, *, library_root: Path | None = None, pattern: str | N
 	are NOT promoted: a C9-whitelisted book stays OK even when an enrichment
 	rule (MISSING_*) also matched, exactly as before.
 
-	``library_root``/``pattern`` opt into the C13 location check (see
-	detect_all); the default keeps the historic location-blind behaviour.
+	``library_root``/``pattern`` opt into the C13 location check and
+	``known_authors`` into C1's library-wide pattern (see detect_all); the
+	defaults keep the historic library-blind behaviour.
 	"""
-	matches = detect_all(meta, library_root=library_root, pattern=pattern)
+	matches = detect_all(meta, library_root=library_root, pattern=pattern, known_authors=known_authors)
 	primary = matches[0]
 	if primary.verdict == Verdict.OK:
 		for m in matches[1:]:

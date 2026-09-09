@@ -172,11 +172,27 @@ def run_pipeline(
 			log.info("pipeline: skipping %d verified book(s)", before - len(all_books))
 			if stats is not None:
 				stats.setdefault("skipped_verified", before - len(all_books))
-	# Location-aware detect (C13) when the caller opted in; plain detect_fn
-	# otherwise so classify-critical behaviour is unchanged for other callers.
-	if location_root is not None:
+	# Library-wide known-author pool: powers C1's pool pattern (the TITLE
+	# field is a known library author — a question no per-book heuristic can
+	# answer) and the swap-repair tier in _process_book. Built once from the
+	# full scan with the same clustering `bmf normalize` uses; read-only
+	# afterwards, so the worker threads share it freely. A build failure must
+	# never kill the run — C1 simply stays library-blind.
+	known_authors: Any = None
+	try:
+		from .normalize import build_known_author_pool
+
+		known_authors = build_known_author_pool(all_books)
+	except Exception:  # noqa: BLE001
+		log.debug("known-author pool build failed; C1 stays library-blind", exc_info=True)
+	# Location-aware detect (C13) when the caller opted in; pool-armed C1 when
+	# the pool was built; plain detect_fn otherwise so classify-critical
+	# behaviour is unchanged for other callers.
+	if location_root is not None or known_authors is not None:
 		def _detect(b: BookMeta):
-			return detect_fn(b, library_root=location_root, pattern=location_pattern)
+			return detect_fn(
+				b, library_root=location_root, pattern=location_pattern, known_authors=known_authors,
+			)
 	else:
 		_detect = detect_fn
 	# Apply the detector cheaply to filter out already-OK books (incremental).
@@ -227,6 +243,8 @@ def run_pipeline(
 		"online_databazeknih": 0, "online_openlibrary": 0, "online_google_books": 0,
 		# Offline fix source breakdown (sub-rows of det_fixed).
 		"offline_content": 0, "offline_embedded": 0,
+		# Known-author swap repair (C1 pool pattern, sub-row of det_fixed).
+		"swap_fixed": 0,
 		"total": total,
 	}
 	if stats is not None:
@@ -249,7 +267,7 @@ def run_pipeline(
 			verify_ok=verify_ok, strict_verify=strict_verify, llm_loop=llm_loop,
 			accept_missing_if_identified=accept_missing_if_identified,
 			llm_skip_ids=llm_skip_ids or (),
-			detect=_detect, cache=cache,
+			detect=_detect, cache=cache, known_authors=known_authors,
 		)
 
 	def _process_safe(meta: BookMeta):
@@ -370,6 +388,7 @@ def _process_book(
 	llm_skip_ids: set | frozenset = frozenset(),
 	detect: Any = None,
 	cache: Cache | None = None,
+	known_authors: Any = None,
 ) -> tuple[BookMeta, Diagnosis, Verification | None, EnrichedMeta | None]:  # noqa: F821
 	"""Process one book end-to-end. Thread-safe (no shared mutable state except *stats*).
 
@@ -380,6 +399,9 @@ def _process_book(
 
 	*detect*: override the detection function (e.g. run_pipeline's
 	location-aware wrapper that adds C13); defaults to the plain detector.
+
+	*known_authors*: the run's KnownAuthorPool (see run_pipeline) — enables
+	the C1 swap-repair tier for books whose title field is a known author.
 	"""
 	dd = detect if detect is not None else detect_fn
 	diag = dd(meta)
@@ -478,6 +500,28 @@ def _process_book(
 					stats["online_fixed"] = stats.get("online_fixed", 0) + 1
 					key = f"online_{enriched.source}"  # databazeknih/openlibrary/google_books
 					stats[key] = stats.get(key, 0) + 1
+
+			# Step 2d: known-author swap repair (C1's pool pattern). The
+			# record's title IS a known library author; the identity is rebuilt
+			# from the pool canonical + the book's own text (see
+			# _try_known_author_swap). Only when the deterministic/online tiers
+			# found nothing (their proposal is at least as good when they have
+			# one) and only for C1-flagged books — the pool build is the only
+			# new input, everything else about these books is unchanged.
+			if (
+				enriched is None
+				and known_authors is not None
+				and extracted is not None
+				and any(d.category == "C1" for d in all_diagnoses(diag))
+			):
+				swap = _try_known_author_swap(meta, known_authors, extracted)
+				if swap is not None:
+					enriched = swap
+					stats["det_fixed"] = stats.get("det_fixed", 0) + 1
+					stats["offline_content" if swap.source == "content" else "offline_embedded"] = stats.get(
+						"offline_content" if swap.source == "content" else "offline_embedded", 0,
+					) + 1
+					stats["swap_fixed"] = stats.get("swap_fixed", 0) + 1
 
 		# Step 4: LLM fallback only if deterministic + online failed AND the
 		# book has usable first-page text (LLM cannot work without it).
@@ -686,6 +730,63 @@ def _try_deterministic_fix(
 	# No online data — fall back to a content-grounded proposal (offline fix
 	# from text_meta + embedded OPF, only fields that improve on the meta).
 	return _content_proposal(meta, extracted)
+
+
+def _try_known_author_swap(
+	meta: BookMeta,
+	known_authors: Any,
+	extracted: ExtractedMeta,
+) -> EnrichedMeta | None:
+	"""C1 pool repair: the TITLE field holds a known library author — rebuild
+	the identity from the pool (author) and the book's own text (title).
+
+	Two record shapes reach here (rule_c1_swap's pool pattern):
+	  - variant pair — title and author are the SAME person in two spellings
+	    ("Anatolij Dněprov" / "A. Dněprov"); the record never held the real
+	    title, so the new title comes from the content (title_from_text,
+	    else the weaker embedded title) and the author from the pool canonical;
+	  - classic swap — the title is the author and the real title sits in the
+	    AUTHOR field. The swap is only trusted when the content-mined title
+	    AGREES with that field: a biography titled with its subject ("Franz
+	    Kafka" by its biographer) has both names in its own text and would
+	    survive any naive swap self-test, but its mined title (the book's real
+	    title) matches the CURRENT title, not the author field — the
+	    disagreement vetoes the swap.
+
+	confirm_identity then binds the rebuilt pair to the content. Every failure
+	returns None and the entry stays for review (with the raw-swap hint
+	_build_proposed already builds). The new title is never accepted when it
+	equals the current title (nothing would change; that is the biography
+	shape) or the canonical author name (a "title" that is still the author's
+	name repairs nothing).
+	"""
+	from rapidfuzz import fuzz
+
+	hit = known_authors.lookup(meta.title)
+	if hit is None or not meta.authors:
+		return None
+	canon, _n_books = hit
+	first = meta.authors[0]
+	mined = getattr(extracted, "title_from_text", None) or getattr(extracted, "title", None)
+	if not mined:
+		return None
+	if known_authors.same_person(meta.title, first):
+		new_title = mined
+	else:
+		# Classic swap: trust the author field as the title only when the
+		# book's own text independently says the same thing.
+		if fuzz.token_sort_ratio(mined.lower(), first.lower()) < 80:
+			return None
+		new_title = first
+	if not new_title or new_title.strip() == meta.title.strip():
+		return None
+	if fuzz.token_sort_ratio(new_title.lower(), canon.lower()) >= 95:
+		return None
+	source = "content" if getattr(extracted, "title_from_text", None) else "embedded"
+	ident = IdentityResult(title=new_title, authors=[canon])
+	if not confirm_identity(ident, extracted):
+		return None
+	return EnrichedMeta(title=new_title, authors=[canon], source=source, identity_confirmed=True)
 
 
 def _online_matches_identity(online: EnrichedMeta, identity: IdentityResult) -> bool:  # noqa: F821
