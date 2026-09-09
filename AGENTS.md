@@ -179,7 +179,14 @@ src/book_meta_fix/
                    (analyze feeds it ReviewWriter.decided_ids()) drops the LLM
                    for books whose prior review entry is already decided —
                    detection/enrichment still run (the entry needs its refresh),
-                   only the token-costly call is skipped. Right after the scan
+                   only the token-costly call is skipped. The optional
+                   scanned_books out-param hands the caller the FULL scan as a
+                   PRE-verified-filter snapshot — analyze feeds it to its
+                   --normalize tail (cli._run_normalize_pass, shared with the
+                   normalize command) so the library-wide C15/C16 clustering
+                   runs over the same scan without a second (NFS-slow) walk;
+                   verified books stay in it on purpose: clustering needs the
+                   closed books to anchor the clusters. Right after the scan
                    run_pipeline builds the KnownAuthorPool (normalize) over
                    all_books and threads it into the detect wrapper (C1 pool
                    pattern) and _process_book (the Step-2d swap-repair tier
@@ -438,7 +445,12 @@ src/book_meta_fix/
                   (deletion itself is apply's job); analyze
                   takes --llm-provider/--antigravity-cmd/--antigravity-model and closes
                   the provider in its finally block — only the ACP provider actually
-                  holds subprocesses)
+                  holds subprocesses — and --normalize, which chains the normalize
+                  pass onto the END of the run via _run_normalize_pass (the shared
+                  post-scan half of the normalize command) over run_pipeline's
+                  scanned_books: strictly AFTER review_writer.finish(), because
+                  merge_normalizations rewrites review.yaml in place and would
+                  race the streaming writer; an interrupted run skips the tail)
 ```
 
 ## Non-obvious gotchas

@@ -8,16 +8,16 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-09-09 17:06+0200\n"
+"POT-Creation-Date: 2026-09-09 18:38+0200\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Generated-By: Babel 2.8.0\n"
+"Generated-By: Babel 2.18.0\n"
 
-#: src/book_meta_fix/cli.py:159 src/book_meta_fix/cli.py:386
+#: src/book_meta_fix/cli.py:159 src/book_meta_fix/cli.py:387
 msgid "Reading library"
 msgstr ""
 
@@ -31,7 +31,7 @@ msgid ""
 "BMF_LANGUAGE)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:199 src/book_meta_fix/cli.py:1554
+#: src/book_meta_fix/cli.py:199 src/book_meta_fix/cli.py:1593
 msgid "Library root (default: $BMF_LIBRARY or ~/Books)"
 msgstr ""
 
@@ -41,26 +41,26 @@ msgid "Disable SQLite cache (force full re-parse)"
 msgstr ""
 
 #: src/book_meta_fix/cli.py:201 src/book_meta_fix/cli.py:232
-#: src/book_meta_fix/cli.py:293 src/book_meta_fix/cli.py:1440
+#: src/book_meta_fix/cli.py:293 src/book_meta_fix/cli.py:1461
 msgid "Process only the first N books (for testing)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:202 src/book_meta_fix/cli.py:314
+#: src/book_meta_fix/cli.py:202 src/book_meta_fix/cli.py:315
 msgid ""
 "Parallel threads for the library scan (tree walk + metadata reads; NFS "
 "latency-bound). Default 8, or BMF_SCAN_WORKERS. 1 = serial scan."
 msgstr ""
 
 #: src/book_meta_fix/cli.py:220 src/book_meta_fix/cli.py:260
-#: src/book_meta_fix/cli.py:1485
+#: src/book_meta_fix/cli.py:1503
 msgid "No books found."
 msgstr ""
 
 #: src/book_meta_fix/cli.py:230 src/book_meta_fix/cli.py:291
-#: src/book_meta_fix/cli.py:760 src/book_meta_fix/cli.py:852
-#: src/book_meta_fix/cli.py:900 src/book_meta_fix/cli.py:1001
-#: src/book_meta_fix/cli.py:1152 src/book_meta_fix/cli.py:1221
-#: src/book_meta_fix/cli.py:1438
+#: src/book_meta_fix/cli.py:781 src/book_meta_fix/cli.py:873
+#: src/book_meta_fix/cli.py:921 src/book_meta_fix/cli.py:1022
+#: src/book_meta_fix/cli.py:1173 src/book_meta_fix/cli.py:1242
+#: src/book_meta_fix/cli.py:1459
 msgid "Library root"
 msgstr ""
 
@@ -97,7 +97,8 @@ msgstr ""
 msgid "Classifying"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:283
+#: src/book_meta_fix/cli.py:284
+#, python-brace-format
 msgid ""
 "{identified} book(s) identified (accepted): MISSING_* with author+title "
 "confirmed against content — these route to OK, not needfix."
@@ -149,6 +150,7 @@ msgid ""
 msgstr ""
 
 #: src/book_meta_fix/cli.py:302
+#, python-brace-format
 msgid ""
 "Target path pattern for OK books (default: '{author}/{title} ({id})'). "
 "Drives the C13 location detector: a book not sitting at its pattern path "
@@ -169,16 +171,24 @@ msgid ""
 msgstr ""
 
 #: src/book_meta_fix/cli.py:305
-msgid "Output review file (default: review.yaml)"
+msgid ""
+"Run the library-wide normalize pass (C15 author variants / C16 genre "
+"variants) at the end, over the books this analyze already scanned — no "
+"second library scan. Proposals are merged into the same review file; "
+"review with `bmf gui`, write with `bmf apply`."
 msgstr ""
 
 #: src/book_meta_fix/cli.py:306
+msgid "Output review file (default: review.yaml)"
+msgstr ""
+
+#: src/book_meta_fix/cli.py:307
 msgid ""
 "Enable/disable LLM reconciliation (default: enabled if provider "
 "configured)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:307
+#: src/book_meta_fix/cli.py:308
 msgid ""
 "Force the LLM provider branch (default: auto — Antigravity ACP when an "
 "agent is configured or cached, else Z.AI when ZAI_API_KEY is set). "
@@ -186,7 +196,7 @@ msgid ""
 " only the paid fallback; 'zai' never uses ACP."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:308
+#: src/book_meta_fix/cli.py:309
 msgid ""
 "Command that launches an Agent Client Protocol agent process (ACP v1 over"
 " stdio) — a Google Antigravity subscription as the FAST LLM tier. The "
@@ -198,7 +208,7 @@ msgid ""
 "BMF_ANTIGRAVITY_CMD."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:309
+#: src/book_meta_fix/cli.py:310
 msgid ""
 "Model the ACP agent should serve the fast tier with (matched against the "
 "agent's session config options by exact value/name or token family, so "
@@ -208,7 +218,7 @@ msgid ""
 "BMF_ANTIGRAVITY_MODEL."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:310
+#: src/book_meta_fix/cli.py:311
 msgid ""
 "Who serves the loop's QUALITY stage when the ACP agent is the fast tier: "
 "'agy' (default — a second ACP pool on the fallback model, the whole loop "
@@ -216,14 +226,14 @@ msgid ""
 "ZAI_API_KEY). Same as BMF_ANTIGRAVITY_FALLBACK."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:311
+#: src/book_meta_fix/cli.py:312
 msgid ""
 "Model for the agy quality stage, family-matched like --antigravity-model "
 "(empty = the agent's default pick). Default gemini-flash-high. Ignored "
 "with --antigravity-fallback glm. Same as BMF_ANTIGRAVITY_FALLBACK_MODEL."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:312
+#: src/book_meta_fix/cli.py:313
 msgid ""
 "Comma-separated categories to send to LLM, or 'ALL' (default). ALL = "
 "every category except C9 (legitimate anonyms like the Bible, where an "
@@ -231,11 +241,11 @@ msgid ""
 "returns all fields at once, so the cost is per-book, not per-category."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:313
+#: src/book_meta_fix/cli.py:314
 msgid "Parallel workers for I/O (extract/LLM/enrich). Default 10."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:315
+#: src/book_meta_fix/cli.py:316
 msgid ""
 "Minimum seconds between LLM requests (RPM throttle, default 2.0 = ~30 "
 "RPM). Decoupled from --workers: cheap I/O still runs at full worker "
@@ -243,7 +253,7 @@ msgid ""
 " 15 RPM) if you still hit 429."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:316
+#: src/book_meta_fix/cli.py:317
 msgid ""
 "Primary model for the LLM loop (default glm-4.7-flash, the free first "
 "attempt; with --no-llm-loop the fallback-quality model instead). "
@@ -252,7 +262,7 @@ msgid ""
 "scripts/llm_experiment.py."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:317
+#: src/book_meta_fix/cli.py:318
 #, python-format
 msgid ""
 "reasoning_effort for GLM-5.x models: low (default) | medium | max. Lower "
@@ -260,14 +270,14 @@ msgid ""
 "thinking)."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:318
+#: src/book_meta_fix/cli.py:319
 msgid ""
 "thinking toggle for GLM-4.x models: disabled (default) | enabled. "
 "'disabled' turns off chain-of-thought (3-4x fewer output tokens). Ignored"
 " by GLM-5.x (use --llm-reasoning-effort)."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:319
+#: src/book_meta_fix/cli.py:320
 msgid ""
 "Disable the self-correction loop. Default: loop on — try the free loop "
 "model first (with verify feedback), then the paid fallback model. With "
@@ -275,14 +285,14 @@ msgid ""
 "the fallback-quality one)."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:320
+#: src/book_meta_fix/cli.py:321
 msgid ""
 "Paid high-quality fallback model (default glm-5.3). Used when the loop "
 "model fails verify or is rate-limited; also the default single-call model"
 " when the loop is off."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:321
+#: src/book_meta_fix/cli.py:322
 msgid ""
 "Leaky-bucket burst capacity: how many LLM calls may start inside one "
 "interval (default 1 = pure even drip, no bunching — one call every --llm-"
@@ -292,7 +302,7 @@ msgid ""
 "limit (429)."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:322
+#: src/book_meta_fix/cli.py:323
 msgid ""
 "Base seconds of the global cooldown applied when a 429 is seen (default "
 "5). When ANY worker hits a 429, ALL workers pause this long; the cooldown"
@@ -301,13 +311,13 @@ msgid ""
 "but slower; lower = more 429 risk."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:323
+#: src/book_meta_fix/cli.py:324
 msgid ""
 "Cap (seconds) on the escalating 429 cooldown (default 60). Prevents a "
 "sustained outage from parking workers indefinitely."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:324
+#: src/book_meta_fix/cli.py:325
 msgid ""
 "Hard cap on LLM requests running at the same instant (default 3). The "
 "Z.AI coding plan admits only ~5 concurrent requests per account "
@@ -317,330 +327,340 @@ msgid ""
 "Flash-family models get a stricter sub-cap of min(2, this value)."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:352
+#: src/book_meta_fix/cli.py:353
 msgid "lookup enabled (genres + metadata)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:353
+#: src/book_meta_fix/cli.py:354
 msgid "cover replacement"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:353
+#: src/book_meta_fix/cli.py:354
 msgid ""
 "enabled (C11 generated / MISSING_COVER → cover_url from online sources; "
 "the two CZ ones cross-compared for the larger image)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:355
+#: src/book_meta_fix/cli.py:356
 msgid "lookup enabled (sci-fi/fantasy — short stories & series)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:357
+#: src/book_meta_fix/cli.py:358
 msgid "CZ audiobook provider lookup enabled (storefront aggregator)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:359
+#: src/book_meta_fix/cli.py:360
 msgid "online enrichment disabled (--skip-enrich)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:402
+#: src/book_meta_fix/cli.py:403
 msgid "Analysing"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:412
+#: src/book_meta_fix/cli.py:413
 msgid "Downloading the ACP agent"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:445
+#: src/book_meta_fix/cli.py:450
+#, python-brace-format
 msgid "cleared the verified flag on {count} book(s)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:503 src/book_meta_fix/cli.py:504
+#: src/book_meta_fix/cli.py:508 src/book_meta_fix/cli.py:509
 msgid "agent default"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:507
+#: src/book_meta_fix/cli.py:512
 msgid "fast tier"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:508
+#: src/book_meta_fix/cli.py:513
 msgid "no fallback configured"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:572
+#: src/book_meta_fix/cli.py:578
 msgid "Interrupted (Ctrl-C). Finalizing review file with partial results…"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:602
+#: src/book_meta_fix/cli.py:608
 msgid "Edit the file, set `action` for each entry, then run:"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:646
+#: src/book_meta_fix/cli.py:618
+msgid "--normalize skipped: run was interrupted"
+msgstr ""
+
+#: src/book_meta_fix/cli.py:620 src/book_meta_fix/cli.py:1490
+msgid "Normalizing authors and genres"
+msgstr ""
+
+#: src/book_meta_fix/cli.py:667
 msgid "Pipeline summary"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:647
+#: src/book_meta_fix/cli.py:668
 msgid "Bucket"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:648 src/book_meta_fix/cli.py:665
-#: src/book_meta_fix/cli.py:718 src/book_meta_fix/cli.py:734
-#: src/book_meta_fix/cli.py:749 src/book_meta_fix/cli.py:825
-#: src/book_meta_fix/cli.py:968 src/book_meta_fix/cli.py:982
-#: src/book_meta_fix/cli.py:1088 src/book_meta_fix/cli.py:1140
-#: src/book_meta_fix/cli.py:1184 src/book_meta_fix/cli.py:1380
-#: src/book_meta_fix/cli.py:1418 src/book_meta_fix/cli.py:1816
-#: src/book_meta_fix/cli.py:1894 src/book_meta_fix/cli.py:1907
-#: src/book_meta_fix/cli.py:1949
+#: src/book_meta_fix/cli.py:669 src/book_meta_fix/cli.py:686
+#: src/book_meta_fix/cli.py:739 src/book_meta_fix/cli.py:755
+#: src/book_meta_fix/cli.py:770 src/book_meta_fix/cli.py:846
+#: src/book_meta_fix/cli.py:989 src/book_meta_fix/cli.py:1003
+#: src/book_meta_fix/cli.py:1109 src/book_meta_fix/cli.py:1161
+#: src/book_meta_fix/cli.py:1205 src/book_meta_fix/cli.py:1401
+#: src/book_meta_fix/cli.py:1439 src/book_meta_fix/cli.py:1855
+#: src/book_meta_fix/cli.py:1933 src/book_meta_fix/cli.py:1946
+#: src/book_meta_fix/cli.py:1988
 msgid "Count"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:649
+#: src/book_meta_fix/cli.py:670
 msgid "OK (already correct — nothing to do)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:650
+#: src/book_meta_fix/cli.py:671
 msgid "Auto-fix (action: accept → `bmf apply`)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:652
+#: src/book_meta_fix/cli.py:673
 msgid "Auto-verified (identity confirmed vs book content)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:653
+#: src/book_meta_fix/cli.py:674
 msgid "Manual review (action: null)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:655
+#: src/book_meta_fix/cli.py:676
 msgid "Other action (delete/keep)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:657
+#: src/book_meta_fix/cli.py:678
 msgid "Skipped (already decided earlier)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:659
+#: src/book_meta_fix/cli.py:680
 msgid "Written to review.yaml"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:660 src/book_meta_fix/cli.py:1896
+#: src/book_meta_fix/cli.py:681 src/book_meta_fix/cli.py:1935
 msgid "Total books"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:663
+#: src/book_meta_fix/cli.py:684
 msgid "Verification results"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:664
+#: src/book_meta_fix/cli.py:685
 msgid "Result"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:688
+#: src/book_meta_fix/cli.py:709
 msgid "Offline fixes"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:689
+#: src/book_meta_fix/cli.py:710
 msgid "  └ text-mined (content)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:690
+#: src/book_meta_fix/cli.py:711
 msgid "  └ embedded OPF"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:691
+#: src/book_meta_fix/cli.py:712
 msgid "  └ author pool (C1 swap)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:692
+#: src/book_meta_fix/cli.py:713
 msgid "Online fixes"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:693
+#: src/book_meta_fix/cli.py:714
 msgid "  └ databazeknih.cz"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:694
+#: src/book_meta_fix/cli.py:715
 msgid "  └ legie.info"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:695
+#: src/book_meta_fix/cli.py:716
 msgid "  └ CZ audiobook provider"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:696
+#: src/book_meta_fix/cli.py:717
 msgid "  └ openlibrary.org"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:697
+#: src/book_meta_fix/cli.py:718
 msgid "  └ Google Books"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:698
+#: src/book_meta_fix/cli.py:719
 msgid "LLM fixes"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:699
+#: src/book_meta_fix/cli.py:720
 msgid "  └ fast model (flash)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:700
+#: src/book_meta_fix/cli.py:721
 msgid "  └ fallback model"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:701
+#: src/book_meta_fix/cli.py:722
 msgid "  └ low confidence"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:716
+#: src/book_meta_fix/cli.py:737
 msgid "Fix sources (how NEEDS_REVIEW books were resolved)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:717 src/book_meta_fix/cli.py:1906
+#: src/book_meta_fix/cli.py:738 src/book_meta_fix/cli.py:1945
 msgid "Source"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:722
+#: src/book_meta_fix/cli.py:743
 msgid "Proposed (any source)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:723
+#: src/book_meta_fix/cli.py:744
 msgid "Unfixed (no proposal found)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:724
+#: src/book_meta_fix/cli.py:745
 msgid "Accepted (identity OK, field missing)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:732
+#: src/book_meta_fix/cli.py:753
 msgid "LLM usage"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:733 src/book_meta_fix/cli.py:824
-#: src/book_meta_fix/cli.py:967 src/book_meta_fix/cli.py:1183
-#: src/book_meta_fix/cli.py:1379 src/book_meta_fix/cli.py:1417
-#: src/book_meta_fix/cli.py:1815 src/book_meta_fix/cli.py:1893
+#: src/book_meta_fix/cli.py:754 src/book_meta_fix/cli.py:845
+#: src/book_meta_fix/cli.py:988 src/book_meta_fix/cli.py:1204
+#: src/book_meta_fix/cli.py:1400 src/book_meta_fix/cli.py:1438
+#: src/book_meta_fix/cli.py:1854 src/book_meta_fix/cli.py:1932
 msgid "Metric"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:735
+#: src/book_meta_fix/cli.py:756
 msgid "LLM calls made"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:736
+#: src/book_meta_fix/cli.py:757
 msgid "Skipped (no usable text)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:737
+#: src/book_meta_fix/cli.py:758
 msgid "No useful result"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:739
+#: src/book_meta_fix/cli.py:760
 msgid "LLM errors"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:747 src/book_meta_fix/gui.py:2326
+#: src/book_meta_fix/cli.py:768 src/book_meta_fix/gui.py:2326
 msgid "Covers"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:748 src/book_meta_fix/cli.py:1948
+#: src/book_meta_fix/cli.py:769 src/book_meta_fix/cli.py:1987
 msgid "Category"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:750
+#: src/book_meta_fix/cli.py:771
 msgid "Generated (calibre placeholder)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:751
+#: src/book_meta_fix/cli.py:772
 msgid "Missing cover"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:761
+#: src/book_meta_fix/cli.py:782
 msgid "Actually write changes (default: dry-run)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:762
+#: src/book_meta_fix/cli.py:783
+#, python-brace-format
 msgid ""
 "Target path pattern for OK books (default: '{author}/{title} ({id})'). "
 "Applied books whose metadata is clean (or `verified`) move there; books "
 "with unresolved problems move to --needfix-dir."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:763
+#: src/book_meta_fix/cli.py:784
 msgid ""
 "Folder for books that still have unresolved problems after apply "
 "(default: 'needfix'). A resolved book moves back out of it on the next "
 "apply."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:764
+#: src/book_meta_fix/cli.py:785
 msgid "Write metadata only; do not move folders (placement off)."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:803
+#: src/book_meta_fix/cli.py:824
 msgid "Applying"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:823
+#: src/book_meta_fix/cli.py:844
 msgid "Apply summary"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:826
+#: src/book_meta_fix/cli.py:847
 msgid "Mode"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:827
+#: src/book_meta_fix/cli.py:848
 msgid "Applied"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:828
+#: src/book_meta_fix/cli.py:849
 msgid "Kept"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:829
+#: src/book_meta_fix/cli.py:850
 msgid "Deleted"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:831
+#: src/book_meta_fix/cli.py:852
 msgid "Deletion snapshot"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:833
+#: src/book_meta_fix/cli.py:854
 msgid "Placed on target path"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:835
+#: src/book_meta_fix/cli.py:856
 msgid "Merged into same-work folder"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:836
+#: src/book_meta_fix/cli.py:857
 msgid "Already on target path"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:838
+#: src/book_meta_fix/cli.py:859
 msgid "Moved to needfix"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:840
+#: src/book_meta_fix/cli.py:861
 msgid "Pruned from review"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:841
+#: src/book_meta_fix/cli.py:862
 msgid "Remaining in review"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:842
+#: src/book_meta_fix/cli.py:863
 msgid "Errors"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:846
+#: src/book_meta_fix/cli.py:867
 msgid "Errors:"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:853
+#: src/book_meta_fix/cli.py:874
 msgid "review.yaml to edit (default: $BMF_REVIEW or review.yaml)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:891
+#: src/book_meta_fix/cli.py:913
 msgid ""
 "`bmf organize` was merged into `bmf apply`. Run `bmf analyze` (it flags "
 "misplaced books with a move proposal), review in `bmf gui` if needed, "
@@ -648,272 +668,276 @@ msgid ""
 "(unresolved ones into needfix/)."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:901 src/book_meta_fix/cli.py:1002
-#: src/book_meta_fix/cli.py:1153 src/book_meta_fix/cli.py:1222
-#: src/book_meta_fix/cli.py:1439
+#: src/book_meta_fix/cli.py:922 src/book_meta_fix/cli.py:1023
+#: src/book_meta_fix/cli.py:1174 src/book_meta_fix/cli.py:1243
+#: src/book_meta_fix/cli.py:1460
 msgid "Disable SQLite cache"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:902 src/book_meta_fix/cli.py:1003
-#: src/book_meta_fix/cli.py:1154 src/book_meta_fix/cli.py:1223
+#: src/book_meta_fix/cli.py:923 src/book_meta_fix/cli.py:1024
+#: src/book_meta_fix/cli.py:1175 src/book_meta_fix/cli.py:1244
 msgid "Process only the first N books"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:903
+#: src/book_meta_fix/cli.py:924
 msgid "Actually generate EPUBs (default: dry-run)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:904
+#: src/book_meta_fix/cli.py:925
 msgid ""
 "Apply the identity gate (same as organize/report): an identified "
 "MISSING_* book (author+title confirmed against content) is treated as OK "
 "and gets an EPUB. Default on."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:905
+#: src/book_meta_fix/cli.py:926
 msgid ""
 "Audit: verify OK books against their content before generating. Off by "
 "default (consistent with organize/report). A MISMATCH (or UNCERTAIN, see "
 "--no-strict-verify) skips generation."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:906
+#: src/book_meta_fix/cli.py:927
 msgid ""
 "With --verify-ok: only a clear MISMATCH skips generation. By default "
 "UNCERTAIN does too."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:942
+#: src/book_meta_fix/cli.py:963
 msgid "Generating EPUBs"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:966
+#: src/book_meta_fix/cli.py:987
 msgid "EPUB generation summary"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:969
+#: src/book_meta_fix/cli.py:990
 msgid "Skipped (not OK)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:970
+#: src/book_meta_fix/cli.py:991
 msgid "Skipped (already has epub)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:971
+#: src/book_meta_fix/cli.py:992
 msgid "To generate"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:980
+#: src/book_meta_fix/cli.py:1001
 msgid "By source format"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:981 src/book_meta_fix/cli.py:1914
+#: src/book_meta_fix/cli.py:1002 src/book_meta_fix/cli.py:1953
 msgid "Format"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:989
+#: src/book_meta_fix/cli.py:1010
 msgid "Sample (first 10)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:990 src/book_meta_fix/cli.py:1105
-#: src/book_meta_fix/cli.py:1127 src/book_meta_fix/cli.py:1967
+#: src/book_meta_fix/cli.py:1011 src/book_meta_fix/cli.py:1126
+#: src/book_meta_fix/cli.py:1148 src/book_meta_fix/cli.py:2006
 msgid "ID"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:991
+#: src/book_meta_fix/cli.py:1012
 msgid "Source file"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:992
+#: src/book_meta_fix/cli.py:1013
 msgid "Tool"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:993
+#: src/book_meta_fix/cli.py:1014
 msgid "Output / Error"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1004
+#: src/book_meta_fix/cli.py:1025
 msgid "Folder for quarantined rogues (default: 'needfix')"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1005
+#: src/book_meta_fix/cli.py:1026
 msgid "Actually move rogues (default: dry-run)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1006
+#: src/book_meta_fix/cli.py:1027
 msgid "Fuzzy title ratio at/above which a format AGREES (default 0.8)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1007
+#: src/book_meta_fix/cli.py:1028
 msgid ""
 "Fuzzy title ratio below which a format DISAGREES (default 0.5). Between "
 "weak and strong = UNCERTAIN (never moved)."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1047
+#: src/book_meta_fix/cli.py:1068
 msgid "Cross-checking formats"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1065
+#: src/book_meta_fix/cli.py:1086
 msgid "Quarantining rogues"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1086
+#: src/book_meta_fix/cli.py:1107
 msgid "Crosscheck summary"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1087
+#: src/book_meta_fix/cli.py:1108
 msgid "Decision"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1091
+#: src/book_meta_fix/cli.py:1112
 msgid "checked (≥2 formats)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1092
+#: src/book_meta_fix/cli.py:1113
 msgid "clean"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1093
+#: src/book_meta_fix/cli.py:1114
 msgid "quarantine"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1094
+#: src/book_meta_fix/cli.py:1115
 msgid "ambiguous"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1095
+#: src/book_meta_fix/cli.py:1116
 msgid "skipped (<2 formats)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1106 src/book_meta_fix/cli.py:1128
-#: src/book_meta_fix/cli.py:1197 src/book_meta_fix/cli.py:1393
-#: src/book_meta_fix/cli.py:1426 src/book_meta_fix/cli.py:1825
+#: src/book_meta_fix/cli.py:1127 src/book_meta_fix/cli.py:1149
+#: src/book_meta_fix/cli.py:1218 src/book_meta_fix/cli.py:1414
+#: src/book_meta_fix/cli.py:1447 src/book_meta_fix/cli.py:1864
 msgid "Book folder"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1107
+#: src/book_meta_fix/cli.py:1128
 msgid "File"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1108 src/book_meta_fix/cli.py:1857
-#: src/book_meta_fix/cli.py:1970
+#: src/book_meta_fix/cli.py:1129 src/book_meta_fix/cli.py:1896
+#: src/book_meta_fix/cli.py:2009
 msgid "Reason"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1125
+#: src/book_meta_fix/cli.py:1146
 msgid ""
 "— formats disagree with metadata but no format corroborates it; not moved"
 " (review manually)."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1126
+#: src/book_meta_fix/cli.py:1147
 msgid "Ambiguous (not moved)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1129
+#: src/book_meta_fix/cli.py:1150
 msgid "Disagreeing files"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1139
+#: src/book_meta_fix/cli.py:1160
 msgid "Action"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1145
+#: src/book_meta_fix/cli.py:1166
 msgid "Dry-run: nothing moved. Re-run with --apply to quarantine the rogues."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1162
+#: src/book_meta_fix/cli.py:1183
 msgid ""
 "strip-covers is deprecated — use `bmf clean --covers` (with optional "
 "--generated/--invalid) instead."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1182
+#: src/book_meta_fix/cli.py:1203
 msgid "Cover strip summary"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1185 src/book_meta_fix/cli.py:1381
-#: src/book_meta_fix/cli.py:1419
+#: src/book_meta_fix/cli.py:1206 src/book_meta_fix/cli.py:1402
+#: src/book_meta_fix/cli.py:1440
 msgid "books scanned"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1186
+#: src/book_meta_fix/cli.py:1207
 msgid "cover.jpg renamed to .bak"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1187
+#: src/book_meta_fix/cli.py:1208
 msgid "invalid cover files renamed to .bak"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1188
+#: src/book_meta_fix/cli.py:1209
 msgid "embedded EPUB covers stripped"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1189
+#: src/book_meta_fix/cli.py:1210
 msgid "invalid embedded EPUB covers stripped"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1190
+#: src/book_meta_fix/cli.py:1211
 msgid "strip failures"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1196 src/book_meta_fix/cli.py:1392
+#: src/book_meta_fix/cli.py:1217 src/book_meta_fix/cli.py:1413
 msgid "Affected books (first 25)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1198
+#: src/book_meta_fix/cli.py:1219
 msgid "Actions"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1204
+#: src/book_meta_fix/cli.py:1225
+#, python-brace-format
 msgid "stripped: {files}"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1206
+#: src/book_meta_fix/cli.py:1227
+#, python-brace-format
 msgid "invalid -> .bak: {files}"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1208
+#: src/book_meta_fix/cli.py:1229
+#, python-brace-format
 msgid "invalid stripped: {files}"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1210
+#: src/book_meta_fix/cli.py:1231
+#, python-brace-format
 msgid "strip failed: {files}"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1216
+#: src/book_meta_fix/cli.py:1237
 msgid ""
 "Some EPUB covers probed as generated but could not be stripped (corrupt "
 "zip / unparseable OPF); see the list above."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1218
+#: src/book_meta_fix/cli.py:1239
 msgid "Dry-run: nothing removed. Re-run with --apply to strip the covers."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1224
+#: src/book_meta_fix/cli.py:1245
 msgid "Actually modify the library (default: dry-run)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1225
+#: src/book_meta_fix/cli.py:1246
 msgid "Clean invalid and generated covers (default: yes)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1226
+#: src/book_meta_fix/cli.py:1247
 msgid ""
 "Scope of generated-cover removal: external (sidecar files), embedded "
 "(inside EPUBs) or both (default). Implies --covers."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1227
+#: src/book_meta_fix/cli.py:1248
 msgid ""
 "Scope of invalid-cover removal — files no image decoder can read (HTML "
 "saved as .jpg, cover.html). Scope: external, embedded or both (default). "
 "Implies --covers."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1228
+#: src/book_meta_fix/cli.py:1249
 msgid ""
 "Probe ebook files for unrecoverable content (recognized as no book format"
 " at all) and propose deletion in review.yaml (C17). Content-based "
@@ -921,459 +945,471 @@ msgid ""
 "file is re-checked at apply time. Default: no."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1229
+#: src/book_meta_fix/cli.py:1250
 msgid ""
 "Clear `verified` flag from books whose author/series cannot be confirmed "
 "online (default: yes)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1230
+#: src/book_meta_fix/cli.py:1251
 msgid "Clear `verified` flag from ALL books unconditionally (default: no)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1265
+#: src/book_meta_fix/cli.py:1286
 msgid "Cleaning library"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1279 src/book_meta_fix/cli.py:1280
-#: src/book_meta_fix/cli.py:1476
+#: src/book_meta_fix/cli.py:1300 src/book_meta_fix/cli.py:1301
+#: src/book_meta_fix/cli.py:1494
 msgid "off"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1280 src/book_meta_fix/cli.py:1476
+#: src/book_meta_fix/cli.py:1301 src/book_meta_fix/cli.py:1494
 msgid "on"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1281
+#: src/book_meta_fix/cli.py:1302
+#, python-brace-format
 msgid "covers: {covers}, files: {files}, unverified: {unverified}"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1309
+#: src/book_meta_fix/cli.py:1330
 msgid "Cleaning"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1378
+#: src/book_meta_fix/cli.py:1399
 msgid "Invalid Ebook Files (C17)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1382
+#: src/book_meta_fix/cli.py:1403
 msgid "books with invalid files"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1383
+#: src/book_meta_fix/cli.py:1404
 msgid "invalid files"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1385
+#: src/book_meta_fix/cli.py:1406
 msgid "review entries added"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1386
+#: src/book_meta_fix/cli.py:1407
 msgid "review entries updated"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1387
+#: src/book_meta_fix/cli.py:1408
 msgid "decided entries skipped"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1394
+#: src/book_meta_fix/cli.py:1415
 msgid "Invalid files"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1403
+#: src/book_meta_fix/cli.py:1424
 msgid "Wrong-extension notes (recognized content, no action)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1404
+#: src/book_meta_fix/cli.py:1425
 msgid "Note"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1412
+#: src/book_meta_fix/cli.py:1433
 msgid ""
 "Dry-run: nothing written to review.yaml. Re-run with --apply to write the"
 " delete proposals; `bmf apply` then deletes (after re-checking every "
 "file, with a tar.gz snapshot)."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1416
+#: src/book_meta_fix/cli.py:1437
 msgid "Unverified Audit Summary"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1420
+#: src/book_meta_fix/cli.py:1441
 msgid "verified flags cleared"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1425
+#: src/book_meta_fix/cli.py:1446
 msgid "Unverified Books (first 25)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1434
+#: src/book_meta_fix/cli.py:1455
 msgid ""
 "Dry-run: verified flags were NOT cleared. Re-run with --apply to clear "
 "them."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1441
+#: src/book_meta_fix/cli.py:1462
 msgid ""
 "Unify author-name variants (C15: initials vs full names, diacritics, "
 "titles, anonym spellings, swapped name order)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1442
+#: src/book_meta_fix/cli.py:1463
 msgid ""
 "Canonicalize genres to Czech names (C16: case/diacritics/word-order "
 "duplicates, English→Czech and singular/plural aliases)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1443
+#: src/book_meta_fix/cli.py:1464
 msgid "Canonicalize tags the same way as genres (shares the vocabulary)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1444
+#: src/book_meta_fix/cli.py:1465
 msgid "Number of clusters to show per table"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1445
+#: src/book_meta_fix/cli.py:1466
 msgid ""
 "Write the proposals into review.yaml as C15/C16 entries (book metadata "
 "itself is written later by `bmf apply`; default: dry-run)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1472
-msgid "Normalizing authors and genres"
-msgstr ""
-
-#: src/book_meta_fix/cli.py:1475
+#: src/book_meta_fix/cli.py:1493
+#, python-brace-format
 msgid "authors: {a}, genres: {g}, tags: {t}"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1498
+#: src/book_meta_fix/cli.py:1537
+#, python-brace-format
 msgid ""
 "Proposals for {books} book(s): {accept} pre-filled accept, {pending} "
 "pending review"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1504
+#: src/book_meta_fix/cli.py:1543
 msgid "Nothing to write."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1508
+#: src/book_meta_fix/cli.py:1547
+#, python-brace-format
 msgid ""
 "review.yaml updated: {added} entry/entries added, {updated} updated, "
 "{skipped} already decided (skipped)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1512
+#: src/book_meta_fix/cli.py:1551
 msgid ""
 "Review with `bmf gui`, then run `bmf apply`. Author renames move folders "
 "— finish with `bmf abs-rescan`."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1514
+#: src/book_meta_fix/cli.py:1553
 msgid "Dry-run: nothing written. Re-run with --apply to fill review.yaml."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1520
+#: src/book_meta_fix/cli.py:1559
 msgid "Author clusters (C15)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1521 src/book_meta_fix/cli.py:1533
+#: src/book_meta_fix/cli.py:1560 src/book_meta_fix/cli.py:1572
 msgid "Canonical"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1522 src/book_meta_fix/cli.py:1534
+#: src/book_meta_fix/cli.py:1561 src/book_meta_fix/cli.py:1573
 msgid "Variants"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1523 src/book_meta_fix/cli.py:1536
+#: src/book_meta_fix/cli.py:1562 src/book_meta_fix/cli.py:1575
 msgid "Conf"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1530 src/book_meta_fix/cli.py:1543
+#: src/book_meta_fix/cli.py:1569 src/book_meta_fix/cli.py:1582
 msgid "more"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1532
+#: src/book_meta_fix/cli.py:1571
 msgid "Genre/tag clusters (C16)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1535
+#: src/book_meta_fix/cli.py:1574
 msgid "Kind"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1545
+#: src/book_meta_fix/cli.py:1584
 msgid "Skipped: multi-author strings (C7/C8 territory)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1546
+#: src/book_meta_fix/cli.py:1585
 msgid "String"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1547 src/book_meta_fix/cli.py:1915
+#: src/book_meta_fix/cli.py:1586 src/book_meta_fix/cli.py:1954
 msgid "Books"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1555
+#: src/book_meta_fix/cli.py:1594
 msgid "Rescan books changed within this window, e.g. 90m, 2h, 3d (default: 24h)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1556
+#: src/book_meta_fix/cli.py:1595
 msgid "Audiobookshelf base URL (default: $BMF_ABS_URL)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1557
+#: src/book_meta_fix/cli.py:1596
 msgid "Audiobookshelf library name or id (default: auto-detect)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1558
+#: src/book_meta_fix/cli.py:1597
 msgid ""
 "Also clear broken covers stored in the ABS database (coverPath pointing "
 "at a non-image or missing file — behind the ffmpeg 'Invalid data found' "
 "errors) and rescan those items"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1559
+#: src/book_meta_fix/cli.py:1598
 msgid "Force-rescan the whole ABS library instead of only the changed books"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1560
+#: src/book_meta_fix/cli.py:1599
 msgid "Parallel per-item scan requests (default: 4, BMF_ABS_WORKERS; 1 = serial)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1561
+#: src/book_meta_fix/cli.py:1600
 msgid "Actually trigger the rescan (default: dry-run)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1599
+#: src/book_meta_fix/cli.py:1638
 msgid ""
 "Audiobookshelf is not configured: set BMF_ABS_URL and BMF_ABS_TOKEN (an "
 "admin API token) in .env or the environment."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1606
+#: src/book_meta_fix/cli.py:1645
+#, python-brace-format
 msgid "Invalid --since value: {value}"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1613
+#: src/book_meta_fix/cli.py:1652
 msgid "ABS rescan"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1614
+#: src/book_meta_fix/cli.py:1653
+#, python-brace-format
 msgid "changed within {window}"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1635
+#: src/book_meta_fix/cli.py:1674
+#, python-brace-format
 msgid "Cannot reach Audiobookshelf at {url} — check the URL and token."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1640
+#: src/book_meta_fix/cli.py:1679
 msgid "No book libraries found on the ABS server."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1648
+#: src/book_meta_fix/cli.py:1687
+#, python-brace-format
 msgid ""
 "Multiple book libraries on the ABS server; pick one with --abs-library "
 "(or BMF_ABS_LIBRARY). Available: {names}"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1652
+#: src/book_meta_fix/cli.py:1691
+#, python-brace-format
 msgid "ABS library: {name}"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1663 src/book_meta_fix/cli.py:1707
+#: src/book_meta_fix/cli.py:1702 src/book_meta_fix/cli.py:1746
 msgid "Cannot list ABS library items — check the URL/token."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1668
+#: src/book_meta_fix/cli.py:1707
 msgid "No broken item covers found in the ABS database."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1674
+#: src/book_meta_fix/cli.py:1713
 msgid "Clearing broken covers"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1685
+#: src/book_meta_fix/cli.py:1724
+#, python-brace-format
 msgid ""
 "Failed to clear {count} stored item cover(s) (e.g. {sample}) — check the "
 "token (must be an ADMIN API token)."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1689
+#: src/book_meta_fix/cli.py:1728
+#, python-brace-format
 msgid ""
 "Cleared {count} stored item cover(s) — the rescan below lets ABS pick a "
 "real cover again."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1693
+#: src/book_meta_fix/cli.py:1732
 msgid "Dry-run: would force-rescan the whole ABS library. Re-run with --apply."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1695
+#: src/book_meta_fix/cli.py:1734
 msgid ""
 "Force-rescan of the whole ABS library requested — ABS re-reads every item"
 " in the background."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1697 src/book_meta_fix/cli.py:1762
+#: src/book_meta_fix/cli.py:1736 src/book_meta_fix/cli.py:1801
 msgid ""
 "Failed to request the library scan — check the token (must be an ADMIN "
 "API token) and URL."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1712
+#: src/book_meta_fix/cli.py:1751
+#, python-brace-format
 msgid "No books changed within {window} — nothing to rescan."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1721
+#: src/book_meta_fix/cli.py:1760
 msgid "Rescanning ABS items"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1728
+#: src/book_meta_fix/cli.py:1767
+#, python-brace-format
 msgid ""
 "Failed to request the rescan of {count} of {total} ABS items — check the "
 "token (must be an ADMIN API token) and URL."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1738
+#: src/book_meta_fix/cli.py:1777
+#, python-brace-format
 msgid ""
 "Rescan of {count} ABS items done — refresh the ABS web UI to see the new "
 "metadata."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1754
+#: src/book_meta_fix/cli.py:1793
+#, python-brace-format
 msgid ""
 "Plain ABS library scan requested in the background — it learns the paths "
 "of the {count} unmatched book(s); re-run abs-rescan afterwards if any "
 "stay unmatched."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1768
+#: src/book_meta_fix/cli.py:1807
+#, python-brace-format
 msgid ""
 "Dry-run: would trigger a plain ABS library scan for the {count} unmatched"
 " book(s)."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1814
+#: src/book_meta_fix/cli.py:1853
 msgid "ABS rescan summary"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1817
+#: src/book_meta_fix/cli.py:1856
 msgid "books changed"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1818
+#: src/book_meta_fix/cli.py:1857
 msgid "matched to ABS items"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1819
+#: src/book_meta_fix/cli.py:1858
 msgid "not found in ABS"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1824
+#: src/book_meta_fix/cli.py:1863
 msgid "Matched books (first 25)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1826
+#: src/book_meta_fix/cli.py:1865
 msgid "ABS item"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1836
+#: src/book_meta_fix/cli.py:1875
 msgid ""
 "Not found in ABS (moved or new): a plain library scan below lets ABS "
 "learn the new paths; re-run abs-rescan afterwards if any stay unmatched."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1838
+#: src/book_meta_fix/cli.py:1877
 msgid ""
 "Not found in ABS (moved or new): run a plain library scan in ABS once so "
 "it learns the new paths, then re-run abs-rescan."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1848
+#: src/book_meta_fix/cli.py:1887
 msgid "Dry-run: nothing sent. Re-run with --apply to trigger the rescan."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1854
+#: src/book_meta_fix/cli.py:1893
 msgid "Broken covers in the ABS database"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1855 src/book_meta_fix/cli.py:1969
+#: src/book_meta_fix/cli.py:1894 src/book_meta_fix/cli.py:2008
 #: src/book_meta_fix/gui.py:88 src/book_meta_fix/gui.py:353
 #: src/book_meta_fix/gui.py:1746
 msgid "Title"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1856
+#: src/book_meta_fix/cli.py:1895
 msgid "Stored cover path"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1859
+#: src/book_meta_fix/cli.py:1898
 msgid "not an image file"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1859
+#: src/book_meta_fix/cli.py:1898
 msgid "file missing"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1865
+#: src/book_meta_fix/cli.py:1904
 msgid ""
 "Dry-run: the stored covers stay as they are. Re-run with --apply to clear"
 " and rescan them."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1892
+#: src/book_meta_fix/cli.py:1931
 msgid "Scan summary"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1895
+#: src/book_meta_fix/cli.py:1934
 msgid "%"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1897
+#: src/book_meta_fix/cli.py:1936
 msgid "With metadata.json"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1898
+#: src/book_meta_fix/cli.py:1937
 msgid "With ISBN (valid)"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1899
+#: src/book_meta_fix/cli.py:1938
 msgid "With publication year"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1900
+#: src/book_meta_fix/cli.py:1939
 msgid "Mojibake repaired"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1901
+#: src/book_meta_fix/cli.py:1940
 msgid "Mojibake unrepairable"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1905
+#: src/book_meta_fix/cli.py:1944
 msgid "Metadata source"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1913
+#: src/book_meta_fix/cli.py:1952
 msgid "File formats present"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1947
+#: src/book_meta_fix/cli.py:1986
 msgid "Detection summary"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1950
+#: src/book_meta_fix/cli.py:1989
 msgid "Verdict"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1968
+#: src/book_meta_fix/cli.py:2007
 msgid "Author folder"
 msgstr ""
 
-#: src/book_meta_fix/cli.py:1998
+#: src/book_meta_fix/cli.py:2037
 msgid "Write the script to a file instead of stdout."
 msgstr ""
 
-#: src/book_meta_fix/cli.py:2040
+#: src/book_meta_fix/cli.py:2079
 msgid "Fish loads it automatically from ~/.config/fish/completions/"
 msgstr ""
 
@@ -1423,24 +1459,29 @@ msgid "folder not found"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:629
+#, python-brace-format
 msgid "folder does not exist: {folder}"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:632
+#, python-brace-format
 msgid "tool '{opener}' not found"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:636
+#, python-brace-format
 msgid "opening failed: {exc}"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:1866
+#, python-brace-format
 msgid ""
 "review file not found:\n"
 "{path}"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:1872
+#, python-brace-format
 msgid ""
 "failed to parse {path}:\n"
 "{err}"
@@ -1466,7 +1507,7 @@ msgstr ""
 msgid "+ library"
 msgstr ""
 
-#: src/book_meta_fix/gui.py:2040
+#: src/book_meta_fix/gui.py:2041
 msgid ""
 "Search the whole library too, not only review.yaml: books matching the "
 "search (author, title, series, folder path, annotation) that are not in "
@@ -1481,7 +1522,7 @@ msgstr ""
 msgid "Bulk edit (Ctrl+E)"
 msgstr ""
 
-#: src/book_meta_fix/gui.py:2073
+#: src/book_meta_fix/gui.py:2074
 msgid ""
 "Set the author or series for all selected books at once.\n"
 "Select rows with Ctrl+click (toggle) and Shift+click (range);\n"
@@ -1509,7 +1550,7 @@ msgstr ""
 msgid "Proposed"
 msgstr ""
 
-#: src/book_meta_fix/gui.py:2194
+#: src/book_meta_fix/gui.py:2195
 msgid ""
 "∅ mark: the field is applied as EMPTY (a proposal that is wrong while the"
 " correct value is unknown). Click again to restore editing."
@@ -1527,7 +1568,7 @@ msgstr ""
 msgid "Verified"
 msgstr ""
 
-#: src/book_meta_fix/gui.py:2243
+#: src/book_meta_fix/gui.py:2244
 msgid ""
 "Mark the book as OK: apply writes `verified: true` into metadata.json, "
 "later analyze runs skip the book entirely, and apply places it on the "
@@ -1626,7 +1667,7 @@ msgstr ""
 msgid "actually is:"
 msgstr ""
 
-#: src/book_meta_fix/gui.py:2400
+#: src/book_meta_fix/gui.py:2401
 msgid ""
 "Double-encoding repair: „read as“ = the codec the text was originally "
 "mis-read through (typically cp1250); „actually is“ = the real encoding of"
@@ -1650,26 +1691,31 @@ msgid "indexing library…"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:2944
+#, python-brace-format
 msgid "library: +{n} books"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:2990
+#, python-brace-format
 msgid "opened: {folder}"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:3120
+#, python-brace-format
 msgid "  (+{n} more)"
 msgstr ""
 
-#: src/book_meta_fix/gui.py:3126
+#: src/book_meta_fix/gui.py:3127
 msgid "not in review.yaml — deciding or editing it adds it to review on save"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:3131
+#, python-brace-format
 msgid "invalid files proposed for deletion: {files}"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:3134
+#, python-brace-format
 msgid ""
 "Entry {i}/{n}   uuid: {uuid}\n"
 "diagnosis: {cat} – {reason} [{conf}]{extra}"
@@ -1690,6 +1736,7 @@ msgid "Bulk edit"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:3387
+#, python-brace-format
 msgid "Apply to {n} selected books:"
 msgstr ""
 
@@ -1702,6 +1749,7 @@ msgid "enter a value or tick ∅"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:3424
+#, python-brace-format
 msgid "bulk edit: {n} books"
 msgstr ""
 
@@ -1715,18 +1763,22 @@ msgid "Cancel"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:3476
+#, python-brace-format
 msgid "bulk accept: {n} books"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:3496
+#, python-brace-format
 msgid "bulk verified: {n} books"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:3497
+#, python-brace-format
 msgid "bulk verify cleared: {n} books"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:3517
+#, python-brace-format
 msgid "bulk decision cleared: {n} books"
 msgstr ""
 
@@ -1735,6 +1787,7 @@ msgid "Remove from review"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:3544
+#, python-brace-format
 msgid ""
 "Remove {n} entries from review.yaml?\n"
 "No files are touched; a later analyze re-flags a book whose problem "
@@ -1748,6 +1801,7 @@ msgid "review is empty"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:3574
+#, python-brace-format
 msgid "removed {n} entries from review"
 msgstr ""
 
@@ -1756,6 +1810,7 @@ msgid "Bulk cover delete"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:3595
+#, python-brace-format
 msgid "Delete covers of {n} selected books:"
 msgstr ""
 
@@ -1776,6 +1831,7 @@ msgid "tick at least one option"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:3620 src/book_meta_fix/gui.py:4071
+#, python-brace-format
 msgid ""
 "Strip the embedded cover from these ebooks?\n"
 "(the ebook files themselves stay)\n"
@@ -1784,10 +1840,12 @@ msgid ""
 msgstr ""
 
 #: src/book_meta_fix/gui.py:3635 src/book_meta_fix/gui.py:4082
+#, python-brace-format
 msgid "deleted {n}"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:3637 src/book_meta_fix/gui.py:4084
+#, python-brace-format
 msgid "covers stripped {stripped}/{total}"
 msgstr ""
 
@@ -1808,10 +1866,12 @@ msgid "Merge books"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:3690
+#, python-brace-format
 msgid "Merge {n} books into one — pick the survivor:"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:3706
+#, python-brace-format
 msgid ""
 "⚠ does not look like the same work:\n"
 "{labels}"
@@ -1821,14 +1881,14 @@ msgstr ""
 msgid "Field-by-field: pick which book's value the merged book keeps"
 msgstr ""
 
-#: src/book_meta_fix/gui.py:3744
+#: src/book_meta_fix/gui.py:3745
 msgid ""
 "Defaults follow the survivor; a field the survivor lacks takes the first "
 "value found. ∅ = keep the field empty. Picked values are written to the "
 "merged book and override a conflicting proposal."
 msgstr ""
 
-#: src/book_meta_fix/gui.py:3750
+#: src/book_meta_fix/gui.py:3751
 msgid ""
 "The survivor keeps its folder and review entry; the other books' files "
 "move in and their folders are removed. review.yaml is saved right after "
@@ -1836,6 +1896,7 @@ msgid ""
 msgstr ""
 
 #: src/book_meta_fix/gui.py:3762
+#, python-brace-format
 msgid "Merge {n} books into {label}?"
 msgstr ""
 
@@ -1848,20 +1909,24 @@ msgid "nothing merged"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:3832
+#, python-brace-format
 msgid ""
 "could not merge:\n"
 "{list}"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:3834
+#, python-brace-format
 msgid "merged {n} books, {m} files moved"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:3888
+#, python-brace-format
 msgid "saved → {path}"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:3902
+#, python-brace-format
 msgid "save failed: {err}"
 msgstr ""
 
@@ -1898,10 +1963,12 @@ msgid "(none / calibre unavailable)"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:4008
+#, python-brace-format
 msgid "Strip the embedded cover from {name} (the ebook file stays)"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:4010
+#, python-brace-format
 msgid "The embedded cover cannot be stripped from {ext} — EPUB only"
 msgstr ""
 
@@ -1942,6 +2009,7 @@ msgid "(no formats / folder not found)"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:4150
+#, python-brace-format
 msgid "(extraction failed: {err})"
 msgstr ""
 
@@ -1954,6 +2022,7 @@ msgid "⚠ double encoding detected"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:4179
+#, python-brace-format
 msgid "⚠ multiple recoding layers ({desc})"
 msgstr ""
 
@@ -1962,14 +2031,17 @@ msgid "unknown reason"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:4201
+#, python-brace-format
 msgid "⚠ {frm} → {to} failed: {reason}"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:4205
+#, python-brace-format
 msgid " — the reverse ({to} → {frm}) works, click here"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:4239
+#, python-brace-format
 msgid "{frm} → {to} ✓"
 msgstr ""
 
@@ -1978,18 +2050,22 @@ msgid "no double encoding to repair"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:4298
+#, python-brace-format
 msgid "indexing library… {done}/{total}"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:4319
+#, python-brace-format
 msgid "library indexed: {n} books"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:4474
+#, python-brace-format
 msgid "{n} entries"
 msgstr ""
 
 #: src/book_meta_fix/gui.py:4476
+#, python-brace-format
 msgid " (of {total})"
 msgstr ""
 
@@ -2131,7 +2207,8 @@ msgid ""
 " hover popup)"
 msgstr ""
 
-#: src/book_meta_fix/review.py:69
+#: src/book_meta_fix/review.py:70
+#, python-brace-format
 msgid ""
 "Auto-generated by book-meta-fix on {date}\n"
 "# {count} books need review.\n"

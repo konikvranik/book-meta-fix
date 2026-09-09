@@ -302,6 +302,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--pattern", "pattern", default=None, help=_("Target path pattern for OK books (default: '{author}/{title} ({id})'). Drives the C13 location detector: a book not sitting at its pattern path enters review with a move proposal that `bmf apply` executes."))
 @click.option("--no-check-location", "no_check_location", is_flag=True, help=_("Skip the C13 location check (analyze metadata only, no placement proposals)."))
 @click.option("--recheck-ok", "recheck_ok", is_flag=True, help=_("Clear the `verified` flag (see review.yaml / the GUI checkbox) from every book, returning user-confirmed books to normal detection. Undo of a too-hasty OK."))
+@click.option("--normalize", "normalize_after", is_flag=True, help=_("Run the library-wide normalize pass (C15 author variants / C16 genre variants) at the end, over the books this analyze already scanned — no second library scan. Proposals are merged into the same review file; review with `bmf gui`, write with `bmf apply`."))
 @click.option("--output", "-o", type=click.Path(path_type=Path), default=None, help=_("Output review file (default: review.yaml)"))
 @click.option("--llm/--no-llm", "use_llm", default=True, help=_("Enable/disable LLM reconciliation (default: enabled if provider configured)"))
 @click.option("--llm-provider", "llm_provider", default=None, type=click.Choice(["antigravity", "acp", "agy", "zai", "mock", "off"], case_sensitive=False), help=_("Force the LLM provider branch (default: auto — Antigravity ACP when an agent is configured or cached, else Z.AI when ZAI_API_KEY is set). 'antigravity' = the ACP agent is the fast tier and Z.AI (if a key exists) only the paid fallback; 'zai' never uses ACP."))
@@ -322,7 +323,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--llm-rate-limit-base", "llm_rate_limit_base", type=float, default=None, help=_("Base seconds of the global cooldown applied when a 429 is seen (default 5). When ANY worker hits a 429, ALL workers pause this long; the cooldown escalates 5/10/20/... with consecutive 429s, honours the server Retry-After when longer, and is capped by --llm-rate-limit-max. Higher = safer but slower; lower = more 429 risk."))
 @click.option("--llm-rate-limit-max", "llm_rate_limit_max", type=float, default=None, help=_("Cap (seconds) on the escalating 429 cooldown (default 60). Prevents a sustained outage from parking workers indefinitely."))
 @click.option("--llm-max-inflight", "llm_max_inflight", type=int, default=None, help=_("Hard cap on LLM requests running at the same instant (default 3). The Z.AI coding plan admits only ~5 concurrent requests per account (interactive clients draw from the same ceiling), so a deep fallback herd gets 429/1302 storms — and false 1113 'insufficient balance' — no matter how slow the drip is. Workers queue on this instead of being rejected. Flash-family models get a stricter sub-cap of min(2, this value)."))
-def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, use_legie: bool, abs_czech_url: str | None, skip_verify: bool, verify_ok: bool, no_strict_verify: bool, accept_missing: bool, pattern: str | None, no_check_location: bool, recheck_ok: bool, output: Path | None, use_llm: bool, llm_provider: str | None, antigravity_cmd: str | None, antigravity_model: str | None, antigravity_fallback: str | None, antigravity_fallback_model: str | None, llm_categories: str, workers: int, scan_workers: int | None, llm_min_interval: float | None, llm_model: str | None, llm_reasoning_effort: str | None, llm_thinking: str | None, no_llm_loop: bool, llm_fallback_model: str | None, llm_burst: float | None, llm_rate_limit_base: float | None, llm_rate_limit_max: float | None, llm_max_inflight: int | None) -> None:
+def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, use_legie: bool, abs_czech_url: str | None, skip_verify: bool, verify_ok: bool, no_strict_verify: bool, accept_missing: bool, pattern: str | None, no_check_location: bool, recheck_ok: bool, normalize_after: bool, output: Path | None, use_llm: bool, llm_provider: str | None, antigravity_cmd: str | None, antigravity_model: str | None, antigravity_fallback: str | None, antigravity_fallback_model: str | None, llm_categories: str, workers: int, scan_workers: int | None, llm_min_interval: float | None, llm_model: str | None, llm_reasoning_effort: str | None, llm_thinking: str | None, no_llm_loop: bool, llm_fallback_model: str | None, llm_burst: float | None, llm_rate_limit_base: float | None, llm_rate_limit_max: float | None, llm_max_inflight: int | None) -> None:
 	"""Run full pipeline and generate a review.yaml for NEEDS_REVIEW books."""
 	from rich.progress import BarColumn, Progress, SpinnerColumn, TaskID, TextColumn, TimeRemainingColumn
 
@@ -417,6 +418,10 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 	review_writer = None
 	results: list = []
 	interrupted = False
+	# Filled by run_pipeline (scanned_books out-param) with the FULL scan —
+	# before the verified filter — so the optional --normalize tail can run
+	# its library-wide clustering without a second scan.
+	scanned_books: list = []
 	# Populated by run_pipeline (passed in) so we can print a fix-source
 	# breakdown after the run. The dict is seeded with all keys inside
 	# run_pipeline, so it's safe to read here even on early failure.
@@ -562,6 +567,7 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 			llm_loop=cfg.llm_loop,
 			accept_missing_if_identified=accept_missing,
 			stats=pipe_stats,
+			scanned_books=scanned_books,
 		)
 	except KeyboardInterrupt:
 		# A second Ctrl-C, or one that escaped run_pipeline's internal handler
@@ -600,6 +606,21 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 	console.print()
 	console.print(f"[bold green]{_('Wrote {count} review entries to {file}').format(count=summary['written'], file=out)}[/bold green]", highlight=False)
 	console.print(_('Edit the file, set `action` for each entry, then run:') + f" [bold]bmf apply {out}[/bold]", highlight=False)
+
+	# --normalize: chain the library-wide pass onto the finished run. Must run
+	# AFTER review_writer.finish() above — merge_normalizations rewrites the
+	# review file in place and would race the streaming writer (and lose the
+	# prior-decision carry-over). analyze writes the review file by design, so
+	# the tail merges its proposals unconditionally — the disk-mutating step
+	# stays `bmf apply`, exactly like analyze's own entries.
+	if normalize_after:
+		if interrupted:
+			console.print("[yellow]" + _("--normalize skipped: run was interrupted") + "[/yellow]")
+		elif scanned_books:
+			title = _("Normalizing authors and genres")
+			console.print()
+			console.print(f"[bold]{title}[/bold] [cyan]{cfg.library}[/cyan] [WRITE]", highlight=False)
+			_run_normalize_pass(cfg, scanned_books, review_file=out, fields=("authors", "genres", "tags"), samples=3, do_apply=True)
 
 
 def _print_pipeline_summary(results, stats: dict | None = None, review_summary: dict | None = None) -> None:  # noqa: ANN001
@@ -1456,9 +1477,6 @@ def normalize(library: Path | None, no_cache: bool, limit: int | None, do_author
 	afterwards to write them; author renames also move folders, so finish
 	with `bmf abs-rescan`. Without a selector flag all three categories run.
 	"""
-	from .normalize import analyze_library
-	from .review import merge_normalizations
-
 	cfg = Config.from_env()
 	if library is not None:
 		cfg.library = library
@@ -1484,13 +1502,34 @@ def normalize(library: Path | None, no_cache: bool, limit: int | None, do_author
 		if not books:
 			console.print("[red]" + _("No books found.") + "[/red]")
 			sys.exit(1)
-		result = analyze_library(
-			books, fields=tuple(n for n, on in (("authors", do_authors), ("genres", do_genres), ("tags", do_tags)) if on)
-		)
 	finally:
 		if cache is not None:
 			cache.close()
 
+	_run_normalize_pass(
+		cfg, books,
+		review_file=cfg.review_file,
+		fields=tuple(n for n, on in (("authors", do_authors), ("genres", do_genres), ("tags", do_tags)) if on),
+		samples=samples,
+		do_apply=do_apply,
+	)
+
+
+def _run_normalize_pass(
+	cfg: Config, books: list, *, review_file: Path, fields: tuple[str, ...], samples: int, do_apply: bool,
+) -> None:
+	"""Post-scan half of `bmf normalize`, shared by the command and `analyze --normalize`.
+
+	Runs the library-wide clustering over an ALREADY-SCANNED book list and
+	merges the C15/C16 proposals into *review_file*. `analyze --normalize`
+	reuses this over run_pipeline's scan because re-walking the tree (minutes
+	on NFS even fully cached) would dominate the cost of the clustering
+	itself.
+	"""
+	from .normalize import analyze_library
+	from .review import merge_normalizations
+
+	result = analyze_library(books, fields=fields)
 	_print_normalize_clusters(result, samples)
 	n_accept = sum(1 for p in result.proposals if p.high_confidence)
 	console.print()
@@ -1503,7 +1542,7 @@ def normalize(library: Path | None, no_cache: bool, limit: int | None, do_author
 		if not result.proposals:
 			console.print("[dim]" + _("Nothing to write.") + "[/dim]")
 			return
-		summary = merge_normalizations(cfg.review_file, result.proposals, books, library_root=cfg.library)
+		summary = merge_normalizations(review_file, result.proposals, books, library_root=cfg.library)
 		console.print(
 			_("review.yaml updated: {added} entry/entries added, {updated} updated, {skipped} already decided (skipped)").format(
 				added=summary["added"], updated=summary["updated"], skipped=summary["skipped_decided"],

@@ -87,6 +87,7 @@ def run_pipeline(
 	accept_missing_if_identified: bool = True,
 	llm_skip_ids: set | None = None,
 	stats: dict | None = None,
+	scanned_books: list | None = None,
 ) -> list[tuple[BookMeta, Diagnosis, Verification | None, EnrichedMeta | None]]:  # noqa: F821
 	"""Run the full pipeline over the whole library.
 
@@ -161,10 +162,19 @@ def run_pipeline(
 	the C13 location rule (book sits in a folder that does not match its
 	metadata). Without *location_root* detection stays location-blind — the
 	historic behaviour report/epubgen rely on.
+
+	*scanned_books* (optional): if a list is passed in, it is EXTENDED with
+	the full scan result — captured BEFORE the *skip_verified* filter, so a
+	library-wide pass (e.g. ``analyze --normalize`` clustering) sees the whole
+	library, closed books included; the pipeline's own book list keeps
+	dropping them. Saves the caller a second full scan, which on NFS costs
+	minutes even fully cached.
 	"""
 	all_books = scan_library(
 		library, cache=cache, progress_callback=scan_progress_callback, workers=scan_workers,
 	)
+	if scanned_books is not None:
+		scanned_books.extend(all_books)
 	if skip_verified:
 		before = len(all_books)
 		all_books = [b for b in all_books if not b.verified]

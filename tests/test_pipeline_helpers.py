@@ -459,6 +459,53 @@ class TestSkipVerified:
 		assert set(seen) == {"v1", "p1"}
 
 
+class TestScannedBooksOutParam:
+	"""run_pipeline(scanned_books=...) hands the caller the FULL scan — captured
+	before the verified filter — so a library-wide pass like `analyze
+	--normalize` clusters over the whole library (closed books anchor the
+	spelling clusters) without paying a second scan."""
+
+	def _two_books(self, tmp_path):
+		from book_meta_fix.models import BookMeta
+		return [
+			BookMeta(calibre_id=1, uuid="v1", verified=True, title="A", authors=["X"], path=str(tmp_path / "a")),
+			BookMeta(calibre_id=2, uuid="p1", title="B", authors=["Y"], path=str(tmp_path / "b")),
+		]
+
+	def test_out_param_gets_pre_filter_snapshot(self, tmp_path):
+		from book_meta_fix.pipeline import run_pipeline
+
+		seen = []
+
+		def fake_process(meta, *a, **k):
+			seen.append(meta.uuid)
+			return (meta, None, None, None)
+
+		scanned: list = []
+		with patch("book_meta_fix.pipeline.scan_library", return_value=self._two_books(tmp_path)), \
+			patch("book_meta_fix.pipeline._process_book", side_effect=fake_process):
+			run_pipeline(tmp_path, workers=1, only_needs_review=False, scanned_books=scanned)
+		# Processing still drops the verified book…
+		assert seen == ["p1"]
+		# …but the out-param holds BOTH, in scan order.
+		assert [b.uuid for b in scanned] == ["v1", "p1"]
+
+	def test_default_none_changes_nothing(self, tmp_path):
+		from book_meta_fix.pipeline import run_pipeline
+
+		seen = []
+
+		def fake_process(meta, *a, **k):
+			seen.append(meta.uuid)
+			return (meta, None, None, None)
+
+		with patch("book_meta_fix.pipeline.scan_library", return_value=self._two_books(tmp_path)), \
+			patch("book_meta_fix.pipeline._process_book", side_effect=fake_process):
+			results = run_pipeline(tmp_path, workers=1, only_needs_review=False)
+		assert seen == ["p1"]
+		assert {r[0].uuid for r in results} == {"p1"}
+
+
 class TestProgressCallbacks:
 	"""run_pipeline reports its two phases distinctly so a progress bar can
 	label them separately: the library scan is forwarded to scan_library via

@@ -7,6 +7,8 @@ bmf normalize                    # dry-run: show the author/genre clusters
 bmf normalize --apply            # fill review.yaml with C15/C16 proposals
 bmf normalize --genres --apply   # genres+tags only (skips authors)
 bmf normalize --authors          # authors only
+bmf analyze --normalize          # analyze, then the normalize pass over the
+                                 # same scan (no second library walk)
 bmf gui                          # review; bulk-accept with Ctrl+Shift+A
 bmf apply --apply review.yaml    # write metadata + move folders
 bmf abs-rescan --apply           # push the changes into Audiobookshelf
@@ -62,6 +64,14 @@ reviewable line.
 
 ## Workflow notes
 
+- `bmf analyze --normalize` runs this pass at the end of analyze over the
+  SAME scan (all books, verified ones included — the clustering needs the
+  whole library; the flag exists because a second scan costs minutes on NFS
+  even fully cached). The merge happens after analyze's review writer
+  finalizes, so the analyzer's own entries are safe: PENDING entries get
+  the C15/C16 proposals overlaid, decided ones are skipped. All three
+  categories run — use the standalone command when you want `--authors`
+  / `--genres` / `--tags` scoping or a dry-run first.
 - Run `normalize --apply` BEFORE `bmf gui`/`bmf apply`. A later
   `bmf analyze` rotates review.yaml to `.bak` and merges by uuid:
   decided entries (including pre-filled `accept` from normalize) are

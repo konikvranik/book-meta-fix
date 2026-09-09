@@ -7,6 +7,8 @@ bmf normalize                    # dry-run: vypíše clustery autorů/žánrů
 bmf normalize --apply            # naplní review.yaml návrhy C15/C16
 bmf normalize --genres --apply   # jen žánry+tagy (bez autorů)
 bmf normalize --authors          # jen autoři
+bmf analyze --normalize          # analyze a po něm průchod normalize nad
+                                 # týž sken (bez druhého průchodu knihovnou)
 bmf gui                          # revize; hromadné potvrzení Ctrl+Shift+A
 bmf apply --apply review.yaml    # zápis metadat + přesuny složek
 bmf abs-rescan --apply           # dotlačí změny do Audiobookshelf
@@ -63,6 +65,14 @@ je explicitní řádek ke kontrole.
 
 ## Poznámky k pracovnímu postupu
 
+- `bmf analyze --normalize` spustí tento průchod na konci analyze nad
+  TÝMŽE skenem (všechny knihy včetně verified — clustering potřebuje celou
+  knihovnu; flag existuje, protože druhý sken stojí minuty i na NFS s
+  plně nahraným cache). Sloučení proběhne po finalizaci analyzinho
+  writeru, takže vlastní položky analyzeru jsou v bezpečí: PENDING
+  položky dostanou návrhy C15/C16 překryté, rozhodnuté se přeskočí. Běží
+  všechny tři kategorie — pro rozsah `--authors`/`--genres`/`--tags`
+  nebo nejdřív dry-run použijte samostatný příkaz.
 - `normalize --apply` spusťte PŘED `bmf gui`/`bmf apply`. Pozdější
   `bmf analyze` přesune review.yaml do `.bak` a sloučí podle uuid:
   rozhodnuté položky (včetně předvyplněných `accept` z normalize) se

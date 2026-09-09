@@ -100,6 +100,7 @@ can recover the pre-run state.
 | `bmf scan` | Traverse library, parse metadata, print summary stats |
 | `bmf report` | Run C1–C14 detector rules, show category breakdown + samples |
 | `bmf analyze` | Full pipeline (scan+detect+extract+verify+enrich+location check) → generate `review.yaml` |
+| `bmf analyze --normalize` | Chain the library-wide normalize pass (C15/C16) onto the end of analyze — clustering runs over the books the pipeline already scanned (no second library walk) and merges its proposals into the same review.yaml after the writer finalizes; decided entries are never touched |
 | `bmf apply <file>` | Apply approved changes from a review.yaml (dry-run by default) |
 | `bmf apply --apply <file>` | Write `metadata.json` + `metadata.opf` AND place each book: clean/`verified` → target pattern path, unresolved → `needfix/`, dead records → `needfix/empty/` |
 | `bmf gui` | Interactive keyboard-driven Tkinter editor for `review.yaml` |

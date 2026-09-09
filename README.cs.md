@@ -102,6 +102,7 @@ zůstane zachován, abyste mohli obnovit stav před během.
 | `bmf scan` | Prochází knihovnu, parsuje metadata, vypisuje souhrnné statistiky |
 | `bmf report` | Spustí detektorová pravidla C1–C14, zobrazí rozdělení do kategorií + ukázky |
 | `bmf analyze` | Úplná pipeline (sken+detekce+extrakce+verifikace+obohacení) → vygeneruje `review.yaml` |
+| `bmf analyze --normalize` | Napojí průchod normalize napříč knihovnou (C15/C16) na konec analyze — clustering běží nad knihami, které pipeline už nascannovala (bez druhého průchodu knihovnou) a návrhy se po finalizaci writeru přidají do téhož review.yaml; rozhodnuté položky se nikdy nepřepisují |
 | `bmf apply <file>` | Aplikuje schválené změny z review.yaml (ve výchozím nastavení dry-run) |
 | `bmf apply --apply <file>` | Skutečně zapíše `metadata.json` + `metadata.opf` |
 | `bmf gui` | Interaktivní Tkinter editor ovládaný klávesnicí pro `review.yaml` |

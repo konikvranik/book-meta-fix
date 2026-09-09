@@ -758,3 +758,89 @@ class TestConsoleLogHandler:
 		finally:
 			root.handlers[:] = saved
 			root.setLevel(saved_level)
+
+
+class TestAnalyzeNormalize:
+	"""`bmf analyze --normalize` chains the library-wide C15/C16 pass onto the
+	finished run, over the books analyze already scanned — no second library
+	walk, and the merge lands in the same review file after the writer's
+	finalize (decided entries untouched, pending ones overlaid)."""
+
+	def _seed_library(self, root: Path) -> None:
+		"""Three books: the majority spelling 'Jan Novák' ×2 and one diacritics-less
+		'Jan Novak' — a deterministic C15 cluster (case/diacritics variant). The
+		odd book's file is named exactly like its title so C2 (filename-as-title)
+		flags it NEEDS_REVIEW — its analyze entry stays PENDING (the MISSING_*
+		only accept pre-fill needs a clean primary), which is the state the
+		normalize merge is allowed to overlay."""
+		import json
+
+		for i, (author, title) in enumerate(
+			[("Jan Novák", "Kniha A"), ("Jan Novák", "Kniha B"), ("Jan Novak", "Kniha C")],
+			start=1,
+		):
+			folder = root / author / f"{title} ({i})"
+			folder.mkdir(parents=True)
+			(folder / "metadata.json").write_text(
+				json.dumps({"authors": [author], "title": title}), encoding="utf-8"
+			)
+			stem = title if author == "Jan Novak" else f"kniha_{i}"
+			(folder / f"{stem}.epub").write_text("not a real epub", encoding="utf-8")
+
+	def _run_analyze(self, tmp_path: Path, *extra: str):
+		import yaml
+
+		review = tmp_path / "review.yaml"
+		args = [
+			"analyze", "--library", str(tmp_path / "lib"), "--no-cache",
+			"--skip-enrich", "--no-llm", "--skip-verify", "--no-check-location",
+			"-o", str(review), *extra,
+		]
+		result = CliRunner().invoke(main, args)
+		entries = []
+		if review.is_file():
+			entries = [e for e in yaml.safe_load_all(review.read_text(encoding="utf-8")) if e]
+		return result, entries
+
+	def _all_diagnoses(self, entry: dict) -> list:
+		diags = entry.get("diagnoses") or ([entry["diagnosis"]] if entry.get("diagnosis") else [])
+		return diags
+
+	def test_tail_merges_c15_into_review(self, tmp_path: Path) -> None:
+		self._seed_library(tmp_path / "lib")
+		result, entries = self._run_analyze(tmp_path, "--normalize")
+		assert result.exit_code == 0, result.output
+		# The odd spelling got a whole-list author proposal onto the canonical.
+		odd = [e for e in entries if e.get("current", {}).get("author") == "Jan Novak"]
+		assert len(odd) == 1
+		# PENDING analyze entry: the C15 whole-list author replacement is
+		# overlaid onto its proposal, the diagnosis appended.
+		assert odd[0]["action"] is None
+		assert odd[0]["proposed"]["authors"] == ["Jan Novák"]
+		assert "C15" in [d.get("category") for d in self._all_diagnoses(odd[0])]
+		# The majority spelling is the canonical — nothing proposes changing it.
+		for e in entries:
+			assert (e.get("proposed") or {}).get("authors") != ["Jan Novak"]
+
+	def test_without_flag_no_c15(self, tmp_path: Path) -> None:
+		self._seed_library(tmp_path / "lib")
+		result, entries = self._run_analyze(tmp_path)
+		assert result.exit_code == 0, result.output
+		assert not any(
+			d.get("category") == "C15" for e in entries for d in self._all_diagnoses(e)
+		)
+
+	def test_interrupted_run_skips_tail(self, tmp_path: Path) -> None:
+		from unittest.mock import patch
+
+		self._seed_library(tmp_path / "lib")
+		review = tmp_path / "review.yaml"
+		args = [
+			"analyze", "--library", str(tmp_path / "lib"), "--no-cache",
+			"--skip-enrich", "--no-llm", "--skip-verify", "--no-check-location",
+			"--normalize", "-o", str(review),
+		]
+		with patch("book_meta_fix.pipeline.run_pipeline", side_effect=KeyboardInterrupt):
+			result = CliRunner().invoke(main, args)
+		assert result.exit_code == 0, result.output
+		assert "--normalize skipped: run was interrupted" in result.output
