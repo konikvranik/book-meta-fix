@@ -129,9 +129,11 @@ Common options: `--library PATH`, `--limit N`, `--no-cache`, `-o FILE`,
 book whose author+title were confirmed against the book's content is
 pre-filled `action: accept` in `review.yaml` (the missing field is cosmetic,
 not an identity problem). `bmf apply` then prunes it in bulk — it's a safe
-no-op when nothing was recovered. Use `--no-accept-missing` to keep these for
-manual review. Books with a co-occurring `NEEDS_REVIEW` diagnosis (e.g. a
-generated cover) are still sent to review.
+no-op when nothing was recovered. An LLM answer that failed verification
+(`source: llm:low`) counts as nothing-recovered too: its untrusted proposal
+is dropped and the book is accepted as-is. Use `--no-accept-missing` to keep
+these for manual review. Books with a co-occurring `NEEDS_REVIEW` diagnosis
+(e.g. a generated cover) are still sent to review.
 
 ## Interactive editor (`bmf gui`)
 
@@ -489,8 +491,11 @@ single expensive call:
        │ failed / 429  →  fall through
        ▼
  3. GLM-5.2 reasoning_effort=low  (paid, high quality)    [only the hard cases]
-       │ passed  →  accept (source llm:high)
-       │ failed  →  return last proposal as confidence=low (still reviewed by the human)
+       │ passed  →  accept (source llm:high — also eligible for the auto-verified
+       │            pre-fill when the identity is content-confirmed)
+       │ failed  →  return last proposal as confidence=low (an acceptable-missing
+       │            book with content-confirmed identity is still auto-accepted
+       │            as-is; others stay for review by the human)
 ```
 
 `verify_proposal` checks both **title** and **author** against the book's
@@ -756,11 +761,15 @@ its own proposal completes the book (the projected post-apply state is
 detector-clean), so a fixed book never re-enters review. It is also
 pre-filled for an accepted entry whose FINAL identity (the post-proposal
 title/author, plus ISBN when known) is confirmed against the book's content
-AND an online source (databazeknih/legie/the self-hosted CZ provider/OpenLibrary/Google Books — an LLM
-answer does not count): such a book is fixed AND closed in one apply even when benign fields stay missing (an ISBN/year/cover no source
-has). A remaining NEEDS_REVIEW problem blocks the pre-fill so a known
-defect stays visible — a missing cover is benign and may stay, but a
-suspected generated Calibre cover (C11) is not. Undo with
+AND either an online source (databazeknih/legie/the self-hosted CZ provider/OpenLibrary/Google
+Books) or a content-confirmed `llm:high` answer whose author/series passed the
+existence check (flash-tier and unconfirmed answers do not count): such a book
+is fixed AND closed in one apply even when benign fields stay missing (an
+ISBN/year/cover no source has). A remaining NEEDS_REVIEW problem blocks the
+pre-fill so a known defect stays visible — a missing cover is benign and may
+stay, but a suspected generated Calibre cover (C11) is not. One C2 signal is
+credited: a title matching the (never-renamed) ebook filename is noise once
+the identity is confirmed, not corruption. Undo with
 `bmf analyze --recheck-ok`.
 
 Old review.yaml files with an `edited:` block or `action: edit|reject|swap`

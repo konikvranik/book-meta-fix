@@ -323,25 +323,37 @@ class ReviewWriter:
 		     this way, the action ladder above has already pre-filled accept
 		     (identity_confirmed accepts with or without a proposal), so
 		     "keep the original and verify" is covered with final=original.
-		  2. ``enriched.identity_confirmed`` with an _ONLINE_SOURCES source.
-		     The pipeline stamps this ONLY after acquire_identity confirmed
-		     the identity against the book's own content AND the online
-		     lookup matched it (ISBN exact / author-filtered); LLM and the
-		     content-only MISSING_* stamp carry no online evidence.
+		  2. ``enriched.identity_confirmed`` with an _ONLINE_SOURCES source
+		     — the pipeline stamps this ONLY after acquire_identity
+		     confirmed the identity against the book's own content AND the
+		     online lookup matched it (ISBN exact / author-filtered) — OR
+		     with source "llm:high": the pipeline's post-LLM ladder
+		     (author/series existence check, else downgrade to llm:low)
+		     plus confirm_identity mean an llm:high answer already carries
+		     a content-bound identity AND a known author — the
+		     cached-author tier. (With --skip-verify the existence check
+		     is skipped; identity_confirmed still binds the answer to the
+		     book's own text.)
 		  3. The PROJECTED identity agrees with the online record
 		     (identity_agrees): the proposal may have carried a different
 		     title (extracted precedence, a C1-swap merge), and then what
 		     would be written is not the identity that was confirmed.
 		  4. Only benign leftovers in the projected state: OK-verdict
 		     diagnoses and genuinely-missing fields (MISSING_ISBN/YEAR/
-		     COVER, a credited cover_url, C13 which the move resolves).
-		     A remaining NEEDS_REVIEW (e.g. C11 with no replacement cover)
-		     or EMPTY_BOOK must stay visible in review — auto-verifying it
-		     would hide a known defect behind the skip.
+		     COVER, a credited cover_url, C13 which the move resolves), and
+		     a C2 whose reason is only "title == primary file stem" — the
+		     confirmed title IS the right title, so the (never-renamed)
+		     ebook filename happening to equal it is noise over an artifact
+		     nothing reads (the library shows folder names, and placement
+		     regenerates those from metadata). A remaining NEEDS_REVIEW
+		     (e.g. C11 with no replacement cover, C2 with a real corruption
+		     reason) or EMPTY_BOOK must stay visible in review —
+		     auto-verifying it would hide a known defect behind the skip.
 		"""
 		if action != "accept" or enriched is None:
 			return False
-		if enriched.source not in _ONLINE_SOURCES:
+		src = getattr(enriched, "source", "") or ""
+		if src != "llm:high" and src not in _ONLINE_SOURCES:
 			return False
 		if not getattr(enriched, "identity_confirmed", False):
 			return False
@@ -362,6 +374,14 @@ class ReviewWriter:
 				return False  # a dead record is not a verified book
 			if d.category in ("C11", "MISSING_COVER") and proposed and proposed.get("cover_url"):
 				continue  # the cover download at apply resolves it
+			if d.category == "C2" and "primary file stem" in (d.reason or ""):
+				# The identity was confirmed (req. 2): the title IS the right
+				# title, so the never-renamed ebook file sharing its name is
+				# not corruption. Other C2 reasons (extension in title, Word
+				# temp prefix, truncated slug) still block — those describe
+				# garbage in the title value itself, which a confirmed record
+				# would not have returned.
+				continue
 			if d.verdict != Verdict.OK and d.category not in ("MISSING_ISBN", "MISSING_YEAR", "MISSING_COVER"):
 				return False
 		return True

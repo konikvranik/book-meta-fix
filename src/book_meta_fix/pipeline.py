@@ -602,12 +602,18 @@ def _process_book(
 		# action: accept (its identity_confirmed-no-proposal branch) and
 		# `bmf apply` prunes it. No fields are set on the EnrichedMeta on purpose
 		# — proposed must stay empty so the entry reads "accept as-is" (no fake
-		# change) and _apply_action is a clean no-op. Fires ONLY when enriched is
-		# None: if any enricher/text_meta found something, enriched is already set
-		# and those fields are proposed + applied normally.
+		# change) and _apply_action is a clean no-op. Fires when enriched is
+		# None (any enricher/text_meta that found something keeps its fields,
+		# proposed + applied normally) OR when the LLM's best answer was
+		# llm:low — a proposal that FAILED verify_proposal is untrusted, and
+		# leaving it in place would strand an otherwise acceptable-missing
+		# book in pending forever (measured: the LLM answer is often garbage
+		# like title "Neznámý"). The llm:low proposal is DISCARDED, not
+		# auto-applied: identity is re-confirmed against the content below
+		# before the stamp fires.
 		if (
 			accept_missing_if_identified
-			and enriched is None
+			and (enriched is None or enriched.source == "llm:low")
 			and is_acceptable_missing(diag)
 			and acquire_identity(meta, extracted) is not None
 		):

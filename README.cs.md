@@ -132,9 +132,12 @@ Společné volby: `--library PATH`, `--limit N`, `--no-cache`, `-o FILE`,
 `MISSING_COVER`, jejíž autor+titul byly potvrzeny proti obsahu knihy, dostane
 v `review.yaml` předvyplněné `action: accept` (chybějící pole je kosmetická
 vada, ne problém identity). `bmf apply` ji pak hromadně prořezá — pokud nic
-nebylo získáno, jde o bezpečný no-op. Chcete-li tyto knihy ponechat k ruční
-revizi, použijte `--no-accept-missing`. Knihy se souběžnou diagnózou
-`NEEDS_REVIEW` (např. generovaná obálka) se do revize stejně pošlou.
+nebylo získáno, jde o bezpečný no-op. I odpověď LLM, která neprošla
+verifikací (`source: llm:low`), se počítá jako „nic získáno“: její
+nedůvěryhodný návrh se zahodí a kniha se akceptuje as-is. Chcete-li tyto
+knihy ponechat k ruční revizi, použijte `--no-accept-missing`. Knihy se
+souběžnou diagnózou `NEEDS_REVIEW` (např. generovaná obálka) se do revize
+stejně pošlou.
 
 ## Interaktivní editor (`bmf gui`)
 
@@ -495,8 +498,11 @@ nastavení zapnutou):
        │ failed / 429  →  fall through
        ▼
  3. GLM-5.2 reasoning_effort=low  (paid, high quality)    [only the hard cases]
-       │ passed  →  accept (source llm:high)
-       │ failed  →  return last proposal as confidence=low (still reviewed by the human)
+       │ passed  →  accept (source llm:high — also eligible for the auto-verified
+       │            pre-fill when the identity is content-confirmed)
+       │ failed  →  return last proposal as confidence=low (an acceptable-missing
+       │            book with content-confirmed identity is still auto-accepted
+       │            as-is; others stay for review by the human)
 ```
 
 `verify_proposal` kontroluje **titul** i **autora** proti textu první strany
@@ -762,12 +768,16 @@ problémy zůstávají. Analyze ho předvyplní, když jeho vlastní návrh knih
 kompletně doplní (projektovaný stav po apply je detektory čistý) — opravená
 kniha se do review už nikdy nevrátí. Předvyplní se i u akceptovaného záznamu,
 jehož FINÁLNÍ identita (titul/autor po aplikování návrhu, případně ISBN) je
-potvrzená proti obsahu knihy A zároveň online zdrojem (databazeknih/legie/
-vlastní CZ provider/OpenLibrary/Google Books — odpověď LLM se nepočítá): taková kniha se opraví
+potvrzená proti obsahu knihy A zároveň buď online zdrojem (databazeknih/
+legie/vlastní CZ provider/OpenLibrary/Google Books), nebo odpovědí `llm:high`
+s potvrzenou identitou, jejíž autor/série prošel existenciální kontrolou
+(flash tier a nepotvrzené odpovědi se nepočítají): taková kniha se opraví
 A zavře jedním apply, i když zůstávají benigní chybějící pole (ISBN/rok/
 obálka, které žádný zdroj nemá). Zbylý problém NEEDS_REVIEW předvyplnění
 blokuje, aby známý defekt zůstal viditelný — chybějící obálka je benigní a
-může zůstat, podezřelá generovaná obálka Calibre (C11) nikoli. Odvolání:
+může zůstat, podezřelá generovaná obálka Calibre (C11) nikoli. Jeden signál
+C2 se kredituje: titul shodný s (nikdy nepřejmenovaným) názvem souboru knihy
+je po potvrzení identity šum, ne korupce. Odvolání:
 `bmf analyze --recheck-ok`.
 
 Staré soubory review.yaml s blokem `edited:` nebo `action: edit|reject|swap`

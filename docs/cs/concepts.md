@@ -113,8 +113,11 @@ vázána na Z.AI: s předplatným Google Antigravity obsluhuje první pokusy
        │ failed / 429  →  fall through
        ▼
  3. GLM-5.2 reasoning_effort=low  (paid, high quality)     [only the hard cases]
-       │ passed  →  accept (source llm:high)
-       │ failed  →  return last proposal as confidence=low (still human-reviewed)
+       │ passed  →  accept (source llm:high — eligible for the auto-verified
+       │            pre-fill when the identity is content-confirmed)
+       │ failed  →  return last proposal as confidence=low (an acceptable-missing
+       │            book with content-confirmed identity is still auto-accepted
+       │            as-is; others stay human-reviewed)
 ```
 
 `verify_proposal` kontroluje název + autora proti textu první strany (fuzzy,
@@ -185,7 +188,7 @@ přicházejí.
 | `accept` | aplikuje `proposed` (hodnoty upravte, čímž přebijete analyzátor; hodnota `null` dané pole smaže) |
 | `delete` | odstraní složku knihy (zámek Wordu `~$` z C6; zálohováno do tar.gz) |
 | `keep` | jako `accept`, ale záznam se v review.yaml zachová (neodstraní se) |
-| `verified: true` | trvalá značka uživatele „OK": apply ji uloží do metadata.json, analyze knihu pak přeskočí a apply ji umístí na cílovou cestu. Analyze ji předvyplní, když vlastní návrh knihu doplní, nebo — u akceptovaného záznamu — když je FINÁLNÍ identita potvrzena proti obsahu A online zdrojem (odpověď LLM se nepočítá); benigní chybějící pole (MISSING_*) zůstat smí, zbylý NEEDS_REVIEW to blokuje |
+| `verified: true` | trvalá značka uživatele „OK": apply ji uloží do metadata.json, analyze knihu pak přeskočí a apply ji umístí na cílovou cestu. Analyze ji předvyplní, když vlastní návrh knihu doplní, nebo — u akceptovaného záznamu — když je FINÁLNÍ identita potvrzena proti obsahu A online zdrojem, nebo odpovědí `llm:high` s potvrzenou identitou, jejíž autor/série prošel existenciální kontrolou (flash tier a nepotvrzené odpovědi se nepočítají); benigní chybějící pole (MISSING_*) zůstat smí (a i C2 s titulem shodným s názvem souboru knihy — po potvrzení identity šum, ne korupce), zbylý NEEDS_REVIEW to blokuje |
 
 Na začátku se existující `review.yaml` přesune na `review.yaml.bak`
 (předchozí rozhodnutí se zachovají); při čistém dokončení se `.bak` smaže;

@@ -262,7 +262,9 @@ src/book_meta_fix/
                    prior whose proposal projects detector-clean (the carried
                    twin of _projected_clean's fresh-entry pre-fill; keep stays
                    exempt — it must remain re-reviewable — and llm:-source
-                   proposals without online confirmation are never auto-closed)
+                   proposals without identity confirmation are never
+                   auto-closed; _identity_verified admits llm:high only with
+                   identity_confirmed, plus online sources)
   review.py        parse review.yaml (multi-doc + legacy list) + update_paths
                    + merge_normalizations (bmf normalize --apply merges C15/C16
                    proposals IN PLACE: pending entries get proposed.authors/
@@ -475,8 +477,12 @@ src/book_meta_fix/
   now present); one whose cover could not be recovered still re-fires. A co-occurring
   `NEEDS_REVIEW` diagnosis (e.g. C11 generated cover) blocks the auto-accept
   and keeps the book in review. If any enricher/text_meta DID return data,
-  `enriched` is already set and those fields are proposed + applied normally —
-  this path fires only when nothing was recovered.
+  `enriched` is already set and those fields are proposed + applied normally;
+  the one exception is an LLM answer that FAILED verification — `source ==
+  "llm:low"` is treated as nothing-recovered too (the untrusted proposal is
+  DISCARDED, not auto-applied; leaving it in place stranded acceptable-missing
+  books in pending forever, measured: 72 MISSING_ISBN books with llm:low
+  answers whose identity the content confirmed).
 - **Placement lives in `apply`, not a separate command** (the former
   `bmf organize` is a deprecation stub). After writing an entry's metadata,
   `apply_review` routes the folder via `_placement_target` + `_place_applied_book`
@@ -514,13 +520,22 @@ src/book_meta_fix/
   place, runs only when the projection is NOT clean) closes an accepted
   entry whose FINAL identity is confirmed against the content AND an online
   source: `enriched.identity_confirmed` with `source` in `_ONLINE_SOURCES`
-  (databazeknih/legie/openlibrary/google_books — the pipeline stamps the
-  flag only after `acquire_identity` + an author-filtered/ISBN-anchored
-  online hit; LLM answers and the content-only MISSING_* stamp do NOT
-  count). `verifier.identity_agrees` checks the projected identity still
-  agrees with the online record (an extracted/C1-swap title must not have
-  overridden it), and the projected state may keep only benign leftovers
-  (OK-verdict or MISSING_*); a NEEDS_REVIEW leftover or EMPTY_BOOK blocks
+  (databazeknih/legie/abs_czech/openlibrary/google_books — the pipeline stamps
+  the flag only after `acquire_identity` + an author-filtered/ISBN-anchored
+  online hit), OR with `source == "llm:high"` — the cached-author tier: the
+  pipeline only keeps llm:high when `confirm_identity` bound the answer to
+  the book's own text AND the post-LLM author/series existence ladder passed
+  (an unconfirmed author is downgraded to llm:low), so the answer carries
+  content-bound identity + a known author even when no bibliographic DB
+  knows the book. The content-only MISSING_* stamp (`source="content"`) and
+  the flash/loop tiers still do NOT count. `verifier.identity_agrees` checks
+  the projected identity still agrees with the confirmed record (an
+  extracted/C1-swap title must not have overridden it), and the projected
+  state may keep only benign leftovers (OK-verdict or MISSING_*), plus a C2
+  whose reason is only "title == primary file stem" — a confirmed title
+  equaling the never-renamed ebook file's name is noise, not corruption (the
+  library shows folder names, and placement regenerates those); other C2
+  reasons still block. A NEEDS_REVIEW leftover or EMPTY_BOOK blocks
   the pre-fill. Counted as `verified_prefilled` in the analyze summary.
   The DECIDED-prior carry path in `review_writer._handle` stamps the same
   flag on an already-accepted prior whose proposal projects clean (same

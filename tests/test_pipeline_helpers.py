@@ -235,6 +235,68 @@ class TestAcceptMissingIdentified:
 		assert stats["accepted_missing"] == 0
 		assert stats["unfixed"] == 1
 
+	def _run_accept_llm_low(self, *, first_page_text):
+		"""_process_book with a stub LLM whose best answer is llm:low (the
+		proposal failed verification — the realistic shape: garbage title,
+		e.g. the 'Neznámý' title page). Deterministic fix finds nothing, so
+		the LLM runs; its answer is returned as-is with the llm:low label.
+		Returns (result_tuple, stats)."""
+		from book_meta_fix import pipeline as pmod
+		from book_meta_fix.llm import ReconciledMeta
+
+		meta = _missing_isbn_book()
+
+		class StubProvider:
+			name = "stub"
+
+			def reconcile_loop(self, evidence, extracted, **kwargs):
+				return (
+					ReconciledMeta(title="Neznámý", authors=["Karel Čapek"], genres=["Detektivky"], confidence="low"),
+					"llm:low",
+				)
+
+		def fake_detect(_m):
+			return Diagnosis(category="MISSING_ISBN", reason="no isbn", confidence=Confidence.LOW, verdict=Verdict.AUTO_FIXABLE)
+
+		def fake_extract(_m):
+			return ExtractedMeta(first_page_text=first_page_text)
+
+		with patch.object(pmod, "detect_fn", fake_detect), \
+			 patch.object(pmod, "safe_extract", fake_extract), \
+			 patch.object(pmod, "has_usable_text", lambda t: True), \
+			 patch.object(pmod, "_try_deterministic_fix", lambda *a, **kw: None):
+			stats = {**_empty_stats(), "llm_low_confidence": 0}
+			result = _process_book(
+				meta, enricher=None, skip_enrich=True, skip_verify=True,
+				llm_provider=StubProvider(), llm_categories=("ALL",), stats=stats,
+				accept_missing_if_identified=True,
+			)
+		return result, stats
+
+	def test_llm_low_answer_does_not_block_accept_missing_stamp(self):
+		# The LLM's answer failed verification (llm:low), but the book's own
+		# content confirms its identity: the untrusted proposal is DISCARDED
+		# (replaced by the minimal content stamp) instead of stranding an
+		# acceptable-missing book in pending forever. Both stats coexist.
+		result, stats = self._run_accept_llm_low(first_page_text="Bílá nemoc\nKarel Čapek\nRomán o lidské slušnosti.")
+		enriched = result[3]
+		assert stats["llm_low_confidence"] == 1
+		assert stats["accepted_missing"] == 1
+		# The minimal stamp: identity confirmed, no fields (accept-as-is).
+		assert enriched.identity_confirmed is True
+		assert enriched.source == "content"
+		assert enriched.title is None and not enriched.authors
+
+	def test_llm_low_without_identity_confirmation_stays_llm_low(self):
+		# Identity NOT confirmable from the content: the stamp's own gate
+		# (acquire_identity) rejects, the llm:low answer survives untouched
+		# and the book stays pending with the LLM hint for a human reviewer.
+		result, stats = self._run_accept_llm_low(first_page_text="Lorem ipsum dolor sit amet, consectetur adipiscing elit.")
+		enriched = result[3]
+		assert stats["accepted_missing"] == 0
+		assert enriched.source == "llm:low"
+		assert enriched.title == "Neznámý"
+
 	def test_apply_action_accept_empty_proposal_is_noop(self):
 		# `bmf apply` on an accept-as-is entry (empty proposed) must NOT touch
 		# metadata — _apply_action gates the whole accept block on item.proposed.

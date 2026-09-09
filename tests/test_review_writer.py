@@ -698,20 +698,20 @@ class TestIdentityVerified:
 	even when benign fields stay missing — no source has them, so re-running
 	analyze would only re-fire the same accept forever."""
 
-	def _book_folder(self, tmp_path, *, title="Kniha", isbn=None, with_year=True, with_cover=True):
+	def _book_folder(self, tmp_path, *, title="Kniha", isbn=None, with_year=True, with_cover=True, file_name="book.epub"):
 		import json as _json
 
 		from book_meta_fix.readers import read_book_folder
 
 		folder = tmp_path / "lib" / "Jan Novak" / "Kniha (7)"
-		folder.mkdir(parents=True)
+		folder.mkdir(parents=True, exist_ok=True)
 		manifest = {"title": title, "authors": ["Jan Novak"]}
 		if isbn:
 			manifest["isbn"] = isbn
 		if with_year:
 			manifest["publishedYear"] = "2001"
 		(folder / "metadata.json").write_text(_json.dumps(manifest), encoding="utf-8")
-		(folder / "book.epub").write_text("x", encoding="utf-8")
+		(folder / file_name).write_text("x", encoding="utf-8")
 		if with_cover:
 			(folder / "cover.jpg").write_bytes(b"cover")
 		return read_book_folder(folder)
@@ -746,9 +746,15 @@ class TestIdentityVerified:
 		assert parsed[0].proposed["title"] == "Správný titul"
 		assert parsed[0].verified is True
 
-	def test_llm_is_not_an_online_source(self, tmp_path):
-		"""llm:high confirms against content only — the LLM reasons from
-		memory, it is not a bibliographic database. No auto-verified."""
+	def test_llm_high_identity_confirmed_verifies(self, tmp_path):
+		"""llm:high + identity_confirmed: the cached-author tier. The pipeline
+		only keeps llm:high when confirm_identity bound the answer to the
+		book's own text AND the author/series existence ladder passed (an
+		unconfirmed author is downgraded to llm:low), so the answer carries
+		content-bound identity + a known author — enough to close the book
+		even though no bibliographic database knows it (measured: ~800
+		MISSING_ISBN books would otherwise re-buy the LLM on every analyze
+		forever)."""
 		meta = self._book_folder(tmp_path, isbn=None)
 		diag = Diagnosis(category="MISSING_ISBN", reason="no isbn", confidence=Confidence.LOW, verdict=Verdict.AUTO_FIXABLE)
 		enriched = EnrichedMeta(identity_confirmed=True, source="llm:high", publisher="Argo")
@@ -757,8 +763,39 @@ class TestIdentityVerified:
 		summary = _submit_all_and_finish(w, [(meta, diag, None, enriched)])
 		parsed = parse_review(out)
 		assert parsed[0].action == "accept"
+		assert parsed[0].verified is True
+		assert summary["verified_prefilled"] == 1
+
+	def test_llm_high_without_identity_confirmed_stays_open(self, tmp_path):
+		"""llm:high alone is a high-confidence ACCEPT, not a close: without
+		identity_confirmed the answer was never bound to the book's own text,
+		so the content half of the double confirmation is missing."""
+		meta = self._book_folder(tmp_path, isbn=None)
+		diag = Diagnosis(category="MISSING_ISBN", reason="no isbn", confidence=Confidence.LOW, verdict=Verdict.AUTO_FIXABLE)
+		enriched = EnrichedMeta(source="llm:high", publisher="Argo")
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		summary = _submit_all_and_finish(w, [(meta, diag, None, enriched)])
+		parsed = parse_review(out)
+		assert parsed[0].action == "accept"
 		assert parsed[0].verified is False
 		assert summary["verified_prefilled"] == 0
+
+	def test_llm_flash_stays_unverified(self, tmp_path):
+		"""The flash tier (llm:flash / llm:loop / llm:low) never closes a
+		book: a weaker model's answer is accept-grade at best (when it passed
+		verify_proposal), never close-grade."""
+		for src in ("llm:flash", "llm:loop", "llm:low"):
+			meta = self._book_folder(tmp_path, isbn=None)
+			diag = Diagnosis(category="MISSING_ISBN", reason="no isbn", confidence=Confidence.LOW, verdict=Verdict.AUTO_FIXABLE)
+			enriched = EnrichedMeta(identity_confirmed=True, source=src, publisher="Argo")
+			out = tmp_path / "review.yaml"
+			w = ReviewWriter(out)
+			summary = _submit_all_and_finish(w, [(meta, diag, None, enriched)])
+			parsed = parse_review(out)
+			assert parsed[0].action == "accept", src
+			assert parsed[0].verified is False, src
+			assert summary["verified_prefilled"] == 0, src
 
 	def test_content_stamp_is_not_an_online_source(self, tmp_path):
 		"""The accept-missing stamp (source='content') has no online evidence:
@@ -790,6 +827,25 @@ class TestIdentityVerified:
 		assert parsed[0].action == "accept"
 		assert parsed[0].verified is False
 		assert summary["verified_prefilled"] == 0
+
+	def test_c2_stem_leftover_credited_when_identity_confirmed(self, tmp_path):
+		"""A diacritic-free title that equals the (never-renamed) ebook file's
+		stem keeps C2 firing on every projection — even when the title was
+		just confirmed correct by databazeknih. The file name is an artifact
+		nothing reads (the library shows folder names, and placement
+		regenerates those), so the stem-match reason is credited inside the
+		identity gate: measured 148 otherwise-finished books were cycling in
+		review on this noise alone."""
+		meta = self._book_folder(tmp_path, isbn=None, title="Kniha", file_name="Kniha.epub")
+		diag = Diagnosis(category="MISSING_ISBN", reason="no isbn", confidence=Confidence.LOW, verdict=Verdict.AUTO_FIXABLE)
+		enriched = EnrichedMeta(identity_confirmed=True, source="databazeknih", publisher="Argo")
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		summary = _submit_all_and_finish(w, [(meta, diag, None, enriched)])
+		parsed = parse_review(out)
+		assert parsed[0].action == "accept"
+		assert parsed[0].verified is True
+		assert summary["verified_prefilled"] == 1
 
 	def test_swap_overriding_online_title_blocks_verified(self, tmp_path):
 		"""A C1-swap merged from diag.proposed overrides the online-confirmed
