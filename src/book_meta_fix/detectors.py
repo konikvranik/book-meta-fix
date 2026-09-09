@@ -17,9 +17,13 @@ Corruption categories (from empirical study of the library):
 	C5  placeholder record                  NEEDS_REVIEW (metadata corrupted; recover from page text)
 	C6  Word lock-file duplicate            AUTO_FIXABLE (delete)
 	C7  glued authors ("byXandY")           NEEDS_REVIEW
-	C8  translator mislabeled as author     NEEDS_REVIEW
+	C8  translator credit in the author     NEEDS_REVIEW (translator AMONG the
+	    field ("přeložil X" label)          comma-separated authors is the
+	                                          accepted state — ABS has no
+	                                          translator field and the authors
+	                                          entry keeps the book searchable
+	                                          by translator)
 	C9  anonym (mostly fake — real anonym is whitelisted) NEEDS_REVIEW
-	C10 long comma-separated author list    NEEDS_REVIEW (mostly real multi-author)
 	C11 generated cover (calibre placeholder) NEEDS_REVIEW (download replacement)
 	C12 author slug/artefact pollution      NEEDS_REVIEW (lost capitalization,
 	                                          leading _ or *, etc. — author
@@ -123,6 +127,14 @@ _ALL_LOWER_RE = re.compile(r"^[^A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ]+$")
 
 # Glued-author patterns: "byX...andY", "XandY" without spaces around connectives
 _GLUED_RE = re.compile(r"\b(by[A-Z]|[a-z]and[A-Z]|[a-z]and\s|[A-Z][a-z]+[a-z]and[A-Z])")
+
+# Translator labels leaking into an author entry ("přeložil František
+# Jungwirth", "Překlad: J. Novák", "translated by John Smith"). A label
+# PROVES the entry is a translator credit, not an author name.
+_TRANSLATOR_LABEL_RE = re.compile(
+	r"\bp[řr]eložil[a]?\b|\bp[řr]eklad(atel|atelka|a)?:?\b|\btranslated\s+by\b|\btranslation\s+by\b",
+	re.IGNORECASE,
+)
 
 # Czech diacritics — used to detect CZ vs foreign author names
 _CZ_DIACRITICS = set("áčďéěíňóřšťúůýžôÁČĎÉĚÍŇÓŘŠŤÚŮÝŽÔ")
@@ -270,12 +282,25 @@ def rule_c12_bad_author(meta: BookMeta) -> Diagnosis | None:
 	  - all-lowercase (a real name always has a capital initial), e.g.
 	    "anthony burgess", "jsvoboda"
 
-	Checked against both ``meta.authors`` and ``meta.author_folder``. These
-	are NEEDS_REVIEW (not auto-fixable): the right author has to be looked
-	up from the book content or an online source.
+	Checked against ``meta.authors``; the ``author_folder`` is consulted
+	ONLY when the author field itself gives nothing to judge (empty) —
+	then the folder is the only author evidence there is. A garbage folder
+	next to CLEAN metadata authors is not an author problem at all: C13
+	already flags the location mismatch and apply's placement recomputes
+	the folder from the metadata (a mechanical move, pre-filled accept).
+	Firing C12 there shadowed C13 as the primary and downgraded 35
+	misplaced-but-correct books to manual review (measured 2026-09-09:
+	every "all-lowercase"/prefix flag in review.yaml hit the folder only —
+	needfix/crosscheck quarantine paths, mojibake title fragments like
+	"!as py!livu" — while current.author was perfectly fine).
+
+	These are NEEDS_REVIEW (not auto-fixable): the right author has to be
+	looked up from the book content or an online source.
 	"""
 	reasons: list[str] = []
-	for candidate in (meta.author_folder, *meta.authors):
+	author_candidates = [a for a in meta.authors if a]
+	candidates: tuple[str, ...] = tuple(author_candidates) or (meta.author_folder,)
+	for candidate in candidates:
 		if not candidate:
 			continue
 		# Leave anonym spellings to C9, which knows the genuine-anonym whitelist
@@ -529,31 +554,45 @@ def rule_c3_series_as_author(meta: BookMeta) -> Diagnosis | None:
 
 
 def rule_c8_translator(meta: BookMeta) -> Diagnosis | None:
-	"""C8: a translator is mislabeled as a second author.
+	"""C8: a translator credit sits in the author's place.
 
-	Signal: 2+ authors, mix of CZ-looking and foreign-looking names. With
-	2-3 authors and exactly one foreign name, the CZ names are likely
-	translators. With 2+ foreign names, it's more likely a real anthology.
+	The library DELIBERATELY keeps translators among the comma-separated
+	authors: Audiobookshelf has no translator field (only authors and
+	narrators — its Book model, checked 2026-09), so an authors-list entry
+	is the only thing that makes a book findable by its translator. A
+	foreign author leading the list with CZ names after is therefore the
+	ACCEPTED shape, not a diagnosis (measured 2026-09-09: all 47 mixed
+	lists in the library look like that; the old "strip CZ names into a
+	translators field" signal flagged every one and its proposal was dead
+	weight — NEEDS_REVIEW diagnosis proposals never reach the entry, and
+	`translators` has no BookMeta/writer support, so an applied fix would
+	have silently DELETED the translator names).
+
+	What metadata alone can still PROVE — an author entry carrying an
+	explicit translator label ("přeložil František Jungwirth", "Překlad:
+	J. Novák", "translated by X"): strip the label, keep the bare name in
+	the list. Currently zero occurrences in the library; kept as a cheap,
+	false-positive-free guard for future Calibre re-imports.
+
+	NOT detected here, deliberately: a translator-first ordering or a lone
+	translator with the real author lost. Name-order heuristics cannot
+	tell a translator leading from a Czech adaptor/editor leading
+	(measured false positives: "Kate Wilhelmová" — an American author with
+	a feminized Czech surname; "Josef V. Pleva, Daniel Defoe" — a Czech
+	adaptor legitimately first), and 0 of the library's books are in the
+	translator-first shape anyway. Those corruptions belong to the content
+	flows: the identity verifier catches a primary author the book's own
+	text contradicts, text_meta mines "přeložil X" credits from page text.
 	"""
-	if len(meta.authors) < 2:
-		return None
-	cz_names = [a for a in meta.authors if _looks_cz_name(a)]
-	foreign_names = [a for a in meta.authors if _looks_foreign_name(a)]
-	# Strong: exactly one foreign author + 1-2 CZ names = translator case
-	if len(foreign_names) == 1 and 1 <= len(cz_names) <= 2:
+	labeled = [a for a in meta.authors if _TRANSLATOR_LABEL_RE.search(a)]
+	if labeled:
 		return Diagnosis(
 			category="C8",
-			reason=f"likely translator as author: foreign={foreign_names}, cz={cz_names}",
-			confidence=Confidence.MEDIUM,
-			verdict=Verdict.NEEDS_REVIEW,
-			proposed={"translators": cz_names, "authors": foreign_names},
-		)
-	# Weaker: 4+ authors — could be anthology OR translator team
-	if len(meta.authors) >= 4:
-		return Diagnosis(
-			category="C10",
-			reason=f"{len(meta.authors)} authors — verify anthology vs translator list",
-			confidence=Confidence.LOW,
+			reason=(
+				f"překladatelské označení v poli autora: {labeled!r} — "
+				"odstraň označení, holé jméno nech v seznamu autorů"
+			),
+			confidence=Confidence.HIGH,
 			verdict=Verdict.NEEDS_REVIEW,
 		)
 	return None

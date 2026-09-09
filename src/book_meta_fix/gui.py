@@ -1055,7 +1055,7 @@ def _library_book_folders(library: Path, workers: int) -> list[Path]:
 
 
 def build_library_index(
-	library: Path | str, *, progress=None, workers: int = 12,
+	library: Path | str, *, progress=None, workers: int = 12, cache=None,
 ) -> list[tuple[dict, str]]:
 	"""One background sweep of the whole library → ``(entry, haystack)`` pairs.
 
@@ -1068,30 +1068,48 @@ def build_library_index(
 	manifest-only fields (:func:`_library_extra_hay` — description,
 	publisher, tags, subtitle).
 
-	Folders are read via the canonical reader (json > opf > path, mojibake
-	repair included) in a thread pool — the library typically lives on NFS
-	where each read costs a few RPC round trips. A book without a uuid gets
-	one minted and persisted here (:func:`writers.ensure_uuid`, the same
-	lazy identity augmentation a cache-miss scan performs; after the first
-	indexed run the library is fully keyed — the review workflow is
-	uuid-keyed). Unreadable folders are skipped. *progress* is called as
-	``progress(done, total)`` every ~100 folders (from the calling thread —
-	marshal to Tk yourself). Returns pairs sorted by (author, title).
+	When *cache* (a :class:`book_meta_fix.library.Cache`) is given, unchanged
+	folders are served from the SQLite cache and only misses are read via the
+	canonical reader (json > opf > path, mojibake repair included) — the
+	sweep used to re-read every metadata.json over NFS on each GUI start,
+	which is the exact cost the cache exists to skip. The payload holds the
+	same BookMeta the reader produces, so entries and autocomplete pools are
+	identical either way; miss results are put back into the cache. A book
+	without a uuid gets one minted and persisted here
+	(:func:`writers.ensure_uuid`, the same lazy identity augmentation a
+	cache-miss scan performs; after the first indexed run the library is
+	fully keyed — the review workflow is uuid-keyed). Unreadable folders are
+	skipped; cache errors degrade to direct reads, never kill the sweep.
+	*progress* is called as ``progress(done, total)`` every ~100 folders
+	(from the calling thread — marshal to Tk yourself). Returns pairs sorted
+	by (author, title).
 	"""
 	library = Path(library)
 	folders = _library_book_folders(library, workers)
 	total = len(folders)
 
 	def _one(folder: Path) -> tuple[dict, str] | None:
-		try:
-			meta = read_book_folder(folder)
-		except Exception:  # noqa: BLE001 - unreadable folder is skipped, not fatal
-			return None
-		if meta.uuid is None:
+		meta = None
+		if cache is not None:
 			try:
-				ensure_uuid(meta)
-			except Exception:  # noqa: BLE001
-				meta.uuid = str(uuid4())  # in-memory only; apply re-mints on disk
+				meta = cache.get(folder)
+			except Exception:  # noqa: BLE001 - cache trouble must not kill the sweep
+				meta = None
+		if meta is None:
+			try:
+				meta = read_book_folder(folder)
+			except Exception:  # noqa: BLE001 - unreadable folder is skipped, not fatal
+				return None
+			if meta.uuid is None:
+				try:
+					ensure_uuid(meta)
+				except Exception:  # noqa: BLE001
+					meta.uuid = str(uuid4())  # in-memory only; apply re-mints on disk
+			if cache is not None:
+				try:
+					cache.put(meta)
+				except Exception:  # noqa: BLE001 - a failed put only costs a re-read next time
+					pass
 		entry = library_entry_from_meta(meta, library)
 		hay = f"{entry_search_haystack(entry)} {_library_extra_hay(meta)}".lower()
 		return entry, hay
@@ -4286,7 +4304,22 @@ class ReviewEditorApp:
 		self._lib_indexing = True
 
 		def work():
-			index = build_library_index(self.library, progress=self._lib_index_progress)
+			# Serve the sweep from the SQLite cache where possible (a cache-miss
+			# sweep re-reads every metadata.json over NFS — minutes on the real
+			# library). Best-effort: an unopenable cache degrades to direct reads.
+			cache = None
+			try:
+				cache = Cache(self.cfg.cache_db)
+			except Exception:  # noqa: BLE001 - CacheError or worse: index without cache
+				cache = None
+			try:
+				index = build_library_index(self.library, cache=cache, progress=self._lib_index_progress)
+			finally:
+				if cache is not None:
+					try:
+						cache.close()
+					except Exception:  # noqa: BLE001
+						pass
 			if self._alive:
 				self._after(lambda: self._finish_lib_index(index))
 

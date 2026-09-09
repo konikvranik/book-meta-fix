@@ -323,8 +323,8 @@ class TestCacheInvalidation:
 		"""Insert a cache row for *path* without a real folder (simulates a stale
 		entry left by a previous occupant of that path, e.g. a needfix round-trip)."""
 		cache.conn.execute(
-			"INSERT INTO books(uuid, path, mtime, size, payload, scanned_at) VALUES (?,?,?,?,?,?)",
-			(f"stale-{path.name}", str(path), 0.0, 0, "{}", 0.0),
+			"INSERT INTO books(uuid, path, dir_mtime, meta_mtime, meta_size, payload, scanned_at) VALUES (?,?,?,?,?,?,?)",
+			(f"stale-{path.name}", str(path), 0.0, 0.0, 0, "{}", 0.0),
 		)
 		cache.commit()
 

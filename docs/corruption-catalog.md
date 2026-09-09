@@ -108,21 +108,35 @@ Author tokens glued together without spaces around connectives.
 
 **Verdict:** NEEDS_REVIEW
 
-## C8 — Translator mislabeled as author
+## C8 — Translator in the author's place
 
-Translators are encoded as a second `<dc:creator opf:role="aut">` — the `trl`
-role is never used in this library. Only reliable signal: CZ-looking name
-alongside a foreign-looking author.
+**POLICY (2026-09):** a translator sitting AMONG the comma-separated
+authors is an ACCEPTED state, not corruption. Audiobookshelf models only
+authors and narrators — there is no translator field — so the authors
+entry is what keeps a book findable by its translator. The old signal
+("CZ-looking name next to a foreign author → propose stripping the CZ
+names") flagged every mixed list in the library (47 books, all with the
+foreign author correctly first) and its proposal was dead weight: a
+separate `translators` field has no model/writer support, so an applied
+fix would have silently deleted the names.
 
-| id | title | authors | likely translator |
-|----|---|---|---|
-| 393 | Měsíční prach | Jarmila Emmerová, Arthur C. Clarke | Emmerová |
-| 499 | Hrobky Atuánu | Karel Soukup, Petr Kotrle, Ursula K. Le Guin | Soukup, Kotrle |
-| 2144 | Smrt lorda Edgwarea | Marek Roesel, Agatha Christie | Roesel |
+What metadata alone can still PROVE — an author entry carrying an explicit
+translator label (`přeložil František Jungwirth`, `Překlad: J. Novák`,
+`translated by X`): strip the label, keep the bare name in the list.
+Currently zero occurrences in the library; kept as a cheap,
+false-positive-free guard for future Calibre re-imports.
+
+NOT detected, deliberately: a translator-first ordering or a lone
+translator with the real author lost. Name-order heuristics cannot tell
+a leading translator from a Czech adaptor/editor legitimately first
+(measured false positives: "Kate Wilhelmová" — an American author with a
+feminized Czech surname; "Josef V. Pleva, Daniel Defoe" — a Czech
+adaptor first by convention), and 0 of the library's books are in the
+translator-first shape anyway. Those corruptions belong to the content
+flows: the identity verifier catches a primary author the book's own
+text contradicts, `text_meta` mines "přeložil X" credits from page text.
 
 **Verdict:** NEEDS_REVIEW
-**Caveat:** with 4+ authors and 2+ foreign names, it's more likely a real
-anthology (C10) than a translator team.
 
 ## C9 — Anonym (mostly fake)
 
@@ -143,16 +157,22 @@ titles; everything else with anonym spelling is flagged.
 
 **Verdict:** NEEDS_REVIEW (unless whitelisted → OK)
 
-## C10 — Long multi-author list
+## C10 — Long multi-author list *(retired 2026-09)*
 
-4+ authors — could be a real anthology OR a translator team. Grain is unclear.
+**PAST:** 4+ authors — "verify anthology vs translator list", NEEDS_REVIEW.
+Both hypotheses are accepted states under the C8 policy above (real
+co-authors of an anthology, or translators riding along for searchability),
+so there is nothing left for a human to verify. Measured on the library:
+all 12 flagged entries were genuine multi-author works, mostly already
+accepted by hand. No new C10 diagnoses are produced; the code stays in the
+display order so historical review entries still render.
 
 | id | title | n_authors |
 |----|---|---|
 | 197 | Soumrak světů | 13 (real CZ SF anthology) |
 | 4411 | Kuchařka stařenky Oggové | 4 (Briggs, Pratchett, Kantůrek, Kidby) |
 
-**Verdict:** NEEDS_REVIEW
+**Verdict:** — (not flagged anymore)
 
 ## C13 — Location mismatch (folder ≠ metadata)
 

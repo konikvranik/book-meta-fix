@@ -184,6 +184,128 @@ class TestCacheInvalidation:
 		cache.close()
 
 
+class TestFingerprintValidation:
+	"""Cache validation via _folder_fingerprint: the cached payload depends
+	on the metadata source content and the folder's file LIST — nothing else.
+	Cover rewrites must not invalidate; metadata rewrites and membership
+	changes must. (The old per-file scan false-invalidated on any file
+	change and cost ~7 GETATTRs per folder on NFS — ~100 s per scan on the
+	real library.)
+	"""
+
+	@staticmethod
+	def _bump_mtime(path: Path) -> None:
+		"""Force a guaranteed-different mtime (same-timestamp filesystems)."""
+		import os as _os
+
+		st = path.stat()
+		_os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+
+	def test_metadata_rewrite_invalidates(self, tmp_path: Path) -> None:
+		cache = Cache(tmp_path / "cache.db")
+		folder = tmp_path / "Author" / "Title (1)"
+		_prime_cache(cache, folder)
+		assert cache.get(folder) is not None
+		(folder / "metadata.json").write_text('{"title": "Změna"}\n', encoding="utf-8")
+		self._bump_mtime(folder / "metadata.json")
+		assert cache.get(folder) is None
+		cache.close()
+
+	def test_cover_rewrite_in_place_keeps_row(self, tmp_path: Path) -> None:
+		"""Replacing cover.jpg bytes (same name — apply's cover recovery,
+		ABS re-covering) does not touch anything the payload depends on."""
+		cache = Cache(tmp_path / "cache.db")
+		folder = tmp_path / "Author" / "Title (1)"
+		folder.mkdir(parents=True)
+		(folder / "metadata.json").write_text("{}\n", encoding="utf-8")
+		(folder / "cover.jpg").write_bytes(b"old-cover")
+		meta = read_book_folder(folder)
+		meta.uuid = "u-cover"
+		cache.put(meta)
+		cache.commit()
+		(folder / "cover.jpg").write_bytes(b"new-cover-bytes-different-size")
+		self._bump_mtime(folder / "cover.jpg")
+		assert cache.get(folder) is not None
+		cache.close()
+
+	def test_added_file_invalidates(self, tmp_path: Path) -> None:
+		"""A new file changes formats/primary-file inputs — the directory's
+		own mtime bumps and the row must not be served."""
+		cache = Cache(tmp_path / "cache.db")
+		folder = tmp_path / "Author" / "Title (1)"
+		_prime_cache(cache, folder)
+		(folder / "book.epub").write_bytes(b"epub")
+		self._bump_mtime(folder)
+		assert cache.get(folder) is None
+		cache.close()
+
+	def test_opf_source_watched_when_no_json(self, tmp_path: Path) -> None:
+		"""OPF-only folders key their fingerprint on metadata.opf — the
+		reader's fallback source."""
+		cache = Cache(tmp_path / "cache.db")
+		folder = tmp_path / "Author" / "Opf Only (1)"
+		folder.mkdir(parents=True)
+		(folder / "metadata.opf").write_text(
+			'<?xml version="1.0"?><package version="2.0" xmlns="http://www.idpf.org/2007/opf"></package>',
+			encoding="utf-8",
+		)
+		meta = read_book_folder(folder)
+		meta.uuid = "u-opf"
+		cache.put(meta)
+		cache.commit()
+		assert cache.get(folder) is not None
+		(folder / "metadata.opf").write_text(
+			'<?xml version="1.0"?><package version="2.0" xmlns="http://www.idpf.org/2007/opf"><metadata/></package>',
+			encoding="utf-8",
+		)
+		self._bump_mtime(folder / "metadata.opf")
+		assert cache.get(folder) is None
+		cache.close()
+
+	def test_v2_schema_migrates_to_fingerprint_columns(self, tmp_path: Path) -> None:
+		"""An old (mtime, size) cache is disposable: opening it under schema v3
+		drops+recreates the books table with the fingerprint columns."""
+		import sqlite3
+
+		db = tmp_path / "cache.db"
+		conn = sqlite3.connect(str(db))
+		conn.executescript(
+			"""
+			CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+			INSERT INTO schema_meta VALUES ('version', '2');
+			CREATE TABLE books (
+				uuid TEXT PRIMARY KEY, path TEXT NOT NULL, mtime REAL NOT NULL,
+				size INTEGER NOT NULL, payload TEXT NOT NULL, scanned_at REAL NOT NULL
+			);
+			INSERT INTO books VALUES ('u-old', '/gone (1)', 1.0, 2, '{}', 0);
+			"""
+		)
+		conn.commit()
+		conn.close()
+
+		cache = Cache(db)
+		cols = {r[1] for r in cache.conn.execute("PRAGMA table_info(books)")}
+		assert {"dir_mtime", "meta_mtime", "meta_size"} <= cols
+		assert cache.conn.execute("SELECT COUNT(*) FROM books").fetchone()[0] == 0
+		assert cache.load_all() == {}
+		cache.close()
+
+	def test_load_all_round_trips_through_scan(self, tmp_path: Path) -> None:
+		"""scan_library's batched fast path serves the same BookMeta the
+		per-folder Cache.get would (they share the fingerprint contract)."""
+		folder = tmp_path / "A" / "One (1)"
+		folder.mkdir(parents=True)
+		(folder / "metadata.json").write_text('{"title": "Kniha", "authors": ["Autor"]}\n', encoding="utf-8")
+		cache = Cache(tmp_path / "cache.db")
+		first = scan_library(tmp_path, cache=cache)
+		assert len(first) == 1
+		rows = cache.load_all()
+		assert str(folder) in rows
+		second = scan_library(tmp_path, cache=cache)
+		assert [m.title for m in second] == [m.title for m in first]
+		cache.close()
+
+
 class TestScanProgressCallback:
 	"""scan_library(progress_callback=cb) reports strictly-increasing done
 	counts, ending at the total number of book folders."""

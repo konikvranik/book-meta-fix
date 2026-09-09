@@ -111,21 +111,34 @@ Tokeny autorů slepené dohromady bez mezer kolem spojek.
 
 **Verdikt:** NEEDS_REVIEW
 
-## C8 — Překladatel označený jako autor
+## C8 — Překladatel na místě autora
 
-Překladatelé jsou kódováni jako druhý `<dc:creator opf:role="aut">` — role
-`trl` se v této knihovně nikdy nepoužívá. Jediný spolehlivý signál: česky
-ypadající jméno po boku zahraničního autora.
+**POLITIKA (2026-09):** překladatel MEZI autory oddělenými čárkou je
+PŘIJATENÝ stav, ne závada. Audiobookshelf modeluje jen autory a vypravěče —
+pole pro překladatele nemá — takže položka v seznamu autorů je to jediné,
+co dělá knihu dohledatelnou podle překladatele. Starý signál („česky
+ypadající jméno po boku zahraničního autora → navrhni odstranit CZ jména")
+označil každý smíšený seznam v knihovně (47 knih, u všech vedl zahraniční
+autor správně první) a jeho návrh byl mrtvý: samostatné pole `translators`
+není nikde modelované, takže použitá oprava by jména mlčky smazala.
 
-| id | název | autoři | pravděpodobný překladatel |
-|----|---|---|---|
-| 393 | Měsíční prach | Jarmila Emmerová, Arthur C. Clarke | Emmerová |
-| 499 | Hrobky Atuánu | Karel Soukup, Petr Kotrle, Ursula K. Le Guin | Soukup, Kotrle |
-| 2144 | Smrt lorda Edgwarea | Marek Roesel, Agatha Christie | Roesel |
+Co se z metadat dá PROKÁZAT — položka autora s explicitním překladatelským
+označením (`přeložil František Jungwirth`, `Překlad: J. Novák`,
+`translated by X`): odstranit označení, holé jméno nechat v seznamu.
+V knihovně dnes nula výskytů; zůstává jako levný bezpečnostní filtr bez
+falešných poplachů pro budoucí calibrovské reimporty.
+
+ZAMĚRNĚ se nedetekuje: pořadí s překladatelem prvnímu, nebo samotný
+překladatel se ztraceným skutečným autorem. Heuristika na jména nerozliší
+vedoucího překladatele od českého adaptora/editora legitimně na prvním
+městě (změřené falešné poplachy: „Kate Wilhelmová" — americká autorka s
+počeštělým příjmením; „Josef V. Pleva, Daniel Defoe" — český adaptér
+první z konvence), a 0 knih knihovny je dnes v tvaru „překladatel
+první". Tyto závady patří tokům s obsahem: identitní verifikátor chytne
+primárního autora, kterému odporuje vlastní text knihy, `text_meta`
+doloví „přeložil X" z textu stránek.
 
 **Verdikt:** NEEDS_REVIEW
-**Výhrada:** při 4+ autorech a 2+ zahraničních jménech je to spíš skutečná
-antologie (C10) než překladatelský tým.
 
 ## C9 — Anonym (většinou falešný)
 
@@ -146,17 +159,22 @@ tituly na whitelist; vše ostatní s anonymním zápisem označí.
 
 **Verdikt:** NEEDS_REVIEW (pokud není na whitelistu → OK)
 
-## C10 — Dlouhý seznam autorů
+## C10 — Dlouhý seznam autorů *(vyřazeno 2026-09)*
 
-4+ autoři — může jít o skutečnou antologii NEBO překladatelský tým. Rozlišit
-to nejde.
+**MINULOST:** 4+ autorů — „ověř antologii vs překladatelský tým",
+NEEDS_REVIEW. Obě hypotézy jsou pod C8 politikou výšu přijaté stavy
+(skuteční spoluautoři antologie, nebo překladatelé připojení kvůli
+vyhledávání), takže už není co ověřovat. Změřeno v knihovně: všech 12
+označených záznamů byly skutečná díla více autorů, většinou už ručně
+přijatá. Nové C10 diagnózy se negenerují; kód zůstává v pořadí
+kategorií, aby se historické review záznamy zobrazovaly.
 
 | id | název | počet autorů |
 |----|---|---|
 | 197 | Soumrak světů | 13 (skutečná CZ SF antologie) |
 | 4411 | Kuchařka stařenky Oggové | 4 (Briggs, Pratchett, Kantůrek, Kidby) |
 
-**Verdikt:** NEEDS_REVIEW
+**Verdikt:** — (už se neoznačuje)
 
 ## C13 — Nesouhlas umístění (složka ≠ metadata)
 

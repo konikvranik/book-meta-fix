@@ -217,9 +217,12 @@ the correct values.
 Return ONLY a JSON object (no markdown, no explanation outside JSON) with
 these fields (omit any you cannot determine):
   - "title": the real title of the book (with correct Czech/Slovak diacritics)
-  - "authors": array of author names (NOT translators — those go in a separate
-    "translators" field if you can identify them)
-  - "translators": array of translator names (optional)
+  - "authors": array with the REAL author(s) first; translators the book
+    credits may follow at the END of the array (e.g. ["Arthur C. Clarke",
+    "Josef Škvorecký"]). The library stores translators among the authors
+    ON PURPOSE: its catalog (Audiobookshelf) has no translator field, and
+    this keeps books searchable by translator. Do NOT put a translator
+    in front of the real author.
   - "isbn": canonical ISBN-13 (13 digits, no hyphens) if clearly stated
   - "series": series name (optional)
   - "series_index": position in series (optional, string)
@@ -266,9 +269,10 @@ CRITICAL — title and author extraction:
     page visible), OMIT the title field — do not invent one from body text.
   - The AUTHOR is a person's name (surname + given name or initials) that
     appears on the title page, typically just below the title or above it.
-    Do NOT use translator names, editor names, series names, or publisher
-    names as the author. If multiple names appear, use the one most likely
-    to be the author (not "Přeložil", "Edited by", "Ilustroval").
+    The author entry must be the REAL author, never "Přeložil"/"Edited by"/
+    "Ilustroval" credits, series names, or publisher names. If the title
+    page also credits a translator ("Přeložil X"), append the bare
+    translator name AFTER the real author in the authors array.
     If you cannot identify the author with confidence, omit the field.
   - If "Known verified author spellings" or "Known verified series" are provided,
     prefer those canonical spellings if they match the book's content.
@@ -1673,9 +1677,19 @@ def _parse_llm_json(content: str, *, model: str | None = None) -> ReconciledMeta
 	year = _int("year")
 	if year is not None and year < 1000:
 		year = None
+	authors = _list("authors")
+	# The prompt now asks for translators INSIDE the authors array (the
+	# library keeps them there deliberately — Audiobookshelf has no
+	# translator field and the authors entry is what makes the book
+	# searchable by translator). Older-schema answers still return a
+	# separate "translators" list: merge it back in at the tail instead of
+	# dropping it — dropping silently deleted the translator credit at apply.
+	for t in _list("translators"):
+		if t not in authors:
+			authors.append(t)
 	return ReconciledMeta(
 		title=_str("title"),
-		authors=_list("authors"),
+		authors=authors,
 		isbn=_str("isbn"),
 		series=_str("series"),
 		series_index=_str("series_index"),

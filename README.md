@@ -710,9 +710,9 @@ catalog with real examples. Summary:
 | C5 | literal placeholder record ("author"/"title") | AUTO_FIXABLE (delete) |
 | C6 | MS-Word lock-file duplicate (`~$`) | AUTO_FIXABLE (delete) |
 | C7 | glued authors ("byX...andY") | NEEDS_REVIEW |
-| C8 | translator mislabeled as author | NEEDS_REVIEW |
+| C8 | translator credit in the author field („přeložil X" label); a translator AMONG the authors is kept on purpose — ABS has no translator field, and the authors entry keeps the book searchable by translator | NEEDS_REVIEW |
 | C9 | anonym (mostly fake — real anonym is whitelisted) | NEEDS_REVIEW |
-| C10 | long multi-author list (anthology vs translator team) | NEEDS_REVIEW |
+| C10 | long multi-author list — *(retired 2026-09)* accepted state, no longer flagged | — |
 | C11 | generated cover (Calibre placeholder) detected by pixel analysis | NEEDS_REVIEW |
 | C12 | author slug/artefact pollution (lost capitalization, leading `_`/`*`) | NEEDS_REVIEW |
 | C13 | location mismatch (folder ≠ pattern-derived target) | AUTO_FIXABLE (move) |

@@ -719,9 +719,9 @@ make i18n-compile   # .po -> .mo
 | C5 | doslovný zástupný záznam („author“/„title“) | AUTO_FIXABLE (smazání) |
 | C6 | duplikát zámku souboru MS Wordu (`~$`) | AUTO_FIXABLE (smazání) |
 | C7 | slepení autoři („byX...andY“) | NEEDS_REVIEW |
-| C8 | překladatel chybně uveden jako autor | NEEDS_REVIEW |
+| C8 | překladatelský kredit v poli autora (označení „přeložil X"); překladatel MEZI autory zůstává záměrně — ABS pole pro překladatele nemá a položka v autorech dělá knihu dohledatelnou i podle překladatele | NEEDS_REVIEW |
 | C9 | anonym (většinou falešný — skutečný anonym je na whitelistu) | NEEDS_REVIEW |
-| C10 | dlouhý seznam více autorů (antologie vs. tým překladatelů) | NEEDS_REVIEW |
+| C10 | dlouhý seznam více autorů — *(vyřazeno 2026-09)* přijatý stav, už se neoznačuje | — |
 | C11 | generovaná obálka (zástupná z Calibre) detekovaná pixelovou analýzou | NEEDS_REVIEW |
 | C12 | znečištění autora (ztracená kapitalizace, úvodní `_`/`*`) | NEEDS_REVIEW |
 | C13 | nesouhlas umístění (složka ≠ vzorová cílová cesta) | AUTO_FIXABLE (přesun) |

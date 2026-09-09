@@ -78,7 +78,18 @@ src/book_meta_fix/
                    BMF_SCAN_WORKERS/--scan-workers, default 8, 1 = serial; Cache
                    is thread-safe: one connection, check_same_thread=False +
                    _lock around SQL, file I/O outside the lock, results sorted
-                   back to path order; also hosts the `covers` table — the
+                   back to path order. books rows validate on the SLIM
+                   fingerprint _folder_fingerprint — the book dir's own mtime
+                   (membership → formats/primary file) + the metadata source
+                   file's (mtime, size), 1–2 stat RPCs; the old per-file scan
+                   (~7 GETATTRs per folder) measured ~100 s per scan on the
+                   real NFS v3 library and the NAS serializes concurrent
+                   GETATTRs (threads give 1.05×), so RPC COUNT is the only
+                   lever — cover rewrites no longer false-invalidate rows,
+                   and scan_library loads all rows with ONE batched SELECT
+                   (Cache.load_all) instead of per-folder queries;
+                   _stat_folder survives for abs_client.changed_folders.
+                   Also hosts the `covers` table — the
                    persistent C11 verdict store keyed (path, mtime_ns, size)
                    that covers.analyze_cover attaches to via set_cover_cache,
                    so an unchanged cover.jpg is never Pillow-decoded twice,
@@ -366,7 +377,10 @@ src/book_meta_fix/
                   clickable path link / list double-click = open folder via open_folder_in_manager;
                   Verified checkbox (Ctrl+O) = the persistent user-OK mark; "+ library" search
                   matches the whole library via a fulltext index built by ONE background sweep at
-                  startup (build_library_index: parallel NFS-aware walk+read with progress; the
+                  startup (build_library_index: parallel NFS-aware walk; folders are served from
+                  the SQLite books cache — Cache.get, only misses read via read_book_folder and
+                  are put back — the sweep used to re-read every metadata.json over NFS per GUI
+                  start; cache errors degrade to direct reads; the
                   same sweep feeds the author/series autocomplete pools; haystack = entry search
                   + manifest-only fields description/publisher/tags/subtitle, so a book matching
                   only via its annotation is found; uuid minted via ensure_uuid at index time).

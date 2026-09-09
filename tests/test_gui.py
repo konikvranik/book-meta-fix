@@ -1454,6 +1454,38 @@ class TestLibraryIndex:
 		assert index
 		assert calls and calls[-1] == (1, 1)  # the final call reports totals
 
+	def test_cache_serves_hits_and_reads_only_misses(self, tmp_path, monkeypatch):
+		"""With a Cache the sweep serves unchanged folders from SQLite and
+		reads only misses — the GUI start sweep used to re-read every
+		metadata.json over NFS on each launch."""
+		import book_meta_fix.gui as gui_mod
+		from book_meta_fix.library import Cache
+
+		self._book(tmp_path, "A/Cached (1)", {"authors": ["Mark Stone"], "title": "X"})
+		cache = Cache(tmp_path / "cache.db")
+		build_library_index(tmp_path, cache=cache)
+		cache.commit()
+
+		self._book(tmp_path, "B/New (2)", {"authors": ["Mark Stone"], "title": "Y"})
+		orig = gui_mod.read_book_folder
+		read: list[str] = []
+
+		def _spy(folder):
+			read.append(str(folder))
+			return orig(folder)
+
+		monkeypatch.setattr(gui_mod, "read_book_folder", _spy)
+		index = build_library_index(tmp_path, cache=cache)
+		assert sorted(e["path"] for e, _h in index) == ["A/Cached (1)", "B/New (2)"]
+		# Only the uncached folder paid a disk read.
+		assert [str(p) for p in read] == [str(tmp_path / "B" / "New (2)")]
+		# The miss was put back into the cache: a third sweep reads nothing.
+		read.clear()
+		index2 = build_library_index(tmp_path, cache=cache)
+		assert read == []
+		assert sorted(e["path"] for e, _h in index2) == ["A/Cached (1)", "B/New (2)"]
+		cache.close()
+
 	def test_missing_library_returns_empty(self, tmp_path):
 		assert build_library_index(tmp_path / "nope") == []
 

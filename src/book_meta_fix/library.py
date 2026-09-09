@@ -169,11 +169,12 @@ class Cache:
 	Records are kept by ABS UUID primary key (surviving outside-of-bmf
 	folder renames/moves), but the LOOKUP is by ``path`` — the only key
 	available cheaply from the directory walk, before any metadata is parsed.
-	On load, a folder whose (path, mtime, size) still matches the cache is
-	reused without re-parsing. Mutating commands must call invalidate() /
-	invalidate_many() for folders they change (apply), or repoint() for a
-	move/rename (organize), so the cache never serves a stale entry —
-	important on NFS, where the client attribute cache can mask a new mtime.
+	On load, a folder whose :func:`_folder_fingerprint` still matches the
+	cache is reused without re-parsing. Mutating commands must call
+	invalidate() / invalidate_many() for folders they change (apply), or
+	repoint() for a move/rename (organize), so the cache never serves a
+	stale entry — important on NFS, where the client attribute cache can
+	mask a new mtime.
 
 	Thread-safe for the parallel scan: the single connection is opened with
 	``check_same_thread=False`` (same pattern as the Enricher's cache) and
@@ -182,7 +183,7 @@ class Cache:
 	that is the part the scan's thread pool exists to overlap.
 	"""
 
-	SCHEMA_VERSION = 2
+	SCHEMA_VERSION = 3
 
 	def __init__(self, db_path: Path):
 		self.db_path = Path(db_path)
@@ -229,10 +230,12 @@ class Cache:
 			);
 			"""
 		)
-		# Migrate on version mismatch (including a fresh db): the books table
-		# shape changed (path-PK -> uuid-PK + path index). The cache is
+		# Migrate on version mismatch (including a fresh db): the cache is
 		# disposable, so we drop+recreate — the next scan rebuilds it and, via
-		# ensure_uuid, backfills the uuid for every book.
+		# ensure_uuid, backfills the uuid for every book. v3 changed the books
+		# validation columns from (mtime, size) of a per-file folder scan to
+		# the slim fingerprint (dir_mtime, meta_mtime, meta_size — see
+		# _folder_fingerprint).
 		row = self.conn.execute("SELECT value FROM schema_meta WHERE key = 'version'").fetchone()
 		current = int(row[0]) if row and str(row[0]).isdigit() else 0
 		if current != self.SCHEMA_VERSION:
@@ -242,8 +245,9 @@ class Cache:
 				CREATE TABLE books (
 					uuid TEXT PRIMARY KEY,
 					path TEXT NOT NULL,
-					mtime REAL NOT NULL,
-					size INTEGER NOT NULL,
+					dir_mtime REAL NOT NULL,
+					meta_mtime REAL NOT NULL,
+					meta_size INTEGER NOT NULL,
 					payload TEXT NOT NULL,
 					scanned_at REAL NOT NULL
 				);
@@ -397,21 +401,31 @@ class Cache:
 		return [m[0] for m in matches]
 
 	def get(self, folder: Path) -> BookMeta | None:
-		"""Return cached BookMeta if folder mtime/size unchanged, else None."""
+		"""Return cached BookMeta if the folder fingerprint is unchanged, else None."""
 		with self._lock:
 			row = self.conn.execute(
-				"SELECT mtime, size, payload FROM books WHERE path = ?", (str(folder),)
+				"SELECT dir_mtime, meta_mtime, meta_size, payload FROM books WHERE path = ?", (str(folder),)
 			).fetchone()
 		if row is None:
 			return None
-		cached_mtime, cached_size, payload = row
-		cur_mtime, cur_size = _stat_folder(folder)
-		if cur_mtime == cached_mtime and cur_size == cached_size:
+		if _folder_fingerprint(folder) == (row[0], row[1], row[2]):
 			try:
-				return _bookmeta_from_payload(payload)
+				return _bookmeta_from_payload(row[3])
 			except Exception:  # noqa: BLE001
 				return None
 		return None
+
+	def load_all(self) -> dict[str, tuple[float, float, int, str]]:
+		"""All rows as ``{path: (dir_mtime, meta_mtime, meta_size, payload)}``.
+
+		One SELECT for the whole scan instead of a per-folder query: thousands
+		of single-row lookups under the connection lock measured ~1 s per scan
+		— pure overhead next to batching them. The dict is read-only once
+		returned (worker threads only ``.get()`` it).
+		"""
+		with self._lock:
+			cur = self.conn.execute("SELECT path, dir_mtime, meta_mtime, meta_size, payload FROM books")
+			return {str(r[0]): (r[1], r[2], r[3], r[4]) for r in cur}
 
 	def put(self, meta: BookMeta) -> None:
 		if meta.uuid is None:
@@ -419,12 +433,12 @@ class Cache:
 			# before put. Guard so a None never lands in the unique index.
 			log.warning("cache.put without uuid for %s; skipping", meta.path)
 			return
-		mtime, size = _stat_folder(Path(meta.path))
+		dir_mtime, meta_mtime, meta_size = _folder_fingerprint(Path(meta.path))
 		payload = _bookmeta_to_payload(meta)
 		with self._lock:
 			self.conn.execute(
-				"INSERT OR REPLACE INTO books(uuid, path, mtime, size, payload, scanned_at) VALUES (?,?,?,?,?,?)",
-				(meta.uuid, str(meta.path), mtime, size, payload, time.time()),
+				"INSERT OR REPLACE INTO books(uuid, path, dir_mtime, meta_mtime, meta_size, payload, scanned_at) VALUES (?,?,?,?,?,?,?)",
+				(meta.uuid, str(meta.path), dir_mtime, meta_mtime, meta_size, payload, time.time()),
 			)
 
 	def get_cover(self, path: str | Path, mtime_ns: int, size: int) -> dict | None:
@@ -524,8 +538,43 @@ class Cache:
 				self.conn.close()
 
 
+def _folder_fingerprint(folder: Path) -> tuple[float, float, int]:
+	"""Cheap change fingerprint of a book folder: ``(dir_mtime, meta_mtime, meta_size)``.
+
+	The cached payload depends on exactly two things: the folder's FILE LIST
+	(formats / primary file — any add, remove or rename bumps the directory's
+	own mtime) and the content of the metadata source (``metadata.json``, else
+	the OPF fallback — the reader's precedence). Two stat RPCs cover both.
+
+	This replaced a per-file scan of the whole folder (max mtime + total size,
+	~7 GETATTRs per book): on the real NFS v3 library that measured ~100 s per
+	scan — dominant over everything else in the load — and immune to threading
+	because the NAS serializes concurrent GETATTRs. Cover/asset files
+	deliberately do NOT participate: they cannot change the parsed BookMeta,
+	and cover replacement (apply / strip-covers) used to falsely invalidate
+	rows. abs_client's changed_folders still wants per-file mtimes and keeps
+	using :func:`_stat_folder`.
+	"""
+	try:
+		dir_mtime = os.stat(folder).st_mtime
+	except OSError:
+		return (0.0, 0.0, 0)
+	for name in ("metadata.json", "metadata.opf"):
+		try:
+			st = os.stat(folder / name)
+		except OSError:
+			continue
+		return (dir_mtime, st.st_mtime, st.st_size)
+	return (dir_mtime, 0.0, 0)
+
+
 def _stat_folder(folder: Path) -> tuple[float, int]:
-	"""Return (max_mtime, total_size) of files in *folder* for change detection."""
+	"""Return (max_mtime, total_size) of files in *folder*.
+
+	Used by abs_client's ``changed_folders`` (stat-only change detection over
+	the tree), NOT for cache validation — that is :func:`_folder_fingerprint`
+	since the per-file GETATTR storm measured ~100 s per scan over NFS.
+	"""
 	max_mtime = 0.0
 	total_size = 0
 	try:
@@ -608,16 +657,22 @@ def scan_library(
 	else:
 		folders = list(iter_book_folders(library))
 	total = len(folders)
+	# One batched SELECT up front (see Cache.load_all): the per-folder lookup
+	# under the connection lock was ~1 s of pure overhead per scan. Read-only
+	# afterwards — the worker threads only .get() it.
+	rows = cache.load_all() if (use_cache and cache is not None) else {}
 	results: list[BookMeta] = []
 	n_cached = n_fresh = 0
 	done = 0  # folders processed (cache hit + fresh parse + errors)
 
 	def _scan_one(folder: Path) -> tuple[BookMeta | None, bool]:
 		"""Process one folder: cache hit, or fresh parse (+uuid mint+cache)."""
-		if use_cache and cache is not None:
-			cached = cache.get(folder)
-			if cached is not None:
-				return cached, True
+		row = rows.get(str(folder))
+		if row is not None and _folder_fingerprint(folder) == row[:3]:
+			try:
+				return _bookmeta_from_payload(row[3]), True
+			except Exception:  # noqa: BLE001
+				pass  # corrupt payload — fall through to a fresh parse
 		try:
 			meta = read_book_folder(folder)
 		except Exception as e:  # noqa: BLE001

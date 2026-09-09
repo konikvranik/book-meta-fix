@@ -239,8 +239,8 @@ class TestCacheUuidKeying:
 		cache.commit()
 		# A stale row already at dst must not block the repoint (unique path).
 		cache.conn.execute(
-			"INSERT INTO books(uuid, path, mtime, size, payload, scanned_at) VALUES (?,?,?,?,?,?)",
-			("stale", str(dst), 0.0, 0, "{}", 0.0),
+			"INSERT INTO books(uuid, path, dir_mtime, meta_mtime, meta_size, payload, scanned_at) VALUES (?,?,?,?,?,?,?)",
+			("stale", str(dst), 0.0, 0.0, 0, "{}", 0.0),
 		)
 		cache.commit()
 

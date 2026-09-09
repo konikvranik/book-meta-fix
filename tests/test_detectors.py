@@ -21,6 +21,7 @@ from book_meta_fix.detectors import (
 	detect_all,
 	rule_c1_swap,
 	rule_c2_filename_title,
+	rule_c8_translator,
 	rule_c9_anonym,
 	rule_c12_bad_author,
 )
@@ -260,6 +261,103 @@ class TestC12BadAuthor:
 		m = _meta(author_folder="anthony burgess", authors=["anthony burgess"])
 		d = detect(m)
 		assert d.category == "C12"
+
+	def test_lowercase_folder_clean_authors_not_c12(self):
+		"""The false positive: garbage all-lowercase FOLDER (needfix/crosscheck
+		quarantine paths, mojibake title fragments) while the metadata author
+		is a proper name. The folder is C13's business (a move), not an author
+		problem — C12 must stay silent so C13 can lead with a pre-filled
+		accept."""
+		m = _meta(author_folder="!as py!livu", authors=["Agatha Christie"])
+		assert rule_c12_bad_author(m) is None
+
+	def test_prefix_folder_clean_authors_not_c12(self):
+		"""Same shape with an artefact-prefix folder ('_'): metadata author
+		clean → location problem, not author pollution."""
+		m = _meta(author_folder="_", authors=["Jan Matzál Troska"])
+		assert rule_c12_bad_author(m) is None
+
+	def test_folder_is_evidence_when_authors_empty(self):
+		"""No author in the metadata → the folder is the only author evidence
+		and still fires C12."""
+		m = _meta(author_folder="anthony burgess", authors=[])
+		d = rule_c12_bad_author(m)
+		assert d is not None
+		assert d.category == "C12"
+		assert "lowercase" in d.reason
+
+	def test_folder_fallback_when_authors_blank(self):
+		"""An authors list of empty strings gives nothing to judge — the
+		folder fallback must engage (the folder candidate is not silently
+		lost)."""
+		m = _meta(author_folder="_ antologie", authors=[""])
+		d = rule_c12_bad_author(m)
+		assert d is not None
+		assert "prefix" in d.reason
+
+
+class TestC8Translator:
+	"""rule_c8_translator: a translator may sit AMONG the comma-separated
+	authors (Audiobookshelf has no translator field — the authors entry is
+	what keeps the book searchable by translator), but must not sit IN THE
+	AUTHOR'S PLACE (leading the list / carrying a translator label)."""
+
+	def test_translator_next_to_author_not_c8(self):
+		"""The accepted shape: foreign author first, CZ translator after.
+		Measured 2026-09-09: every mixed list in the library looks like
+		this — the old rule flagged all of them for nothing."""
+		m = _meta(author_folder="Arthur C. Clarke", authors=["Arthur C. Clarke", "Josef Škvorecký"])
+		assert rule_c8_translator(m) is None
+
+	def test_coauthor_pair_not_c8(self):
+		"""The old false positive: Kuttner + Moore are co-authors (Moore's
+		Czech-married spelling looks CZ to the heuristic)."""
+		m = _meta(author_folder="Henry Kuttner", authors=["Henry Kuttner", "Catherine L. Mooreová"])
+		assert rule_c8_translator(m) is None
+
+	def test_translator_label_fires_c8(self):
+		"""A translator label in an author entry is unambiguous — flag HIGH,
+		strip the label, keep the bare name in the list."""
+		m = _meta(author_folder="Arthur C. Clarke", authors=["Arthur C. Clarke", "přeložil Josef Škvorecký"])
+		d = rule_c8_translator(m)
+		assert d is not None
+		assert d.category == "C8"
+		assert d.confidence.value == "HIGH"
+		assert "označení" in d.reason
+
+	def test_translator_first_not_c8(self):
+		"""Name ORDER alone must not fire: a CZ-looking name leading with a
+		foreign name behind cannot be told apart from a Czech
+		adaptor/editor legitimately first (measured false positives: Kate
+		Wilhelmová — an American with a feminized Czech surname; Josef V.
+		Pleva leading Daniel Defoe). The content flows own the wrong-author
+		case."""
+		m = _meta(author_folder="Kate Wilhelmová", authors=["Kate Wilhelmová", "Theodor L. Thomas"])
+		assert rule_c8_translator(m) is None
+		m = _meta(author_folder="Josef V. Pleva", authors=["Josef V. Pleva", "Daniel Defoe"])
+		assert rule_c8_translator(m) is None
+
+	def test_lone_cz_author_not_c8(self):
+		"""A single CZ name is usually a real Czech author — a lone
+		translator with the author lost is not metadata-detectable (the
+		content/identity flows own that case)."""
+		m = _meta(author_folder="Karel Čapek", authors=["Karel Čapek"])
+		assert rule_c8_translator(m) is None
+
+	def test_four_authors_no_c10(self):
+		"""The retired C10: a 4+ author list is no longer flagged. Both of
+		its hypotheses are accepted states now — real co-authors (an
+		anthology) or translators riding along — so there is nothing left
+		for a human to verify (measured: the 12 C10 entries were genuine
+		anthologies, mostly already accepted)."""
+		m = _meta(author_folder="Jaroslav Veis", authors=["Jaroslav Veis", "Robert Silverberg", "J. G. Ballard", "Henry Kuttner"])
+		assert rule_c8_translator(m) is None
+
+	def test_detect_routes_translator_label_to_c8(self):
+		"""End-to-end: detect() returns C8 for the label shape."""
+		m = _meta(author_folder="Agatha Christie", authors=["Agatha Christie", "přeložil Marek Roesel"])
+		d = detect(m)
+		assert d.category == "C8"
 
 
 class TestAnonymSpellings:
