@@ -151,9 +151,16 @@ def _scan_library_with_progress(
 	*,
 	no_cache: bool = False,
 	description: str | None = None,
-	bar_style: str = "bright_yellow",
+	bar_style: str = "#f6cd53",
 ) -> list[BookMeta]:
-	"""Scan library folders and return parsed BookMeta records with a unified yellow progress bar."""
+	"""Scan library folders and return parsed BookMeta records with a unified gold progress bar.
+
+	Progress bar colours across bmf are truecolor hexes tuned on the owner's
+	terminal (see scripts/progressbar_palette.py): there, bars are told apart
+	by brightness and the red/green axes — blue-channel differences and
+	same-hue brightness tweaks merge — so each command's colour keeps a large
+	brightness/red-green gap from its neighbours rather than a "nice hue".
+	"""
 	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 
 	desc = description or _("Reading library")
@@ -265,7 +272,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 	identified = 0
 	with Progress(
 		SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-		BarColumn(complete_style="magenta", finished_style="magenta", pulse_style="magenta"), TextColumn("{task.completed}/{task.total}"),
+		BarColumn(complete_style="#fdf6d4", finished_style="#fdf6d4", pulse_style="#fdf6d4"), TextColumn("{task.completed}/{task.total}"),
 		TimeRemainingColumn(), console=console, transient=True,
 	) as progress:
 		task_id = progress.add_task(_("Classifying"), total=len(books))
@@ -325,7 +332,16 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--llm-max-inflight", "llm_max_inflight", type=int, default=None, help=_("Hard cap on LLM requests running at the same instant (default 3). The Z.AI coding plan admits only ~5 concurrent requests per account (interactive clients draw from the same ceiling), so a deep fallback herd gets 429/1302 storms — and false 1113 'insufficient balance' — no matter how slow the drip is. Workers queue on this instead of being rejected. Flash-family models get a stricter sub-cap of min(2, this value)."))
 def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, use_legie: bool, abs_czech_url: str | None, skip_verify: bool, verify_ok: bool, no_strict_verify: bool, accept_missing: bool, pattern: str | None, no_check_location: bool, recheck_ok: bool, normalize_after: bool, output: Path | None, use_llm: bool, llm_provider: str | None, antigravity_cmd: str | None, antigravity_model: str | None, antigravity_fallback: str | None, antigravity_fallback_model: str | None, llm_categories: str, workers: int, scan_workers: int | None, llm_min_interval: float | None, llm_model: str | None, llm_reasoning_effort: str | None, llm_thinking: str | None, no_llm_loop: bool, llm_fallback_model: str | None, llm_burst: float | None, llm_rate_limit_base: float | None, llm_rate_limit_max: float | None, llm_max_inflight: int | None) -> None:
 	"""Run full pipeline and generate a review.yaml for NEEDS_REVIEW books."""
-	from rich.progress import BarColumn, Progress, SpinnerColumn, TaskID, TextColumn, TimeRemainingColumn
+	from rich.progress import (
+		BarColumn,
+		Progress,
+		ProgressBar,
+		SpinnerColumn,
+		Task,
+		TaskID,
+		TextColumn,
+		TimeRemainingColumn,
+	)
 
 	from .enrichers import Enricher
 	from .llm import get_provider
@@ -362,26 +378,45 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 		strict = not no_strict_verify
 		console.print(f"  [cyan]--verify-ok[/cyan] {_('--verify-ok audit: OK books checked against content (strict={strict})').format(strict=strict)}")
 
-	# Two-phase progress: the library scan (minutes on NFS) uses a YELLOW bar
+	# Two-phase progress: the library scan (minutes on NFS) uses a GOLD bar
 	# (shared with all scan operations in bmf). When processing actually starts,
-	# a CYAN bar takes over — each bmf command has its own colour so the user
-	# sees at a glance which phase is running.
+	# an azure bar takes over — each bmf command has its own colour so the user
+	# sees at a glance which phase is running (truecolor hexes tuned for this
+	# terminal; see the note in _scan_library_with_progress).
 	# run_pipeline fires (0, total) before the first book, so the bar shows
 	# its total and ETA immediately instead of pulsing at 0/None until the
 	# first (LLM-bound) book completes.
+	class _TaskBarColumn(BarColumn):
+		"""BarColumn whose colour can be overridden per task via add_task(..., bar_style=...).
+
+		analyze renders the library scan and the ACP agent download as two
+		tasks of ONE Progress; a plain BarColumn would paint both the same.
+		"""
+
+		def render(self, task: Task) -> ProgressBar:
+			override = task.fields.get("bar_style")
+			if not override:
+				return super().render(task)
+			original = (self.complete_style, self.finished_style, self.pulse_style)
+			self.complete_style = self.finished_style = self.pulse_style = override
+			try:
+				return super().render(task)
+			finally:
+				self.complete_style, self.finished_style, self.pulse_style = original
+
 	def _make_progress(bar_style: str) -> Progress:
 		return Progress(
 			SpinnerColumn(),
 			TextColumn("[progress.description]{task.description}"),
-			BarColumn(complete_style=bar_style, finished_style=bar_style, pulse_style=bar_style),
+			_TaskBarColumn(complete_style=bar_style, finished_style=bar_style, pulse_style=bar_style),
 			TextColumn("{task.completed}/{task.total}"),
 			TimeRemainingColumn(),
 			console=console,
 			transient=True,
 		)
 
-	scan_progress = _make_progress("bright_yellow")
-	proc_progress = _make_progress("cyan")
+	scan_progress = _make_progress("#f6cd53")
+	proc_progress = _make_progress("#459df5")
 	# Current active progress (starts as scan phase).
 	progress = scan_progress
 	scan_task = scan_progress.add_task(_("Reading library"), total=None)
@@ -396,7 +431,7 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 		nonlocal proc_task, progress
 		if proc_task is None:
 			# First processing callback = the scan phase is over; stop the
-			# yellow scan bar and switch to the cyan analysis bar.
+			# gold scan bar and switch to the azure analysis bar.
 			scan_progress.stop()
 			proc_progress.start()
 			progress = proc_progress
@@ -404,13 +439,14 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 		proc_progress.update(proc_task, completed=done)
 
 	# The ACP agent self-install (first agy run / outdated cache) streams its
-	# ~700 MB download through this task inside the scan (yellow) bar.
+	# ~700 MB download through this task inside the scan Progress — its own
+	# colour via the per-task bar_style (see _TaskBarColumn above).
 	acp_task: TaskID | None = None
 
 	def _acp_dl_cb(done: int, total: int) -> None:
 		nonlocal acp_task
 		if acp_task is None:
-			acp_task = scan_progress.add_task(_("Downloading the ACP agent"), total=total or None)
+			acp_task = scan_progress.add_task(_("Downloading the ACP agent"), total=total or None, bar_style="#8fb6b8")
 		scan_progress.update(acp_task, total=total or None, completed=done)
 
 	enricher = None
@@ -818,7 +854,7 @@ def apply(review_file: Path | None, library: Path | None, do_apply: bool, patter
 			cache = None
 	progress = Progress(
 		SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-		BarColumn(complete_style="green", finished_style="green", pulse_style="green"), TextColumn("{task.completed}/{task.total}"),
+		BarColumn(complete_style="#1ef341", finished_style="#1ef341", pulse_style="#1ef341"), TextColumn("{task.completed}/{task.total}"),
 		TimeRemainingColumn(), console=console, transient=True,
 	)
 	task_id = progress.add_task(_("Applying"), total=None)
@@ -957,7 +993,7 @@ def epubgen(library: Path | None, no_cache: bool, limit: int | None, do_apply: b
 
 	with Progress(
 		SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-		BarColumn(complete_style="bright_cyan", finished_style="bright_cyan", pulse_style="bright_cyan"), TextColumn("{task.completed}/{task.total}"),
+		BarColumn(complete_style="#078667", finished_style="#078667", pulse_style="#078667"), TextColumn("{task.completed}/{task.total}"),
 		TimeRemainingColumn(), console=console, transient=True,
 	) as progress:
 		task_id = progress.add_task(_("Generating EPUBs"), total=len(books))
@@ -1062,7 +1098,7 @@ def crosscheck(library: Path | None, no_cache: bool, limit: int | None, needfix_
 		results: list = []
 		with Progress(
 			SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-			BarColumn(complete_style="bright_magenta", finished_style="bright_magenta", pulse_style="bright_magenta"), TextColumn("{task.completed}/{task.total}"),
+			BarColumn(complete_style="#3b5fd9", finished_style="#3b5fd9", pulse_style="#3b5fd9"), TextColumn("{task.completed}/{task.total}"),
 			TimeRemainingColumn(), console=console, transient=True,
 		) as progress:
 			task_id = progress.add_task(_("Cross-checking formats"), total=len(books))
@@ -1080,7 +1116,7 @@ def crosscheck(library: Path | None, no_cache: bool, limit: int | None, needfix_
 			rogue_count = sum(len(r.rogues) for r in to_quarantine)
 			with Progress(
 				SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-				BarColumn(complete_style="bright_magenta", finished_style="bright_magenta", pulse_style="bright_magenta"), TextColumn("{task.completed}/{task.total}"),
+				BarColumn(complete_style="#b60def", finished_style="#b60def", pulse_style="#b60def"), TextColumn("{task.completed}/{task.total}"),
 				TimeRemainingColumn(), console=console, transient=True,
 			) as progress:
 				qtask = progress.add_task(_("Quarantining rogues"), total=rogue_count)
@@ -1324,7 +1360,7 @@ def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: boo
 
 		with Progress(
 			SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-			BarColumn(complete_style="bright_blue", finished_style="bright_blue", pulse_style="bright_blue"), TextColumn("{task.completed}/{task.total}"),
+			BarColumn(complete_style="#e9680c", finished_style="#e9680c", pulse_style="#e9680c"), TextColumn("{task.completed}/{task.total}"),
 			TimeRemainingColumn(), console=console, transient=True,
 		) as progress:
 			task_id = progress.add_task(_("Cleaning"), total=len(books))
@@ -1662,10 +1698,10 @@ def abs_rescan(library: Path | None, since: str, url: str | None, abs_library: s
 	# ABS to re-read one item); both drive this bar so the run shows N/M + ETA
 	# instead of a silent, hung-looking terminal. The bar stays on screen at
 	# the end (not transient) as a completion record.
-	def _new_progress() -> Progress:
+	def _new_progress(bar_style: str = "#e83b3b") -> Progress:
 		return Progress(
 			SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-			BarColumn(complete_style="steel_blue", finished_style="steel_blue", pulse_style="steel_blue"), TextColumn("{task.completed}/{task.total}"),
+			BarColumn(complete_style=bar_style, finished_style=bar_style, pulse_style=bar_style), TextColumn("{task.completed}/{task.total}"),
 			TimeRemainingColumn(), console=console,
 		)
 
@@ -1756,7 +1792,7 @@ def abs_rescan(library: Path | None, since: str, url: str | None, abs_library: s
 	scan_ids = list(mres.item_ids) if mres else []
 	scan_ids.extend(i for i in cleared_ids if i not in scan_ids)
 	if do_apply and scan_ids:
-		with _new_progress() as progress:
+		with _new_progress("#5d16f2") as progress:
 			task_id = progress.add_task(_("Rescanning ABS items"), total=len(scan_ids))
 
 			def _scan_cb(done: int, total: int) -> None:
