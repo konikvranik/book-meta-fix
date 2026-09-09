@@ -350,7 +350,7 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 	if not skip_enrich:
 		if cfg.databazeknih_enabled:
 			console.print("  [cyan]databazeknih.cz[/cyan] " + _("lookup enabled (genres + metadata)"))
-			console.print("  [cyan]" + _("cover replacement") + "[/cyan] " + _("enabled (C11 generated / MISSING_COVER → databazeknih cover_url)"))
+			console.print("  [cyan]" + _("cover replacement") + "[/cyan] " + _("enabled (C11 generated / MISSING_COVER → cover_url from online sources; the two CZ ones cross-compared for the larger image)"))
 		if cfg.legie_enabled:
 			console.print("  [cyan]legie.info[/cyan] " + _("lookup enabled (sci-fi/fantasy — short stories & series)"))
 		if cfg.abs_czech_url:

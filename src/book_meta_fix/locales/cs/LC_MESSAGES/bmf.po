@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-09-09 13:37+0200\n"
+"POT-Creation-Date: 2026-09-09 17:06+0200\n"
 "PO-Revision-Date: 2026-08-15 10:28+0200\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: cs\n"
@@ -430,8 +430,12 @@ msgid "cover replacement"
 msgstr "náhrada obálky"
 
 #: src/book_meta_fix/cli.py:353
-msgid "enabled (C11 generated / MISSING_COVER → databazeknih cover_url)"
-msgstr "zapnuto (C11 generovaná / MISSING_COVER → databazeknih cover_url)"
+msgid ""
+"enabled (C11 generated / MISSING_COVER → cover_url from online sources; "
+"the two CZ ones cross-compared for the larger image)"
+msgstr ""
+"zapnuto (C11 generovaná / MISSING_COVER → cover_url z online zdrojů; dva CZ "
+"zdroje se pro porovnání zkříží a bere se větší obrázek)"
 
 #: src/book_meta_fix/cli.py:355
 msgid "lookup enabled (sci-fi/fantasy — short stories & series)"
@@ -2714,4 +2718,7 @@ msgstr ""
 
 #~ msgid "Auto-verified (identity confirmed vs content + online source)"
 #~ msgstr "Auto-verifikováno (identita potvrzena proti obsahu + online zdroji)"
+
+#~ msgid "enabled (C11 generated / MISSING_COVER → databazeknih cover_url)"
+#~ msgstr "zapnuto (C11 generovaná / MISSING_COVER → databazeknih cover_url)"
 
