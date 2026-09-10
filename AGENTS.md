@@ -133,7 +133,25 @@ src/book_meta_fix/
                    per analyze over the same clusters (variant spellings land
                    on the cluster canonical; anonym family excluded; lone
                    spellings indexed under their own fold key), read-only
-                   after build so worker threads share it freely
+                   after build so worker threads share it freely.
+                   Third emitter: C18 series-name variants (fold_series is
+                   order-SENSITIVE — close sub-series must not auto-merge;
+                   fold merges HIGH/accept, SERIES_ALIASES rows and evidenced
+                   SuspectPairs MEDIUM/pending). Suspects = token-prefix
+                   pairs ("Mark Stone"/"Mark Stone (edice)") + fuzzy
+                   closeness to a VERIFIED series name, weighed by volume
+                   NUMBERING (sets interleaving into one contiguous row ⇒
+                   merge; both claiming volume 1 ⇒ distinct, never merged)
+                   and optionally by an injected online_check callable
+                   (Enricher.series_exists, persistent cache) — the engine
+                   stays I/O-free. analyze_sequence gives the per-group
+                   volume overview (missing = info, duplicates/anomalies =
+                   warnings) that `bmf series` renders. The volume INDEX is
+                   never proposed — only the series NAME (_apply_fields
+                   keeps the book's own index half); dict-glued "#N" names
+                   are SKIPPED (C14's split owns them) and multi-series
+                   books are skipped and reported (a single-name proposal
+                   would drop the other series)
   extractors.py    per-format content extraction → ExtractedMeta
   filecheck.py     CONTENT-PROBE validity of ebook files — the engine of `bmf clean --files`
                    (C17 invalid-file delete proposals). Safety model: a file is
@@ -195,7 +213,7 @@ src/book_meta_fix/
                    scanned_books out-param hands the caller the FULL scan as a
                    PRE-verified-filter snapshot — analyze feeds it to its
                    --normalize tail (cli._run_normalize_pass, shared with the
-                   normalize command) so the library-wide C15/C16 clustering
+                   normalize command) so the library-wide C15/C16/C18 clustering
                    runs over the same scan without a second (NFS-slow) walk;
                    verified books stay in it on purpose: clustering needs the
                    closed books to anchor the clusters. Right after the scan
@@ -318,7 +336,7 @@ src/book_meta_fix/
                    lets the decided accept-missing pool (~867 books) close on
                    the first re-analyze instead of re-extracting forever)
   review.py        parse review.yaml (multi-doc + legacy list) + update_paths
-                   + merge_normalizations (bmf normalize --apply merges C15/C16
+                   + merge_normalizations (bmf normalize --apply merges C15/C16/C18
                    proposals IN PLACE: pending entries get proposed.authors/
                    genres/tags overlaid + the diagnoses appended, DECIDED
                    entries are skipped — never clobber a user decision — and
@@ -389,8 +407,10 @@ src/book_meta_fix/
                   are put back — the sweep used to re-read every metadata.json over NFS per GUI
                   start; cache errors degrade to direct reads; the
                   same sweep feeds the author/series autocomplete pools; haystack = entry search
-                  + manifest-only fields description/publisher/tags/subtitle, so a book matching
-                  only via its annotation is found; uuid minted via ensure_uuid at index time).
+                  + manifest-only fields description/publisher/tags/subtitle + ALL series entries
+                  (entry `current` carries only the FIRST series — a multi-series book's second
+                  series is searchable only through this half), so a book matching only via its
+                  annotation is found; uuid minted via ensure_uuid at index time).
                   Searches (search_library_index) are instant in-memory multi-word filters that
                   serve SHALLOW COPIES (the GUI mutates served entries; the index stays pristine);
                   merged entries stay in memory for the whole session (no drop on toggle-off —
@@ -450,8 +470,12 @@ src/book_meta_fix/
                   automatic gap-fill (survivor's value, else first found), so confirming
                   as-is loses nothing
   cli.py           click commands: scan, report, analyze, apply, epubgen, crosscheck,
-                  strip-covers, normalize, abs-rescan, gui
-                  (organize is a deprecation stub — placement lives in apply; in abs_rescan
+                  strip-covers, normalize, series, abs-rescan, gui
+                  (series = the READ-ONLY C18 companion — overview table of
+                  every series with book counts, volume coverage and the
+                  suspect pairs, writes nothing; normalize gained --series/
+                  --online selectors and analyze --normalize runs the series
+                  tier too; organize is a deprecation stub — placement lives in apply; in abs_rescan
                   the two _() header strings sit OUTSIDE the f-string — babel on py3.10
                   cannot extract calls from f-string holes — the SAME reason the ACP info
                   line's "fast tier"/"no Z.AI fallback" strings are hoisted into locals

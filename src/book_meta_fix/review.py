@@ -514,12 +514,14 @@ def merge_normalizations(
 	"""Merge `bmf normalize` proposals into review.yaml (in place, atomic).
 
 	*proposals* is a list of ``normalize.BookProposal`` (C15 author variants /
-	C16 genre-tag variants — library-level diagnoses no per-book detector can
-	see). Existing entries are matched by uuid:
+	C16 genre-tag variants / C18 series-name variants — library-level
+	diagnoses no per-book detector can see). Existing entries are matched by
+	uuid:
 
-	- a PENDING entry gets the proposed ``authors``/``genres``/``tags`` keys
-	  overlaid onto its ``proposed`` block (other keys untouched) and the
-	  C15/C16 diagnoses appended to its ``diagnoses`` list;
+	- a PENDING entry gets the proposed ``authors``/``genres``/``tags``/
+	  ``series`` keys overlaid onto its ``proposed`` block (other keys
+	  untouched) and the C15/C16/C18 diagnoses appended to its
+	  ``diagnoses`` list;
 	- a DECIDED entry (action set) is left alone — the user already judged
 	  that book against its previous proposal;
 	- a book with no entry yet gets a fresh one, ``action: accept`` pre-filled
@@ -551,7 +553,7 @@ def merge_normalizations(
 			continue
 		fields = {
 			k: getattr(prop, k)
-			for k in ("authors", "genres", "tags")
+			for k in ("authors", "genres", "tags", "series")
 			if getattr(prop, k) is not None
 		}
 		if not fields:
@@ -567,6 +569,14 @@ def merge_normalizations(
 			diags_new.append({
 				"category": "C16",
 				"reason": "; ".join(prop.genre_reasons),
+				"confidence": "HIGH" if prop.high_confidence else "MEDIUM",
+			})
+		# C18 proposes the canonical series NAME only — the book's own
+		# series_index stays as-is (an overlay never touches that key).
+		if prop.series is not None and prop.series_reasons:
+			diags_new.append({
+				"category": "C18",
+				"reason": "; ".join(prop.series_reasons),
 				"confidence": "HIGH" if prop.high_confidence else "MEDIUM",
 			})
 		existing = by_uuid.get(prop.uuid)

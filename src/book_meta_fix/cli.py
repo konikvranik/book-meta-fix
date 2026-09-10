@@ -309,7 +309,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--pattern", "pattern", default=None, help=_("Target path pattern for OK books (default: '{author}/{title} ({id})'). Drives the C13 location detector: a book not sitting at its pattern path enters review with a move proposal that `bmf apply` executes."))
 @click.option("--no-check-location", "no_check_location", is_flag=True, help=_("Skip the C13 location check (analyze metadata only, no placement proposals)."))
 @click.option("--recheck-ok", "recheck_ok", is_flag=True, help=_("Clear the `verified` flag (see review.yaml / the GUI checkbox) from every book, returning user-confirmed books to normal detection. Undo of a too-hasty OK."))
-@click.option("--normalize", "normalize_after", is_flag=True, help=_("Run the library-wide normalize pass (C15 author variants / C16 genre variants) at the end, over the books this analyze already scanned — no second library scan. Proposals are merged into the same review file; review with `bmf gui`, write with `bmf apply`."))
+@click.option("--normalize", "normalize_after", is_flag=True, help=_("Run the library-wide normalize pass (C15 author variants / C16 genre variants / C18 series-name variants) at the end, over the books this analyze already scanned — no second library scan. Proposals are merged into the same review file; review with `bmf gui`, write with `bmf apply`."))
 @click.option("--output", "-o", type=click.Path(path_type=Path), default=None, help=_("Output review file (default: review.yaml)"))
 @click.option("--llm/--no-llm", "use_llm", default=True, help=_("Enable/disable LLM reconciliation (default: enabled if provider configured)"))
 @click.option("--llm-provider", "llm_provider", default=None, type=click.Choice(["antigravity", "acp", "agy", "zai", "mock", "off"], case_sensitive=False), help=_("Force the LLM provider branch (default: auto — Antigravity ACP when an agent is configured or cached, else Z.AI when ZAI_API_KEY is set). 'antigravity' = the ACP agent is the fast tier and Z.AI (if a key exists) only the paid fallback; 'zai' never uses ACP."))
@@ -656,7 +656,7 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 			title = _("Normalizing authors and genres")
 			console.print()
 			console.print(f"[bold]{title}[/bold] [cyan]{cfg.library}[/cyan] [WRITE]", highlight=False)
-			_run_normalize_pass(cfg, scanned_books, review_file=out, fields=("authors", "genres", "tags"), samples=3, do_apply=True)
+			_run_normalize_pass(cfg, scanned_books, review_file=out, fields=("authors", "genres", "tags", "series"), samples=3, do_apply=True)
 
 
 def _print_pipeline_summary(results, stats: dict | None = None, review_summary: dict | None = None) -> None:  # noqa: ANN001
@@ -1501,27 +1501,30 @@ def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: boo
 @click.option("--authors", "do_authors", is_flag=True, default=False, help=_("Unify author-name variants (C15: initials vs full names, diacritics, titles, anonym spellings, swapped name order)"))
 @click.option("--genres", "do_genres", is_flag=True, default=False, help=_("Canonicalize genres to Czech names (C16: case/diacritics/word-order duplicates, English→Czech and singular/plural aliases)"))
 @click.option("--tags", "do_tags", is_flag=True, default=False, help=_("Canonicalize tags the same way as genres (shares the vocabulary)"))
+@click.option("--series", "do_series", is_flag=True, default=False, help=_("Unify series-name variants (C18: case/diacritics duplicates, curated alias table, prefix/fuzzy suspects weighed by volume numbering — the volume index is never changed)"))
+@click.option("--online", "do_online", is_flag=True, default=False, help=_("Weigh suspected series pairs against online sources (databazeknih etc.; results are cached; needs network)"))
 @click.option("--samples", type=int, default=25, help=_("Number of clusters to show per table"))
-@click.option("--apply", "do_apply", is_flag=True, help=_("Write the proposals into review.yaml as C15/C16 entries (book metadata itself is written later by `bmf apply`; default: dry-run)"))
-def normalize(library: Path | None, no_cache: bool, limit: int | None, do_authors: bool, do_genres: bool, do_tags: bool, samples: int, do_apply: bool) -> None:
-	"""Unify author-name variants and genre tags across the whole library.
+@click.option("--apply", "do_apply", is_flag=True, help=_("Write the proposals into review.yaml as C15/C16/C18 entries (book metadata itself is written later by `bmf apply`; default: dry-run)"))
+def normalize(library: Path | None, no_cache: bool, limit: int | None, do_authors: bool, do_genres: bool, do_tags: bool, do_series: bool, do_online: bool, samples: int, do_apply: bool) -> None:
+	"""Unify author-name variants, genre tags and series names across the whole library.
 
 	The per-book detectors judge one folder in isolation; a "Robert A.
 	Heinlein" vs "Robert Anson Heinlein" pair or a "sci-fi"/"Sci-fi"/
 	"Science Fiction" trio only becomes visible across books. This command
 	clusters them and (with --apply) fills review.yaml with C15 (author
-	variant / swapped name order) and C16 (genre/tag variant) entries —
-	deterministic fixes arrive pre-filled `accept`, judgement calls (letter
-	variants, unevidenced comma reorders) stay pending. Run `bmf apply`
+	variant / swapped name order), C16 (genre/tag variant) and C18 (series
+	name variant) entries — deterministic fixes arrive pre-filled `accept`,
+	judgement calls (letter variants, unevidenced comma reorders, alias
+	rows and suspected series merges) stay pending. Run `bmf apply`
 	afterwards to write them; author renames also move folders, so finish
-	with `bmf abs-rescan`. Without a selector flag all three categories run.
+	with `bmf abs-rescan`. Without a selector flag all four categories run.
 	"""
 	cfg = Config.from_env()
 	if library is not None:
 		cfg.library = library
 
-	if not (do_authors or do_genres or do_tags):
-		do_authors = do_genres = do_tags = True
+	if not (do_authors or do_genres or do_tags or do_series):
+		do_authors = do_genres = do_tags = do_series = True
 
 	_validate_library(cfg.library)
 	# The two _() header strings sit OUTSIDE the f-string — babel on py3.10
@@ -1529,8 +1532,9 @@ def normalize(library: Path | None, no_cache: bool, limit: int | None, do_author
 	title = _("Normalizing authors and genres")
 	mode = "WRITE" if do_apply else "DRY-RUN"
 	console.print(f"[bold]{title}[/bold] [cyan]{cfg.library}[/cyan] [{mode}]", highlight=False)
-	console.print("[dim]" + _("authors: {a}, genres: {g}, tags: {t}").format(
-		a=_("on") if do_authors else _("off"), g=_("on") if do_genres else _("off"), t=_("on") if do_tags else _("off"),
+	console.print("[dim]" + _("authors: {a}, genres: {g}, tags: {t}, series: {s}").format(
+		a=_("on") if do_authors else _("off"), g=_("on") if do_genres else _("off"),
+		t=_("on") if do_tags else _("off"), s=_("on") if do_series else _("off"),
 	) + "[/dim]")
 
 	cache = _open_cache(cfg.cache_db, no_cache=no_cache)
@@ -1548,19 +1552,21 @@ def normalize(library: Path | None, no_cache: bool, limit: int | None, do_author
 	_run_normalize_pass(
 		cfg, books,
 		review_file=cfg.review_file,
-		fields=tuple(n for n, on in (("authors", do_authors), ("genres", do_genres), ("tags", do_tags)) if on),
+		fields=tuple(n for n, on in (("authors", do_authors), ("genres", do_genres), ("tags", do_tags), ("series", do_series)) if on),
 		samples=samples,
 		do_apply=do_apply,
+		series_online=do_online,
 	)
 
 
 def _run_normalize_pass(
 	cfg: Config, books: list, *, review_file: Path, fields: tuple[str, ...], samples: int, do_apply: bool,
+	series_online: bool = False,
 ) -> None:
 	"""Post-scan half of `bmf normalize`, shared by the command and `analyze --normalize`.
 
 	Runs the library-wide clustering over an ALREADY-SCANNED book list and
-	merges the C15/C16 proposals into *review_file*. `analyze --normalize`
+	merges the C15/C16/C18 proposals into *review_file*. `analyze --normalize`
 	reuses this over run_pipeline's scan because re-walking the tree (minutes
 	on NFS even fully cached) would dominate the cost of the clustering
 	itself.
@@ -1568,7 +1574,22 @@ def _run_normalize_pass(
 	from .normalize import analyze_library
 	from .review import merge_normalizations
 
-	result = analyze_library(books, fields=fields)
+	online_check = None
+	if series_online and "series" in fields:
+		# Advisory evidence for the C18 suspect tier; the Enricher caches
+		# every answer in cfg.cache_db so repeat runs cost nothing.
+		from .enrichers import Enricher
+
+		enricher = Enricher(
+			cache_db=cfg.cache_db,
+			databazeknih_enabled=cfg.databazeknih_enabled,
+			legie_enabled=cfg.legie_enabled,
+			abs_czech_url=cfg.abs_czech_url or None,
+			abs_czech_token=cfg.abs_czech_token,
+		)
+		online_check = enricher.series_exists
+
+	result = analyze_library(books, fields=fields, series_online_check=online_check)
 	_print_normalize_clusters(result, samples)
 	n_accept = sum(1 for p in result.proposals if p.high_confidence)
 	console.print()
@@ -1625,6 +1646,49 @@ def _print_normalize_clusters(result, samples: int) -> None:  # noqa: ANN001
 		console.print(t)
 		if len(result.genre_clusters) > samples:
 			console.print(f"[dim]… {len(result.genre_clusters) - samples} " + _("more") + "[/dim]")
+	if result.series_clusters:
+		t = Table(title=_("Series clusters (C18)"), show_header=True, header_style="bold cyan")
+		t.add_column(_("Canonical"))
+		t.add_column(_("Variants"), style="dim", max_width=60)
+		t.add_column(_("Kind"), justify="center")
+		t.add_column(_("Conf"), justify="center")
+		for c in result.series_clusters[:samples]:
+			vars_ = "; ".join(f"{v} ×{n}" for v, n in c.variants if v != c.canonical)
+			style = "green" if c.confidence.value == "HIGH" else "yellow"
+			t.add_row(f"[{style}]{c.canonical}[/{style}]", vars_[:110], c.kind, f"[{style}]{c.confidence.value}[/{style}]")
+		console.print(t)
+		if len(result.series_clusters) > samples:
+			console.print(f"[dim]… {len(result.series_clusters) - samples} " + _("more") + "[/dim]")
+	if result.series_suspects:
+		t = Table(title=_("Series suspects (advisory — numbering/online evidence decides)"), show_header=True, header_style="bold yellow")
+		t.add_column(_("Base"))
+		t.add_column(_("Suspect"))
+		t.add_column(_("Evidence"), style="dim", max_width=55)
+		t.add_column(_("Verdict"), justify="center")
+		for s in result.series_suspects[:samples]:
+			verdict = {
+				"merge": _("merge"),
+				"distinct": _("distinct"),
+			}.get(s.verdict, _("unknown"))
+			style = "yellow" if s.verdict == "merge" else "dim"
+			t.add_row(f"[{style}]{s.base}[/{style}]", s.suspect, s.evidence[:110], f"[{style}]{verdict}[/{style}]")
+		console.print(t)
+		if len(result.series_suspects) > samples:
+			console.print(f"[dim]… {len(result.series_suspects) - samples} " + _("more") + "[/dim]")
+	if result.glued_series:
+		t = Table(title=_("Skipped: series order glued into the name (C14 splits it)"), show_header=True, header_style="bold yellow")
+		t.add_column(_("Series"))
+		t.add_column(_("Books"), justify="right")
+		for raw, n in result.glued_series[: samples]:
+			t.add_row(raw[:70], str(n))
+		console.print(t)
+	if result.multi_series:
+		t = Table(title=_("Skipped: books listing multiple series (edit in `bmf gui`)"), show_header=True, header_style="bold yellow")
+		t.add_column(_("Series"))
+		t.add_column(_("Books"), justify="right")
+		for raw, n in result.multi_series[: samples]:
+			t.add_row(raw[:70], str(n))
+		console.print(t)
 	if result.multi_author:
 		t = Table(title=_("Skipped: multi-author strings (C7/C8 territory)"), show_header=True, header_style="bold yellow")
 		t.add_column(_("String"))
@@ -1632,6 +1696,150 @@ def _print_normalize_clusters(result, samples: int) -> None:  # noqa: ANN001
 		for raw, n in result.multi_author[: samples]:
 			t.add_row(raw[:70], str(n))
 		console.print(t)
+
+
+@main.command(name="series")
+@click.option("--library", "library", type=click.Path(file_okay=False, path_type=Path), help=_("Library root"))
+@click.option("--no-cache", is_flag=True, help=_("Disable SQLite cache"))
+@click.option("--samples", type=int, default=50, help=_("Number of series to show (sorted by book count)"))
+@click.option("--online", "do_online", is_flag=True, default=False, help=_("Weigh suspected series pairs against online sources (databazeknih etc.; results are cached; needs network)"))
+def series_cmd(library: Path | None, no_cache: bool, samples: int, do_online: bool) -> None:
+	"""Show every series in the library with book counts and volume numbering.
+
+	Read-only consistency overview: spelling variants per series, missing
+	volumes (informational — a personal library need not be complete),
+	duplicate volume numbers (warnings — duplicate books or a wrong index)
+	and suspected same-series pairs (a prefix/fuzzy sibling whose volume
+	numbering complements the base). Writes nothing; merge proposals are
+	the job of `bmf normalize --series`.
+	"""
+	cfg = Config.from_env()
+	if library is not None:
+		cfg.library = library
+
+	_validate_library(cfg.library)
+	title = _("Series overview")
+	console.print(f"[bold]{title}[/bold] [cyan]{cfg.library}[/cyan]", highlight=False)
+
+	cache = _open_cache(cfg.cache_db, no_cache=no_cache)
+	try:
+		books = _scan_library_with_progress(cfg, cache, no_cache=no_cache)
+		if not books:
+			console.print("[red]" + _("No books found.") + "[/red]")
+			sys.exit(1)
+	finally:
+		if cache is not None:
+			cache.close()
+
+	online_check = None
+	if do_online:
+		# Same advisory evidence as `bmf normalize --series --online`; the
+		# Enricher's persistent cache makes the second run free.
+		from .enrichers import Enricher
+
+		enricher = Enricher(
+			cache_db=cfg.cache_db,
+			databazeknih_enabled=cfg.databazeknih_enabled,
+			legie_enabled=cfg.legie_enabled,
+			abs_czech_url=cfg.abs_czech_url or None,
+			abs_czech_token=cfg.abs_czech_token,
+		)
+		online_check = enricher.series_exists
+
+	from .normalize import analyze_library
+
+	result = analyze_library(books, fields=("series",), series_online_check=online_check)
+	console.print()
+	console.print(_("Series overview summary: {series} series, {books} books in series, {inconsistent} with spelling variants.").format(
+		series=len(result.series_overview),
+		books=sum(g.books for g in result.series_overview),
+		inconsistent=sum(1 for g in result.series_overview if len(g.variants) > 1),
+	))
+	if result.series_overview:
+		t = Table(title=_("Series (sorted by book count)"), show_header=True, header_style="bold cyan")
+		t.add_column(_("Series"))
+		t.add_column(_("Books"), justify="right")
+		t.add_column(_("Volumes"), max_width=62)
+		t.add_column(_("Variants"), style="dim", max_width=45)
+		for g in result.series_overview[:samples]:
+			vars_ = "; ".join(f"{v} ×{n}" for v, n in g.variants if v != g.canonical)
+			name_style = "yellow" if len(g.variants) > 1 else "white"
+			t.add_row(f"[{name_style}]{g.canonical}[/{name_style}]", str(g.books), _format_sequence(g.sequence), vars_[:100])
+		console.print(t)
+		if len(result.series_overview) > samples:
+			console.print(f"[dim]… {len(result.series_overview) - samples} " + _("more") + "[/dim]")
+	if result.series_suspects:
+		t = Table(title=_("Suspected same-series pairs"), show_header=True, header_style="bold yellow")
+		t.add_column(_("Base"))
+		t.add_column(_("Suspect"))
+		t.add_column(_("Evidence"), style="dim", max_width=55)
+		t.add_column(_("Verdict"), justify="center")
+		for s in result.series_suspects:
+			verdict = {
+				"merge": _("merge"),
+				"distinct": _("distinct"),
+			}.get(s.verdict, _("unknown"))
+			style = "yellow" if s.verdict == "merge" else "dim"
+			t.add_row(f"[{style}]{s.base}[/{style}]", s.suspect, s.evidence[:110], f"[{style}]{verdict}[/{style}]")
+		console.print(t)
+	if result.glued_series:
+		t = Table(title=_("Series order glued into the name (C14 will split it)"), show_header=True, header_style="bold yellow")
+		t.add_column(_("Series"))
+		t.add_column(_("Books"), justify="right")
+		for raw, n in result.glued_series:
+			t.add_row(raw[:70], str(n))
+		console.print(t)
+	if result.multi_series:
+		t = Table(title=_("Books listing multiple series (edit in `bmf gui`)"), show_header=True, header_style="bold yellow")
+		t.add_column(_("Series"))
+		t.add_column(_("Books"), justify="right")
+		for raw, n in result.multi_series:
+			t.add_row(raw[:70], str(n))
+		console.print(t)
+	console.print("[dim]" + _("Merge proposals: `bmf normalize --series` (dry-run), then `--apply`.") + "[/dim]")
+
+
+def _fmt_int_ranges(nums: list[int]) -> str:
+	"""Compress a sorted int list into ranges: 1,2,3,5 → "1–3, 5"."""
+	parts: list[str] = []
+	start: int | None = None
+	prev = 0
+	for n in nums:
+		if start is None:
+			start = prev = n
+		elif n == prev + 1:
+			prev = n
+		else:
+			parts.append(f"{start}–{prev}" if prev > start else f"{start}")
+			start = prev = n
+	if start is not None:
+		parts.append(f"{start}–{prev}" if prev > start else f"{start}")
+	return ", ".join(parts)
+
+
+def _format_sequence(seq) -> str:  # noqa: ANN001 (SeriesSequence — lazy import domain)
+	"""Render one series' volume overview: "1–3, 5 (missing: 4) ⚠ 4 ×2"."""
+	ints = sorted(int(n) for n in seq.present if n == int(n))
+	subs = [n for n in seq.present if n != int(n)]
+	parts: list[str] = []
+	if ints or subs:
+		present = _fmt_int_ranges(ints)
+		if subs:
+			extra = ", ".join(f"{n:g}" for n in subs)
+			present = f"{present}, {extra}" if present else extra
+		parts.append(present)
+	if seq.missing:
+		ranges = ", ".join(str(a) if a == b else f"{a}–{b}" for a, b in seq.missing)
+		parts.append("[dim](" + _("missing: {r}").format(r=ranges) + ")[/dim]")
+	if seq.duplicates:
+		dup = ", ".join(f"{n:g} ×{c}" for n, c in seq.duplicates)
+		parts.append("[yellow]⚠ " + _("duplicate volume: {r}").format(r=dup) + "[/yellow]")
+	if seq.unnumbered:
+		parts.append("[dim]+" + _("{n} without a number").format(n=seq.unnumbered) + "[/dim]")
+	if seq.anomalies:
+		bad = ", ".join(f"{v!r} ×{c}" for v, c in seq.anomalies)
+		parts.append("[yellow]⚠ " + _("bad volume number: {r}").format(r=bad) + "[/yellow]")
+	return " ".join(parts) if parts else "—"
 
 
 @main.command(name="abs-rescan")

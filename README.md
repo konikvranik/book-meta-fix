@@ -18,7 +18,7 @@ Audiobookshelf and Kavita pick up the fixes on rescan.
 | [docs/diagrams.md](docs/diagrams.md) | UML diagrams — analyze/apply sequence, per-book decision flow, review-entry lifecycle (Mermaid) |
 | [docs/concepts.md](docs/concepts.md) | Verdict buckets, verification philosophy, fix cascade, LLM loop, review.yaml format |
 | [docs/how-to/](docs/how-to/index.md) | Step-by-step recipes (run a batch, tune the rate limit, debug, …) |
-| [docs/corruption-catalog.md](docs/corruption-catalog.md) | The C1–C17 categories with real examples |
+| [docs/corruption-catalog.md](docs/corruption-catalog.md) | The C1–C18 categories with real examples |
 | [AGENTS.md](AGENTS.md) | Guide for AI agents editing this codebase (conventions, layout, gotchas) |
 
 ## Status
@@ -28,7 +28,7 @@ Audiobookshelf and Kavita pick up the fixes on rescan.
 - [x] Verify (content vs metadata cascade)
 - [x] Enrich (databazeknih.cz scraping for CZ/SK genres + metadata; legie.info for sci-fi/fantasy short stories & series; a self-hosted audiobookshelf_czech_metadata instance aggregating ~17 CZ audiobook storefronts; OpenLibrary + Google Books fallback)
 - [x] Analyze + YAML review (`bmf analyze`, `bmf apply`)
-- [x] Library-wide normalize (`bmf normalize`) — C15 author-name variants + C16 genre/tag variants, human-gated via review.yaml
+- [x] Library-wide normalize (`bmf normalize`) — C15 author-name variants + C16 genre/tag variants + C18 series-name variants, human-gated via review.yaml
 - [x] Placement (`bmf apply`) — clean/verified books to the pattern path, unresolved to needfix/ (organize merged in)
 - [x] EPUB generation (`bmf epubgen`)
 - [x] Cross-format consistency (`bmf crosscheck`) — quarantine formats whose content differs from metadata
@@ -101,12 +101,13 @@ can recover the pre-run state.
 | `bmf scan` | Traverse library, parse metadata, print summary stats |
 | `bmf report` | Run C1–C14 detector rules, show category breakdown + samples |
 | `bmf analyze` | Full pipeline (scan+detect+extract+verify+enrich+location check) → generate `review.yaml` |
-| `bmf analyze --normalize` | Chain the library-wide normalize pass (C15/C16) onto the end of analyze — clustering runs over the books the pipeline already scanned (no second library walk) and merges its proposals into the same review.yaml after the writer finalizes; decided entries are never touched |
+| `bmf analyze --normalize` | Chain the library-wide normalize pass (C15/C16/C18) onto the end of analyze — clustering runs over the books the pipeline already scanned (no second library walk) and merges its proposals into the same review.yaml after the writer finalizes; decided entries are never touched |
 | `bmf apply <file>` | Apply approved changes from a review.yaml (dry-run by default) |
 | `bmf apply --apply <file>` | Write `metadata.json` + `metadata.opf` AND place each book: clean/`verified` → target pattern path, unresolved → `needfix/`, dead records → `needfix/empty/` |
 | `bmf gui` | Interactive keyboard-driven Tkinter editor for `review.yaml` |
-| `bmf normalize` | Library-wide pass: cluster author-name variants (C15 — initials vs full names, diacritics, titles, anonym spellings, swapped order) and canonicalize genres/tags to Czech names (C16 — case/diacritics/word-order duplicates, EN→CZ aliases). Dry-run: show the clusters |
-| `bmf normalize --apply` | Fill review.yaml with the C15/C16 proposals (deterministic ones pre-filled `accept`, judgement calls pending); `--authors`/`--genres`/`--tags` narrow the scope. Book writes happen via `bmf apply`; author renames also move folders, so finish with `bmf abs-rescan` |
+| `bmf series` | Read-only series overview: every series with book counts, volume coverage (missing volumes are information, duplicates are warnings), spelling variants and suspected same-series pairs (numbering/online evidence) |
+| `bmf normalize` | Library-wide pass: cluster author-name variants (C15 — initials vs full names, diacritics, titles, anonym spellings, swapped order), canonicalize genres/tags to Czech names (C16 — case/diacritics/word-order duplicates, EN→CZ aliases) and unify series names (C18 — fold variants, curated alias table, prefix/fuzzy suspects weighed by volume numbering; the volume index is never changed). Dry-run: show the clusters |
+| `bmf normalize --apply` | Fill review.yaml with the C15/C16/C18 proposals (deterministic ones pre-filled `accept`, judgement calls pending); `--authors`/`--genres`/`--tags`/`--series` narrow the scope, `--online` weighs series suspects against databazeknih etc. (cached). Book writes happen via `bmf apply`; author renames also move folders, so finish with `bmf abs-rescan` |
 | `bmf organize` | *(deprecated stub)* — placement was merged into `bmf apply` |
 | `bmf epubgen` | Generate missing `.epub` files for OK books (from pdb/mobi/pdf/doc/txt) |
 | `bmf epubgen --apply` | Actually generate the EPUBs |
@@ -697,7 +698,7 @@ $EDITOR src/book_meta_fix/locales/cs/LC_MESSAGES/bmf.po
 make i18n-compile   # .po -> .mo
 ```
 
-## Corruption categories (C1–C17)
+## Corruption categories (C1–C18)
 
 See [`docs/corruption-catalog.md`](docs/corruption-catalog.md) for the full
 catalog with real examples. Summary:
@@ -721,6 +722,7 @@ catalog with real examples. Summary:
 | C15 | author-name variants / swapped order — library-level, emitted by `bmf normalize` only | AUTO_FIXABLE / NEEDS_REVIEW |
 | C16 | genre/tag name variants (case, word order, EN/CZ, spelling) — library-level, emitted by `bmf normalize` only | AUTO_FIXABLE |
 | C17 | invalid ebook file (content matches no book format) — emitted by `bmf clean --files` only | NEEDS_REVIEW (delete proposal) |
+| C18 | series-name variants (fold, alias table, numbering/online-evidenced suspects) — library-level, emitted by `bmf normalize` only; the volume index is never proposed | AUTO_FIXABLE / NEEDS_REVIEW |
 | — | EMPTY_BOOK (only metadata/backups/cover — the book file is gone) | AUTO_FIXABLE (`needfix/empty/`) |
 | — | MISSING_ISBN / MISSING_YEAR | AUTO_FIXABLE (enrich) |
 | — | MISSING_COVER (no `cover.jpg` sidecar) | AUTO_FIXABLE (download) |

@@ -10,6 +10,11 @@ messes this module targets only become visible ACROSS the library:
 * C16 — genre/tag strings that differ only by case, diacritics, word order
   or language ("humor"/"Humor"/"mumour"/"Comedy", "sci-fi"/"Sci-fi"/
   "Science Fiction").
+* C18 — the same series spelled several ways: "Zaklínač"/"zaklínač"/
+  "Zaklinac" (fold), "Perry Rodan"/"Perry Rhodan" (alias table), or a
+  suffixed sibling "Mark Stone"/"Mark Stone (edice)" (suspect tier, weighed
+  by volume-numbering complementarity and an optional online existence
+  check). The volume INDEX is never proposed — only the name changes.
 
 The engine is pure (no I/O): `analyze_library` takes the scanned BookMetas
 and returns clusters + per-book proposals. The CLI turns those into review.yaml
@@ -35,8 +40,8 @@ from dataclasses import dataclass, field
 from rapidfuzz import fuzz
 from rapidfuzz.distance import Levenshtein
 
-from .detectors import _is_anonym_spelling
-from .models import BookMeta, Confidence
+from .detectors import _is_anonym_spelling, split_series_index
+from .models import BookMeta, Confidence, series_entry_pair
 
 # ---------------------------------------------------------------------------
 # Shared string hygiene
@@ -692,6 +697,365 @@ def build_genre_clusters(
 
 
 # ---------------------------------------------------------------------------
+# Series-name canonicalization (C18)
+# ---------------------------------------------------------------------------
+
+# Curated rename table: human-readable alias → canonical STRING, lookup runs
+# through fold_series and targets resolve through the library's own fold
+# groups (same contract as GENRE_ALIASES). The fold tier already catches
+# case/diacritics/punctuation variants ("Zaklínač"/"zaklínač"/"Zaklinac");
+# this table is for REAL-WORD renames the fold cannot see — different letters
+# ("Perry Rodan" → "Perry Rhodan") or edition suffixes ("Mark Stone (edice)"
+# → "Mark Stone"). Unlike genre aliases (HIGH), every row here lands as
+# PENDING: a fresh row retitles a whole group at once and the one-time GUI
+# confirm is the safety net against a typo in the row itself.
+SERIES_ALIASES: dict[str, str] = {
+	# The Zeměplocha family (measured 2026-09-10): the Czech name is the
+	# dominant spelling (×16); the bare form, the English name and the
+	# CZ/SK dual name with the slash are four DIFFERENT fold groups no
+	# automatic tier may bridge — real-word renames, alias rows by design.
+	"Zeměplocha": "Úžasná Zeměplocha",
+	"Discworld": "Úžasná Zeměplocha",
+	"Diskworld": "Úžasná Zeměplocha",  # typo of Discworld (k≠c), fold-blind
+	"Úžasná Zeměplocha / Úžasná Plochozem": "Úžasná Zeměplocha",
+	# The Nomes trilogy: EN name vs the Czech one (same works, CZ wins).
+	"Bromeliad Trilogy": "Vyprávění o nomech",
+}
+
+
+def fold_series(s: str) -> str:
+	"""Fold key: NFC + casefold + diacritics out + punctuation to spaces,
+	whitespace collapsed — word ORDER preserved (unlike genres, close
+	sub-series names must not auto-merge: "Legenda o Drizztovi" ≠
+	"Drizztova legenda"). A trailing "#N" glued into the name is stripped
+	first so a glued spelling lands in the same group as the bare name.
+	"""
+	bare = s
+	split = split_series_index(s)
+	if split is not None:
+		bare = split[0]
+	folded = _nfc(bare).casefold().translate(_DIA_MAP)
+	return " ".join(re.sub(r"[^\w\s]", " ", folded).split())
+
+
+@dataclass
+class SeriesSequence:
+	"""Volume-numbering overview of one series group (display + evidence).
+
+	Missing volumes are INFORMATION, not a defect — a personal library does
+	not own every title; duplicates (two books claiming the same slot) and
+	anomalies (index 0, non-numeric) are warnings.
+	"""
+
+	present: list[float] = field(default_factory=list)
+	missing: list[tuple[int, int]] = field(default_factory=list)  # inclusive int ranges
+	duplicates: list[tuple[float, int]] = field(default_factory=list)
+	unnumbered: int = 0
+	anomalies: list[tuple[str, int]] = field(default_factory=list)
+
+
+def analyze_sequence(indexes: list[str]) -> SeriesSequence:
+	"""Summarize one group's raw series_index strings ("" = unnumbered)."""
+	counts: Counter[float] = Counter()
+	anomalies: Counter[str] = Counter()
+	unnumbered = 0
+	for raw in indexes:
+		s = (raw or "").strip().replace(",", ".")
+		if not s:
+			unnumbered += 1
+			continue
+		try:
+			n = float(s)
+		except ValueError:
+			anomalies[raw] += 1
+			continue
+		if n <= 0:
+			anomalies[raw] += 1
+			continue
+		counts[n] += 1
+	present = sorted(counts)
+	# Gaps are counted on whole numbers only ("3.5" is a sub-volume, not a hole).
+	ints = sorted({int(n) for n in present if n == int(n)})
+	missing = [
+		(a + 1, b - 1)
+		for a, b in zip(ints, ints[1:], strict=False)
+		if b - a > 1
+	]
+	return SeriesSequence(
+		present=present,
+		missing=missing,
+		duplicates=sorted((n, c) for n, c in counts.items() if c > 1),
+		unnumbered=unnumbered,
+		anomalies=sorted(anomalies.items()),
+	)
+
+
+def _numeric_volumes(indexes: list[str]) -> set[int]:
+	"""Positive integer volume numbers claimed by one name's books."""
+	out: set[int] = set()
+	for raw in indexes:
+		s = (raw or "").strip().replace(",", ".")
+		try:
+			n = float(s)
+		except ValueError:
+			continue
+		if n > 0 and n == int(n):
+			out.add(int(n))
+	return out
+
+
+@dataclass
+class SeriesCluster:
+	"""One canonical series name and the spellings that map to it."""
+
+	canonical: str
+	kind: str  # "fold" | "alias" (table) | "prefix" | "fuzzy" (suspect, evidenced)
+	confidence: Confidence
+	reason: str
+	variants: list[tuple[str, int]] = field(default_factory=list)
+	sequence: SeriesSequence | None = None
+
+
+@dataclass
+class SuspectPair:
+	"""Two series names suspected of being the same series (advisory).
+
+	Suspects are found by structural proximity (one name is a token prefix
+	of the other) or by fuzzy closeness to a VERIFIED series name; the
+	verdict weighs the offline evidence (volume numbering) and, when an
+	online check is supplied, the names' existence in the bibliographic DB.
+	Only "merge" suspects become clusters/proposals — the rest stay here
+	for the overview tables.
+	"""
+
+	base: str
+	suspect: str
+	kind: str  # "prefix" | "fuzzy"
+	complementary: bool | None = None  # volume sets interleave into one row
+	collision: bool | None = None  # both claim the same volume number
+	online_base: bool | None = None
+	online_suspect: bool | None = None
+	verdict: str = "unknown"  # "merge" | "distinct" | "unknown"
+
+	@property
+	def evidence(self) -> str:
+		parts = []
+		if self.complementary:
+			parts.append("numbering complementary")
+		if self.collision:
+			parts.append("numbering collision")
+		if self.online_base is not None:
+			parts.append(f"online base={self.online_base}")
+		if self.online_suspect is not None:
+			parts.append(f"online suspect={self.online_suspect}")
+		return "; ".join(parts) or "no evidence"
+
+
+def _prefix_pairs(keys: list[str]) -> list[tuple[str, str]]:
+	"""Fold keys that are a whole-token prefix of another fold key."""
+	by_tokens = {k: tuple(k.split()) for k in keys}
+	pairs: list[tuple[str, str]] = []
+	for key, tokens in by_tokens.items():
+		for i in range(1, len(tokens)):
+			base = " ".join(tokens[:i])
+			if base in by_tokens and by_tokens[base] != key:
+				pairs.append((base, key))
+	return pairs
+
+
+def build_series_clusters(
+	counter: Counter[str],
+	*,
+	aliases: dict[str, str] | None = None,
+	indexes_by_name: dict[str, list[str]] | None = None,
+	verified_names: set[str] | None = None,
+	online_check=None,
+) -> tuple[dict[str, SeriesCluster], list[SuspectPair]]:
+	"""Map every distinct series-name string → its canonical cluster (changed only).
+
+	Mirrors build_genre_clusters' deterministic core (fold groups + curated
+	table) with two series-specific tiers on top:
+
+	* confidence policy — fold merges are HIGH (pre-filled accept, same
+	  letters after folding); alias-table rows and evidenced suspects are
+	  MEDIUM (pending — a fresh alias row or a prefix/fuzzy merge retitles
+	  a whole group at once and gets one GUI confirm);
+	* suspects — token-prefix pairs ("Mark Stone" / "Mark Stone (edice)")
+	  and fuzzy closeness to a verified series name, weighed by volume
+	  numbering (complementary sets ⇒ one series; a collision ⇒ two series
+	  or duplicates) and optionally by ``online_check(name) -> bool``
+	  (injected; the engine stays I/O-free). Only positively-evidenced
+	  pairs become clusters; every pair is returned for display.
+
+	There is deliberately NO free fuzzy tier (same trade as genres, see
+	_GIVEN_FUZZY): close sub-series names would auto-merge; misses become
+	alias rows or suspects instead.
+	"""
+	aliases = SERIES_ALIASES if aliases is None else aliases
+	indexes_by_name = indexes_by_name or {}
+	verified_names = verified_names or set()
+	groups: dict[str, list[tuple[str, int]]] = defaultdict(list)
+	for raw, n in counter.items():
+		groups[fold_series(raw)].append((raw, n))
+	reps: dict[str, str] = {}
+	for key, items in groups.items():
+		reps[key] = max(items, key=lambda it: (it[1], it[0]))[0]
+
+	def _group_indexes(key: str) -> list[str]:
+		out: list[str] = []
+		for raw, _n in groups.get(key, []):
+			out.extend(indexes_by_name.get(raw, []))
+		return out
+
+	clusters: dict[str, SeriesCluster] = {}
+	by_canonical: dict[str, SeriesCluster] = {}
+	# Fold keys each cluster covers — sequence/variants are recomputed over
+	# the WHOLE membership whenever a merge extends an existing cluster.
+	cluster_keys: dict[int, set[str]] = defaultdict(set)
+
+	def _register(cluster: SeriesCluster, member_keys: list[str]) -> None:
+		all_keys = cluster_keys[id(cluster)] | set(member_keys)
+		cluster_keys[id(cluster)] = all_keys
+		for key in all_keys:
+			for raw, _n in groups.get(key, []):
+				if raw != cluster.canonical:
+					clusters[raw] = cluster
+		cluster.sequence = analyze_sequence(
+			[idx for key in all_keys for idx in _group_indexes(key)]
+		)
+
+	merged_keys: set[str] = set()  # fold groups consumed by a table/suspect merge
+
+	# 1) fold groups with >1 spelling (deterministic, HIGH)
+	for key, items in groups.items():
+		if len(items) > 1:
+			canonical = reps[key]
+			n_books = sum(c for _, c in items)
+			cluster = SeriesCluster(
+				canonical, "fold", Confidence.HIGH,
+				f"series spelling unified to '{canonical}' ({len(items)} spellings, {n_books} books)",
+				sorted(items, key=lambda it: -it[1]),
+			)
+			by_canonical[canonical] = cluster
+			_register(cluster, [key])
+
+	# 2) alias table (each matched row merges its whole fold group, MEDIUM)
+	def _resolve(target: str) -> str:
+		return reps.get(fold_series(target), target)
+
+	for alias, target in aliases.items():
+		alias_key = fold_series(alias)
+		if alias_key not in groups:
+			continue
+		canonical = _resolve(target)
+		tkey = fold_series(target)
+		member_keys = [alias_key] if tkey not in groups else [alias_key, tkey]
+		variants = sorted(
+			{i for key in member_keys for i in groups.get(key, [])},
+			key=lambda it: -it[1],
+		)
+		existing = by_canonical.get(canonical)
+		if existing is not None:
+			existing.variants = sorted(set(existing.variants) | set(variants), key=lambda it: -it[1])
+			if existing.confidence is Confidence.HIGH:
+				existing.confidence = Confidence.MEDIUM
+			if existing.kind == "fold":
+				existing.kind = "alias"
+			existing.reason = f"series unified to '{canonical}' (alias + spelling variants)"
+			_register(existing, member_keys)
+		else:
+			cluster = SeriesCluster(
+				canonical, "alias", Confidence.MEDIUM,
+				f"series unified to '{canonical}' (alias merge)",
+				variants,
+			)
+			by_canonical[canonical] = cluster
+			_register(cluster, member_keys)
+		merged_keys.add(alias_key)
+		if tkey in groups:
+			merged_keys.add(tkey)
+
+	# 3) suspects — token-prefix pairs + fuzzy closeness to a verified name.
+	pair_index: dict[tuple[str, str], str] = {}
+	for base_key, sus_key in _prefix_pairs(list(groups)):
+		if base_key in merged_keys or sus_key in merged_keys:
+			continue
+		pair_index[(base_key, sus_key)] = "prefix"
+	if verified_names:
+		verified_folded = {fold_series(v) for v in verified_names}
+		for key in groups:
+			if key in merged_keys or key in verified_folded:
+				continue
+			for vkey in verified_folded:
+				if vkey == key or (key, vkey) in pair_index or (vkey, key) in pair_index:
+					continue
+				if fuzz.token_set_ratio(key, vkey) >= 80:
+					# The verified name is the base — it is the trusted anchor.
+					pair_index.setdefault((vkey, key), "fuzzy")
+
+	suspects: list[SuspectPair] = []
+	for (base_key, sus_key), kind in sorted(pair_index.items()):
+		base, sus = reps[base_key], reps[sus_key]
+		na = _numeric_volumes(_group_indexes(base_key))
+		nb = _numeric_volumes(_group_indexes(sus_key))
+		complementary: bool | None = None
+		collision: bool | None = None
+		if na and nb:
+			collision = bool(na & nb)
+			union = na | nb
+			complementary = not collision and union == set(range(min(union), max(union) + 1))
+		online_base = online_suspect = None
+		if online_check is not None:
+			online_base = bool(online_check(base))
+			online_suspect = bool(online_check(sus))
+		verdict = "unknown"
+		if collision:
+			verdict = "distinct"  # two series (or duplicate books) — never merge
+		elif complementary:
+			verdict = "merge"
+		elif online_base is not None:
+			if online_base and not online_suspect:
+				verdict = "merge"  # the base exists online, the suspect does not
+			elif online_base and online_suspect:
+				verdict = "distinct"
+		suspects.append(SuspectPair(base, sus, kind, complementary, collision, online_base, online_suspect, verdict))
+		if verdict != "merge":
+			continue
+		# A "merge" suspect joins the base group's cluster (extending fold
+		# variants if one exists) as MEDIUM — pending, one GUI confirm.
+		existing = by_canonical.get(base)
+		if existing is not None:
+			existing.variants = sorted(
+				set(existing.variants) | {i for i in groups[sus_key]},
+				key=lambda it: -it[1],
+			)
+			if existing.confidence is Confidence.HIGH:
+				existing.confidence = Confidence.MEDIUM
+			existing.reason = f"series merged with '{base}' (suspected same series, numbering/online evidence)"
+			_register(existing, [sus_key])
+		else:
+			cluster = SeriesCluster(
+				base, kind, Confidence.MEDIUM,
+				f"series merged with '{base}' (suspected same series, numbering/online evidence)",
+				sorted({*groups[base_key], *groups[sus_key]}, key=lambda it: -it[1]),
+			)
+			by_canonical[base] = cluster
+			_register(cluster, [sus_key])
+	return clusters, suspects
+
+
+@dataclass
+class SeriesGroup:
+	"""One fold group as it exists ON DISK today — the honest overview unit
+	for `bmf series` (proposals annotate this view, they do not shape it)."""
+
+	canonical: str  # most frequent original spelling in the group
+	books: int
+	variants: list[tuple[str, int]] = field(default_factory=list)
+	sequence: SeriesSequence = field(default_factory=SeriesSequence)
+
+
+# ---------------------------------------------------------------------------
 # Library pass
 # ---------------------------------------------------------------------------
 
@@ -706,15 +1070,19 @@ class BookProposal:
 	authors: list[str] | None = None
 	genres: list[str] | None = None
 	tags: list[str] | None = None
-	# Per-diagnosis reason pools (C15 authors / C16 genres+tags); `reasons` is
-	# their union for flat CLI display.
+	# C18: canonical series NAME only — the book's series index is never
+	# proposed (_apply_fields keeps the current half of the pair).
+	series: str | None = None
+	# Per-diagnosis reason pools (C15 authors / C16 genres+tags / C18 series);
+	# `reasons` is their union for flat CLI display.
 	author_reasons: list[str] = field(default_factory=list)
 	genre_reasons: list[str] = field(default_factory=list)
+	series_reasons: list[str] = field(default_factory=list)
 	high_confidence: bool = True
 
 	@property
 	def reasons(self) -> list[str]:
-		return [*self.author_reasons, *self.genre_reasons]
+		return [*self.author_reasons, *self.genre_reasons, *self.series_reasons]
 
 	@property
 	def categories(self) -> list[str]:
@@ -723,6 +1091,8 @@ class BookProposal:
 			cats.append("C15")
 		if self.genres is not None or self.tags is not None:
 			cats.append("C16")
+		if self.series is not None:
+			cats.append("C18")
 		return cats
 
 
@@ -731,7 +1101,15 @@ class NormalizeResult:
 	author_clusters: list[AuthorCluster] = field(default_factory=list)
 	genre_clusters: list[GenreCluster] = field(default_factory=list)
 	tag_clusters: list[GenreCluster] = field(default_factory=list)
+	series_clusters: list[SeriesCluster] = field(default_factory=list)
+	series_suspects: list[SuspectPair] = field(default_factory=list)
+	series_overview: list[SeriesGroup] = field(default_factory=list)
 	multi_author: list[tuple[str, int]] = field(default_factory=list)
+	# C18 skips: books whose series order is glued into the NAME (C14's
+	# split already pre-fills accept for them) and books listing more than
+	# one series (applying a single-name proposal would drop the rest).
+	glued_series: list[tuple[str, int]] = field(default_factory=list)
+	multi_series: list[tuple[str, int]] = field(default_factory=list)
 	proposals: list[BookProposal] = field(default_factory=list)
 
 
@@ -740,13 +1118,17 @@ def _dedupe(items: list[str]) -> list[str]:
 
 
 def analyze_library(
-	books: list[BookMeta], *, fields: tuple[str, ...] = ("authors", "genres", "tags")
+	books: list[BookMeta],
+	*,
+	fields: tuple[str, ...] = ("authors", "genres", "tags", "series"),
+	series_online_check=None,
 ) -> NormalizeResult:
-	"""Cluster authors/genres across the library and build per-book proposals."""
+	"""Cluster authors/genres/series across the library and build per-book proposals."""
 	result = NormalizeResult()
 	author_map: dict[str, AuthorCluster] = {}
 	gmap: dict[str, GenreCluster] = {}
 	tmap: dict[str, GenreCluster] = {}
+	smap: dict[str, SeriesCluster] = {}
 
 	if "authors" in fields:
 		counter: Counter[str] = Counter()
@@ -787,6 +1169,69 @@ def analyze_library(
 		result.genre_clusters = sorted(gseen.values(), key=lambda c: -sum(n for _, n in c.variants))
 		result.tag_clusters = sorted(gseen.values(), key=lambda c: -sum(n for _, n in c.variants))
 
+	if "series" in fields:
+		scounter: Counter[str] = Counter()
+		indexes_by_name: dict[str, list[str]] = defaultdict(list)
+		verified_names: set[str] = set()
+		glued: Counter[str] = Counter()
+		multi: Counter[str] = Counter()
+		for b in books:
+			entries = b.series or []
+			if len(entries) > 1:
+				# The apply path writes ONE {name, index} pair per proposal —
+				# renaming here would silently drop the other series.
+				for s in {series_entry_pair(s_)[0] for s_ in entries if series_entry_pair(s_)[0]}:
+					multi[s] += 1
+				continue
+			name, idx = b.series_pair()
+			if not name:
+				continue
+			if split_series_index(name) is not None:
+				# Order glued into the name — C14's split owns these books.
+				glued[name] += 1
+				continue
+			scounter[name] += 1
+			indexes_by_name[name].append(idx)
+			if b.verified:
+				verified_names.add(name)
+		smap, suspects = build_series_clusters(
+			scounter,
+			indexes_by_name=indexes_by_name,
+			verified_names=verified_names,
+			online_check=series_online_check,
+		)
+		result.series_suspects = suspects
+		result.glued_series = sorted(glued.items(), key=lambda it: -it[1])
+		result.multi_series = sorted(multi.items(), key=lambda it: -it[1])
+		sseen: dict[int, SeriesCluster] = {}
+		for c in smap.values():
+			sseen.setdefault(id(c), c)
+		# Alphabetical, diacritics-folded (Ú under U, not after Z) — unlike the
+		# count-sorted C15/C16 tables: the point of this table is LOOKING UP a
+		# known series name, not ranking the biggest messes.
+		result.series_clusters = sorted(
+			sseen.values(), key=lambda c: c.canonical.casefold().translate(_DIA_MAP)
+		)
+		# The overview mirrors the DISK state (plain fold groups, alias/suspect
+		# merges are only proposals) — `bmf series` annotates, never presumes.
+		overview: dict[str, list[tuple[str, int]]] = defaultdict(list)
+		for raw, n in scounter.items():
+			overview[fold_series(raw)].append((raw, n))
+		result.series_overview = sorted(
+			(
+				SeriesGroup(
+					canonical=max(items, key=lambda it: (it[1], it[0]))[0],
+					books=sum(n for _, n in items),
+					variants=sorted(items, key=lambda it: -it[1]),
+					sequence=analyze_sequence(
+						[idx for raw, _n in items for idx in indexes_by_name.get(raw, [])]
+					),
+				)
+				for items in overview.values()
+			),
+			key=lambda g: (-g.books, g.canonical.lower()),
+		)
+
 	for b in books:
 		proposal = BookProposal(uuid=b.uuid, path=b.path, calibre_id=b.calibre_id)
 		high = True
@@ -815,8 +1260,18 @@ def analyze_library(
 						proposal.genre_reasons.append(f"{field_name[:-1]} '{v}' → '{c.canonical}'")
 						if c.confidence is not Confidence.HIGH:
 							high = False
+		if "series" in fields and len(b.series or []) == 1:
+			name, _idx = b.series_pair()
+			if name and split_series_index(name) is None:
+				c = smap.get(name)
+				if c is not None:
+					proposal.series = c.canonical
+					proposal.series_reasons.append(f"series '{name}' → '{c.canonical}' ({c.reason})")
+					if c.confidence is not Confidence.HIGH:
+						high = False
 		proposal.author_reasons = list(dict.fromkeys(proposal.author_reasons))
 		proposal.genre_reasons = list(dict.fromkeys(proposal.genre_reasons))
+		proposal.series_reasons = list(dict.fromkeys(proposal.series_reasons))
 		proposal.high_confidence = high
 		if proposal.categories:
 			result.proposals.append(proposal)

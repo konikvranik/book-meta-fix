@@ -1,4 +1,4 @@
-# Corruption Catalog (C1–C17)
+# Corruption Catalog (C1–C18)
 
 **English** | [Čeština](cs/corruption-catalog.md)
 
@@ -301,6 +301,53 @@ book file cascades: the next run reports EMPTY_BOOK and routes the folder
 to `needfix/empty/`.
 
 **Verdict:** NEEDS_REVIEW (delete proposal; review-gated, never auto-applied)
+
+## C18 — Series-name variants (library-level)
+
+The same series spelled several ways across books: "Zaklínač" /
+"zaklínač" / "Zaklinac" (case/diacritics), "Perry Rodan" / "Perry Rhodan"
+(real-word rename), or a suffixed sibling "Mark Stone" / "Mark Stone
+(edice)". Like C15/C16, invisible to any per-book detector — the
+inconsistency is a property of the whole library. The series ORDER is
+never proposed, only the name (`_apply_fields` keeps each book's own
+index half of the pair).
+
+`bmf normalize --series` clusters the names with three evidence tiers:
+
+1. **Fold (deterministic, pre-filled accept):** NFC + casefold +
+   diacritics out + punctuation to spaces, whitespace collapsed. Word
+   order is PRESERVED (unlike genres: "Legenda o Drizztovi" ≠ "Drizztova
+   legenda" — close sub-series must not auto-merge). Canonical = the
+   group's most frequent original spelling. A trailing "#N" glued into
+   the name is stripped from the fold key, but a dict-glued name is
+   otherwise SKIPPED — C14's split already owns those books.
+2. **Suspects (pending):** token-prefix pairs ("Mark Stone" /
+   "Mark Stone (edice)") and names fuzzy-close to a VERIFIED series.
+   Evidence weighs volume NUMBERING — the two names' volume sets that
+   interleave into one contiguous row (1,2,4 + 3 ⇒ merge) versus a
+   collision (both claim volume 1 ⇒ two series or duplicate books, never
+   merged) — and, with `--online`, the names' existence in the
+   bibliographic DB (base exists and the suspect does not ⇒ merge; both
+   exist ⇒ distinct). Online answers go through the enricher's
+   persistent cache, so repeat runs cost nothing.
+3. **Alias table (`SERIES_ALIASES` in `normalize.py`, pending):**
+   hand-written rows for renames neither tier can see. Unlike
+   `GENRE_ALIASES` (HIGH), a row lands as PENDING — it retitles a whole
+   group at once and the one-time GUI confirm is the safety net against
+   a typo in the row itself.
+
+Books listing MULTIPLE series are skipped and reported (applying a
+single-name proposal would drop the other series — edit those in
+`bmf gui`). There is deliberately no free fuzzy tier, same trade as C16.
+
+`bmf series` is the read-only companion: every series with book counts,
+volume coverage ("1–3, 5 (missing: 4)"), duplicate-volume warnings and
+the suspect pairs with their verdicts. Missing volumes are INFORMATION
+(a personal library need not be complete); a volume number claimed by
+two books is a WARNING (duplicate folder or a wrong index).
+
+**Verdict:** AUTO_FIXABLE (fold) / NEEDS_REVIEW (alias rows, evidenced
+suspect merges)
 
 ## EMPTY_BOOK — Dead record (the book file is gone)
 

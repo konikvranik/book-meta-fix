@@ -14,10 +14,13 @@ from collections import Counter
 from book_meta_fix.models import BookMeta
 from book_meta_fix.normalize import (
 	analyze_library,
+	analyze_sequence,
 	build_author_clusters,
 	build_genre_clusters,
 	build_known_author_pool,
+	build_series_clusters,
 	fold_genre,
+	fold_series,
 )
 from book_meta_fix.pipeline import _apply_fields
 
@@ -271,6 +274,180 @@ class TestGenreClusters:
 		assert fold_genre("Sci-fi") == "fi sci"
 
 
+class TestSeriesSequence:
+	def test_missing_gaps_and_duplicates(self):
+		seq = analyze_sequence(["1", "2", "4", "7", "8", "4"])
+		assert seq.present == [1.0, 2.0, 4.0, 7.0, 8.0]
+		assert seq.missing == [(3, 3), (5, 6)]
+		assert seq.duplicates == [(4.0, 2)]
+		assert seq.unnumbered == 0 and seq.anomalies == []
+
+	def test_unnumbered_and_anomalies(self):
+		# "0" and "III" are anomalies, "3,5" a legit sub-volume, "" unnumbered.
+		seq = analyze_sequence(["", "", "0", "III", "3,5"])
+		assert seq.unnumbered == 2
+		assert seq.anomalies == [("0", 1), ("III", 1)]
+		assert seq.present == [3.5]
+		assert seq.missing == [] and seq.duplicates == []
+
+
+class TestSeriesClusters:
+	def _build(self, counter: dict[str, int], **kw):  # noqa: ANN003
+		return build_series_clusters(Counter(counter), **kw)
+
+	def test_glued_order_folds_with_bare_name(self):
+		assert fold_series("Mark Stone #73") == fold_series("Mark Stone")
+		assert fold_series("Zaklínač") == fold_series("Zaklinac") == fold_series("zaklínač")
+
+	def test_word_order_not_merged(self):
+		# Close sub-series are genuinely different series — the series fold is
+		# order-sensitive on purpose (unlike the genre fold).
+		clusters, suspects = self._build({"Legenda o Drizztovi": 2, "Drizztova legenda": 3})
+		assert not clusters and not suspects
+
+	def test_fold_unifies_to_most_frequent_high(self):
+		clusters, suspects = self._build({"Zaklínač": 4, "Zaklinac": 1, "zaklínač": 1})
+		assert not suspects
+		c = clusters["Zaklinac"]
+		assert c.canonical == "Zaklínač" and c.confidence.value == "HIGH" and c.kind == "fold"
+		assert clusters["zaklínač"] is c
+
+	def test_alias_row_merges_pending(self):
+		# A human-written row is an explicit decision, but it retitles a whole
+		# group at once — MEDIUM/pending is the one-confirm safety net.
+		clusters, _ = self._build(
+			{"Perry Rhodan": 8, "Perry Rodan": 2},
+			aliases={"Perry Rodan": "Perry Rhodan"},
+		)
+		c = clusters["Perry Rodan"]
+		assert c.canonical == "Perry Rhodan" and c.confidence.value == "MEDIUM" and c.kind == "alias"
+
+	def test_prefix_pair_complementary_numbering_merges(self):
+		idx = {"Mark Stone": ["1", "2", "4", "5"], "Mark Stone (edice)": ["3"]}
+		clusters, suspects = self._build({"Mark Stone": 4, "Mark Stone (edice)": 1}, indexes_by_name=idx)
+		c = clusters["Mark Stone (edice)"]
+		assert c.canonical == "Mark Stone" and c.confidence.value == "MEDIUM"
+		s = suspects[0]
+		assert s.verdict == "merge" and s.complementary and not s.collision
+
+	def test_prefix_pair_numbering_collision_never_merges(self):
+		# Both claim volumes 1-2: two real series (or duplicates) — a merge
+		# would be wrong, the pair stays advisory.
+		idx = {"Duna": ["1", "2"], "Duna: Chronologie": ["1", "2"]}
+		clusters, suspects = self._build({"Duna": 2, "Duna: Chronologie": 2}, indexes_by_name=idx)
+		assert "Duna: Chronologie" not in clusters
+		assert suspects[0].verdict == "distinct" and suspects[0].collision
+
+	def test_fuzzy_against_verified_name_suspected(self):
+		# "Perry Rodan" is not a prefix twin and folds differently; only its
+		# closeness to the VERIFIED "Perry Rhodan" makes it a suspect, and the
+		# complementary numbering (1,2 + 3) upgrades it to a merge proposal.
+		idx = {"Perry Rhodan": ["1", "2"], "Perry Rodan": ["3"]}
+		clusters, suspects = self._build(
+			{"Perry Rhodan": 2, "Perry Rodan": 1},
+			indexes_by_name=idx,
+			verified_names={"Perry Rhodan"},
+		)
+		assert clusters["Perry Rodan"].canonical == "Perry Rhodan"
+		assert any(s.kind == "fuzzy" and s.verdict == "merge" for s in suspects)
+
+	def test_online_existence_decides_without_numbering(self):
+		clusters, suspects = self._build(
+			{"Duna": 2, "Duna Chronicles": 1},
+			online_check=lambda n: n == "Duna",
+		)
+		assert clusters["Duna Chronicles"].canonical == "Duna"
+		s = suspects[0]
+		assert s.verdict == "merge" and s.online_base and not s.online_suspect
+
+	def test_both_online_stay_distinct(self):
+		clusters, suspects = self._build(
+			{"Duna": 2, "Duna Chronicles": 1},
+			online_check=lambda n: True,
+		)
+		assert not clusters
+		assert suspects[0].verdict == "distinct"
+
+	def test_singleton_untouched(self):
+		clusters, suspects = self._build({"Only Series": 3})
+		assert not clusters and not suspects
+
+
+class TestAnalyzeSeries:
+	def _book(self, uuid, name=None, idx=None, series_list=None, verified=False):  # noqa: ANN001
+		series = series_list if series_list is not None else ([{"name": name, "index": idx}] if name else [])
+		return BookMeta(
+			uuid=uuid, path=f"/lib/{uuid}", title="T", authors=["A"], series=series, verified=verified
+		)
+
+	def test_proposes_canonical_name_only(self):
+		books = [self._book("u1", "Zaklínač", "1"), self._book("u2", "Zaklinac", "2")]
+		res = analyze_library(books, fields=("series",))
+		p = next(p for p in res.proposals if p.uuid == "u2")
+		assert p.series == "Zaklínač" and p.series_reasons
+		assert p.categories == ["C18"]
+		# Only the NAME is proposed — apply keeps the book's own index half.
+		meta = self._book("u2", "Zaklinac", "2")
+		_apply_fields(meta, {"series": p.series})
+		assert meta.series == [{"name": "Zaklínač", "index": "2"}]
+
+	def test_fold_high_suspect_merge_pending(self):
+		books = [
+			self._book("u1", "Mark Stone", "1"),
+			self._book("u2", "Mark Stone", "2"),
+			self._book("u3", "Mark Stone", "4"),
+			self._book("u4", "Mark Stone (edice)", "3"),
+			self._book("u5", "Zaklínač", "1"),
+			self._book("u6", "Zaklinac", "2"),
+		]
+		res = analyze_library(books, fields=("series",))
+		sus = next(p for p in res.proposals if p.uuid == "u4")
+		fold = next(p for p in res.proposals if p.uuid == "u6")
+		assert sus.high_confidence is False  # suspect tier → pending
+		assert fold.high_confidence is True  # deterministic fold → accept
+
+	def test_glued_and_multi_series_skipped_and_reported(self):
+		books = [
+			self._book("u1", "Mark Stone #73", "73"),  # dict-glued: C14's split owns it
+			self._book("u2", series_list=[{"name": "A", "index": "1"}, {"name": "B", "index": "2"}]),
+			self._book("u3", "Fine Series", "1"),
+		]
+		res = analyze_library(books, fields=("series",))
+		assert not res.proposals
+		assert ("Mark Stone #73", 1) in res.glued_series
+		assert ("A", 1) in res.multi_series and ("B", 1) in res.multi_series
+
+	def test_overview_mirrors_disk_state(self):
+		books = [self._book("u1", "Zaklínač", "1"), self._book("u2", "Zaklinac", "2")]
+		res = analyze_library(books, fields=("series",))
+		assert len(res.series_overview) == 1
+		g = res.series_overview[0]
+		assert g.canonical == "Zaklínač" and g.books == 2
+		assert g.sequence.present == [1.0, 2.0]
+		assert [(v, n) for v, n in g.variants if v != g.canonical] == [("Zaklinac", 1)]
+
+	def test_series_only_field_selection_leaves_authors_alone(self):
+		books = [
+			BookMeta(uuid="u1", path="/lib/u1", title="T", authors=["Neznamy"], series=[{"name": "Zaklinac", "index": "1"}]),
+			BookMeta(uuid="u2", path="/lib/u2", title="T", authors=["Neznamy"], series=[{"name": "Zaklínač", "index": "2"}]),
+		]
+		res = analyze_library(books, fields=("series",))
+		p = next(p for p in res.proposals if p.uuid == "u1")
+		assert p.series == "Zaklínač" and p.authors is None and p.genres is None and p.tags is None
+
+	def test_clusters_sorted_alphabetically_diacritics_folded(self):
+		books = [
+			self._book("u1", "Žízeň", "1"), self._book("u2", "Zizen", "2"),
+			self._book("u3", "Zaklinac", "1"), self._book("u4", "Zaklínač", "2"),
+			self._book("u5", "Úžasná Zeměplocha", "1"), self._book("u6", "Úžasná Zemeplocha", "2"),
+		]
+		res = analyze_library(books, fields=("series",))
+		names = [c.canonical for c in res.series_clusters]
+		# "Ú" sorts under U (diacritics folded), "Ž" last — the table exists
+		# for looking up a known name, so it is alphabetical, not count-ranked.
+		assert names == ["Úžasná Zeměplocha", "Zaklínač", "Žízeň"]
+
+
 class TestAnalyzeLibrary:
 	def _books(self):
 		return [
@@ -503,3 +680,57 @@ action: keep
 		summary = merge_normalizations(p, [prop], books)
 		assert summary["added"] == 1
 		assert parse_review(p)[0].uuid == "u9"
+
+	def test_series_c18_accept_and_pending(self, tmp_path):
+		"""C18 entries: a deterministic fold proposal pre-fills accept, a
+		suspect-tier proposal stays pending; both carry the canonical NAME
+		only — the book's own series_index is never part of the proposal."""
+		from book_meta_fix.normalize import BookProposal
+		from book_meta_fix.review import merge_normalizations, parse_review
+
+		p = self._review_file(tmp_path, "# empty\n")
+		high = BookProposal(uuid="u1", path="/lib/A", series="Zaklínač",
+			series_reasons=["series 'Zaklinac' → 'Zaklínač' (fold)"], high_confidence=True)
+		med = BookProposal(uuid="u2", path="/lib/B", series="Mark Stone",
+			series_reasons=["series 'Mark Stone (edice)' → 'Mark Stone' (suspect)"], high_confidence=False)
+		books = [
+			BookMeta(uuid="u1", path="/lib/A", authors=["A"], title="X", series=[{"name": "Zaklinac", "index": "2"}]),
+			BookMeta(uuid="u2", path="/lib/B", authors=["A"], title="Y", series=[{"name": "Mark Stone (edice)", "index": "3"}]),
+		]
+		summary = merge_normalizations(p, [high, med], books)
+		assert summary["added"] == 2
+		items = {i.uuid: i for i in parse_review(p)}
+		assert items["u1"].action == "accept" and items["u1"].proposed["series"] == "Zaklínač"
+		assert items["u1"].diagnosis["category"] == "C18"
+		assert items["u1"].current["series"] == "Zaklinac"
+		assert "series_index" not in items["u1"].proposed
+		assert items["u2"].action is None
+
+	def test_series_overlaid_onto_pending_entry(self, tmp_path):
+		from book_meta_fix.normalize import BookProposal
+		from book_meta_fix.review import merge_normalizations, parse_review
+
+		p = self._review_file(tmp_path, """---
+id: 1
+uuid: u1
+path: A/X (1)
+diagnosis:
+  category: MISSING_ISBN
+  reason: isbn missing
+  confidence: HIGH
+current:
+  author: A
+  title: X
+proposed:
+  isbn: "80-01-00000-0"
+action: null
+""")
+		prop = BookProposal(uuid="u1", path="/lib/A", series="Zaklínač",
+			series_reasons=["series 'Zaklinac' → 'Zaklínač' (fold)"], high_confidence=True)
+		books = [BookMeta(uuid="u1", path="/lib/A", authors=["A"], title="X", series=[{"name": "Zaklinac", "index": "2"}])]
+		summary = merge_normalizations(p, [prop], books)
+		assert summary["updated"] == 1
+		items = parse_review(p)
+		assert items[0].proposed["isbn"] == "80-01-00000-0"  # other proposal keys kept
+		assert items[0].proposed["series"] == "Zaklínač"  # series overlaid
+		assert "C18" in [d["category"] for d in items[0].diagnoses]

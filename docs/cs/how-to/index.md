@@ -24,7 +24,7 @@ review.yaml; zápis knih stále dělá `bmf apply`).
 9. [Odstranění vygenerovaných obálek](strip-covers.md)
 10. [Neplatné soubory e-knih](invalid-files.md)
 11. [Propuštění změn do Audiobookshelf](abs-rescan.md)
-12. [Sjednocení pravopisů autorů a názvů žánrů](normalize.md)
+12. [Sjednocení pravopisů autorů, názvů žánrů a sérií](normalize.md)
 13. [Zapnutí CZ/SK obohacení](enrichment.md)
 14. [Běh s LLM fallbackem](llm.md)
 14. [Výběr LLM modelu](llm-models.md)

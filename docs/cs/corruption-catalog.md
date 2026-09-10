@@ -1,6 +1,6 @@
 [English](../corruption-catalog.md) | **Čeština**
 
-# Katalog poškození (C1–C17)
+# Katalog poškození (C1–C18)
 
 Odvozeno empiricky z CZ/SK calibre knihovny s ~5 440 knihami. Každá kategorie
 má reálné příklady (calibre_id, author_folder, title) nalezené během
@@ -302,6 +302,52 @@ kaskáduje: další běh nahlásí EMPTY_BOOK a přesune složku do
 `needfix/empty/`.
 
 **Verdikt:** NEEDS_REVIEW (návrh smazání; vždy schvaluje člověk, nikdy se neaplikuje automaticky)
+
+## C18 — Varianty názvů sérií (úroveň knihovny)
+
+Tentýž název série zapsaný několika způsoby napříč knihami: „Zaklínač" /
+„zaklínač" / „Zaklinac" (velikost písmen/diakritika), „Perry Rodan" /
+„Perry Rhodan" (skutečné přejmenování), nebo příbuzný název s příponou
+„Mark Stone" / „Mark Stone (edice)". Stejně jako C15/C16 je to neviditelné
+pro detektor jedné knihy — nekonzistence je vlastností celé knihovny.
+Pořadové číslo dílu se NIKDY nenavrhuje, jen název (`_apply_fields`
+si u každé knihy drží vlastní polovinu páru název/číslo).
+
+`bmf normalize --series` klastruje názvy ve třech vrstvách důkazů:
+
+1. **Fold (deterministické, předvyplněno accept):** NFC + casefold +
+   diakritika ven + interpunkce na mezery, mezery slepené. Pořadí slov se
+   ZACHOVÁVÁ (na rozdíl od žánrů: „Legenda o Drizztovi" ≠ „Drizztova
+   legenda" — blízké pod-série se nesmí automaticky sloučit). Kanonik =
+   nejčastější původní pravopis skupiny. Zlepené „#N" na konci názvu se ze
+   skládacího klíče odstraní, ale jinak se zlepený tvar PŘESKOČÍ — tyto
+   knihy už vlastní rozdělení C14.
+2. **Podezřelé dvojice (pending):** předponové páry („Mark Stone" /
+   „Mark Stone (edice)") a názvy fuzzy-blízké OVĚŘENÉ sérii. Důkazem je
+   především ČÍSLOVÁNÍ dílů — dvě množiny čísel, které se doplňují do jedné
+   souvislé řady (1,2,4 + 3 ⇒ sloučit), versus kolize (obě tvrdí díl 1 ⇒
+   dvě série nebo duplicitní knihy, nikdy neslučovat) — a s `--online`
+   také existence názvů v bibliografické DB (základ existuje a podezřelý
+   ne ⇒ sloučit; oba existují ⇒ odlišné). Online odpovědi jdou přes
+   perzistentní cache enricheru, opakované běhy nic nestojí.
+3. **Alias tabulka (`SERIES_ALIASES` v `normalize.py`, pending):**
+   ručně psané řádky pro přejmenování, která žádná vrstva nevidí. Na
+   rozdíl od `GENRE_ALIASES` (HIGH) řádek přistane jako PENDING —
+   přejmenovává celou skupinu najednou a jednorázové potvrzení v gui je
+   pojistka proti překlepu v řádku samotném.
+
+Knihy s VÍCE sériemi se přeskočí a vypíšou (aplikace jednoho názvu by
+zahozením druhé série ublížila — upravte je v `bmf gui`). Volná fuzzy
+vrstva záměrně chybí, stejný trade-off jako C16.
+
+`bmf series` je read-only doplněk: všechny série s počty knih, pokrytím
+dílů („1–3, 5 (chybí: 4)"), varováními na duplicitní díly a podezřelými
+dvojicemi s verdikty. Chybějící díly jsou INFORMACE (osobní knihovna
+nemusí být úplná); číslo dílu, na které si dělá nárok dvě knih, je
+VAROVÁNÍ (duplicitní složka nebo špatné číslo).
+
+**Verdikt:** AUTO_FIXABLE (fold) / NEEDS_REVIEW (alias řádky, důkazní
+podezřelá sloučení)
 
 ## EMPTY_BOOK — Mrtvý záznam (knižní soubor chybí)
 

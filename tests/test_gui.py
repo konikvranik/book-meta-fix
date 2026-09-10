@@ -1372,6 +1372,18 @@ class TestLibraryIndex:
 		assert {e["path"] for e, _h in found} == {
 			"Mark Stone/Jupiter (5)", "Mark Stone/nepojmenovana (6)"}
 
+	def test_second_series_of_multi_series_book(self, tmp_path):
+		# `current` (the entry half of the haystack) carries only the FIRST
+		# series — the manifest-only half must append the REST, or the second
+		# series of a multi-series book is unsearchable. Mixed stored shapes:
+		# the ABS-native glued string and the legacy `sequence` dict.
+		self._book(tmp_path, "A/Kniha (1)",
+		           {"authors": ["Autor"], "title": "Kniha",
+		            "series": ["Zaklínač #8", {"name": "Lasst", "sequence": 3}]})
+		index = build_library_index(tmp_path)
+		for needle in ("zaklínač", "zaklínač 8", "lasst", "lasst 3"):
+			assert [e["path"] for e, _h in self._search(index, needle)] == ["A/Kniha (1)"], needle
+
 	def test_multi_word_query_needs_all_words(self, tmp_path):
 		self._book(tmp_path, "A/T (1)", {"authors": ["Mark"], "title": "X"})
 		index = build_library_index(tmp_path)

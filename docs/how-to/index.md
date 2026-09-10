@@ -24,7 +24,7 @@ writes still happen via `bmf apply`).
 9. [Strip generated covers](strip-covers.md)
 10. [Invalid ebook files](invalid-files.md)
 11. [Push changes into Audiobookshelf](abs-rescan.md)
-12. [Normalize author spellings and genre names](normalize.md)
+12. [Normalize author spellings, genre names and series names](normalize.md)
 13. [Enabling CZ/SK enrichment](enrichment.md)
 14. [Running with the LLM fallback](llm.md)
 14. [Choosing an LLM model](llm-models.md)

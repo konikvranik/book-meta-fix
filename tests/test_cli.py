@@ -844,3 +844,67 @@ class TestAnalyzeNormalize:
 			result = CliRunner().invoke(main, args)
 		assert result.exit_code == 0, result.output
 		assert "--normalize skipped: run was interrupted" in result.output
+
+
+class TestNormalizeSeriesAndOverview:
+	"""`bmf series` is the read-only overview half and `bmf normalize --series`
+	the merge half: dry-run writes nothing, --apply fills review.yaml with C18
+	entries — fold fixes pre-filled accept, suspect merges pending."""
+
+	def _seed_library(self, root: Path) -> None:
+		"""One fold cluster (Zaklínač/Zaklinac) and one complementary prefix
+		pair (Mark Stone + a suffixed sibling holding volume 2)."""
+		import json
+
+		def book(author: str, title: str, series: str | None, idx: str | None = None) -> None:
+			folder = root / author / title
+			folder.mkdir(parents=True)
+			manifest: dict = {"authors": [author], "title": title}
+			if series:
+				manifest["series"] = [f"{series} #{idx}" if idx else series]
+			(folder / "metadata.json").write_text(json.dumps(manifest), encoding="utf-8")
+			(folder / "book.epub").write_text("x", encoding="utf-8")
+
+		for i in (1, 2, 3):
+			book("Autor X", f"Kniha {i}", "Zaklínač", str(i))
+		book("Autor X", "Kniha 4", "Zaklinac", "4")
+		book("Autor Y", "MS 1", "Mark Stone", "1")
+		book("Autor Y", "MS 2", "Mark Stone (edice)", "2")
+
+	def _env(self, tmp_path: Path, monkeypatch) -> Path:  # noqa: ANN001
+		review = tmp_path / "review.yaml"
+		monkeypatch.setenv("BMF_REVIEW", str(review))
+		monkeypatch.setenv("BMF_CACHE", str(tmp_path / "cache.db"))
+		monkeypatch.setenv("BMF_LIBRARY", str(tmp_path / "lib"))
+		return review
+
+	def test_series_command_prints_overview_and_writes_nothing(self, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+		self._seed_library(tmp_path / "lib")
+		review = self._env(tmp_path, monkeypatch)
+		result = CliRunner().invoke(main, ["series", "--no-cache"])
+		assert result.exit_code == 0, result.output
+		assert "Zaklínač" in result.output
+		assert "Zaklinac ×1" in result.output  # the variant column
+		assert "Mark Stone (edice)" in result.output
+		assert not review.exists()  # read-only
+
+	def test_normalize_series_dry_run_then_apply(self, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+		import yaml
+
+		self._seed_library(tmp_path / "lib")
+		review = self._env(tmp_path, monkeypatch)
+
+		result = CliRunner().invoke(main, ["normalize", "--series", "--no-cache"])
+		assert result.exit_code == 0, result.output
+		assert not review.exists()  # dry-run writes nothing
+
+		result = CliRunner().invoke(main, ["normalize", "--series", "--no-cache", "--apply"])
+		assert result.exit_code == 0, result.output
+		entries = [e for e in yaml.safe_load_all(review.read_text(encoding="utf-8")) if e]
+		c18 = [e for e in entries if e["diagnosis"]["category"] == "C18"]
+		actions = {e["current"]["series"]: e["action"] for e in c18}
+		assert actions == {"Zaklinac": "accept", "Mark Stone (edice)": None}
+		proposed = {e["current"]["series"]: e["proposed"]["series"] for e in c18}
+		assert proposed == {"Zaklinac": "Zaklínač", "Mark Stone (edice)": "Mark Stone"}
+		# The book's own volume index is never part of the proposal.
+		assert all("series_index" not in e["proposed"] for e in c18)

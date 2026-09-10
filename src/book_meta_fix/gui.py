@@ -57,6 +57,7 @@ from .encoding import detect_double_decode, recode, recode_failure_reason, repai
 from .extractors import extract
 from .i18n import _
 from .library import _META_FILES, Cache, _is_excluded, iter_book_folders
+from .models import series_entry_pair
 from .mover import merge_folders, same_book
 from .readers import EBOOK_EXTS, read_book_folder
 from .review import _build_current, _header, _load_raw_entries, _render_entry
@@ -1013,10 +1014,19 @@ def _library_extra_hay(meta) -> str:
 	tags, publisher and subtitle. That matters in practice: a series book
 	may carry an empty ``series`` and mention the series only in its
 	annotation (measured: ~70 "Mark Stone" books, most under other authors'
-	folders, several with the name ONLY in the description).
+	folders, several with the name ONLY in the description). ALL series
+	entries are appended too: the entry half of the haystack carries only
+	the FIRST series (``_build_current`` flat pair), so without this the
+	second series of a multi-series book would be unsearchable.
 	"""
 	parts = [meta.description, meta.publisher, meta.subtitle]
 	parts.extend(meta.tags or [])
+	for item in meta.series or []:
+		name, idx = series_entry_pair(item)
+		if name:
+			parts.append(name)
+			if idx:
+				parts.append(idx)
 	return " ".join(str(x) for x in parts if x).lower()
 
 
