@@ -235,6 +235,30 @@ class TestLanguageAndDescriptionProposal:
 		# The year still is (guards against an empty-proposed shortcut).
 		assert proposed["year"] == 2001
 
+	def test_639_2_language_canonicalized_before_compare(self):
+		"""The LLM prompt used to request ISO 639-2 ("ces") and the enrichment
+		cache still holds those rows — the value is canonicalized BEFORE the
+		difference check, so a 639-2 answer on a canonical book proposes
+		nothing instead of re-introducing the variant C20 just normalized."""
+		meta = _meta(1)
+		meta.language = "cs"
+		enr = EnrichedMeta(language="ces", source="llm:high")
+		assert _build_proposed(meta, None, enr, _diag()) is None
+
+	def test_639_2_language_proposed_in_canonical_form(self):
+		meta = _meta(1)
+		meta.language = "ces"
+		enr = EnrichedMeta(language="ces", source="databazeknih")
+		proposed = _build_proposed(meta, None, enr, _diag())
+		assert proposed["language"] == "cs"
+
+	def test_unknown_language_passed_through_untouched(self):
+		# An unrecognized value still proposes (the human reviews it) —
+		# canonicalization must not silently drop enricher data.
+		enr = EnrichedMeta(language="čeština", source="databazeknih")
+		proposed = _build_proposed(_meta(1), None, enr, _diag())
+		assert proposed["language"] == "čeština"
+
 	def test_description_from_real_source(self):
 		enr = EnrichedMeta(description="Anotace knihy.", source="databazeknih")
 		proposed = _build_proposed(_meta(1), None, enr, _diag())

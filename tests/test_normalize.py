@@ -547,6 +547,77 @@ class TestAnalyzeLibrary:
 		assert [c.canonical for c in res.genre_clusters] == ["Ábie", "žába"]
 
 
+class TestLanguageCanonicalization:
+	def test_three_letter_families_map_to_two_letter(self):
+		# ISO 639-2/B (cze, slk, fre), 639-2/T ≈ 639-3 (ces, slo, fra) and
+		# the junk spellings (cz = country code, csy = legacy Windows locale)
+		# all land on the BCP 47 two-letter form (the EPUB dc:language norm).
+		assert canonical_language("ces") == "cs"
+		assert canonical_language("cze") == "cs"
+		assert canonical_language("cz") == "cs"
+		assert canonical_language("slk") == "sk"
+		assert canonical_language("slo") == "sk"
+		assert canonical_language("fre") == "fr"
+		assert canonical_language("fra") == "fr"
+		assert canonical_language("eng") == "en"
+
+	def test_case_and_region_suffix_reduce_to_primary(self):
+		assert canonical_language("CS") == "cs"
+		assert canonical_language("cs-CZ") == "cs"
+		assert canonical_language("cs_CZ") == "cs"
+		assert canonical_language(" ces ") == "cs"
+
+	def test_already_canonical_unchanged(self):
+		assert canonical_language("cs") == "cs"
+		assert canonical_language("sk") == "sk"
+		assert canonical_language("en") == "en"
+		assert canonical_language("en-GB") == "en"
+
+	def test_unknown_returned_untouched(self):
+		# The curated table is the only proof — unrecognized values are
+		# reported (unknown_languages), never rewritten.
+		assert canonical_language("čeština") == "čeština"
+		assert canonical_language("klingon") == "klingon"
+
+	def test_none_and_empty_pass_through(self):
+		assert canonical_language(None) is None
+		assert canonical_language("") == ""
+
+
+class TestAnalyzeLanguage:
+	def _books(self):
+		return [
+			BookMeta(uuid="l1", path="/l1", title="A", authors=["X"], language="ces"),
+			BookMeta(uuid="l2", path="/l2", title="B", authors=["X"], language="cs"),
+			BookMeta(uuid="l3", path="/l3", title="C", authors=["X"], language="čeština"),
+			BookMeta(uuid="l4", path="/l4", title="D", authors=["X"], language=None),
+		]
+
+	def test_proposes_two_letter_form(self):
+		res = analyze_library(self._books(), fields=("language",))
+		p = next(p for p in res.proposals if p.uuid == "l1")
+		assert p.language == "cs"
+		assert p.categories == ["C20"] and p.high_confidence is True
+		assert p.language_reasons == ["language 'ces' → 'cs' (ISO 639-1 / BCP 47)"]
+
+	def test_canonical_unknown_and_missing_get_no_proposal(self):
+		res = analyze_library(self._books(), fields=("language",))
+		assert all(p.uuid not in {"l2", "l3", "l4"} for p in res.proposals)
+		assert res.unknown_languages == [("čeština", 1)]
+
+	def test_cluster_table_and_apply_roundtrip(self):
+		res = analyze_library(self._books(), fields=("language",))
+		assert [(c.canonical, c.variants) for c in res.language_clusters] == [("cs", [("ces", 1)])]
+		meta = BookMeta(title="A", authors=["X"], language="ces")
+		_apply_fields(meta, {"language": "cs"})
+		assert meta.language == "cs"
+
+	def test_language_in_default_fields(self):
+		# A plain analyze_library() run (no fields kwarg) includes the tier.
+		res = analyze_library(self._books())
+		assert res.language_clusters and any(p.uuid == "l1" for p in res.proposals)
+
+
 class TestApplyTags:
 	def test_tags_list_replaces(self):
 		meta = BookMeta(authors=["A"], title="T", tags=["sci-fi", "Science Fiction"])
@@ -793,3 +864,51 @@ action: null
 		assert items[0].proposed["isbn"] == "80-01-00000-0"  # other proposal keys kept
 		assert items[0].proposed["series"] == "Zaklínač"  # series overlaid
 		assert "C18" in [d["category"] for d in items[0].diagnoses]
+
+	def test_language_c20_entry(self, tmp_path):
+		"""C20: a curated-table mapping is deterministic HIGH — the fresh entry
+		pre-fills accept and carries the raw spelling in `current`."""
+		from book_meta_fix.normalize import BookProposal
+		from book_meta_fix.review import merge_normalizations, parse_review
+
+		p = self._review_file(tmp_path, "# empty\n")
+		prop = BookProposal(uuid="u1", path="/lib/A", calibre_id=7, language="cs",
+			language_reasons=["language 'ces' → 'cs' (ISO 639-1 / BCP 47)"],
+			high_confidence=True)
+		books = [BookMeta(uuid="u1", calibre_id=7, path="/lib/A", authors=["A"], title="X", language="ces")]
+		summary = merge_normalizations(p, [prop], books, library_root=None)
+		assert summary["added"] == 1
+		items = parse_review(p)
+		assert items[0].action == "accept" and items[0].proposed["language"] == "cs"
+		assert items[0].diagnosis["category"] == "C20"
+		assert items[0].current["language"] == "ces"
+
+	def test_language_overlaid_onto_pending_entry(self, tmp_path):
+		from book_meta_fix.normalize import BookProposal
+		from book_meta_fix.review import merge_normalizations, parse_review
+
+		p = self._review_file(tmp_path, """---
+id: 1
+uuid: u1
+path: A/X (1)
+diagnosis:
+  category: MISSING_ISBN
+  reason: isbn missing
+  confidence: HIGH
+current:
+  author: A
+  title: X
+proposed:
+  isbn: "80-01-00000-0"
+action: null
+""")
+		prop = BookProposal(uuid="u1", path="/lib/A", calibre_id=1, language="sk",
+			language_reasons=["language 'slk' → 'sk' (ISO 639-1 / BCP 47)"],
+			high_confidence=True)
+		books = [BookMeta(uuid="u1", calibre_id=1, path="/lib/A", authors=["A"], title="X", language="slk")]
+		summary = merge_normalizations(p, [prop], books)
+		assert summary["updated"] == 1
+		items = parse_review(p)
+		assert items[0].proposed["isbn"] == "80-01-00000-0"  # other proposal keys kept
+		assert items[0].proposed["language"] == "sk"  # language overlaid
+		assert "C20" in [d["category"] for d in items[0].diagnoses]
