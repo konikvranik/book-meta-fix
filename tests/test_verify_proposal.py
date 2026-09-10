@@ -3,7 +3,14 @@ book's actual page text (title + author fuzzy match, ISBN exact match)."""
 from __future__ import annotations
 
 from book_meta_fix.extractors import ExtractedMeta
-from book_meta_fix.verifier import _author_in_text, _isbn_in_content, confirm_identity, identity_agrees, verify_proposal
+from book_meta_fix.verifier import (
+	_author_in_text,
+	_author_variant_in_text,
+	_isbn_in_content,
+	confirm_identity,
+	identity_agrees,
+	verify_proposal,
+)
 
 
 class _Proposal:
@@ -32,6 +39,113 @@ class TestAuthorInText:
 
 	def test_missing_author_low_score(self):
 		assert _author_in_text("Karel May", _TEXT) < 0.5
+
+
+class TestAuthorFormatVariants:
+	"""The printed credit is the same author in a different format.
+
+	Variant classes measured on the real library (see the survey comment in
+	verifier.py): initials, dropped middle names/initials, inflected or
+	transliterated surnames, a co-author joined by a connective. The FIRST
+	given name stays mandatory — that is the homonym guard."""
+
+	# --- positive: format variants of the same author ---
+
+	def test_initial_for_given_name(self):
+		# Real title page: 'A. Buškov' credits 'Alexandr Buškov'.
+		text = "Neznámý A. Buškov - Rytířka Natal Kilometrovník první"
+		assert _author_in_text("Alexandr Buškov", text) >= 0.8
+
+	def test_bare_initial_without_dot_next_to_surname(self):
+		# Some e-book credits lose the dots; the bare 'A' counts only
+		# directly beside the surname (adjacency is the evidence it is a
+		# name-forming initial, not a preposition).
+		assert _author_in_text("Alexandr Buškov", "A Buškov: Rytířka Natal") >= 0.8
+
+	def test_glued_initials_one_token(self):
+		# Real credit shape: 'G.J.Arnaud' — dots survive but glue the name
+		# into one whitespace token.
+		text = "Neznámý G.J.Arnaud 16. Ledová společnost Lien Rag se probudil"
+		assert _author_in_text("Gérard-J. Arnaud", text) >= 0.8
+		assert _author_in_text("G. J. Arnaud", text) >= 0.8
+
+	def test_dropped_middle_name(self):
+		text = "Neznámý Brian Aldiss Starý stý Prašná cesta se svažovala"
+		assert _author_in_text("Brian Wilson Aldiss", text) >= 0.8
+
+	def test_dropped_middle_initials(self):
+		text = "Neznámý Avram Davidson I. Draka vyplašili v belroských lesích"
+		assert _author_in_text("Avram J. A. Davidson", text) >= 0.8
+
+	def test_metadata_initials_text_full_names(self):
+		text = "Phyllis Dorothy James Ponurá stará vila na okraji Cornwallu"
+		assert _author_in_text("P. D. James", text) >= 0.8
+
+	def test_inflected_surname_czech(self):
+		# Genitive credit: 'od A. Buškova'.
+		text = "román od A. Buškova, přeložila Marie Kovalová"
+		assert _author_in_text("Alexandr Buškov", text) >= 0.8
+
+	def test_coauthor_with_connective(self):
+		# authors[0] credit inside 'Arkadij a Boris Strugačtí'.
+		text = "Neznámý Arkadij a Boris Strugačtí - Nepokoj (Bespokojstvo)"
+		assert _author_in_text("Arkadij Strugackij", text) >= 0.8
+
+	def test_transliterated_surname(self):
+		# 'Andersen' typo in an e-book credit vs 'Anderson' in metadata.
+		text = "Neznámý Poul Andersen Formace malých úderných lodí"
+		assert _author_in_text("Poul Anderson", text) >= 0.8
+
+	def test_comma_form_reversed_credit(self):
+		assert _author_in_text("Egon Bondy", "BONDY, EGON 3x Egon Bondy") >= 0.8
+
+	# --- negative: prose mentions and homonyms must NOT confirm ---
+	# The gate everywhere is fuzzy_strong = 0.8, so negatives assert < 0.8
+	# (the legacy fuzzy fallback stays lenient around 0.5-0.7 on shared
+	# surnames — that is pre-existing and below every gate).
+
+	def test_surname_mention_without_given_name(self):
+		# Real false positive: 'Poe' mentioned inside a Feist novel.
+		text = "Trůn v městě podivném, Poe, Město v moři, Neznámý"
+		assert _author_in_text("Edgar Allan Poe", text) < 0.8
+
+	def test_surname_in_url(self):
+		# Real false positive: 'kosek.cz' in an XML handbook.
+		text = "více na http www kosek cz clanky cw sgml"
+		assert _author_in_text("Jiří Kosek", text) < 0.8
+
+	def test_homonym_same_surname_different_author(self):
+		# The first given name is mandatory — no in-position skipping.
+		text = "Kevin J. Anderson Formace malých úderných lodí"
+		assert _author_in_text("Poul Anderson", text) < 0.8
+
+	def test_homonym_reverse_direction(self):
+		text = "Poul Anderson Formace malých úderných lodí"
+		assert _author_in_text("Kevin J. Anderson", text) < 0.8
+
+	def test_homonym_capbrothers(self):
+		text = "Josef Čapek Ze života hmyzu"
+		assert _author_in_text("Karel Čapek", text) < 0.8
+
+	def test_wrong_initial_does_not_confirm(self):
+		assert _author_in_text("Alexandr Buškov", "J. Buškov - úplně jiná kniha") < 0.8
+
+	def test_preposition_posing_as_initial(self):
+		# Real false positive: the Baxter dedication mentions the SON
+		# ('Jamesi Baxterovi'), and a nearby Czech preposition 's' must not
+		# pose as the initial of 'Stephen'.
+		text = "Mému synovci Jamesi Baxterovi, když se s ní uvidíme zas"
+		assert _author_in_text("Stephen Baxter", text) < 0.8
+
+	def test_inflected_given_name_is_not_a_variant(self):
+		# 'Jamesi' (a different person, the son) must not match 'James' in
+		# the structural matcher. (The legacy fuzzy fallback alone still
+		# scores this ~0.9 — pre-existing leniency, kept because the joint
+		# title+author gate and the upstream identity gates bear the risk.)
+		from book_meta_fix.verifier import _normalize
+
+		text = "Mému synovci Jamesi Baxterovi věnoval"
+		assert _author_variant_in_text(_normalize("James Baxter"), _normalize(text)) is False
 
 
 class TestVerifyProposal:
@@ -173,6 +287,19 @@ class TestBroaderSearch:
 		ext = ExtractedMeta(first_page_text="úplně jiný text", broader_text=_COPYRIGHT_PAGE)
 		prop = _Proposal("Jiný titul", ["Jiný Autor"], isbn="9788072072323")
 		# ISBN confirmed in broader → verify passes, identity confirmed.
+		assert verify_proposal(prop, ext)[0] is True
+		assert confirm_identity(prop, ext) is True
+
+	def test_prefix_aligned_broader_reaches_past_search_cap(self):
+		"""Real extractor output is prefix-aligned: broader_text starts where
+		first_page_text starts, so its only ADDED evidence sits past the
+		4000-char search cap. A capped window search just re-sees page 1 and
+		finds nothing new — the copyright page a few pages in needs the whole
+		window."""
+		pad = "Obyčejný text úplně jiné kapitoly románu. " * 150  # ~6k chars
+		broader = pad + _COPYRIGHT_PAGE
+		ext = ExtractedMeta(first_page_text=broader[:5000], broader_text=broader)
+		prop = _Proposal("Zastavený příval", ["Eduard Štorch"])
 		assert verify_proposal(prop, ext)[0] is True
 		assert confirm_identity(prop, ext) is True
 

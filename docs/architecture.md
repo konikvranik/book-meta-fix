@@ -5,7 +5,8 @@
 This document describes how `book-meta-fix` (`bmf`) is structured internally:
 the module map, the data flow for a single book, the concurrency model, and
 the key design decisions. For *what* the corruption categories mean see
-[concepts.md](concepts.md); for *how to run things* see
+[concepts.md](concepts.md); for the same flows as UML diagrams (Mermaid)
+see [diagrams.md](diagrams.md); for *how to run things* see
 [how-to/index.md](how-to/index.md); for the command reference see the [README](../README.md).
 
 ## Goal

@@ -18,7 +18,12 @@ ze **skutečného textu knihy**:
 
 1. **ISBN naskenované z textu obsahu** (copyrightová strana) — nejsilnější.
 2. **Fuzzy shoda názvu/autora s textem první strany** (rapidfuzz,
-   necitlivé na diakritiku).
+   necitlivé na diakritiku). Shoda autora pozná též téhož autora
+   v jiném vytištěném formátu — iniciály křestních jmen („A. Buškov"
+   za „Alexandr Buškov"), vypuštěná prostřední jména, skloňovaná či
+   přepsaná příjmení („Strugačtí" za „Strugackij") — první křestní
+   jméno ale zůstává povinné, takže příjmení zmíněné v textu nebo
+   stejnopříjmenčí homonym nikdy nepotvrdí záznam.
 3. **UNCERTAIN**, pokud jsou k dispozici jen vložená metadata (žádný
    čitelný text).
 
@@ -188,7 +193,7 @@ přicházejí.
 | `accept` | aplikuje `proposed` (hodnoty upravte, čímž přebijete analyzátor; hodnota `null` dané pole smaže) |
 | `delete` | odstraní složku knihy (zámek Wordu `~$` z C6; zálohováno do tar.gz) |
 | `keep` | jako `accept`, ale záznam se v review.yaml zachová (neodstraní se) |
-| `verified: true` | trvalá značka uživatele „OK": apply ji uloží do metadata.json, analyze knihu pak přeskočí a apply ji umístí na cílovou cestu. Analyze ji předvyplní, když vlastní návrh knihu doplní, nebo — u akceptovaného záznamu — když je FINÁLNÍ identita potvrzena proti obsahu A nezávislým záznamem: online zdrojem, odpovědí `llm:high` s potvrzenou identitou, jejíž autor/série prošel existenciální kontrolou, nebo samotnou content tierí (stamp accepted-missing / fix z text_meta — titul+autor vázané k textu vlastních stránek knihy; vložené OPF se nikdy nepočítá). Ta poslední tier zavírá knihy, které žádný zdroj nezná, místo aby je každý běh znovu extrahoval; verified kniha bez obálky se už enricherů nedotazuje (znovu otevře `--recheck-ok`). Flash tier a nepotvrzené odpovědi se nepočítají; benigní chybějící pole (MISSING_*) zůstat smí (a i C2 s titulem shodným s názvem souboru knihy — po potvrzení identity šum, ne korupce), zbylý NEEDS_REVIEW to blokuje |
+| `verified: true` | trvalá značka uživatele „OK": apply ji uloží do metadata.json, analyze knihu pak přeskočí a apply ji umístí na cílovou cestu. Analyze ji předvyplní, když vlastní návrh knihu doplní (projektovaný stav po apply je detektorově čistý), `bmf normalize` ji předvyplní u nového deterministického záznamu (HIGH), jehož projekce je rovněž čistá — zbylé chybějící pole knihu drží otevřenou — nebo — u akceptovaného záznamu — když je FINÁLNÍ identita potvrzena proti obsahu A nezávislým záznamem: online zdrojem, odpovědí `llm:high` s potvrzenou identitou, jejíž autor/série prošel existenciální kontrolou, nebo samotnou content tierí (stamp accepted-missing / fix z text_meta — titul+autor vázané k textu vlastních stránek knihy; vložené OPF se nikdy nepočítá), nebo pool autorů (obsah neměl proti čemu potvrzovat — skenované PDF, chybějící titulní strana — ale autor je etablovaný autor knihovny s ≥3 knihami a titul není jméno autora ani název série; dokazuje autora, ne titul — odsouhlasený trade, znovu otevíratelné přes `--recheck-ok`). Content tier zavírá knihy, které žádný zdroj nezná, místo aby je každý běh znovu extrahoval; verified kniha bez obálky se už enricherů nedotazuje (znovu otevře `--recheck-ok`). Flash tier a nepotvrzené odpovědi se nepočítají; benigní chybějící pole (MISSING_*) zůstat smí (a i C2 s titulem shodným s názvem souboru knihy — po potvrzení identity šum, ne korupce), zbylý NEEDS_REVIEW to blokuje |
 
 Na začátku se existující `review.yaml` přesune na `review.yaml.bak`
 (předchozí rozhodnutí se zachovají); při čistém dokončení se `.bak` smaže;

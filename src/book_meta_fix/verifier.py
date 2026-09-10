@@ -163,12 +163,15 @@ def _compare_embedded(meta: BookMeta, ext: ExtractedMeta, fuzzy_strong: float) -
 	return match, avg, "; ".join(reasons)
 
 
-def _title_in_text(title: str, text: str, window: int = 4000) -> float:
+def _title_in_text(title: str, text: str, window: int | None = 4000) -> float:
 	"""Check whether *title* appears (fuzzily) within the first *window* chars of *text*.
 
 	Returns the best fuzzy ratio found when sliding the title over the text.
 	Uses partial_ratio which is well-suited for finding a short query string
-	inside a longer text.
+	inside a longer text. ``window=None`` searches the WHOLE text — reserved
+	for the broader content window, whose extra depth past the default cap
+	is exactly the copyright/title-page material the deep-penalty logic
+	below was built to judge.
 
 	Positional penalty: titles appear at the TOP of a title page. If a match
 	is found ONLY deep in the text (past the first _TITLE_EARLY_WINDOW chars),
@@ -180,7 +183,7 @@ def _title_in_text(title: str, text: str, window: int = 4000) -> float:
 	1.0 regardless of depth — verbatim presence is trusted unconditionally.
 	"""
 	title_norm = _normalize(title)
-	text_norm = _normalize(text[:window])
+	text_norm = _normalize(text if window is None else text[:window])
 	if not title_norm or not text_norm:
 		return 0.0
 
@@ -203,19 +206,29 @@ def _title_in_text(title: str, text: str, window: int = 4000) -> float:
 	return full_score * _TITLE_DEEP_PENALTY
 
 
-def _author_in_text(author: str, text: str, window: int = 4000) -> float:
-	"""Check whether *author* appears (fuzzily) within the first *window* chars.
+def _author_in_text(author: str, text: str, window: int | None = 4000) -> float:
+	"""Check whether *author* appears (fuzzily) within the first *window* chars of *text*.
 
 	Same technique as _title_in_text: partial_ratio of the normalised author
 	against the normalised text. On CZ/SK title pages the author name usually
 	appears verbatim (often in ALL-CAPS); the normalisation folds case and
-	diacritics so 'BOŽENA NĚMCOVÁ' matches 'Božena Němcová'.
+	diacritics so 'BOŽENA NĚMCOVÁ' matches 'Božena Němcová'. ``window=None``
+	searches the whole text (see _title_in_text — the broader window's depth).
+
+	Before the fuzzy pass, the structural variant matcher
+	(_author_variant_in_text) recognises the SAME author under a different
+	printed format — initials for given names, dropped middle names, inflected
+	or transliterated surnames — which plain partial_ratio scores below 0.8
+	(measured: "A. Buškov" vs "Alexandr Buškov", "Brian Aldiss" vs "Brian
+	Wilson Aldiss", "Strugačtí" vs "Strugackij").
 	"""
 	author_norm = _normalize(author)
-	text_norm = _normalize(text[:window])
+	text_norm = _normalize(text if window is None else text[:window])
 	if not author_norm or not text_norm:
 		return 0.0
 	if author_norm in text_norm:
+		return 1.0
+	if _author_variant_in_text(author_norm, text_norm):
 		return 1.0
 	# For short author names token_sort_ratio is slightly more tolerant of
 	# reordered name parts (e.g. "May Karel" vs "Karel May"), but we still
@@ -224,6 +237,157 @@ def _author_in_text(author: str, text: str, window: int = 4000) -> float:
 		fuzz.partial_ratio(author_norm, text_norm),
 		fuzz.token_sort_ratio(author_norm, text_norm[: len(author_norm) * 4 + 40]),
 	) / 100.0
+
+
+# --- Author-name format variants ---------------------------------------------
+#
+# The printed author credit in a book's text is the same person as the
+# canonical metadata form, only formatted differently. Measured classes in
+# the real library (accept-missing books whose identity would not confirm):
+#
+#   initials for given names   "A. Buškov"        vs "Alexandr Buškov"
+#   dropped middle names       "Brian Aldiss"     vs "Brian Wilson Aldiss"
+#   dropped middle initials    "Avram Davidson"   vs "Avram J. A. Davidson"
+#   inflected surname (CZ)     "Baxterovi"        vs "Baxter"   (+ová/+ovi/+a…)
+#   transliteration/typo       "Strugačtí"/"Andersen" vs "Strugackij"/"Anderson"
+#   co-author with connective  "Arkadij a Boris Strugačtí" vs authors[0]
+#
+# The structural rules stay strict where it matters (survey-verified false
+# positives): the FIRST given name must align (initial or full) — otherwise a
+# surname mentioned in prose confirms anything ("Poe" inside a Feist novel,
+# "kosek.cz" in a URL, the homonym Karel vs Josef Čapek), and a bare
+# single-letter token counts as an initial only with its dot or right next to
+# the surname — Czech prepositions ("s", "v", "u"…) otherwise pose as
+# initials (measured: "…dura se s" near "Jamesi Baxterovi" fake-matched
+# "Stephen").
+
+# Single letters that are Czech/English function words, never initials.
+_NOT_AN_INITIAL = frozenset("aioskvuz")
+
+# Trailing/leading punctuation stripped from a text token before comparing.
+_NAME_PUNCT = ".,;:!?()[]{}„\"«»—–-…*"
+
+
+def _name_tokens(author_norm: str) -> tuple[list[str], str]:
+	"""Split a folded author name into (given-name tokens, surname).
+
+	Library convention is "Given Surname"; the comma form ("Bondy, Egon")
+	carries the surname first. Middle names/initials are given-name tokens
+	too — the alignment decides whether they were printed.
+	"""
+	if "," in author_norm:
+		head, _, tail = author_norm.partition(",")
+		givens = [t.strip(_NAME_PUNCT) for t in tail.split()]
+		head_toks = [t.strip(_NAME_PUNCT) for t in head.split()]
+		return [t for t in givens if t], (head_toks[-1] if head_toks else "")
+	toks = [t.strip(_NAME_PUNCT) for t in author_norm.split()]
+	toks = [t for t in toks if t]
+	return toks[:-1], (toks[-1] if toks else "")
+
+
+def _surname_hit(tok: str, surname: str) -> bool:
+	"""Can text token *tok* stand for the metadata *surname*?
+
+	Accepts the exact folded form, a Czech inflection suffix (Baxter →
+	Baxterovi, Christie → Christieové) and — for reasonably long surnames
+	only — a transliteration/typo variant (Strugačtí vs Strugackij and
+	Andersen vs Anderson both measure ≥ 84). Short surnames skip the fuzzy
+	tier: "Poe"→"poemu" scores 75, and a mentioned short surname is prose,
+	not an author credit.
+	"""
+	if not tok or not surname:
+		return False
+	if tok == surname:
+		return True
+	if len(tok) > len(surname) and tok.startswith(surname) and len(tok) - len(surname) <= 4:
+		return True
+	if len(surname) >= 6 and tok[:1] == surname[:1] and fuzz.ratio(tok, surname) >= 74:
+		return True
+	return False
+
+
+def _given_hit(tok: str, given: str, *, dotted: bool, adjacent: bool) -> bool:
+	"""Can text token *tok* stand for the metadata *given* token?
+
+	Exact, or an initial standing for the full token in either direction
+	(metadata "A." vs text "Alexandr", metadata "P. D." vs text "Phyllis
+	Dorothy"). A bare single letter (no dot) counts only directly beside the
+	surname — elsewhere it is usually a preposition. Given names are NOT
+	fuzzy- or inflection-matched: the homonym guard lives exactly here
+	("Kevin" must never match "Poul"), and a Czech-inflected given in a
+	dedication ("Jamesi" for "James") is a different person, not a format
+	variant (measured: "mému synovci Jamesi Baxterovi" in a Stephen Baxter
+	book).
+	"""
+	if not tok or not given:
+		return False
+	if tok == given:
+		return True
+	if len(given) == 1:
+		# Metadata carries the initial, text the full name.
+		return len(tok) >= 3 and tok[0] == given
+	if len(tok) == 1 and tok == given[0]:
+		return dotted or adjacent
+	return False
+
+
+def _author_variant_in_text(author_norm: str, text_norm: str) -> bool:
+	"""Is the author credited in *text_norm* the same person, another format?
+
+	Structural match: some token passes _surname_hit for the author's
+	surname, and the given-name tokens align in order over the ±4 tokens
+	around it. Returns a plain bool — the caller scores it 1.0 (the printed
+	form of the same author is the author).
+	"""
+	givens, surname = _name_tokens(author_norm)
+	if not surname or not givens:
+		# A surname-only author gets no structural credit: a lone surname hit
+		# is indistinguishable from a prose mention.
+		return False
+	tokens = []
+	for raw in text_norm.split():
+		# Split on '.' too: glued initials ("G.J.Arnaud") are one whitespace
+		# token. A piece counts as dotted when a dot actually follows it
+		# inside the raw token — a standalone "s" stays undotted (preposition,
+		# never an initial).
+		pieces = raw.split(".")
+		for idx, piece in enumerate(pieces):
+			core = piece.strip(_NAME_PUNCT)
+			if not core:
+				continue
+			dotted = idx < len(pieces) - 1 or raw.endswith(".")
+			tokens.append((core, dotted))
+	n = len(tokens)
+	for i, (core, _dot) in enumerate(tokens):
+		if not _surname_hit(core, surname):
+			continue
+		lo = max(0, i - 4)
+		ctx = []
+		for k in list(range(lo, i)) + list(range(i + 1, min(n, i + 5))):
+			c, d = tokens[k]
+			ctx.append((c, d, k in (i - 1, i + 1)))
+		# In-order alignment: every given token may claim a distinct context
+		# token (or be skipped — a middle name the print dropped, or an extra
+		# text token: a co-author, a dedication). The FIRST given token is
+		# mandatory — skipping it would let any same-surname author confirm.
+		pos = 0
+		first_aligned = False
+		for gi, given in enumerate(givens):
+			found = -1
+			for j in range(pos, len(ctx)):
+				c, d, adj = ctx[j]
+				if _given_hit(c, given, dotted=d, adjacent=adj):
+					found = j
+					break
+			if found >= 0:
+				pos = found + 1
+				if gi == 0:
+					first_aligned = True
+			elif gi == 0:
+				break
+		if first_aligned:
+			return True
+	return False
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +447,7 @@ def _title_only_confirms(title: str | None, windows: list[str], title_strong: fl
 	"""
 	if not title or len(_normalize(title)) < _TITLE_ONLY_MIN_LEN:
 		return False
-	return max((_title_in_text(title, t) for t in windows), default=0.0) >= title_strong
+	return max((_title_in_text(title, t, window=None) for t in windows), default=0.0) >= title_strong
 
 
 def _isbn_in_content(isbn: str, extracted: ExtractedMeta) -> bool:
@@ -309,13 +473,24 @@ def _isbn_in_content(isbn: str, extracted: ExtractedMeta) -> bool:
 	return False
 
 
-def identity_in_text(title: str, author: str | None, text: str | None, *, fuzzy_strong: float = 0.8) -> bool:
-	"""Do *title* and *author* both appear (fuzzily) in the book's page text?"""
+def identity_in_text(
+	title: str,
+	author: str | None,
+	text: str | None,
+	*,
+	fuzzy_strong: float = 0.8,
+	window: int | None = 4000,
+) -> bool:
+	"""Do *title* and *author* both appear (fuzzily) in the book's page text?
+
+	*window* is the per-text search extent (None = whole text); see
+	_title_in_text for why the broader window passes None.
+	"""
 	if not text or not title:
 		return False
-	if _title_in_text(title, text) < fuzzy_strong:
+	if _title_in_text(title, text, window) < fuzzy_strong:
 		return False
-	if author and _author_in_text(author, text) < fuzzy_strong:
+	if author and _author_in_text(author, text, window) < fuzzy_strong:
 		return False
 	return True
 
@@ -345,9 +520,11 @@ def confirm_identity(proposal, extracted, *, fuzzy_strong: float = 0.8, title_st
 		return False
 	authors = getattr(proposal, "authors", None) or []
 	author = authors[0] if authors else None
-	# Signal 2: title + author both in a content window.
+	# Signal 2: title + author both in a content window. window=None: the
+	# broader window is prefix-aligned with the first page, so a capped search
+	# would only ever re-see page 1 — its whole value is the depth past the cap.
 	for text in windows:
-		if identity_in_text(title, author, text, fuzzy_strong=fuzzy_strong):
+		if identity_in_text(title, author, text, fuzzy_strong=fuzzy_strong, window=None):
 			return True
 	# Signal 3: title alone, strongly (author genuinely absent from body text).
 	if _title_only_confirms(title, windows, title_strong):
@@ -432,10 +609,13 @@ def verify_proposal(proposal, extracted, *, fuzzy_strong: float = 0.8, title_str
 			return False, f"proposed ISBN {proposal_isbn} differs from the ISBN scanned from the book's text ({text_isbn}); the proposal is for a different book."
 
 	# Best fuzzy score per field across EVERY content window (first-page then
-	# broader). Searching only page 1 was the #1 reason correct proposals got
-	# tagged 'low' — a title/author on the title/copyright page counts too.
-	title_score = max((_title_in_text(title, t) for t in windows), default=0.0) if title else 0.0
-	best_author = max((_author_in_text(a, t) for a in authors if a for t in windows), default=0.0) if authors else 0.0
+	# broader), whole-window: the broader window is prefix-aligned with the
+	# first page, so only the depth past the old 4000-char cap is new evidence
+	# — a title/author on the title/copyright page counts too (that was the
+	# point of adding it; searching page 1 was the #1 reason correct proposals
+	# got tagged 'low'). The deep penalty keeps deep-only title hits honest.
+	title_score = max((_title_in_text(title, t, window=None) for t in windows), default=0.0) if title else 0.0
+	best_author = max((_author_in_text(a, t, window=None) for a in authors if a for t in windows), default=0.0) if authors else 0.0
 
 	title_ok = title_score >= fuzzy_strong
 	author_ok = best_author >= fuzzy_strong
@@ -587,6 +767,12 @@ def acquire_identity(meta: BookMeta, extracted: ExtractedMeta | None) -> Identit
 	  3. metadata title+author — confirmed present in the page text.
 	  4. offline extractor (text_meta) title+author — mined from the page text.
 
+	Steps 3-4 search EVERY content window whole-text (first page + broader):
+	the broader window is prefix-aligned with the first page, so its only
+	added evidence sits past the 4000-char search cap — exactly the
+	title/copyright-page material acquire_identity used to miss while
+	confirm_identity already accepted it (the two gates must not disagree).
+
 	Returns None when no identity can be confirmed against content (→ LLM).
 
 	Note: per the agreed identification policy, an author+title confirmed
@@ -598,7 +784,6 @@ def acquire_identity(meta: BookMeta, extracted: ExtractedMeta | None) -> Identit
 		return None
 
 	content_isbn = extracted.isbn_from_text or extracted.isbn
-	text = extracted.first_page_text
 
 	# 1. Content-ISBN (strongest, content-grounded).
 	if content_isbn:
@@ -608,14 +793,20 @@ def acquire_identity(meta: BookMeta, extracted: ExtractedMeta | None) -> Identit
 	if meta.isbn and _isbn_in_content(meta.isbn, extracted):
 		return IdentityResult(isbn=meta.isbn, source="metadata")
 
+	windows = _content_windows(extracted)
+
 	# 3. Metadata title+author, verified against content.
-	if meta.title and meta.authors and identity_in_text(meta.title, meta.authors[0], text):
-		return IdentityResult(title=meta.title, authors=list(meta.authors), year=meta.year, source="metadata")
+	if meta.title and meta.authors:
+		for text in windows:
+			if identity_in_text(meta.title, meta.authors[0], text, window=None):
+				return IdentityResult(title=meta.title, authors=list(meta.authors), year=meta.year, source="metadata")
 
 	# 4. Offline extractor (text_meta) — content-grounded.
 	ext_title = extracted.title_from_text
 	ext_authors = extracted.authors_from_text or []
-	if ext_title and ext_authors and identity_in_text(ext_title, ext_authors[0], text):
-		return IdentityResult(title=ext_title, authors=list(ext_authors), year=extracted.year_from_text, source="extractor")
+	if ext_title and ext_authors:
+		for text in windows:
+			if identity_in_text(ext_title, ext_authors[0], text, window=None):
+				return IdentityResult(title=ext_title, authors=list(ext_authors), year=extracted.year_from_text, source="extractor")
 
 	return None

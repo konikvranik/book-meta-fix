@@ -3,6 +3,7 @@
 Read this before editing. It captures the conventions, layout, and
 non-obvious gotchas that matter when changing this code. Companion docs:
 [docs/architecture.md](docs/architecture.md),
+[docs/diagrams.md](docs/diagrams.md),
 [docs/concepts.md](docs/concepts.md),
 [docs/how-to/index.md](docs/how-to/index.md),
 [README.md](README.md).
@@ -322,7 +323,13 @@ src/book_meta_fix/
                    genres/tags overlaid + the diagnoses appended, DECIDED
                    entries are skipped — never clobber a user decision — and
                    unknown books get fresh entries, accept pre-filled only
-                   when every change is deterministic/HIGH)
+                   when every change is deterministic/HIGH; a fresh accepted
+                   entry whose projected post-apply state is detector-clean —
+                   same projection as review_writer.projected_clean, hoisted
+                   module-level for this reuse — is ALSO born verified: true,
+                   so apply fixes AND closes it; a leftover MISSING_* keeps
+                   the book open on purpose, a spelling fix is not identity
+                   evidence and closing would cancel the enricher retries)
   writers.py       atomic metadata.json/.opf writers + ensure_uuid + clear_verified
   mover.py         move/merge engine used by apply's placement (organize fn kept for tests)
   epubgen.py       bmf epubgen
@@ -474,6 +481,21 @@ src/book_meta_fix/
   inside `content.opf`/PDF Info is *not* independent evidence. Only the book's
   actual text (ISBN scanned from content, fuzzy title on first-page text) can
   confirm a record. Don't "fix" the verifier to trust embedded OPF.
+  `_author_in_text` additionally runs a STRUCTURAL variant matcher
+  (`_author_variant_in_text`) before its fuzzy fallback: the printed credit is
+  often the same author in another format — initials for given names (incl.
+  glued "G.J.Arnaud"), dropped middle names/initials, inflected
+  (Baxter → Baxterovi) or transliterated (Strugačtí/Andersen vs
+  Strugackij/Anderson, fuzzy ≥ 74 with len ≥ 6) surnames, a co-author joined
+  by a connective. The FIRST given name is mandatory (initial or full, in
+  order) — that is the homonym guard (Karel vs Josef Čapek, Kevin J. vs Poul
+  Anderson; same rule as normalize's `_given_compat`); a bare single letter
+  counts as an initial only with its dot or directly beside the surname
+  (Czech prepositions "s"/"v"/"u" otherwise pose as initials); given names
+  are never fuzzy/inflection-matched (a Czech-inflected given in a dedication
+  is a different person — "Jamesi Baxterovi" in a Stephen Baxter book is the
+  son); a surname-only author gets no structural credit (a prose mention is
+  indistinguishable).
 - **Source of truth = `metadata.json`**, not `.opf`. Writers update *both*.
   Readers prefer `metadata.json`, fall back to `.opf`.
 - **Field coverage is end-to-end**: whatever the enrichers/LLM return must
@@ -515,7 +537,14 @@ src/book_meta_fix/
   (`acquire_identity`, `IdentityResult`, `safe_extract`, `has_usable_text`)
   live in `verifier.py`. Per the agreed identification policy, author+title
   confirmed against the content is sufficient; the year is never required
-  for identity.
+  for identity. The text gates (`acquire_identity` steps 3-4,
+  `confirm_identity`, `verify_proposal`) search every content window
+  WHOLE-text: `broader_text` is prefix-aligned with `first_page_text` (all
+  extractors build it as a longer prefix of the same stream), so the old
+  4000-char search cap made the broader window a no-op — a title page a few
+  pages in needs the depth, and the `_TITLE_DEEP_PENALTY` positional logic
+  is what keeps deep-only hits honest (deep non-verbatim titles max out at
+  0.80, exactly the fuzzy_strong boundary).
 - **Identity-confirmed MISSING_* books are auto-accepted** (`pipeline.py`
   `_process_book`, gated by `accept_missing_if_identified`, default on). When
   a `MISSING_ISBN`/`MISSING_YEAR`/`MISSING_COVER` book has its author+title
@@ -548,6 +577,18 @@ src/book_meta_fix/
   DISCARDED, not auto-applied; leaving it in place stranded acceptable-missing
   books in pending forever, measured: 72 MISSING_ISBN books with llm:low
   answers whose identity the content confirmed).
+  The stamp has a weaker second tier, `source="author-pool"`
+  (`_pool_confirms_author`): when `acquire_identity` found nothing in the
+  content (scanned PDF, no title page in the extract) but the author resolves
+  in the run's KnownAuthorPool with >= `_POOL_AUTHOR_MIN_BOOKS` (3) books and
+  the title is substantive (>= 10 folded chars, not a "Neznámý" shape) and is
+  neither a known author nor a known SERIES name (run_pipeline also builds a
+  folded `known_series` set beside the pool; the book's OWN series is exempt —
+  a first volume legitimately shares the series title), the same minimal stamp
+  fires. Weaker BY DESIGN — it proves the author field, not that the title
+  belongs to this book; the owner accepted the trade (reversible via
+  `--recheck-ok`). Counted in stats[`pool_verified`]. Metadata stays
+  untouched — canonicalising author spellings is C15/normalize's job.
 - **Placement lives in `apply`, not a separate command** (the former
   `bmf organize` is a deprecation stub). After writing an entry's metadata,
   `apply_review` routes the folder via `_placement_target` + `_place_applied_book`
@@ -581,7 +622,12 @@ src/book_meta_fix/
   re-detects — when the projected state is detector-clean (a proposed
   `cover_url` and C13 are credited), the entry is born `verified: true`, so
   a book the analyzer's proposal completes is fixed AND closed in one apply
-  and never re-enters review. The relaxed twin `_identity_verified` (same
+  and never re-enters review. `bmf normalize` pre-fills it too: a FRESH
+  deterministic (HIGH) entry whose projection through the same function
+  (hoisted module-level as `review_writer.projected_clean`) is detector-clean
+  is born verified — a leftover MISSING_* deliberately blocks it (a genre/
+  spelling fix is not identity evidence, and closing would cancel that
+  field's enricher retries). The relaxed twin `_identity_verified` (same
   place, runs only when the projection is NOT clean) closes an accepted
   entry whose FINAL identity is confirmed against the content AND an
   independent record: `enriched.identity_confirmed` with `source` in
@@ -595,7 +641,12 @@ src/book_meta_fix/
   known author even when no bibliographic DB knows the book — OR with
   `source == "content"` — the accept-missing stamp / a text_meta fix:
   `acquire_identity`/`confirm_identity` bound title+author to the book's
-  own PAGE TEXT (never the embedded OPF). Measured 2026-09-09: without the
+  own PAGE TEXT (never the embedded OPF) — OR with `source ==
+  "author-pool"` — the pool tier of the accept-missing stamp: content had
+  nothing to confirm against, but the author is an established library
+  author and the title guards passed (see the accept-missing bullet); the
+  weakest admitted tier, it proves the author field, not the title.
+  Measured 2026-09-09: without the
   content tier ~867 accepted-missing books re-entered EVERY analyze run
   (re-extracted over NFS just to re-confirm the identity and be
   re-accepted); with it the carry path closes them on the first re-analyze

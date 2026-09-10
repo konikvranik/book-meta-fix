@@ -30,10 +30,12 @@ from .detectors import detect as detect_fn
 from .enrichers import EnrichedMeta, Enricher
 from .extractors import ExtractedMeta
 from .library import DEFAULT_SCAN_WORKERS, Cache, scan_library
-from .models import BookMeta, Confidence, Diagnosis, Verdict
+from .models import BookMeta, Confidence, Diagnosis, Verdict, series_entry_pair
+from .normalize import _looks_like_neznamy
 from .review import _COVER_CATEGORIES, _migrate_entry, build_review, parse_review, prune_review, update_paths
 from .verifier import (
 	IdentityResult,
+	_normalize,
 	acquire_identity,
 	confirm_identity,
 	has_usable_text,
@@ -175,19 +177,16 @@ def run_pipeline(
 	)
 	if scanned_books is not None:
 		scanned_books.extend(all_books)
-	if skip_verified:
-		before = len(all_books)
-		all_books = [b for b in all_books if not b.verified]
-		if before != len(all_books):
-			log.info("pipeline: skipping %d verified book(s)", before - len(all_books))
-			if stats is not None:
-				stats.setdefault("skipped_verified", before - len(all_books))
 	# Library-wide known-author pool: powers C1's pool pattern (the TITLE
 	# field is a known library author — a question no per-book heuristic can
-	# answer) and the swap-repair tier in _process_book. Built once from the
-	# full scan with the same clustering `bmf normalize` uses; read-only
-	# afterwards, so the worker threads share it freely. A build failure must
-	# never kill the run — C1 simply stays library-blind.
+	# answer), the swap-repair tier and the pool tier of the accept-missing
+	# stamp in _process_book. Built once from the FULL scan (verified books
+	# INCLUDED — an author whose books are all closed is no less known; the
+	# skip_verified filter below must not thin the book counts the pool's
+	# established-author bar feeds on) with the same clustering `bmf
+	# normalize` uses; read-only afterwards, so the worker threads share it
+	# freely. A build failure must never kill the run — C1 simply stays
+	# library-blind.
 	known_authors: Any = None
 	try:
 		from .normalize import build_known_author_pool
@@ -195,6 +194,20 @@ def run_pipeline(
 		known_authors = build_known_author_pool(all_books)
 	except Exception:  # noqa: BLE001
 		log.debug("known-author pool build failed; C1 stays library-blind", exc_info=True)
+	# Library-wide series-name set (folded) — the pool-tier title guard in
+	# _pool_confirms_author: a title that equals a known series name is
+	# pollution (the real title lost), not a book title. Read-only after
+	# build, same sharing model as the author pool.
+	known_series: frozenset[str] = frozenset(
+		_normalize(series_entry_pair(b.series)[0]) for b in all_books
+	) - {""}
+	if skip_verified:
+		before = len(all_books)
+		all_books = [b for b in all_books if not b.verified]
+		if before != len(all_books):
+			log.info("pipeline: skipping %d verified book(s)", before - len(all_books))
+			if stats is not None:
+				stats.setdefault("skipped_verified", before - len(all_books))
 	# Location-aware detect (C13) when the caller opted in; pool-armed C1 when
 	# the pool was built; plain detect_fn otherwise so classify-critical
 	# behaviour is unchanged for other callers.
@@ -255,6 +268,8 @@ def run_pipeline(
 		"offline_content": 0, "offline_embedded": 0,
 		# Known-author swap repair (C1 pool pattern, sub-row of det_fixed).
 		"swap_fixed": 0,
+		# Pool-tier accept-missing closures (sub-row of accepted_missing).
+		"pool_verified": 0,
 		"total": total,
 	}
 	if stats is not None:
@@ -278,6 +293,7 @@ def run_pipeline(
 			accept_missing_if_identified=accept_missing_if_identified,
 			llm_skip_ids=llm_skip_ids or (),
 			detect=_detect, cache=cache, known_authors=known_authors,
+			known_series=known_series,
 		)
 
 	def _process_safe(meta: BookMeta):
@@ -399,6 +415,7 @@ def _process_book(
 	detect: Any = None,
 	cache: Cache | None = None,
 	known_authors: Any = None,
+	known_series: frozenset[str] = frozenset(),
 ) -> tuple[BookMeta, Diagnosis, Verification | None, EnrichedMeta | None]:  # noqa: F821
 	"""Process one book end-to-end. Thread-safe (no shared mutable state except *stats*).
 
@@ -412,6 +429,9 @@ def _process_book(
 
 	*known_authors*: the run's KnownAuthorPool (see run_pipeline) — enables
 	the C1 swap-repair tier for books whose title field is a known author.
+
+	*known_series*: folded library series names (see run_pipeline) — the
+	title guard of the pool-tier accept-missing stamp.
 	"""
 	dd = detect if detect is not None else detect_fn
 	diag = dd(meta)
@@ -665,14 +685,29 @@ def _process_book(
 		# like title "Neznámý"). The llm:low proposal is DISCARDED, not
 		# auto-applied: identity is re-confirmed against the content below
 		# before the stamp fires.
+		#
+		# Two evidence tiers, strongest first:
+		#   "content"     — acquire_identity bound title+author (or ISBN) to
+		#                  the book's own text: the record describes THIS book.
+		#   "author-pool" — content could not confirm (scanned PDF, no title
+		#                  page in the extract), but the author is an
+		#                  established library author and the title guards
+		#                  pass (see _pool_confirms_author). Weaker by design:
+		#                  it proves the author field, not the title — the
+		#                  trade the owner accepted, reversible via
+		#                  `bmf analyze --recheck-ok`.
 		if (
 			accept_missing_if_identified
 			and (enriched is None or enriched.source == "llm:low")
 			and is_acceptable_missing(diag)
-			and acquire_identity(meta, extracted) is not None
 		):
-			enriched = EnrichedMeta(identity_confirmed=True, source="content")
-			stats["accepted_missing"] = stats.get("accepted_missing", 0) + 1
+			if acquire_identity(meta, extracted) is not None:
+				enriched = EnrichedMeta(identity_confirmed=True, source="content")
+				stats["accepted_missing"] = stats.get("accepted_missing", 0) + 1
+			elif _pool_confirms_author(meta, known_authors, known_series):
+				enriched = EnrichedMeta(identity_confirmed=True, source="author-pool")
+				stats["accepted_missing"] = stats.get("accepted_missing", 0) + 1
+				stats["pool_verified"] = stats.get("pool_verified", 0) + 1
 		if enriched is None:
 			stats["unfixed"] += 1
 
@@ -797,6 +832,48 @@ def _try_known_author_swap(
 	if not confirm_identity(ident, extracted):
 		return None
 	return EnrichedMeta(title=new_title, authors=[canon], source=source, identity_confirmed=True)
+
+
+# The pool tier's author bar: a spelling resolving to a cluster with at least
+# this many books is an established library author. Typos, nicknames and
+# polluted fields almost never carry that many books under one folded cluster
+# (variant spellings union at build time); anonym spellings are excluded from
+# the pool entirely. Below the bar the pool says nothing about the author.
+_POOL_AUTHOR_MIN_BOOKS = 3
+
+
+def _pool_confirms_author(meta: BookMeta, known_authors: Any, known_series: frozenset[str]) -> bool:
+	"""Pool fallback for the accept-missing stamp: the content could not
+	confirm the identity (scanned PDF, no title page in the extract), but the
+	record still holds — the author is an ESTABLISHED library author and the
+	title is neither a name nor a placeholder.
+
+	Weaker than the content tier by design: this proves the AUTHOR field,
+	not that the title belongs to this book. The guards keep the known
+	corruption shapes out (a title that is a known author or series name is
+	title pollution; "Neznámý"/short titles are lost identities), a
+	plausible-but-wrong title still passes — the trade the owner accepted
+	(reversible via `bmf analyze --recheck-ok`).
+	"""
+	if known_authors is None or not meta.authors:
+		return False
+	hit = known_authors.lookup(meta.authors[0])
+	if hit is None or hit[1] < _POOL_AUTHOR_MIN_BOOKS:
+		return False
+	title = _normalize(meta.title or "")
+	if len(title) < 10 or _looks_like_neznamy(meta.title or ""):
+		return False
+	# The title must not BE a name. A known author is the swap shape (C1's
+	# pool pattern usually fires first and blocks accept-missing outright —
+	# this is the explicit belt-and-braces); a known series name is the same
+	# pollution family. The book's OWN series is exempt: a first volume
+	# legitimately shares the series title ("Duna" in series "Duna").
+	if known_authors.lookup(meta.title or "") is not None:
+		return False
+	own_series = _normalize(series_entry_pair(meta.series)[0])
+	if title in known_series and title != own_series:
+		return False
+	return True
 
 
 def _online_matches_identity(online: EnrichedMeta, identity: IdentityResult) -> bool:  # noqa: F821

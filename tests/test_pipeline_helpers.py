@@ -149,10 +149,11 @@ def _empty_stats() -> dict:
 		"llm_fixed": 0, "llm_skipped_no_text": 0, "llm_no_result": 0, "llm_error": 0,
 		"unfixed": 0, "errors": 0, "content_mismatch": 0,
 		"covers_generated": 0, "covers_missing": 0, "accepted_missing": 0,
+		"pool_verified": 0,
 	}
 
 
-def _run_accept(meta, *, first_page_text, additional=None, accept=True):
+def _run_accept(meta, *, first_page_text, additional=None, accept=True, known_authors=None, known_series=frozenset()):
 	"""Run _process_book with detect_fn -> MISSING_ISBN (AUTO_FIXABLE) and
 	safe_extract mocked to return an ExtractedMeta with *first_page_text*.
 	No enricher, no LLM. Returns (result_tuple, stats)."""
@@ -178,6 +179,7 @@ def _run_accept(meta, *, first_page_text, additional=None, accept=True):
 			meta, enricher=None, skip_enrich=True, skip_verify=False,
 			llm_provider=None, llm_categories=("ALL",), stats=stats,
 			accept_missing_if_identified=accept,
+			known_authors=known_authors, known_series=known_series,
 		)
 	finally:
 		for p in patches:
@@ -309,6 +311,125 @@ class TestAcceptMissingIdentified:
 		item = SimpleNamespace(action="accept", proposed=None, diagnoses=None, diagnosis=None, id=10, path=meta.path)
 		_apply_action(meta, item)
 		assert (meta.title, list(meta.authors), meta.isbn, meta.year, meta.publisher) == before
+
+
+def _capek_pool(n_books: int = 3):
+	"""A real KnownAuthorPool with 'Karel Čapek' carrying *n_books* books."""
+	from book_meta_fix.normalize import build_known_author_pool
+
+	books = [
+		BookMeta(calibre_id=i, title=f"Čapkova kniha {i}", authors=["Karel Čapek"], path=f"/lib/ck{i}")
+		for i in range(n_books)
+	]
+	return build_known_author_pool(books)
+
+
+class TestAcceptMissingPoolTier:
+	"""The author-pool tier of the accept-missing stamp: the content could not
+	confirm the identity, but the author is an established library author (>= 3
+	books under the folded cluster) and the title is neither a known author, a
+	known series, nor an anonymous placeholder -> close with source
+	'author-pool'. Weaker than content by design (proves the author field, not
+	the title); reversible via --recheck-ok."""
+
+	UNRELATED_TEXT = "Lorem ipsum dolor sit amet, consectetur adipiscing elit sed do."
+
+	def test_pool_tier_stamps_when_author_established(self):
+		meta = _missing_isbn_book()  # 'Bílá nemoc' / 'Karel Čapek'
+		result, stats = _run_accept(
+			meta, first_page_text=self.UNRELATED_TEXT,
+			known_authors=_capek_pool(3),
+		)
+		enriched = result[3]
+		assert enriched is not None
+		assert enriched.identity_confirmed is True
+		assert enriched.source == "author-pool"
+		assert enriched.title is None and not enriched.authors  # accept-as-is
+		assert stats["accepted_missing"] == 1
+		assert stats["pool_verified"] == 1
+
+	def test_no_text_pool_tier_stamps(self):
+		# The tier exists exactly for books with nothing to confirm against
+		# (scanned PDF): extracted is None, acquire_identity returns None.
+		meta = _missing_isbn_book()
+		result, stats = _run_accept(meta, first_page_text=None, known_authors=_capek_pool(3))
+		assert result[3].source == "author-pool"
+		assert stats["pool_verified"] == 1
+
+	def test_below_threshold_no_stamp(self):
+		# Two books under the cluster: not an established author, pool says
+		# nothing -> stays unfixed for review.
+		meta = _missing_isbn_book()
+		result, stats = _run_accept(
+			meta, first_page_text=self.UNRELATED_TEXT, known_authors=_capek_pool(2),
+		)
+		assert result[3] is None
+		assert stats["accepted_missing"] == 0
+		assert stats["unfixed"] == 1
+
+	def test_no_pool_no_stamp(self):
+		# known_authors=None (other callers / pool build failure): behaviour
+		# identical to the pre-pool code.
+		meta = _missing_isbn_book()
+		result, stats = _run_accept(meta, first_page_text=self.UNRELATED_TEXT)
+		assert result[3] is None
+		assert stats["unfixed"] == 1
+
+	def test_neznamy_title_no_stamp(self):
+		meta = _missing_isbn_book(title="Neznámý", author="Karel Čapek", calibre_id=11)
+		result, stats = _run_accept(
+			meta, first_page_text=self.UNRELATED_TEXT, known_authors=_capek_pool(3),
+		)
+		assert result[3] is None
+		assert stats["pool_verified"] == 0
+
+	def test_short_title_no_stamp(self):
+		meta = _missing_isbn_book(title="Nemoc", author="Karel Čapek", calibre_id=12)
+		result, stats = _run_accept(
+			meta, first_page_text=self.UNRELATED_TEXT, known_authors=_capek_pool(3),
+		)
+		assert result[3] is None
+
+	def test_title_is_known_author_no_stamp(self):
+		# Title pollution: the title field holds a known author's name. (The
+		# fake detect here bypasses C1, so this exercises the explicit
+		# belt-and-braces guard inside the tier itself.)
+		meta = _missing_isbn_book(title="Karel Čapek", calibre_id=13)
+		result, stats = _run_accept(
+			meta, first_page_text=self.UNRELATED_TEXT, known_authors=_capek_pool(3),
+		)
+		assert result[3] is None
+		assert stats["pool_verified"] == 0
+
+	def test_title_is_known_series_no_stamp(self):
+		meta = _missing_isbn_book(title="Vlčí honba", calibre_id=14)
+		result, stats = _run_accept(
+			meta, first_page_text=self.UNRELATED_TEXT,
+			known_authors=_capek_pool(3), known_series=frozenset({"vlci honba"}),
+		)
+		assert result[3] is None
+
+	def test_title_equals_own_series_is_allowed(self):
+		# A first volume legitimately shares the series title — not pollution.
+		meta = _missing_isbn_book(title="Vlčí honba", calibre_id=15)
+		meta.series = "Vlčí honba #1"
+		result, stats = _run_accept(
+			meta, first_page_text=self.UNRELATED_TEXT,
+			known_authors=_capek_pool(3), known_series=frozenset({"vlci honba"}),
+		)
+		assert result[3].source == "author-pool"
+		assert stats["pool_verified"] == 1
+
+	def test_content_confirmation_wins_over_pool(self):
+		# Strongest tier first: when the content CAN confirm, the stamp is
+		# 'content' and the pool counter stays untouched.
+		meta = _missing_isbn_book()
+		result, stats = _run_accept(
+			meta, first_page_text="Bílá nemoc\nKarel Čapek\nRomán o lidské slušnosti.",
+			known_authors=_capek_pool(3),
+		)
+		assert result[3].source == "content"
+		assert stats["pool_verified"] == 0
 
 
 class TestCoverShadowedC13Routing:

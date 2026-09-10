@@ -523,17 +523,28 @@ def merge_normalizations(
 	- a DECIDED entry (action set) is left alone — the user already judged
 	  that book against its previous proposal;
 	- a book with no entry yet gets a fresh one, ``action: accept`` pre-filled
-	  only when every change is deterministic (HIGH confidence).
+	  only when every change is deterministic (HIGH confidence); a fresh
+	  accepted entry whose projected post-apply state is detector-clean is
+	  ALSO born ``verified: true`` (review_writer.projected_clean — the same
+	  close-the-loop contract as the analyze path: apply fixes AND closes the
+	  book in one pass). A book with any leftover (a still-missing ISBN/year)
+	  stays unverified on purpose — a deterministic genre/author spelling fix
+	  says nothing about identity, and closing the book would cancel the
+	  enricher retries that field still needs.
 
 	Reasons are plain English like detector reasons — review.yaml is a stable
 	artifact, not a localized UI surface. Returns ``{added, updated,
-	skipped_decided}``. Idempotent: re-running after the values reached disk
-	finds nothing left to propose.
+	skipped_decided, verified_prefilled}``. Idempotent: re-running after the
+	values reached disk finds nothing left to propose.
 	"""
+	# Lazy: review_writer imports review at module level, so importing it here
+	# (runtime, never at import time) is the house pattern for that cycle.
+	from .review_writer import projected_clean
+
 	entries = _load_raw_entries(path) if Path(path).is_file() else []
 	by_uuid = {e.get("uuid"): e for e in entries if e.get("uuid")}
 	metas = {b.uuid: b for b in books if b.uuid}
-	added = updated = skipped = 0
+	added = updated = skipped = verified = 0
 	for prop in proposals:
 		meta = metas.get(prop.uuid)
 		if meta is None:
@@ -583,22 +594,26 @@ def merge_normalizations(
 			if prop.tags is not None and meta.tags:
 				current["tags"] = meta.tags
 			primary = diags_new[0] if diags_new else {"category": "C16", "reason": "; ".join(prop.reasons), "confidence": "MEDIUM"}
+			proposed = {**fields, "source": "normalize"}
 			entry = {
 				"id": meta.calibre_id,
 				"uuid": meta.uuid,
 				"path": _relative_path(meta, library_root),
 				"diagnosis": primary,
 				"current": current,
-				"proposed": {**fields, "source": "normalize"},
+				"proposed": proposed,
 				"action": "accept" if prop.high_confidence else None,
 			}
+			if prop.high_confidence and projected_clean(meta, proposed):
+				entry["verified"] = True
+				verified += 1
 			if len(diags_new) > 1:
 				entry["diagnoses"] = diags_new
 			entries.append(entry)
 			by_uuid[meta.uuid] = entry
 			added += 1
 	if not (added or updated):
-		return {"added": 0, "updated": 0, "skipped_decided": skipped}
+		return {"added": 0, "updated": 0, "skipped_decided": skipped, "verified_prefilled": 0}
 	header = _header(len(entries))
 	body = "\n".join(_render_entry(e) for e in entries)
 	if body:
@@ -607,4 +622,4 @@ def merge_normalizations(
 	tmp = p.with_suffix(p.suffix + ".tmp")
 	tmp.write_text(header + body, encoding="utf-8")
 	os.replace(tmp, p)
-	return {"added": added, "updated": updated, "skipped_decided": skipped}
+	return {"added": added, "updated": updated, "skipped_decided": skipped, "verified_prefilled": verified}

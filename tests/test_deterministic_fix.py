@@ -325,6 +325,37 @@ class TestAcquireIdentity:
 
 		assert acquire_identity(_book(), None) is None
 
+	def test_identity_deep_in_broader_window_confirms(self):
+		"""Title+author sit past the 4000-char search cap (title page a few
+		pages in). Real extractor output is prefix-aligned — broader_text
+		starts where first_page_text starts — so only a whole-text search of
+		the broader window can find them; a capped search just re-sees page 1
+		(and acquire_identity then disagreed with confirm_identity, which
+		already searched the windows)."""
+		from book_meta_fix.pipeline import acquire_identity
+
+		meta = BookMeta(calibre_id=1, title="Zastavený příval", authors=["Eduard Štorch"],
+			path="/lib/A/B", primary_file="/lib/A/B/book.epub")
+		pad = "Obyčejný text úplně jiné kapitoly románu. " * 150  # ~6k chars, no identity
+		broader = pad + " EDUARD ŠTORCH ZASTAVENÝ PŘÍVAL "
+		ext = ExtractedMeta(title="Zastavený příval", first_page_text=broader[:5000], broader_text=broader)
+		ident = acquire_identity(meta, ext)
+		assert ident is not None and ident.source == "metadata"
+		assert ident.title == "Zastavený příval"
+
+	def test_deep_title_without_author_stays_unconfirmed(self):
+		"""A deep-only title hit with the author nowhere in the text is a
+		chapter-heading-shaped false positive — the author requirement must
+		still reject it under the whole-window search."""
+		from book_meta_fix.pipeline import acquire_identity
+
+		meta = BookMeta(calibre_id=1, title="Prolog", authors=["Eduard Štorch"],
+			path="/lib/A/B", primary_file="/lib/A/B/book.epub")
+		pad = "Kapitola první obyčejný běžný text vyprávění. " * 150
+		broader = pad + " Prolog " + pad
+		ext = ExtractedMeta(title="Prolog", first_page_text=broader[:5000], broader_text=broader)
+		assert acquire_identity(meta, ext) is None
+
 
 class TestOnlineFill:
 	"""_online_fill: anchored lookup with false-positive filtering."""

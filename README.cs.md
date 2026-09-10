@@ -16,6 +16,7 @@ při opětovném prohledání.
 | Dokument | Co pokrývá |
 |---|---|
 | [docs/cs/architecture.md](docs/cs/architecture.md) | Mapa modulů, tok dat, model souběžnosti, cache, atomicita |
+| [docs/cs/diagrams.md](docs/cs/diagrams.md) | UML diagramy — sekvice analyze/apply, rozhodovací tok jedné knihy, lifecycle review záznamu (Mermaid) |
 | [docs/cs/concepts.md](docs/cs/concepts.md) | Skupiny verdiktů, filozofie verifikace, kaskáda oprav, smyčka LLM, formát review.yaml |
 | [docs/cs/how-to/](docs/cs/how-to/index.md) | Návody krok za krokem (spustit dávku, vyladit rate limit, ladit, …) |
 | [docs/cs/corruption-catalog.md](docs/cs/corruption-catalog.md) | Kategorie C1–C17 s reálnými příklady |

@@ -769,6 +769,47 @@ class TestIdentityVerified:
 		assert parsed[0].verified is True
 		assert summary["verified_prefilled"] == 1
 
+	def test_author_pool_identity_confirmed_verifies(self, tmp_path):
+		"""author-pool + identity_confirmed: the pool tier of the accept-missing
+		stamp — the content could not confirm anything (scanned PDF, no title
+		page in the extract), but the pipeline checked the author is an
+		established library author and the title guards passed (not a known
+		author/series, not a placeholder). Weaker than the content tier — the
+		title is not proven — the trade the owner accepted; reversible via
+		--recheck-ok."""
+		meta = self._book_folder(tmp_path, isbn=None)
+		diag = Diagnosis(category="MISSING_ISBN", reason="no isbn", confidence=Confidence.LOW, verdict=Verdict.AUTO_FIXABLE)
+		enriched = EnrichedMeta(identity_confirmed=True, source="author-pool")
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		summary = _submit_all_and_finish(w, [(meta, diag, None, enriched)])
+		parsed = parse_review(out)
+		assert parsed[0].action == "accept"
+		assert parsed[0].verified is True
+		assert summary["verified_prefilled"] == 1
+
+	def test_author_pool_empty_book_stays_open(self, tmp_path):
+		"""EMPTY_BOOK is a dead record: no identity tier, pool included, may
+		close it (the projection re-detects it and the gate hard-blocks)."""
+		import json as _json
+
+		from book_meta_fix.readers import read_book_folder
+
+		folder = tmp_path / "lib2" / "Jan Novak" / "Kniha (8)"
+		folder.mkdir(parents=True)
+		(folder / "metadata.json").write_text(
+			_json.dumps({"title": "Kniha", "authors": ["Jan Novak"]}), encoding="utf-8",
+		)
+		meta = read_book_folder(folder)
+		diag = Diagnosis(category="EMPTY_BOOK", reason="no ebook file", confidence=Confidence.HIGH, verdict=Verdict.AUTO_FIXABLE)
+		enriched = EnrichedMeta(identity_confirmed=True, source="author-pool")
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		_submit_all_and_finish(w, [(meta, diag, None, enriched)])
+		parsed = parse_review(out)
+		assert parsed[0].action == "accept"
+		assert parsed[0].verified is not True
+
 	def test_llm_high_without_identity_confirmed_stays_open(self, tmp_path):
 		"""llm:high alone is a high-confidence ACCEPT, not a close: without
 		identity_confirmed the answer was never bound to the book's own text,

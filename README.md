@@ -15,6 +15,7 @@ Audiobookshelf and Kavita pick up the fixes on rescan.
 | Doc | What it covers |
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | Module map, data flow, concurrency model, caching, atomicity |
+| [docs/diagrams.md](docs/diagrams.md) | UML diagrams — analyze/apply sequence, per-book decision flow, review-entry lifecycle (Mermaid) |
 | [docs/concepts.md](docs/concepts.md) | Verdict buckets, verification philosophy, fix cascade, LLM loop, review.yaml format |
 | [docs/how-to/](docs/how-to/index.md) | Step-by-step recipes (run a batch, tune the rate limit, debug, …) |
 | [docs/corruption-catalog.md](docs/corruption-catalog.md) | The C1–C17 categories with real examples |

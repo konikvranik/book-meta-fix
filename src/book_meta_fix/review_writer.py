@@ -65,6 +65,42 @@ _ONLINE_SOURCES: frozenset[str] = frozenset(
 )
 
 
+def projected_clean(meta: Any, proposed: dict | None) -> bool:
+	"""Would *meta* be detector-clean once *proposed* is applied?
+
+	Projects the entry's post-apply state: shallow-copies the meta,
+	applies the proposal through the SAME ``_apply_fields`` apply uses
+	(lazy import — pipeline imports review, so a module-level import
+	here would be circular), then runs the location-blind detector.
+	A proposed ``cover_url`` is credited (the download happens at
+	apply), as is C13 (the apply-time move resolves it). Drives the
+	auto ``verified`` pre-fill: when the analyzer's own proposal
+	completes the book, apply fixes AND closes it in one pass — the
+	book never re-enters review.
+
+	Module-level (not a ReviewWriter method) so review.merge_normalizations
+	can reuse it for its fresh normalize entries — the same projection
+	contract, lazily imported there to avoid an import cycle
+	(review_writer imports review at module level).
+	"""
+	import copy
+
+	from .detectors import detect as _detect
+	from .pipeline import _apply_fields
+
+	m2 = copy.copy(meta)
+	if proposed:
+		_apply_fields(m2, proposed)
+	for d in all_diagnoses(_detect(m2)):
+		if d.category == "C13":
+			continue  # the placement move resolves it
+		if d.category in ("C11", "MISSING_COVER") and proposed and proposed.get("cover_url"):
+			continue  # the cover download at apply resolves it
+		if d.verdict != Verdict.OK:
+			return False
+	return True
+
+
 class ReviewWriter:
 	"""Streaming writer for review.yaml: append one entry per processed book.
 
@@ -276,36 +312,8 @@ class ReviewWriter:
 			return "medium"
 		return "low"
 
-	@staticmethod
-	def _projected_clean(meta: Any, proposed: dict | None) -> bool:
-		"""Would *meta* be detector-clean once *proposed* is applied?
-
-		Projects the entry's post-apply state: shallow-copies the meta,
-		applies the proposal through the SAME ``_apply_fields`` apply uses
-		(lazy import — pipeline imports review, so a module-level import
-		here would be circular), then runs the location-blind detector.
-		A proposed ``cover_url`` is credited (the download happens at
-		apply), as is C13 (the apply-time move resolves it). Drives the
-		auto ``verified`` pre-fill: when the analyzer's own proposal
-		completes the book, apply fixes AND closes it in one pass — the
-		book never re-enters review.
-		"""
-		import copy
-
-		from .detectors import detect as _detect
-		from .pipeline import _apply_fields
-
-		m2 = copy.copy(meta)
-		if proposed:
-			_apply_fields(m2, proposed)
-		for d in all_diagnoses(_detect(m2)):
-			if d.category == "C13":
-				continue  # the placement move resolves it
-			if d.category in ("C11", "MISSING_COVER") and proposed and proposed.get("cover_url"):
-				continue  # the cover download at apply resolves it
-			if d.verdict != Verdict.OK:
-				return False
-		return True
+	# The pre-fill projection, hoisted to module level (see projected_clean).
+	_projected_clean = staticmethod(projected_clean)
 
 	@staticmethod
 	def _identity_verified(meta: Any, proposed: dict | None, enriched: Any, action: str | None) -> bool:
@@ -342,7 +350,15 @@ class ReviewWriter:
 		     confirmation, made against the very meta that stays unchanged;
 		     the benign-leftover loop is what still guards the projected
 		     state. "embedded" stays excluded: embedded metadata is NOT
-		     independent evidence (see the verifier).
+		     independent evidence (see the verifier). OR with source
+		     "author-pool": the pool tier of the accept-missing stamp — the
+		     content could not confirm anything (scanned PDF, no title page
+		     in the extract), but the author is an established library
+		     author (>= _POOL_AUTHOR_MIN_BOOKS books under the folded
+		     cluster) and the title is neither a known author, a known
+		     series, nor an anonymous placeholder. Weaker by design — it
+		     proves the author field, not the title — the trade the owner
+		     accepted; reversible via `bmf analyze --recheck-ok`.
 		  3. The PROJECTED identity agrees with the confirmed record
 		     (identity_agrees): the proposal may have carried a different
 		     title (extracted precedence, a C1-swap merge), and then what
@@ -362,7 +378,7 @@ class ReviewWriter:
 		if action != "accept" or enriched is None:
 			return False
 		src = getattr(enriched, "source", "") or ""
-		if src not in _ONLINE_SOURCES and src not in ("llm:high", "content"):
+		if src not in _ONLINE_SOURCES and src not in ("llm:high", "content", "author-pool"):
 			return False
 		if not getattr(enriched, "identity_confirmed", False):
 			return False

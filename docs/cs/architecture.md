@@ -5,7 +5,8 @@
 Tento dokument popisuje vnitřní strukturu `book-meta-fix` (`bmf`): mapu
 modulů, tok dat pro jednu knihu, model souběžnosti a klíčová rozhodnutí
 o návrhu. Význam kategorií poškození (*co* znamenají) najdete v
-[concepts.md](concepts.md); *jak věci spouštět* v
+[concepts.md](concepts.md); tytéž toky jako UML diagramy (Mermaid) v
+[diagrams.md](diagrams.md); *jak věci spouštět* v
 [how-to/index.md](how-to/index.md); referenci příkazů v [README](../../README.cs.md).
 
 ## Cíl

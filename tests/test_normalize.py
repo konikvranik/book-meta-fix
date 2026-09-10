@@ -346,11 +346,62 @@ class TestMergeNormalizations:
 		)
 		books = [BookMeta(uuid="u1", calibre_id=7, path="/lib/A", authors=["Neznamy"], title="X", genres=["humor"])]
 		summary = merge_normalizations(p, [prop], books, library_root=None)
-		assert summary == {"added": 1, "updated": 0, "skipped_decided": 0}
+		assert summary == {"added": 1, "updated": 0, "skipped_decided": 0, "verified_prefilled": 0}
 		items = parse_review(p)
 		assert len(items) == 1
 		assert items[0].action == "accept" and items[0].proposed["authors"] == ["Neznámý"]
 		assert items[0].diagnosis["category"] == "C15"
+		# The book still misses ISBN/year/cover (fake path, no files) — the
+		# projection is not detector-clean, so no verified pre-fill.
+		assert not items[0].verified
+
+	def test_fresh_deterministic_entry_on_clean_book_gets_verified(self, tmp_path):
+		"""A fresh HIGH-confidence normalize proposal on an otherwise-clean
+		book is born verified: apply fixes AND closes it in one pass (the same
+		close-the-loop contract as the analyze path's _projected_clean)."""
+		from book_meta_fix.normalize import BookProposal
+		from book_meta_fix.review import merge_normalizations, parse_review
+
+		# A real folder shape — cover.jpg + an ebook file — else MISSING_COVER /
+		# EMPTY_BOOK fire and the projection is never clean.
+		book_dir = tmp_path / "A" / "Stin hmly"
+		book_dir.mkdir(parents=True)
+		(book_dir / "cover.jpg").write_bytes(b"x")
+		(book_dir / "book.epub").write_bytes(b"x")
+
+		p = self._review_file(tmp_path, "# empty\n")
+		prop = BookProposal(uuid="u1", path=str(book_dir), genres=["humor"],
+			genre_reasons=["genre 'Humor' → 'humor' (fold group canonical)"], high_confidence=True)
+		books = [BookMeta(uuid="u1", path=str(book_dir), title="Stín hmly",
+			authors=["Graham Masterton"], isbn="8020312345", year=2005, genres=["Humor"])]
+		summary = merge_normalizations(p, [prop], books)
+		assert summary["verified_prefilled"] == 1
+		items = parse_review(p)
+		assert items[0].action == "accept"
+		assert items[0].verified is True
+
+	def test_fresh_entry_with_missing_leftover_stays_unverified(self, tmp_path):
+		"""Same deterministic genre fix, but the book still misses its ISBN:
+		closing it would cancel the enricher retries that field still needs —
+		the accept pre-fill stays, the verified mark does not."""
+		from book_meta_fix.normalize import BookProposal
+		from book_meta_fix.review import merge_normalizations, parse_review
+
+		book_dir = tmp_path / "A" / "Stin hmly"
+		book_dir.mkdir(parents=True)
+		(book_dir / "cover.jpg").write_bytes(b"x")
+		(book_dir / "book.epub").write_bytes(b"x")
+
+		p = self._review_file(tmp_path, "# empty\n")
+		prop = BookProposal(uuid="u1", path=str(book_dir), genres=["humor"],
+			genre_reasons=["genre 'Humor' → 'humor' (fold group canonical)"], high_confidence=True)
+		books = [BookMeta(uuid="u1", path=str(book_dir), title="Stín hmly",
+			authors=["Graham Masterton"], year=2005, genres=["Humor"])]  # no ISBN
+		summary = merge_normalizations(p, [prop], books)
+		assert summary["verified_prefilled"] == 0
+		items = parse_review(p)
+		assert items[0].action == "accept"
+		assert not items[0].verified
 
 	def test_pending_proposal_gets_null_action(self, tmp_path):
 		from book_meta_fix.normalize import BookProposal
@@ -364,6 +415,7 @@ class TestMergeNormalizations:
 		assert items[0].action is None
 		assert items[0].diagnosis["category"] == "C16"
 		assert items[0].current["genres"] == ["Humor"]
+		assert not items[0].verified  # pending entries are never pre-verified
 
 	def test_overlays_pending_entry_and_keeps_other_fields(self, tmp_path):
 		from book_meta_fix.normalize import BookProposal
@@ -397,6 +449,7 @@ action: null
 		assert "normalize" in items[0].proposed["source"]
 		cats = [d["category"] for d in items[0].diagnoses]
 		assert cats == ["C2", "C15"]
+		assert not items[0].verified  # an overlaid pending entry stays open for review
 
 	def test_decided_entry_is_skipped(self, tmp_path):
 		from book_meta_fix.normalize import BookProposal
@@ -419,7 +472,7 @@ action: keep
 		prop = BookProposal(uuid="u1", path="/lib/A", authors=["Neznámý"], author_reasons=["r"], high_confidence=True)
 		books = [BookMeta(uuid="u1", path="/lib/A", authors=["Neznamy"], title="X")]
 		summary = merge_normalizations(p, [prop], books)
-		assert summary == {"added": 0, "updated": 0, "skipped_decided": 1}
+		assert summary == {"added": 0, "updated": 0, "skipped_decided": 1, "verified_prefilled": 0}
 		items = parse_review(p)
 		assert "authors" not in (items[0].proposed or {})
 

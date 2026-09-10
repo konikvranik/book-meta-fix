@@ -779,6 +779,9 @@ def _print_fix_source_summary(stats: dict) -> None:
 	t.add_row(_("Proposed (any source)"), str(proposed_total), style="bold")
 	t.add_row(_("Unfixed (no proposal found)"), str(unfixed), style="yellow")
 	t.add_row(_("Accepted (identity OK, field missing)"), str(stats.get("accepted_missing", 0)), style="green")
+	pool_verified = stats.get("pool_verified", 0)
+	if pool_verified:
+		t.add_row(_("  └ via author pool (content unverifiable)"), str(pool_verified))
 	console.print(t)
 
 	# LLM cost detail: how many books the LLM was asked about vs. how many it
@@ -1584,6 +1587,12 @@ def _run_normalize_pass(
 				added=summary["added"], updated=summary["updated"], skipped=summary["skipped_decided"],
 			)
 		)
+		if summary.get("verified_prefilled"):
+			console.print(
+				_("{count} clean deterministic entries are pre-marked verified — apply will fix and close them in one pass.").format(
+					count=summary["verified_prefilled"],
+				)
+			)
 		console.print("[dim]" + _("Review with `bmf gui`, then run `bmf apply`. Author renames move folders — finish with `bmf abs-rescan`.") + "[/dim]")
 	else:
 		console.print("[dim]" + _("Dry-run: nothing written. Re-run with --apply to fill review.yaml.") + "[/dim]")
