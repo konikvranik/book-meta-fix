@@ -352,13 +352,35 @@ class TestSeriesClusters:
 		assert any(s.kind == "fuzzy" and s.verdict == "merge" for s in suspects)
 
 	def test_online_existence_decides_without_numbering(self):
+		# Only a DECORATIVE tail stays online-decidable — a content extension
+		# is a named sub-series (see test_named_subseries... below).
 		clusters, suspects = self._build(
-			{"Duna": 2, "Duna Chronicles": 1},
+			{"Duna": 2, "Duna (edice)": 1},
 			online_check=lambda n: n == "Duna",
 		)
-		assert clusters["Duna Chronicles"].canonical == "Duna"
+		assert clusters["Duna (edice)"].canonical == "Duna"
 		s = suspects[0]
 		assert s.verdict == "merge" and s.online_base and not s.online_suspect
+
+	def test_named_subseries_never_merges_into_umbrella(self):
+		# Real library shape (measured 2026-09-10): the umbrella "Star Wars"
+		# holds vols {3,4}, the one-book lines "Star Wars - Akademie Jedi"
+		# {2} and "Star Wars - Legendy" {5} — both unions are CONTIGUOUS
+		# ({2,3,4}, {3,4,5}), which the complementary rule alone misread as
+		# "one series" and retitled both lines to "Star Wars" on every run.
+		idx = {"Star Wars": ["4", "3", ""], "Star Wars - Akademie Jedi": ["2"], "Star Wars - Legendy": ["5"]}
+		counter = {"Star Wars": 3, "Star Wars - Akademie Jedi": 1, "Star Wars - Legendy": 1}
+		clusters, suspects = self._build(counter, indexes_by_name=idx)
+		assert not clusters
+		verdicts = {(s.base, s.suspect): s.verdict for s in suspects}
+		assert verdicts[("Star Wars", "Star Wars - Akademie Jedi")] == "distinct"
+		assert verdicts[("Star Wars", "Star Wars - Legendy")] == "distinct"
+		assert all(s.subseries for s in suspects)
+		# The online tier must not resurrect the merge either: the FRANCHISE
+		# umbrella exists in the bibliographic DB, the local line name does not.
+		clusters, suspects = self._build(counter, indexes_by_name=idx, online_check=lambda n: n == "Star Wars")
+		assert not clusters
+		assert all(s.verdict == "distinct" for s in suspects)
 
 	def test_both_online_stay_distinct(self):
 		clusters, suspects = self._build(
@@ -416,6 +438,20 @@ class TestAnalyzeSeries:
 		assert not res.proposals
 		assert ("Mark Stone #73", 1) in res.glued_series
 		assert ("A", 1) in res.multi_series and ("B", 1) in res.multi_series
+
+	def test_named_subseries_books_get_no_series_proposal(self):
+		# The library-level twin of the cluster regression: umbrella books
+		# (vols 3, 4 + one unnumbered) must not pull the one-book lines
+		# "Star Wars - Akademie Jedi"/"Star Wars - Legendy" into a rename.
+		books = [
+			self._book("u1", "Star Wars", "4"),
+			self._book("u2", "Star Wars", "3"),
+			self._book("u3", "Star Wars", ""),
+			self._book("u4", "Star Wars - Akademie Jedi", "2"),
+			self._book("u5", "Star Wars - Legendy", "5"),
+		]
+		res = analyze_library(books, fields=("series",))
+		assert not [p for p in res.proposals if p.series is not None]
 
 	def test_overview_mirrors_disk_state(self):
 		books = [self._book("u1", "Zaklínač", "1"), self._book("u2", "Zaklinac", "2")]

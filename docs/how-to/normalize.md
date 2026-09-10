@@ -71,6 +71,15 @@ any other fix.
   suspect does not. A numbering COLLISION (both claim volume 1) or both
   existing online means two distinct series: the pair is listed in the
   advisory table and never merged.
+- **Named sub-series stay sub-series** — a prefix suspect whose extension
+  NAMES something ("Star Wars" / "Star Wars - Akademie Jedi",
+  "Duna Chronicles") is a sub-series line, not a spelling variant, so it
+  is `distinct` up front and no evidence can merge it into the umbrella:
+  contiguity of the volume numbers is coincidence (the umbrella's 3,4 +
+  a lone line volume 2), and online the FRANCHISE exists while the local
+  line name does not. Only decorative tails ("(edice)",
+  "(série)") can merge on evidence; a deliberate merge of a named
+  sub-series goes through a `SERIES_ALIASES` row.
 
 Different first-name initials never merge (Karel vs Josef Čapek, Dan vs
 Eric Brown stay apart). Multi-author strings ("Wilhelm a Jacob Grimmové")

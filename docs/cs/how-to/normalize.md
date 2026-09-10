@@ -70,6 +70,15 @@ zapíše jako každou jinou opravu.
   bibliografické DB existuje a podezřelý název ne. KOLIZE číslování (obě
   tvrdí díl 1) nebo existence obou online znamená dvě odlišné série:
   dvojice se vypíše v advisory tabulce a nikdy se neslučuje.
+- **Pojmenované pod-série zůstávají pod-sériemi** — předponové podezření,
+  jehož prodloužení něco POJMENOVÁVÁ („Star Wars" /
+  „Star Wars - Akademie Jedi", „Duna Chronicles"), je samostatná linie
+  série, ne pravopisná varianta: rovnou dostává verdikt `distinct` a
+  žádný důkaz ji neslučuje s „deštníkovou" sérií. Souvislost čísel dílů
+  je náhoda (deštník má 3,4 a osamocený díl linie 2) a online existuje
+  samotná FRANŠÍZA, ne lokální název linie. Na důkazech se slučují jen
+  dekorativní ocasy („(edice)", „(série)"); záměrné sloučení pojmenované
+  pod-série patří do `SERIES_ALIASES`.
 
 Různé iniciály křestních jmen se nikdy nesloučí (Karel vs Josef Čapek,
 Dan vs Eric Brown zůstávají oddělení). Multi-author řetězce („Wilhelm a

@@ -144,7 +144,15 @@ src/book_meta_fix/
                    merge; both claiming volume 1 ⇒ distinct, never merged)
                    and optionally by an injected online_check callable
                    (Enricher.series_exists, persistent cache) — the engine
-                   stays I/O-free. analyze_sequence gives the per-group
+                   stays I/O-free. A prefix pair whose extension carries
+                   CONTENT tokens ("Star Wars" → "Star Wars - Akademie
+                   Jedi") is a named SUB-SERIES: verdict distinct up front,
+                   no tier may retitle a named line into its franchise
+                   umbrella (measured 2026-09-10: umbrella vols {3,4} +
+                   a lone line volume {2} read as "contiguous" and renamed
+                   the lines on every run; decorative tails like "(edice)"
+                   stay mergeable, _SERIES_DECOR_TOKENS).
+                   analyze_sequence gives the per-group
                    volume overview (missing = info, duplicates/anomalies =
                    warnings) that `bmf series` renders. The volume INDEX is
                    never proposed — only the series NAME (_apply_fields
@@ -354,8 +362,14 @@ src/book_meta_fix/
   crosscheck.py    bmf crosscheck
   covers.py        generated-cover detection (pixel math) + replacement & in-book extraction fallback
                   + embedded-cover strip (EPUB zip+OPF surgery) + strip_generated_covers
-                  (the per-folder engine of `bmf strip-covers`: sidecar → .bak, embedded EPUB probe+strip;
-                  two selectors with independent scopes — generated/invalid × external/embedded; "invalid" =
+                  (the per-folder engine of `bmf clean --covers`: sidecar → .bak, embedded EPUB probe+strip;
+                  two selectors with independent scopes — generated/invalid × external/embedded — plus
+                  min_size (px on the SHORTER side, external-only): real-but-small covers (the
+                  databazeknih thumbnails) → <name>.bak over the same candidate set so the book
+                  re-fires MISSING_COVER and Enricher.upgrade_cover refetchs a strictly bigger one;
+                  the EMBEDDED cover is deliberately kept — it is the recovery fallback when no source
+                  serves anything bigger; sizes ride analyze_cover's persistent cache;
+                  "invalid" =
                   cover files no decoder reads (image-ext or cover.* name — ABS picks covers by EXTENSION
                   only, prefers cover.*, else first png/jpg/jpeg/webp, so a cover.html/HTML-as-.jpg becomes
                   the item cover and ffmpeg fails "Invalid data found"); checked by image_is_readable
@@ -487,7 +501,14 @@ src/book_meta_fix/
                   a THIRD selector --files (default OFF, plain boolean flag — the C17
                   file probes are opt-in): dry-run only reports, --apply writes the
                   delete proposals into cfg.review_file via filecheck.merge_file_deletions
-                  (deletion itself is apply's job); analyze
+                  (deletion itself is apply's job), and a FOURTH --min-size N
+                  (pixels, shorter side; implies --covers, env default
+                  BMF_COVER_MIN_SIZE honoured only while covers are on — an explicit
+                  --no-covers beats the env): small sidecar covers → .bak via the
+                  engine's min_size selector, and the touched books ALSO get their
+                  `verified` flag cleared (else analyze's skip-verified default would
+                  never re-fire MISSING_COVER, so the bigger cover would never be
+                  fetched); analyze
                   takes --llm-provider/--antigravity-cmd/--antigravity-model and closes
                   the provider in its finally block — only the ACP provider actually
                   holds subprocesses — and --normalize, which chains the normalize

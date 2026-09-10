@@ -687,6 +687,93 @@ class TestCleanCommand:
 		assert calls["n"] == 0
 		assert "Invalid Ebook Files" not in result.output
 
+	def _cover(self, folder: Path, name: str = "cover.jpg", size: tuple[int, int] = (120, 180)) -> Path:
+		"""A real, decodable cover image of the given pixel size."""
+		from PIL import Image
+
+		folder.mkdir(parents=True, exist_ok=True)
+		img = Image.new("RGB", size)
+		px = img.load()
+		for y in range(size[1]):
+			for x in range(size[0]):
+				px[x, y] = ((x + y) % 256, (x * 2 + y) % 256, (y * 2) % 256)
+		p = folder / name
+		img.save(p)
+		return p
+
+	def test_clean_min_size_dry_run_reports_without_touching(self, tmp_path: Path, monkeypatch) -> None:
+		"""--min-size flags small covers in the summary; dry-run renames
+		nothing and keeps the verified flag."""
+		import json as _json
+
+		lib = tmp_path / "lib"
+		b = self._make_book(lib / "Autor" / "Kniha (1)", verified=True, author="Autor")
+		self._cover(b, size=(120, 180))
+		monkeypatch.setenv("BMF_CACHE", str(tmp_path / "cache.db"))
+
+		result = CliRunner().invoke(main, ["clean", "--library", str(lib), "--no-unverified", "--min-size", "300"])
+		assert result.exit_code == 0
+		assert "small cover files renamed to .bak" in result.output
+		assert "Dry-run" in result.output
+		assert (b / "cover.jpg").is_file()
+		assert not (b / "cover.jpg.bak").exists()
+		data = _json.loads((b / "metadata.json").read_text(encoding="utf-8"))
+		assert data.get("verified") is True
+
+	def test_clean_min_size_apply_baks_and_reopens_book(self, tmp_path: Path, monkeypatch) -> None:
+		"""--apply renames the small cover to .bak and clears `verified`, so
+		the next analyze re-enters the book and re-fetches a bigger cover.
+		A big-cover verified book stays untouched."""
+		import json as _json
+
+		lib = tmp_path / "lib"
+		small = self._make_book(lib / "Autor" / "Kniha (1)", verified=True, author="Autor")
+		self._cover(small, size=(120, 180))
+		big = self._make_book(lib / "Autor" / "Kniha (2)", verified=True, author="Autor")
+		self._cover(big, size=(400, 600))
+		monkeypatch.setenv("BMF_CACHE", str(tmp_path / "cache.db"))
+
+		result = CliRunner().invoke(main, ["clean", "--library", str(lib), "--no-unverified", "--min-size", "300", "--apply"])
+		assert result.exit_code == 0
+		assert "verified flags cleared for re-fetch" in result.output
+		assert not (small / "cover.jpg").exists()
+		assert (small / "cover.jpg.bak").is_file()
+		d1 = _json.loads((small / "metadata.json").read_text(encoding="utf-8"))
+		assert "verified" not in d1
+		# The big cover survives with its verified flag intact.
+		assert (big / "cover.jpg").is_file()
+		d2 = _json.loads((big / "metadata.json").read_text(encoding="utf-8"))
+		assert d2.get("verified") is True
+
+	def test_clean_min_size_env_default_used(self, tmp_path: Path, monkeypatch) -> None:
+		"""BMF_COVER_MIN_SIZE serves as the default threshold when the flag
+		is not given (covers are on by default)."""
+		monkeypatch.setenv("BMF_CACHE", str(tmp_path / "cache.db"))
+		monkeypatch.setenv("BMF_COVER_MIN_SIZE", "300")
+		lib = tmp_path / "lib"
+		b = self._make_book(lib / "Autor" / "Kniha (1)")
+		self._cover(b, size=(120, 180))
+
+		result = CliRunner().invoke(main, ["clean", "--library", str(lib), "--no-unverified"])
+		assert result.exit_code == 0
+		assert "small=300" in result.output
+		assert "small cover files renamed to .bak" in result.output
+		assert (b / "cover.jpg").is_file()  # dry-run
+
+	def test_clean_min_size_env_loses_to_no_covers(self, tmp_path: Path, monkeypatch) -> None:
+		"""An explicit --no-covers beats the env default: the selector only
+		rides the covers pass, it cannot switch it on."""
+		monkeypatch.setenv("BMF_CACHE", str(tmp_path / "cache.db"))
+		monkeypatch.setenv("BMF_COVER_MIN_SIZE", "300")
+		lib = tmp_path / "lib"
+		b = self._make_book(lib / "Autor" / "Kniha (1)")
+		self._cover(b, size=(120, 180))
+
+		result = CliRunner().invoke(main, ["clean", "--library", str(lib), "--no-unverified", "--no-covers"])
+		assert result.exit_code == 0
+		assert "Cover strip summary" not in result.output
+		assert (b / "cover.jpg").is_file()
+
 
 class TestConsoleLogHandler:
 	"""CLI logging must route through the shared rich console.

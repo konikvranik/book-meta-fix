@@ -10,6 +10,10 @@ bmf strip-covers --invalid external --apply     # odstraní jen nevalidní soubo
 bmf strip-covers --generated embedded --invalid both --apply   # oba selektory, zvolené rozsahy
 ```
 
+> `bmf strip-covers` je zavržený alias; aktuální domov všeho toho je
+> `bmf clean --covers` (s rozsahy `--generated` / `--invalid` a prahem
+> `--min-size` níže).
+
 Dva selektory, každý jako příznak s volitelným rozsahem. Příznak bez
 hodnoty znamená `both`; volitelně přijme hodnotu `external` (volné soubory
 ve složce knihy) nebo `embedded` (obálky uvnitř EPUB). Bez kterékoli volby
@@ -55,3 +59,32 @@ Jednu ABS záležitost tento příkaz záměrně neřeší: když ffmpeg dostane
 (EMPTY_BOOK — e-kniha už není) a `metadata.json` je manifest, který bmf
 musí zachovat; zastaralá cesta k obálce žije v databázi ABS samotné a
 vyčistí se na straně ABS (plný rescan knihovny), ne mazáním souborů.
+
+## `--min-size N` — skutečné obálky, které jsou prostě malé (bmf clean)
+
+```bash
+bmf clean --min-size 300            # dry-run: vypíše obálky pod 300 px na kratší straně
+bmf clean --min-size 300 --apply    # přejmenuje je na .bak a knihy znovu otevře do review
+```
+
+Kvalitativní selektor pro obálky, které jsou sice skutečné obrázky, ale
+drobné — typicky náhledy, které bmf kdysi stáhl z databazeknih. Obálka je
+malá, když její KRATŠÍ strana nedosahuje N pixelů (`120x180` selže na 300,
+`300x450` ne).
+
+- **Pouze externí**: soubory obálek ve složce (stejná kandidátní množina
+  jako `--invalid`: obrázkové přípony a `cover.*`) se přejmenují na
+  `<název>.bak`. EMBEDDED obálka uvnitř EPUB se záměrně ponechává — je
+  zálohou pro případ, kdy žádný zdroj nic většího nemá, a malá skutečná
+  záloha je lepší než žádná.
+- **Kniha se vrací do review**: s `--apply` se knize s odstraněnou malou
+  obálkou zruší i příznak `verified` — jinak by `bmf analyze` (který
+  verified knihy přeskočí) nikdy nevydal `MISSING_COVER` a žádná nová
+  obálka by se nestáhla.
+- **Nová obálka preferuje větší**: při dalším `bmf analyze` + `bmf apply`
+  enrichery porovnají CZ zdroje podle velikosti obrázku
+  (`Enricher.upgrade_cover` čte jen hlavičky obrázků, těla nestahuje) a
+  vezmou striktně větší obálku. Má-li každý zdroj jen stejný malý obrázek,
+  vrátí se původní (`.bak` zůstává).
+- Práh se bere z `BMF_COVER_MIN_SIZE` (env / `.env`), když příznak dán
+  není; explicitní `--no-covers` má nad env výchozí hodnotou přednost.

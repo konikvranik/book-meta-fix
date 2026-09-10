@@ -884,6 +884,82 @@ class TestStripScopeGating:
 		assert (tmp_path / "cover.jpg").is_file()
 
 
+class TestStripSmallCovers:
+	"""min_size selector: real-but-small EXTERNAL covers .bak'd, rest kept."""
+
+	def test_small_sidecar_baked_with_size_recorded(self, tmp_path: Path) -> None:
+		cover = tmp_path / "cover.jpg"
+		_gradient_cover(cover, size=(120, 180))
+		before = cover.read_bytes()
+		result = strip_generated_covers(tmp_path, dry_run=False, generated=None, invalid=None, min_size=300)
+		assert result.small_baks == ["cover.jpg"]
+		assert result.small_sizes == {"cover.jpg": (120, 180)}
+		assert result.touched is True
+		assert not cover.exists()
+		bak = tmp_path / "cover.jpg.bak"
+		assert bak.is_file() and bak.read_bytes() == before  # reversible
+
+	def test_shorter_side_is_the_measure(self, tmp_path: Path) -> None:
+		# 400x250: shorter side 250 < 300 -> flagged; 300x450: 300 >= 300 -> kept.
+		small = tmp_path / "a.jpg"
+		_gradient_cover(small, size=(400, 250))
+		ok = tmp_path / "b.jpg"
+		_gradient_cover(ok, size=(300, 450))
+		result = strip_generated_covers(tmp_path, dry_run=False, generated=None, invalid=None, min_size=300)
+		assert result.small_baks == ["a.jpg"]
+		assert ok.is_file()
+
+	def test_dry_run_reports_without_touching(self, tmp_path: Path) -> None:
+		cover = tmp_path / "cover.jpg"
+		_gradient_cover(cover, size=(120, 180))
+		result = strip_generated_covers(tmp_path, dry_run=True, generated=None, invalid=None, min_size=300)
+		assert result.small_baks == ["cover.jpg"]
+		assert result.small_sizes == {"cover.jpg": (120, 180)}
+		assert cover.is_file()
+		assert not (tmp_path / "cover.jpg.bak").exists()
+
+	def test_off_by_default(self, tmp_path: Path) -> None:
+		cover = tmp_path / "cover.jpg"
+		_gradient_cover(cover, size=(120, 180))
+		result = strip_generated_covers(tmp_path, dry_run=False, generated=None, invalid=None)
+		assert result.small_baks == []
+		assert result.touched is False
+		assert cover.is_file()
+
+	def test_undecodable_not_judged_small(self, tmp_path: Path) -> None:
+		# No readable header -> no size to judge; the invalid selector owns it.
+		(tmp_path / "cover.jpg").write_bytes(_HTML_BYTES)
+		result = strip_generated_covers(tmp_path, dry_run=False, generated=None, invalid=None, min_size=300)
+		assert result.small_baks == []
+		assert (tmp_path / "cover.jpg").is_file()
+
+	def test_bak_and_tmp_untouched(self, tmp_path: Path) -> None:
+		bak = tmp_path / "cover.jpg.bak"
+		bak.write_bytes(_gradient_jpeg_bytes(size=(120, 180)))
+		tmp = tmp_path / "other.jpg.tmp"
+		tmp.write_bytes(_gradient_jpeg_bytes(size=(120, 180)))
+		result = strip_generated_covers(tmp_path, dry_run=False, generated=None, invalid=None, min_size=300)
+		assert result.small_baks == []
+		assert bak.is_file() and tmp.is_file()
+
+	def test_embedded_small_epub_cover_kept(self, tmp_path: Path) -> None:
+		# The embedded cover is the recovery FALLBACK for the re-fetch —
+		# min_size deliberately never strips it (external-only selector).
+		epub = _make_epub(tmp_path / "b.epub", cover_bytes=_gradient_jpeg_bytes(size=(120, 180)))
+		result = strip_generated_covers(tmp_path, dry_run=False, generated=None, invalid=None, min_size=300)
+		assert result.touched is False
+		assert epub_cover_image(epub) is not None
+
+	def test_generated_sidecar_not_double_reported(self, tmp_path: Path) -> None:
+		# A tiny solid cover fires the generated pass first; under dry-run the
+		# file is still present and small must not claim it a second time.
+		cover = tmp_path / "cover.jpg"
+		_solid_cover(cover, size=(100, 150))
+		result = strip_generated_covers(tmp_path, dry_run=True, min_size=300)
+		assert result.cover_bak is True
+		assert result.small_baks == []
+
+
 class TestCoverAnalysisCache:
 	"""analyze_cover memoizes its verdict per (path, mtime_ns, size) and — with
 	a persistent store attached — carries it across the in-run memo. One

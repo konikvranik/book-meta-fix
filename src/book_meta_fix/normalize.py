@@ -731,6 +731,19 @@ SERIES_ALIASES: dict[str, str] = {
 	"Bromeliad Trilogy": "Vyprávění o nomech",
 }
 
+# Tail tokens that only DECORATE a series name ("Mark Stone (edice)") — a
+# prefix suspect whose extra tokens are all decorative may still be the same
+# series (numbering/online evidence decides). Any CONTENT token in the
+# extension ("Star Wars - Akademie Jedi", "Duna Chronicles") names a
+# SUB-SERIES and is never auto-merged into the umbrella (measured
+# 2026-09-10: the umbrella's {3,4} + a lone line volume {2} is contiguous,
+# which the complementary rule alone misread as one series). Keys are FOLD
+# forms — lowercase, diacritics stripped.
+_SERIES_DECOR_TOKENS = {
+	"edice", "edicia", "serie", "series", "cyklus", "cycle",
+	"kolekce", "collection", "soubor",
+}
+
 
 def fold_series(s: str) -> str:
 	"""Fold key: NFC + casefold + diacritics out + punctuation to spaces,
@@ -833,6 +846,11 @@ class SuspectPair:
 	of the other) or by fuzzy closeness to a VERIFIED series name; the
 	verdict weighs the offline evidence (volume numbering) and, when an
 	online check is supplied, the names' existence in the bibliographic DB.
+	A prefix suspect whose extension carries CONTENT tokens ("Star Wars" /
+	"Star Wars - Akademie Jedi") is a named SUB-SERIES: "distinct" up
+	front — no evidence tier may retitle a named line into its umbrella
+	(only decorative tails like "(edice)" stay mergeable; the escape hatch
+	for a deliberate merge is a SERIES_ALIASES row).
 	Only "merge" suspects become clusters/proposals — the rest stay here
 	for the overview tables.
 	"""
@@ -840,6 +858,7 @@ class SuspectPair:
 	base: str
 	suspect: str
 	kind: str  # "prefix" | "fuzzy"
+	subseries: bool | None = None  # suspect NAMES a sub-series of the base
 	complementary: bool | None = None  # volume sets interleave into one row
 	collision: bool | None = None  # both claim the same volume number
 	online_base: bool | None = None
@@ -849,6 +868,8 @@ class SuspectPair:
 	@property
 	def evidence(self) -> str:
 		parts = []
+		if self.subseries:
+			parts.append("named sub-series — never merged into the umbrella")
 		if self.complementary:
 			parts.append("numbering complementary")
 		if self.collision:
@@ -893,7 +914,11 @@ def build_series_clusters(
 	  and fuzzy closeness to a verified series name, weighed by volume
 	  numbering (complementary sets ⇒ one series; a collision ⇒ two series
 	  or duplicates) and optionally by ``online_check(name) -> bool``
-	  (injected; the engine stays I/O-free). Only positively-evidenced
+	  (injected; the engine stays I/O-free). A prefix pair whose extension
+	  carries CONTENT tokens ("Star Wars" / "Star Wars - Akademie Jedi")
+	  names a sub-series and is verdict-"distinct" up front — no tier may
+	  retitle a named line into its franchise umbrella; the deliberate
+	  merge stays a SERIES_ALIASES row. Only positively-evidenced
 	  pairs become clusters; every pair is returned for display.
 
 	There is deliberately NO free fuzzy tier (same trade as genres, see
@@ -1013,12 +1038,27 @@ def build_series_clusters(
 			collision = bool(na & nb)
 			union = na | nb
 			complementary = not collision and union == set(range(min(union), max(union) + 1))
+		# A prefix pair whose extension carries content tokens names a
+		# SUB-SERIES ("Star Wars - Akademie Jedi"), not a spelling variant —
+		# the same doctrine that keeps fold_series order-sensitive. No
+		# evidence tier may absorb a named line into its umbrella: the
+		# numbering is coincidence ({3,4} + {2} is contiguous) and the
+		# online check would only confirm the FRANCHISE exists while the
+		# local line name does not. Decorative tails ("(edice)") stay
+		# mergeable through the tiers below.
+		subseries = kind == "prefix" and any(
+			t not in _SERIES_DECOR_TOKENS
+			for t in sus_key.split()
+			if t not in base_key.split()
+		)
 		online_base = online_suspect = None
-		if online_check is not None:
+		if online_check is not None and not subseries:
 			online_base = bool(online_check(base))
 			online_suspect = bool(online_check(sus))
 		verdict = "unknown"
-		if collision:
+		if subseries:
+			verdict = "distinct"
+		elif collision:
 			verdict = "distinct"  # two series (or duplicate books) — never merge
 		elif complementary:
 			verdict = "merge"
@@ -1027,7 +1067,7 @@ def build_series_clusters(
 				verdict = "merge"  # the base exists online, the suspect does not
 			elif online_base and online_suspect:
 				verdict = "distinct"
-		suspects.append(SuspectPair(base, sus, kind, complementary, collision, online_base, online_suspect, verdict))
+		suspects.append(SuspectPair(base, sus, kind, subseries=subseries, complementary=complementary, collision=collision, online_base=online_base, online_suspect=online_suspect, verdict=verdict))
 		if verdict != "merge":
 			continue
 		# A "merge" suspect joins the base group's cluster (extending fold

@@ -594,6 +594,11 @@ class CoverStripResult:
 	# EPUB file names whose embedded cover does not decode as an image and
 	# was (or would be) stripped for that reason.
 	invalid_epubs: list[str] = field(default_factory=list)
+	# Cover files SMALLER than the requested minimum (min_size selector)
+	# renamed to <name>.bak, with their pixel size in small_sizes so the
+	# report can show what was found.
+	small_baks: list[str] = field(default_factory=list)
+	small_sizes: dict[str, tuple[int, int]] = field(default_factory=dict)
 
 	@property
 	def touched(self) -> bool:
@@ -603,6 +608,7 @@ class CoverStripResult:
 			or bool(self.failed_epubs)
 			or bool(self.invalid_baks)
 			or bool(self.invalid_epubs)
+			or bool(self.small_baks)
 		)
 
 
@@ -681,12 +687,13 @@ def _invalid_cover_candidate(p: Path) -> bool:
 def strip_generated_covers(
 	folder: str | Path, *, dry_run: bool = True,
 	generated: str | None = "both", invalid: str | None = None,
+	min_size: int | None = None,
 ) -> CoverStripResult:
-	"""Remove GENERATED and/or INVALID covers from one book folder.
+	"""Remove GENERATED, INVALID and/or SMALL covers from one book folder.
 
-	Per-folder engine of ``bmf strip-covers``. Two selectors, each with its
-	own scope (``"external"`` = loose files in the folder, ``"embedded"`` =
-	covers inside EPUBs, ``"both"``):
+	Per-folder engine of ``bmf clean --covers``. Two selectors with a scope
+	(each ``"external"`` = loose files in the folder, ``"embedded"`` =
+	covers inside EPUBs, ``"both"``) plus one external-only threshold:
 
 	- *generated* (default ``"both"``; ``None`` disables) — the C11 pixel
 	  math: ``cover.jpg`` classified generated → renamed ``cover.jpg.bak``
@@ -701,6 +708,17 @@ def strip_generated_covers(
 	  ``<name>.bak``; an EPUB whose OPF-wired cover bytes do not decode is
 	  stripped with the same surgery. These are the files behind ABS's ffmpeg
 	  "Invalid data found when processing input" resize errors.
+	- *min_size* (default ``None`` = off; pixels on the SHORTER side) —
+	  real, decodable covers that are simply too small (the databazeknih
+	  thumbnails) are renamed to ``<name>.bak`` over the same external
+	  candidate set, so the book re-fires MISSING_COVER and the pipeline
+	  refetches a bigger cover (``Enricher.upgrade_cover`` cross-compares
+	  the CZ sources by image size and keeps the strictly larger one).
+	  External only on purpose: the embedded cover is the recovery FALLBACK
+	  when no source serves anything bigger — a small real fallback beats
+	  none — and stripping an EPUB is file surgery too invasive for a
+	  quality nit. A file whose header cannot be read has no judgeable size
+	  and stays for the *invalid* selector.
 
 	Non-EPUB format files are deliberately untouched: their covers live in
 	binary EXTH headers with no safe removal path (see
@@ -716,15 +734,17 @@ def strip_generated_covers(
 	def _emb(scope: str | None) -> bool:
 		return scope in ("embedded", "both")
 
-	def _bak_away(path: Path, report: list[str]) -> None:
+	def _bak_away(path: Path, report: list[str]) -> bool:
 		if dry_run:
 			report.append(path.name)
-			return
+			return True
 		try:
 			os.replace(path, path.with_suffix(path.suffix + ".bak"))
 			report.append(path.name)
+			return True
 		except OSError as exc:
 			log.warning("cover strip failed for %s: %s", path, exc)
+			return False
 
 	cover_path = folder / "cover.jpg"
 	if _ext(generated) and cover_path.is_file() and analyze_cover(cover_path).is_generated:
@@ -743,6 +763,25 @@ def strip_generated_covers(
 			# pixels for the C11 math) — the two passes never collide.
 			if _invalid_cover_candidate(p) and not image_is_readable(p):
 				_bak_away(p, result.invalid_baks)
+
+	if min_size:
+		# SMALL covers: external candidates only (see the docstring for why
+		# the embedded fallback is kept). analyze_cover rides the persistent
+		# cover-verdict cache, so the size of an unchanged cover is free.
+		for p in sorted(folder.iterdir()):
+			if not _invalid_cover_candidate(p):
+				continue
+			# The generated pass already claimed cover.jpg — under dry-run the
+			# file is still there and must not be reported a second time.
+			if p.name == "cover.jpg" and result.cover_bak:
+				continue
+			info = analyze_cover(p)
+			# width == 0: undecodable or no Pillow — the invalid pass owns
+			# those; without a header there is no size to judge.
+			if not info.width:
+				continue
+			if min(info.width, info.height) < min_size and _bak_away(p, result.small_baks):
+				result.small_sizes[p.name] = (info.width, info.height)
 
 	for epub in sorted(folder.glob("*.epub")):
 		data = epub_cover_image(epub)

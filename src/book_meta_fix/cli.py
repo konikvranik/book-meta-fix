@@ -1237,7 +1237,7 @@ def strip_covers(ctx: click.Context, library: Path | None, no_cache: bool, limit
 	)
 
 
-def _print_strip_covers_summary(results, do_apply: bool) -> None:  # noqa: ANN001
+def _print_strip_covers_summary(results, do_apply: bool, reopened: int = 0) -> None:  # noqa: ANN001
 	console.print()
 	t = Table(title=_("Cover strip summary"), show_header=True, header_style="bold cyan")
 	t.add_column(_("Metric"), style="bold")
@@ -1245,9 +1245,12 @@ def _print_strip_covers_summary(results, do_apply: bool) -> None:  # noqa: ANN00
 	t.add_row(_("books scanned"), str(len(results)), style="dim")
 	t.add_row(_("cover.jpg renamed to .bak"), str(sum(1 for r in results if r.cover_bak)))
 	t.add_row(_("invalid cover files renamed to .bak"), str(sum(len(r.invalid_baks) for r in results)))
+	t.add_row(_("small cover files renamed to .bak"), str(sum(len(r.small_baks) for r in results)))
 	t.add_row(_("embedded EPUB covers stripped"), str(sum(len(r.stripped_epubs) for r in results)))
 	t.add_row(_("invalid embedded EPUB covers stripped"), str(sum(len(r.invalid_epubs) for r in results)))
 	t.add_row(_("strip failures"), str(sum(len(r.failed_epubs) for r in results)))
+	if reopened:
+		t.add_row(_("verified flags cleared for re-fetch"), str(reopened))
 	console.print(t)
 
 	touched = [r for r in results if r.touched]
@@ -1264,6 +1267,9 @@ def _print_strip_covers_summary(results, do_apply: bool) -> None:  # noqa: ANN00
 				parts.append(_("stripped: {files}").format(files=", ".join(r.stripped_epubs)))
 			if r.invalid_baks:
 				parts.append(_("invalid -> .bak: {files}").format(files=", ".join(r.invalid_baks)))
+			if r.small_baks:
+				named = [f"{n} ({r.small_sizes[n][0]}x{r.small_sizes[n][1]})" if n in r.small_sizes else n for n in r.small_baks]
+				parts.append(_("small -> .bak: {files}").format(files=", ".join(named)))
 			if r.invalid_epubs:
 				parts.append(_("invalid stripped: {files}").format(files=", ".join(r.invalid_epubs)))
 			if r.failed_epubs:
@@ -1274,6 +1280,11 @@ def _print_strip_covers_summary(results, do_apply: bool) -> None:  # noqa: ANN00
 		console.print(t)
 		if any(r.failed_epubs for r in results):
 			console.print("[yellow]" + _("Some EPUB covers probed as generated but could not be stripped (corrupt zip / unparseable OPF); see the list above.") + "[/yellow]")
+		if any(r.small_baks for r in results):
+			if do_apply:
+				console.print("[dim]" + _("Small covers were renamed to .bak — run `bmf analyze` + `bmf apply` to re-fetch bigger ones (sources are cross-compared by image size).") + "[/dim]")
+			else:
+				console.print("[dim]" + _("Dry-run for small covers too — re-run with --apply to rename them, then `bmf analyze` + `bmf apply` re-fetches bigger ones.") + "[/dim]")
 		if not do_apply:
 			console.print("[dim]" + _("Dry-run: nothing removed. Re-run with --apply to strip the covers.") + "[/dim]")
 
@@ -1285,11 +1296,13 @@ def _print_strip_covers_summary(results, do_apply: bool) -> None:  # noqa: ANN00
 @click.option("--covers/--no-covers", "clean_covers", default=True, help=_("Clean invalid and generated covers (default: yes)"))
 @click.option("--generated", "generated", type=click.Choice(_STRIP_SCOPES), is_flag=False, flag_value="both", default=None, help=_("Scope of generated-cover removal: external (sidecar files), embedded (inside EPUBs) or both (default). Implies --covers."))
 @click.option("--invalid", "invalid", type=click.Choice(_STRIP_SCOPES), is_flag=False, flag_value="both", default=None, help=_("Scope of invalid-cover removal — files no image decoder can read (HTML saved as .jpg, cover.html). Scope: external, embedded or both (default). Implies --covers."))
+@click.option("--min-size", "min_size", type=click.IntRange(min=1), default=None, help=_("Minimum cover image size in pixels (shorter side). Covers below it (e.g. the small databazeknih thumbnails) are renamed to .bak and their books return to review (the `verified` flag is cleared), so the next `bmf analyze` re-fetches a bigger cover — sources are cross-compared by image size. Implies --covers. Default: BMF_COVER_MIN_SIZE or off."))
 @click.option("--files/--no-files", "clean_files", default=False, help=_("Probe ebook files for unrecoverable content (recognized as no book format at all) and propose deletion in review.yaml (C17). Content-based detection: a valid book with a wrong extension is never proposed; every file is re-checked at apply time. Default: no."))
 @click.option("--unverified/--no-unverified", "clean_unverified", default=True, help=_("Clear `verified` flag from books whose author/series cannot be confirmed online (default: yes)"))
 @click.option("--clear-all-verified", "clear_all_verified", is_flag=True, help=_("Clear `verified` flag from ALL books unconditionally (default: no)"))
 def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: bool,
 		clean_covers: bool, generated: str | None, invalid: str | None,
+		min_size: int | None,
 		clean_files: bool, clean_unverified: bool, clear_all_verified: bool) -> None:
 	"""Clean invalid data and unconfirmed verified flags from the library.
 
@@ -1298,6 +1311,9 @@ def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: boo
 	   image files (HTML saved as .jpg) to .bak, and strips them from EPUBs.
 	   Use --generated / --invalid with optional scope (external/embedded/both)
 	   to select which type and where; both default to both scopes.
+	   --min-size N additionally renames real but SMALL covers (shorter side
+	   below N pixels) to .bak, so the next analyze + apply re-fetch a bigger
+	   cover from the sources (compared by image size).
 	2. --files: Probes ebook files whose CONTENT is recognizable as no book
 	   format (binary garbage, 0 bytes, archives without book content) and —
 	   with --apply — writes `action: delete` proposals (C17) into review.yaml.
@@ -1323,8 +1339,10 @@ def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: boo
 	_validate_library(cfg.library)
 
 	console.print("[bold]" + _("Cleaning library") + f"[/bold] [cyan]{cfg.library}[/cyan] [{'WRITE' if do_apply else 'DRY-RUN'}]", highlight=False)
-	# --generated / --invalid imply --covers even if --no-covers was passed.
-	if generated is not None or invalid is not None:
+	# --generated / --invalid / --min-size imply --covers even if --no-covers
+	# was passed. Only the FLAG implies — an env-default min-size must not
+	# override an explicit --no-covers.
+	if generated is not None or invalid is not None or min_size is not None:
 		clean_covers = True
 	# If neither scope flag was given and covers are active, default to both=both
 	# (the pre-existing "clean everything" behaviour). If only ONE scope flag was
@@ -1335,8 +1353,12 @@ def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: boo
 	else:
 		eff_generated = generated
 		eff_invalid = invalid
+	# Env/.env default for the threshold, honoured only while covers are on.
+	if clean_covers and min_size is None:
+		min_size = cfg.cover_min_size
 	unverified_desc = "all" if clear_all_verified else str(clean_unverified)
-	covers_desc = f"generated={eff_generated or 'off'}, invalid={eff_invalid or 'off'}" if clean_covers else _("off")
+	small_desc = str(min_size) if (clean_covers and min_size) else "off"
+	covers_desc = f"generated={eff_generated or 'off'}, invalid={eff_invalid or 'off'}, small={small_desc}" if clean_covers else _("off")
 	files_desc = _("on") if clean_files else _("off")
 	console.print("[dim]" + _("covers: {covers}, files: {files}, unverified: {unverified}").format(covers=covers_desc, files=files_desc, unverified=unverified_desc) + "[/dim]")
 
@@ -1358,6 +1380,7 @@ def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: boo
 
 		cover_results: list = []
 		unverified_cleared: list[str] = []
+		small_refetch_reopened: list[str] = []
 		file_findings: list = []
 		file_notes: list[str] = []
 
@@ -1371,9 +1394,17 @@ def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: boo
 				# 1. Clean covers
 				if clean_covers:
 					try:
-						cover_results.append(strip_generated_covers(
+						res = strip_generated_covers(
 							meta.path, dry_run=not do_apply, generated=eff_generated, invalid=eff_invalid,
-						))
+							min_size=min_size,
+						)
+						cover_results.append(res)
+						# A book whose SMALL cover was removed must re-enter review,
+						# else analyze (skip-verified default) would never re-fire
+						# MISSING_COVER and the bigger cover would never be fetched.
+						if do_apply and res.small_baks and meta.verified:
+							clear_verified(Path(meta.path))
+							small_refetch_reopened.append(meta.path)
 					except Exception as e:  # noqa: BLE001
 						log.warning("cover strip failed for %s: %s", meta.path, e)
 
@@ -1428,7 +1459,7 @@ def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: boo
 			cache.close()
 
 	if clean_covers:
-		_print_strip_covers_summary(cover_results, do_apply)
+		_print_strip_covers_summary(cover_results, do_apply, reopened=len(small_refetch_reopened))
 
 	if clean_files:
 		files_merge = None

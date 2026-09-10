@@ -94,6 +94,13 @@ class Config:
 	# behaviour). Default 7 days. Override via BMF_ENRICH_NEGATIVE_TTL.
 	enrich_negative_ttl_sec: float = 7 * 24 * 3600
 
+	# Minimum cover image size (pixels, SHORTER side) for `bmf clean --min-size`.
+	# Covers below it are renamed to .bak and their books return to review, so
+	# the next analyze re-fetches a bigger cover (sources cross-compared by
+	# image size). None = the small-cover selector is off. Override via
+	# BMF_COVER_MIN_SIZE or `bmf clean --min-size`.
+	cover_min_size: int | None = None
+
 	# LLM (Z.AI)
 	# Coding plan users must use /api/coding/paas/v4/ (draws from subscription
 	# quota). PaaS / pay-as-you-go users use /api/paas/v4/ (per-token billing).
@@ -307,6 +314,12 @@ class Config:
 		if (v := os.environ.get("BMF_ENRICH_NEGATIVE_TTL")) is not None:
 			try:
 				cfg.enrich_negative_ttl_sec = float(v)
+			except ValueError:
+				pass
+		# Minimum cover size for the clean --min-size selector (pixels)
+		if (v := os.environ.get("BMF_COVER_MIN_SIZE")) is not None:
+			try:
+				cfg.cover_min_size = max(1, int(v))
 			except ValueError:
 				pass
 		# LLM
