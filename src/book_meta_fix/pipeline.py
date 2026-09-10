@@ -1381,6 +1381,20 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cach
 	``deletion_snapshot_<stamp>.tar.gz`` (in dry-run mode nothing is archived
 	and nothing is removed).
 
+	``action: merge`` (C19) folds the folder into the one named by
+	``proposed.merge_into`` (the survivor — picked by ``mover._pick_base``:
+	valid ISBN first, then lowest calibre_id). Merges run BEFORE the main
+	loop: a survivor may be moved by its own placement later in this run,
+	which would leave the proposal's target path stale. Like C17, every
+	merge is RE-CHECKED against the fresh disk state (``mover.same_book``
+	must still hold — metadata may have changed since the proposal) and the
+	loser's metadata sidecars + cover ride the same tar.gz snapshot. No
+	book file is ever overwritten: same-name collisions rename with the
+	loser's id, identical bytes are skipped. A survivor with its own
+	decided whole-folder ``delete`` entry is left alone (a conflict of
+	decisions — merging would only feed files into a folder about to be
+	removed).
+
 	After a successful WRITE run, successfully-applied entries (accept/delete
 	without error) are pruned from review.yaml so the file reflects
 	only remaining work; pending (action: null) and errored entries
@@ -1413,7 +1427,8 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cach
 
 	items = parse_review(review_path)
 	summary = {"applied": 0, "deleted": 0, "kept": 0, "pruned": 0, "remaining": None, "snapshot": None, "errors": [], "dry_run": dry_run,
-	           "moved_to_root": 0, "moved_to_needfix": 0, "already_placed": 0, "merged": 0}
+	           "moved_to_root": 0, "moved_to_needfix": 0, "already_placed": 0, "merged": 0,
+	           "merged_folders": 0, "skipped_merges": []}
 	succeeded_uuids: set = set()  # uuids of entries committed this run → pruned
 	# delete collects (folder, uuid) so removal success can be tracked per entry.
 	deletions: list[tuple[Path, str | None]] = []
@@ -1423,7 +1438,94 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cach
 	# uuid → new relative path for retained (keep) entries whose book moved —
 	# their review.yaml entry survives, so its `path` must follow the folder.
 	kept_moves: dict[str, str] = {}
+	# C19 merge: the loser's sidecars + cover are destroyed by the merge's
+	# rmtree — they ride the deletion snapshot for rollback. The shared
+	# snapshot is only taken AFTER the main loop (when the loser folder is
+	# already gone), so the files are COPIED into a run-lifetime spool dir
+	# as they are collected; the spool is removed once archived.
+	merge_snapshot_paths: list = []
+	merge_spool: Path | None = None
 	total = len(items)
+
+	# C19 merges run BEFORE the main loop: a survivor may be MOVED by its own
+	# placement later in this run, which would leave the proposal's
+	# merge_into path stale. Every merge re-checks the fresh disk state.
+	if any(item.action == "merge" for item in items):
+		import shutil
+		import tempfile
+
+		from . import mover
+		from .readers import read_book_folder
+
+		# Survivors slated for whole-folder deletion in THIS review — merging
+		# into them would feed files into a folder about to be removed.
+		delete_uuids = {
+			item.uuid for item in items
+			if item.action == "delete" and not (item.proposed or {}).get("delete_files")
+		}
+		for item in items:
+			if item.action != "merge":
+				continue
+			merge_into = (item.proposed or {}).get("merge_into")
+			if not merge_into:
+				summary["errors"].append(f"id={item.id}: merge entry without proposed.merge_into")
+				continue
+			loser = Path(item.path)
+			if not loser.is_absolute():
+				loser = library / item.path
+			survivor = Path(str(merge_into))
+			if not survivor.is_absolute():
+				survivor = library / str(merge_into)
+			if not loser.is_dir():
+				summary["errors"].append(f"id={item.id}: folder not found: {loser}")
+				continue
+			try:
+				same = loser.resolve() == survivor.resolve()
+			except OSError:
+				same = loser == survivor
+			if same:
+				summary["errors"].append(f"id={item.id}: merge target is the entry itself: {survivor}")
+				continue
+			if not survivor.is_dir():
+				summary["errors"].append(f"id={item.id}: merge target not found: {survivor}")
+				continue
+			loser_meta = read_book_folder(loser)
+			survivor_meta = read_book_folder(survivor)
+			if survivor_meta.uuid is not None and survivor_meta.uuid in delete_uuids:
+				summary["skipped_merges"].append(f"{item.path}: merge target has a decided delete entry")
+				continue
+			# Re-check on FRESH metadata — the proposal may predate edits or
+			# another apply; same_book still decides "same work" (incl. the
+			# different-edition year tie-breaker).
+			if not mover.same_book(loser_meta, survivor_meta):
+				summary["skipped_merges"].append(f"{item.path}: no longer the same work as the target (re-run `bmf merge`)")
+				continue
+			for name in ("metadata.json", "metadata.opf", "cover.jpg"):
+				cand = loser / name
+				if not cand.is_file():
+					continue
+				if merge_spool is None:
+					merge_spool = Path(tempfile.mkdtemp(prefix="bmf-merge-spool-"))
+				spooled = merge_spool / f"{len(merge_snapshot_paths):04d}_{cand.name}"
+				shutil.copy2(cand, spooled)
+				try:
+					arc = str(cand.relative_to(library))
+				except ValueError:
+					arc = str(cand)
+				merge_snapshot_paths.append((spooled, arc))
+			res = mover.merge_folders(survivor, survivor_meta, loser_meta, dry_run=dry_run, library=library)
+			if res.action == "error":
+				summary["errors"].append(f"id={item.id}: merge failed: {res.error}")
+				continue
+			summary["merged_folders"] += 1
+			if not dry_run:
+				if item.uuid is not None:
+					succeeded_uuids.add(item.uuid)
+				# Both ends changed: the loser is gone, the survivor's payload
+				# was merged — a repoint would carry the stale pre-merge row.
+				if cache is not None:
+					cache.invalidate(loser)
+					cache.invalidate(survivor)
 
 	for i, item in enumerate(items):
 		# Report progress at the start of each item (covers every path, including
@@ -1434,9 +1536,11 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cach
 		if item.action is None:
 			# Not yet reviewed — skip silently
 			continue
-		if item.action not in ("accept", "delete", "keep"):
+		if item.action not in ("accept", "delete", "keep", "merge"):
 			summary["errors"].append(f"id={item.id}: unknown action {item.action!r}")
 			continue
+		if item.action == "merge":
+			continue  # handled by the pre-loop merge pass
 
 		# Reconstruct a BookMeta with the *current* values, then apply the fix
 		folder = Path(item.path)
@@ -1539,7 +1643,7 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cach
 	# File-level deletions (C17) are RE-CHECKED first: a proposal can never
 	# delete a file that is healthy (or already gone) at apply time — the user
 	# may have replaced it since `clean --files` ran.
-	snapshot_paths = [p for p, _ in deletions]
+	snapshot_paths = merge_snapshot_paths + [p for p, _ in deletions]
 	if file_deletions:
 		from .filecheck import file_is_invalid
 
@@ -1578,17 +1682,21 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cach
 					if cache is not None:
 						cache.invalidate(folder)
 		for folder, did in deletions:
-				try:
-					import shutil
+			try:
+				import shutil
 
-					shutil.rmtree(folder)
-					if did is not None:
-						succeeded_uuids.add(did)
-					# Folder is gone — drop its cache entry too.
-					if cache is not None:
-						cache.invalidate(folder)
-				except OSError as e:
-					summary["errors"].append(f"delete failed for {folder}: {e}")
+				shutil.rmtree(folder)
+				if did is not None:
+					succeeded_uuids.add(did)
+				# Folder is gone — drop its cache entry too.
+				if cache is not None:
+					cache.invalidate(folder)
+			except OSError as e:
+				summary["errors"].append(f"delete failed for {folder}: {e}")
+	if merge_spool is not None:
+		import shutil
+
+		shutil.rmtree(merge_spool, ignore_errors=True)
 
 	# Pruning: drop successfully-applied entries from review.yaml. Only in WRITE
 	# mode — dry-run must leave the file untouched.
@@ -1690,9 +1798,15 @@ def _place_applied_book(meta: BookMeta, placement: str, dest: Path, *, dry_run: 
 	return move_book(src, dest, dry_run=dry_run, library=library)
 
 
-def _snapshot_deletions(paths: list[Path], library: Path) -> Path | None:
+def _snapshot_deletions(paths: list, library: Path) -> Path | None:
 	"""Bundle *paths* (whole book dirs and/or individual deleted files) into
     a tar.gz next to the library.
+
+	Each item is a path, or a ``(path, arcname)`` pair — the pair form serves
+	the C19 merge sidecars, which are SPOOLED out of the loser folder before
+	the merge's rmtree runs (the shared snapshot is only taken later, when the
+	folder is already gone), so their archive name must still name the original
+	library-relative location.
 
     Returns the snapshot path, or None if there was nothing to archive or the
     archive could not be written (errors are logged, not raised — the caller
@@ -1707,8 +1821,13 @@ def _snapshot_deletions(paths: list[Path], library: Path) -> Path | None:
 	output = Path(f"deletion_snapshot_{stamp}.tar.gz")
 	try:
 		with tarfile.open(output, "w:gz") as tar:
-			for p in paths:
-				tar.add(p, arcname=str(p.relative_to(library)) if p.is_relative_to(library) else p.name)
+			for item in paths:
+				if isinstance(item, tuple):
+					p, arcname = item
+					tar.add(p, arcname=arcname)
+				else:
+					p = item
+					tar.add(p, arcname=str(p.relative_to(library)) if p.is_relative_to(library) else p.name)
 		log.info("deletion snapshot: %d paths -> %s", len(paths), output)
 		return output
 	except OSError as e:

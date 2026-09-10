@@ -310,6 +310,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--no-check-location", "no_check_location", is_flag=True, help=_("Skip the C13 location check (analyze metadata only, no placement proposals)."))
 @click.option("--recheck-ok", "recheck_ok", is_flag=True, help=_("Clear the `verified` flag (see review.yaml / the GUI checkbox) from every book, returning user-confirmed books to normal detection. Undo of a too-hasty OK."))
 @click.option("--normalize", "normalize_after", is_flag=True, help=_("Run the library-wide normalize pass (C15 author variants / C16 genre variants / C18 series-name variants) at the end, over the books this analyze already scanned — no second library scan. Proposals are merged into the same review file; review with `bmf gui`, write with `bmf apply`."))
+@click.option("--merge", "merge_after", is_flag=True, help=_("Also propose merging duplicate folders of the same work (C19) at the end, over the books this analyze already scanned. ISBN-confirmed duplicates arrive pre-filled action: merge, the rest pending; `bmf apply` executes them."))
 @click.option("--output", "-o", type=click.Path(path_type=Path), default=None, help=_("Output review file (default: review.yaml)"))
 @click.option("--llm/--no-llm", "use_llm", default=True, help=_("Enable/disable LLM reconciliation (default: enabled if provider configured)"))
 @click.option("--llm-provider", "llm_provider", default=None, type=click.Choice(["antigravity", "acp", "agy", "zai", "mock", "off"], case_sensitive=False), help=_("Force the LLM provider branch (default: auto — Antigravity ACP when an agent is configured or cached, else Z.AI when ZAI_API_KEY is set). 'antigravity' = the ACP agent is the fast tier and Z.AI (if a key exists) only the paid fallback; 'zai' never uses ACP."))
@@ -330,7 +331,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--llm-rate-limit-base", "llm_rate_limit_base", type=float, default=None, help=_("Base seconds of the global cooldown applied when a 429 is seen (default 5). When ANY worker hits a 429, ALL workers pause this long; the cooldown escalates 5/10/20/... with consecutive 429s, honours the server Retry-After when longer, and is capped by --llm-rate-limit-max. Higher = safer but slower; lower = more 429 risk."))
 @click.option("--llm-rate-limit-max", "llm_rate_limit_max", type=float, default=None, help=_("Cap (seconds) on the escalating 429 cooldown (default 60). Prevents a sustained outage from parking workers indefinitely."))
 @click.option("--llm-max-inflight", "llm_max_inflight", type=int, default=None, help=_("Hard cap on LLM requests running at the same instant (default 3). The Z.AI coding plan admits only ~5 concurrent requests per account (interactive clients draw from the same ceiling), so a deep fallback herd gets 429/1302 storms — and false 1113 'insufficient balance' — no matter how slow the drip is. Workers queue on this instead of being rejected. Flash-family models get a stricter sub-cap of min(2, this value)."))
-def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, use_legie: bool, abs_czech_url: str | None, skip_verify: bool, verify_ok: bool, no_strict_verify: bool, accept_missing: bool, pattern: str | None, no_check_location: bool, recheck_ok: bool, normalize_after: bool, output: Path | None, use_llm: bool, llm_provider: str | None, antigravity_cmd: str | None, antigravity_model: str | None, antigravity_fallback: str | None, antigravity_fallback_model: str | None, llm_categories: str, workers: int, scan_workers: int | None, llm_min_interval: float | None, llm_model: str | None, llm_reasoning_effort: str | None, llm_thinking: str | None, no_llm_loop: bool, llm_fallback_model: str | None, llm_burst: float | None, llm_rate_limit_base: float | None, llm_rate_limit_max: float | None, llm_max_inflight: int | None) -> None:
+def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich: bool, use_databazeknih: bool, use_legie: bool, abs_czech_url: str | None, skip_verify: bool, verify_ok: bool, no_strict_verify: bool, accept_missing: bool, pattern: str | None, no_check_location: bool, recheck_ok: bool, normalize_after: bool, merge_after: bool, output: Path | None, use_llm: bool, llm_provider: str | None, antigravity_cmd: str | None, antigravity_model: str | None, antigravity_fallback: str | None, antigravity_fallback_model: str | None, llm_categories: str, workers: int, scan_workers: int | None, llm_min_interval: float | None, llm_model: str | None, llm_reasoning_effort: str | None, llm_thinking: str | None, no_llm_loop: bool, llm_fallback_model: str | None, llm_burst: float | None, llm_rate_limit_base: float | None, llm_rate_limit_max: float | None, llm_max_inflight: int | None) -> None:
 	"""Run full pipeline and generate a review.yaml for NEEDS_REVIEW books."""
 	from rich.progress import (
 		BarColumn,
@@ -658,6 +659,18 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 			console.print(f"[bold]{title}[/bold] [cyan]{cfg.library}[/cyan] [WRITE]", highlight=False)
 			_run_normalize_pass(cfg, scanned_books, review_file=out, fields=("authors", "genres", "tags", "series"), samples=3, do_apply=True)
 
+	# --merge: the C19 duplicate sweep rides the same scan. Same ordering rule
+	# as --normalize — strictly after review_writer.finish(), because the
+	# proposal merge rewrites the review file in place.
+	if merge_after:
+		if interrupted:
+			console.print("[yellow]" + _("--merge skipped: run was interrupted") + "[/yellow]")
+		elif scanned_books:
+			title = _("Merging duplicate folders of the same work")
+			console.print()
+			console.print(f"[bold]{title}[/bold] [cyan]{cfg.library}[/cyan] [WRITE]", highlight=False)
+			_run_merge_proposals(cfg, scanned_books, review_file=out, do_apply=True, samples=3)
+
 
 def _print_pipeline_summary(results, stats: dict | None = None, review_summary: dict | None = None) -> None:  # noqa: ANN001
 	"""Print a summary of what the pipeline produced.
@@ -887,6 +900,10 @@ def apply(review_file: Path | None, library: Path | None, do_apply: bool, patter
 	t.add_row(_("Applied"), str(summary["applied"]))
 	t.add_row(_("Kept"), str(summary.get("kept", 0)))
 	t.add_row(_("Deleted"), str(summary.get("deleted", 0)))
+	if summary.get("merged_folders"):
+		t.add_row(_("Merged duplicate folders (C19)"), str(summary["merged_folders"]))
+	if summary.get("skipped_merges"):
+		t.add_row(_("Skipped merges (re-check failed)"), str(len(summary["skipped_merges"])))
 	if summary.get("snapshot"):
 		t.add_row(_("Deletion snapshot"), summary["snapshot"])
 	if summary.get("moved_to_root") or summary.get("merged") or summary.get("already_placed"):
@@ -905,6 +922,11 @@ def apply(review_file: Path | None, library: Path | None, do_apply: bool, patter
 		console.print()
 		console.print("[red]" + _("Errors:") + "[/red]")
 		for e in summary["errors"][:20]:
+			console.print(f"  {e}")
+	if summary.get("skipped_merges"):
+		console.print()
+		console.print("[yellow]" + _("Skipped merges:") + "[/yellow]")
+		for e in summary["skipped_merges"][:20]:
 			console.print(f"  {e}")
 
 
@@ -1727,6 +1749,101 @@ def _print_normalize_clusters(result, samples: int) -> None:  # noqa: ANN001
 		for raw, n in result.multi_author[: samples]:
 			t.add_row(raw[:70], str(n))
 		console.print(t)
+
+
+@main.command()
+@click.option("--library", "library", type=click.Path(file_okay=False, path_type=Path), help=_("Library root"))
+@click.option("--no-cache", is_flag=True, help=_("Disable SQLite cache"))
+@click.option("--apply", "do_apply", is_flag=True, help=_("Write the proposals into review.yaml as C19 entries (the folders themselves are merged later by `bmf apply`; default: dry-run)"))
+@click.option("--samples", type=int, default=25, help=_("Number of duplicate clusters to show"))
+def merge(library: Path | None, no_cache: bool, do_apply: bool, samples: int) -> None:
+	"""Find duplicate folders of the same work and propose merging them (C19).
+
+	The same book imported twice lives in two folders — the default
+	'{author}/{title} ({id})' pattern keeps their paths apart, so they never
+	collide and never merge on their own. This command clusters same-work
+	folders across the whole library (identical folded author+title, or the
+	same valid ISBN; different editions — years differing on both sides —
+	are left alone) and fills review.yaml with `action: merge` entries
+	pointing each duplicate at its survivor. Only ISBN-confirmed duplicates
+	arrive pre-filled; the rest stay pending for your decision. `bmf apply`
+	then moves the duplicate's files into the survivor folder (same-name
+	files are renamed with the loser's id, never overwritten) and merges the
+	metadata — the survivor's values win, the duplicate fills gaps.
+	"""
+	cfg = Config.from_env()
+	if library is not None:
+		cfg.library = library
+
+	_validate_library(cfg.library)
+	title = _("Merging duplicate folders of the same work")
+	mode = "WRITE" if do_apply else "DRY-RUN"
+	console.print(f"[bold]{title}[/bold] [cyan]{cfg.library}[/cyan] [{mode}]", highlight=False)
+
+	cache = _open_cache(cfg.cache_db, no_cache=no_cache)
+	try:
+		books = _scan_library_with_progress(cfg, cache, no_cache=no_cache)
+		if not books:
+			console.print("[red]" + _("No books found.") + "[/red]")
+			sys.exit(1)
+	finally:
+		if cache is not None:
+			cache.close()
+
+	_run_merge_proposals(cfg, books, review_file=cfg.review_file, do_apply=do_apply, samples=samples)
+
+
+def _run_merge_proposals(cfg: Config, books: list, *, review_file: Path, do_apply: bool, samples: int = 25) -> None:
+	"""Post-scan half of `bmf merge`, shared with `analyze --merge`.
+
+	Runs the library-wide C19 clustering over an ALREADY-SCANNED book list
+	and merges the merge proposals into *review_file* — same reuse reason
+	as _run_normalize_pass: re-walking the tree costs minutes on NFS even
+	fully cached.
+	"""
+	from .duplicates import merge_duplicate_proposals, scan_duplicates
+
+	findings = scan_duplicates(books, library_root=cfg.library)
+	_print_duplicate_findings(findings, samples, library_root=cfg.library)
+	console.print()
+	n_prefilled = sum(1 for f in findings if f.isbn_confirmed)
+	console.print(
+		_("Merge proposals for {count} duplicate folder(s): {prefilled} pre-filled merge, {pending} pending review").format(
+			count=len(findings), prefilled=n_prefilled, pending=len(findings) - n_prefilled,
+		)
+	)
+	if do_apply:
+		if not findings:
+			console.print("[dim]" + _("Nothing to write.") + "[/dim]")
+			return
+		summary = merge_duplicate_proposals(review_file, findings, books, library_root=cfg.library)
+		console.print(
+			_("review.yaml updated: {added} entry/entries added, {updated} updated, {skipped} already decided (skipped)").format(
+				added=summary["added"], updated=summary["updated"], skipped=summary["skipped_decided"],
+			)
+		)
+		console.print("[dim]" + _("Review with `bmf gui`, then run `bmf apply`. The survivor folder changes on disk — finish with `bmf abs-rescan`.") + "[/dim]")
+	else:
+		console.print("[dim]" + _("Dry-run: nothing written. Re-run with --apply to fill review.yaml.") + "[/dim]")
+
+
+def _print_duplicate_findings(findings, samples: int, library_root: Path | None = None) -> None:  # noqa: ANN001
+	console.print()
+	t = Table(title=_("Duplicate folders of the same work (C19)"), show_header=True, header_style="bold yellow")
+	t.add_column(_("Duplicate folder"))
+	t.add_column(_("Merge into (survivor)"), style="green")
+	t.add_column(_("Evidence"))
+	for f in sorted(findings, key=lambda x: (x.merge_into.lower(), str(x.path)))[:samples]:
+		loser = str(f.path)
+		if library_root is not None:
+			try:
+				loser = str(Path(f.path).relative_to(library_root))
+			except ValueError:
+				pass
+		t.add_row(loser[:90], f.merge_into[:90], f.reason[:110])
+	console.print(t)
+	if len(findings) > samples:
+		console.print(f"[dim]… {len(findings) - samples} " + _("more") + "[/dim]")
 
 
 @main.command(name="series")

@@ -349,6 +349,56 @@ two books is a WARNING (duplicate folder or a wrong index).
 **Verdict:** AUTO_FIXABLE (fold) / NEEDS_REVIEW (alias rows, evidenced
 suspect merges)
 
+## C19 — Duplicate folders of the same work (library-level)
+
+The same book imported twice lives in two folders. The default
+`{author}/{title} ({id})` pattern puts each import at its own path, so the
+folders never collide — and apply's collision-merge (which folds a book into
+an occupied same-work target) can never reach them. The duplicates persist
+forever: two half-filled records, one format in each folder, and neither
+enricher sees a complete book.
+
+Like C15–C18 this is invisible to any per-book detector; it is a property of
+the library as a whole. `bmf merge` (or `analyze --merge`, which reuses the
+run's scan) clusters same-work folders and writes `action: merge` entries
+into review.yaml:
+
+* **Detection is exact-only.** Two books are candidates when their folded
+  first author + folded title are identical (diacritics/case/punctuation
+  folded — the `fold_series` recipe), or when both carry the same valid
+  (canonicalized) ISBN. There is deliberately no fuzzy tier: a library-wide
+  0.85 sweep over ~5,000 books multiplies false pairs, and a wrong merge
+  proposal is noise the user pays for. A misspelled title stays invisible to
+  C19 — fix it via C15 first and the pair appears on the next run.
+* **The final gate is `mover.same_book`** (the year tie-breaker): folders
+  whose years both exist and differ are different editions and never merge —
+  unless the ISBNs already match (a matching ISBN identifies the same
+  edition even when one record carries a wrong year; the merge then fills
+  the survivor's missing year from the loser). Dead records (no format
+  files) are excluded — EMPTY_BOOK owns them.
+* **The survivor** is picked by `mover._pick_base`: a valid ISBN wins, then
+  the lowest calibre_id — deterministic across runs. Every other member of
+  the cluster gets a review entry whose `proposed.merge_into` names the
+  survivor.
+* **Pre-fill:** only ISBN-confirmed duplicates (both sides carry the same
+  valid ISBN) arrive pre-filled `action: merge`; an exact author+title match
+  without ISBN proof stays pending. Entries are never born `verified` —
+  merging folders is not identity evidence.
+
+`bmf apply` executes merges BEFORE its main loop (a survivor may be moved by
+its own placement later in the run). Every merge is re-checked against the
+fresh disk state — `same_book` must still hold, metadata may have changed
+since the proposal — and re-check failures skip the entry and keep it in
+review. The loser's format files move into the survivor folder (same-name
+collisions rename with the loser's id, identical bytes are skipped, the
+survivor's cover wins), metadata is field-merged survivor-first, and the
+loser's metadata sidecars + cover ride the `deletion_snapshot_*.tar.gz` for
+rollback. A survivor with its own decided whole-folder `delete` entry is left
+alone (a conflict of decisions). Both folders' cache rows are invalidated.
+
+**Verdict:** AUTO_FIXABLE (ISBN-confirmed) / NEEDS_REVIEW (exact match
+without ISBN proof)
+
 ## EMPTY_BOOK — Dead record (the book file is gone)
 
 The folder holds only metadata sidecars, their backups and/or a cover —

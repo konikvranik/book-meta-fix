@@ -5,6 +5,7 @@ snapshot and then removes them; summary counts.
 """
 from __future__ import annotations
 
+import shutil
 import tarfile
 from pathlib import Path
 from unittest.mock import patch
@@ -1118,3 +1119,155 @@ class TestDeleteFiles:
 		assert summary["files_deleted"] == 1  # the honest dry-run count
 		assert (folder / "kniha.epub").is_file()
 		assert summary["snapshot"] is None
+
+
+class TestMergeAction:
+	"""action: merge (C19) — fold a duplicate folder into its survivor."""
+
+	def _seed_dup(self, library: Path) -> tuple[Path, Path]:
+		"""Two same-work folders: Author/Book (1) survives, Author/Book (2) merges in."""
+		import json
+
+		folders = []
+		for cid in (1, 2):
+			folder = library / "Author" / f"Book ({cid})"
+			folder.mkdir(parents=True)
+			(folder / "metadata.json").write_text(json.dumps({
+				"title": "Book", "authors": ["Author"], "uuid": f"u{cid}",
+				"isbn": "9780306406157",
+			}), encoding="utf-8")
+			(folder / f"Book - Author ({cid}).epub").write_text(f"epub-{cid}", encoding="utf-8")
+			folders.append(folder)
+		return folders[0], folders[1]
+
+	def _merge_entry(self) -> dict:
+		return {
+			"id": 2, "uuid": "u2", "path": "Author/Book (2)",
+			"current": {"title": "Book"},
+			"proposed": {"merge_into": "Author/Book (1)"},
+			"action": "merge",
+		}
+
+	def test_merge_moves_files_and_prunes_entry(self, tmp_path):
+		library = tmp_path / "lib"
+		survivor, loser = self._seed_dup(library)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._merge_entry()])
+		summary = apply_review(review, library, dry_run=False, place=False)
+		assert summary["merged_folders"] == 1
+		assert summary["errors"] == []
+		# Loser folder gone, both format files at the survivor.
+		assert not loser.exists()
+		assert (survivor / "Book - Author (1).epub").is_file()
+		assert (survivor / "Book - Author (2).epub").is_file()
+		# Entry pruned.
+		assert parse_review(review) == []
+
+	def test_merge_invalidates_cache_rows_for_both_folders(self, tmp_path):
+		from book_meta_fix.readers import read_book_folder
+
+		library = tmp_path / "lib"
+		survivor, loser = self._seed_dup(library)
+		cache = Cache(tmp_path / "cache.db")
+		for folder in (survivor, loser):
+			meta = read_book_folder(folder)
+			cache.put(meta)
+			cache.commit()
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._merge_entry()])
+		apply_review(review, library, dry_run=False, place=False, cache=cache)
+		for folder in (survivor, loser):
+			row = cache.conn.execute(
+				"SELECT 1 FROM books WHERE path = ?", (str(folder),)).fetchone()
+			assert row is None
+		cache.close()
+
+	def test_dry_run_merges_nothing(self, tmp_path):
+		library = tmp_path / "lib"
+		survivor, loser = self._seed_dup(library)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._merge_entry()])
+		summary = apply_review(review, library, dry_run=True, place=False)
+		assert summary["merged_folders"] == 1  # the honest dry-run count
+		assert loser.is_dir()
+		assert (loser / "Book - Author (2).epub").is_file()
+		assert not (survivor / "Book - Author (2).epub").exists()
+		assert len(parse_review(review)) == 1  # never pruned in dry-run
+		assert summary["snapshot"] is None
+
+	def test_recheck_veto_keeps_changed_loser(self, tmp_path):
+		"""The proposal may predate edits: same_book re-checked on FRESH disk
+		state decides the folders are no longer the same work → merge skipped,
+		entry kept, folders intact. (The loser's ISBN is dropped too — a
+		shared ISBN would trump the title change.)"""
+		import json
+
+		library = tmp_path / "lib"
+		survivor, loser = self._seed_dup(library)
+		md = json.loads((loser / "metadata.json").read_text(encoding="utf-8"))
+		md["title"] = "A Totally Different Book"
+		md.pop("isbn", None)
+		(loser / "metadata.json").write_text(json.dumps(md), encoding="utf-8")
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._merge_entry()])
+		summary = apply_review(review, library, dry_run=False, place=False)
+		assert summary["merged_folders"] == 0
+		assert len(summary["skipped_merges"]) == 1
+		assert summary["errors"] == []
+		assert loser.is_dir()
+		assert len(parse_review(review)) == 1
+
+	def test_missing_merge_target_is_an_error(self, tmp_path):
+		library = tmp_path / "lib"
+		survivor, loser = self._seed_dup(library)
+		shutil.rmtree(survivor)
+		review = tmp_path / "review.yaml"
+		entry = self._merge_entry()
+		_write_review(review, [entry])
+		summary = apply_review(review, library, dry_run=False, place=False)
+		assert summary["merged_folders"] == 0
+		assert any("merge target not found" in e for e in summary["errors"])
+		assert loser.is_dir()
+		assert len(parse_review(review)) == 1
+
+	def test_merge_without_merge_into_is_an_error(self, tmp_path):
+		library = tmp_path / "lib"
+		self._seed_dup(library)
+		review = tmp_path / "review.yaml"
+		entry = self._merge_entry()
+		entry["proposed"] = {}
+		_write_review(review, [entry])
+		summary = apply_review(review, library, dry_run=False, place=False)
+		assert any("without proposed.merge_into" in e for e in summary["errors"])
+
+	def test_survivor_with_decided_delete_is_skipped(self, tmp_path):
+		"""Conflict of decisions: merging into a folder slated for whole-folder
+		deletion would feed files into the rmtree — skip instead."""
+		library = tmp_path / "lib"
+		survivor, loser = self._seed_dup(library)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [
+			self._merge_entry(),
+			{"id": 1, "uuid": "u1", "path": "Author/Book (1)", "current": {"title": "Book"}, "action": "delete"},
+		])
+		summary = apply_review(review, library, dry_run=False, place=False)
+		assert summary["merged_folders"] == 0
+		assert len(summary["skipped_merges"]) == 1
+		# The survivor WAS deleted (its own decision), the loser stayed intact.
+		assert not survivor.exists()
+		assert loser.is_dir()
+
+	def test_loser_sidecars_ride_the_deletion_snapshot(self, tmp_path, monkeypatch):
+		monkeypatch.chdir(tmp_path)
+		library = tmp_path / "lib"
+		survivor, loser = self._seed_dup(library)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._merge_entry()])
+		summary = apply_review(review, library, dry_run=False, place=False)
+		assert summary["snapshot"] is not None
+		with tarfile.open(summary["snapshot"]) as tar:
+			names = tar.getnames()
+		assert any(n.endswith("Book (2)/metadata.json") for n in names)
+		# The ebook file itself was MOVED, not deleted — it must not be in the
+		# snapshot (it still lives at the survivor).
+		assert not any(n.endswith(".epub") for n in names)

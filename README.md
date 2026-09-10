@@ -18,7 +18,7 @@ Audiobookshelf and Kavita pick up the fixes on rescan.
 | [docs/diagrams.md](docs/diagrams.md) | UML diagrams — analyze/apply sequence, per-book decision flow, review-entry lifecycle (Mermaid) |
 | [docs/concepts.md](docs/concepts.md) | Verdict buckets, verification philosophy, fix cascade, LLM loop, review.yaml format |
 | [docs/how-to/](docs/how-to/index.md) | Step-by-step recipes (run a batch, tune the rate limit, debug, …) |
-| [docs/corruption-catalog.md](docs/corruption-catalog.md) | The C1–C18 categories with real examples |
+| [docs/corruption-catalog.md](docs/corruption-catalog.md) | The C1–C19 categories with real examples |
 | [AGENTS.md](AGENTS.md) | Guide for AI agents editing this codebase (conventions, layout, gotchas) |
 
 ## Status
@@ -102,10 +102,13 @@ can recover the pre-run state.
 | `bmf report` | Run C1–C14 detector rules, show category breakdown + samples |
 | `bmf analyze` | Full pipeline (scan+detect+extract+verify+enrich+location check) → generate `review.yaml` |
 | `bmf analyze --normalize` | Chain the library-wide normalize pass (C15/C16/C18) onto the end of analyze — clustering runs over the books the pipeline already scanned (no second library walk) and merges its proposals into the same review.yaml after the writer finalizes; decided entries are never touched |
+| `bmf analyze --merge` | Chain the C19 duplicate-folder sweep onto the end of analyze, over the same scan — same-work folders (identical folded author+title, or the same valid ISBN; differing years on both sides mean different editions and stay apart unless the ISBNs match) get `action: merge` proposals; ISBN-confirmed ones pre-filled, the rest pending |
 | `bmf apply <file>` | Apply approved changes from a review.yaml (dry-run by default) |
 | `bmf apply --apply <file>` | Write `metadata.json` + `metadata.opf` AND place each book: clean/`verified` → target pattern path, unresolved → `needfix/`, dead records → `needfix/empty/` |
 | `bmf gui` | Interactive keyboard-driven Tkinter editor for `review.yaml` |
 | `bmf series` | Read-only series overview: every series with book counts, volume coverage (missing volumes are information, duplicates are warnings), spelling variants and suspected same-series pairs (numbering/online evidence) |
+| `bmf merge` | Library-wide C19 sweep: find duplicate folders of the same work and show the clusters (survivor per cluster: valid ISBN first, then lowest id). Dry-run: report only |
+| `bmf merge --apply` | Fill review.yaml with the C19 `action: merge` entries (ISBN-confirmed pre-filled, exact author+title matches without ISBN proof pending); `bmf apply` then folds each duplicate into its survivor — files are moved (never overwritten; name collisions rename with the loser's id), metadata field-merged survivor-first, the loser's sidecars + cover snapshotted into the tar.gz. Every merge is re-checked (`same_book`) before it runs |
 | `bmf normalize` | Library-wide pass: cluster author-name variants (C15 — initials vs full names, diacritics, titles, anonym spellings, swapped order), canonicalize genres/tags to Czech names (C16 — case/diacritics/word-order duplicates, EN→CZ aliases) and unify series names (C18 — fold variants, curated alias table, prefix/fuzzy suspects weighed by volume numbering; the volume index is never changed). Dry-run: show the clusters |
 | `bmf normalize --apply` | Fill review.yaml with the C15/C16/C18 proposals (deterministic ones pre-filled `accept`, judgement calls pending); `--authors`/`--genres`/`--tags`/`--series` narrow the scope, `--online` weighs series suspects against databazeknih etc. (cached). Book writes happen via `bmf apply`; author renames also move folders, so finish with `bmf abs-rescan` |
 | `bmf organize` | *(deprecated stub)* — placement was merged into `bmf apply` |
@@ -699,7 +702,7 @@ $EDITOR src/book_meta_fix/locales/cs/LC_MESSAGES/bmf.po
 make i18n-compile   # .po -> .mo
 ```
 
-## Corruption categories (C1–C18)
+## Corruption categories (C1–C19)
 
 See [`docs/corruption-catalog.md`](docs/corruption-catalog.md) for the full
 catalog with real examples. Summary:
@@ -724,6 +727,7 @@ catalog with real examples. Summary:
 | C16 | genre/tag name variants (case, word order, EN/CZ, spelling) — library-level, emitted by `bmf normalize` only | AUTO_FIXABLE |
 | C17 | invalid ebook file (content matches no book format) — emitted by `bmf clean --files` only | NEEDS_REVIEW (delete proposal) |
 | C18 | series-name variants (fold, alias table, numbering/online-evidenced suspects) — library-level, emitted by `bmf normalize` only; the volume index is never proposed | AUTO_FIXABLE / NEEDS_REVIEW |
+| C19 | duplicate folders of the same work (folded author+title, or equal valid ISBN; year-differing pairs stay apart unless the ISBNs match) — library-level, emitted by `bmf merge` only; merged by `bmf apply` via `action: merge` | AUTO_FIXABLE (ISBN-confirmed) / NEEDS_REVIEW |
 | — | EMPTY_BOOK (only metadata/backups/cover — the book file is gone) | AUTO_FIXABLE (`needfix/empty/`) |
 | — | MISSING_ISBN / MISSING_YEAR | AUTO_FIXABLE (enrich) |
 | — | MISSING_COVER (no `cover.jpg` sidecar) | AUTO_FIXABLE (download) |

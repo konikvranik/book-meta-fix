@@ -349,6 +349,56 @@ VAROVÁNÍ (duplicitní složka nebo špatné číslo).
 **Verdikt:** AUTO_FIXABLE (fold) / NEEDS_REVIEW (alias řádky, důkazní
 podezřelá sloučení)
 
+## C19 — Duplicitní složky téhož díla (úroveň knihovny)
+
+Ta samá kniha naimportovaná dvakrát žije ve dvou složkách. Výchozí vzor
+`{author}/{title} ({id})` dá každému importu vlastní cestu, takže složky
+nikdy nekolidují — a apply sloučení při kolizi cíle (které včleňuje knihu do
+obsazeného cíle téhož díla) se k nim nikdy nedostane. Duplicity tak
+přetrvávají navždy: dva napůl vyplněné záznamy, v každé složce jeden formát,
+a žádný enricher nevidí kompletní knihu.
+
+Stejně jako C15–C18 to nemůže vidět per-book detektor — je to vlastnost
+celé knihovny. `bmf merge` (nebo `analyze --merge`, který znovu použije scan
+daného běhu) shlukne složky téhož díla a zapíše do review.yaml záznamy
+`action: merge`:
+
+* **Detekce je záměrně pouze přesná.** Dvě knihy jsou kandidáti, když se
+  jejich zfoldovaný první autor + zfoldovaný název shodují (diakritika/
+  velikost/interpunkce zfoldována — recept `fold_series`), nebo když obě
+  nesou stejné platné (kanonizované) ISBN. Fuzzy vrstva záměrně chybí:
+  knihovna-wide sweep na 0,85 nad ~5 000 knihami násobí falešné páry a
+  špatný návrh sloučení je šum, který platí uživatel. Překlepaný název tak
+  C19 nevidí — opravte ho přes C15 a dvojice se objeví při dalším běhu.
+* **Poslední branou je `mover.same_book`** (rozhoduje rok): složky, u kterých
+  oba roky existují a liší se, jsou různá vydání a nikdy se neslučují —
+  pokud už si nesou shodné ISBN (shodné ISBN určuje též vydání i tehdy,
+  když jeden záznam nese špatný rok; sloučení pak doplní chybějící rok
+  přeživšího z poraženého). Mrtvé záznamy (bez souborů formátů) se
+  vynechávají — ty vlastní EMPTY_BOOK.
+* **Přeživšího** volí `mover._pick_base`: vyhrává platné ISBN, pak nejnižší
+  calibre_id — deterministicky mezi běhy. Každý další člen klastru dostane
+  review záznam, jehož `proposed.merge_into` jmenuje přeživšího.
+* **Předvyplnění:** jen ISBN-potvrzené duplicity (obě strany nesou stejné
+  platné ISBN) přicházejí předvyplněné `action: merge`; přesná shoda
+  autora+názvu bez ISBN důkazu zůstává pending. Záznamy se nikdy nerodí
+  `verified` — sloučení složek není důkaz identity.
+
+`bmf apply` vykonává sloučení PŘED hlavní smyčkou (přeživšího může ještě v
+témže běhu přesunout jeho vlastní placement). Každé sloučení se znovu
+kontroluje proti čerstvému stavu na disku — `same_book` musí stále platit,
+metadata se od návrhu mohla změnit — a neprošlá kontrola záznam přeskočí a
+nechá ho v review. Soubory formátů poraženého se přesunou do složky
+přeživšího (kolize jmen se přejmenovávají s id poraženého, identické bajty
+se přeskakují, obálka přeživšího vyhrává), metadata se sloučí pole po poli
+přeživší-první a sidecary + obálka poraženého jedou do
+`deletion_snapshot_*.tar.gz` pro možnost rollbacku. Přeživší se svým vlastním
+decidovaným `delete` na celou složku se nedotkne (konflikt rozhodnutí).
+Cache řádky obou složek se invalidují.
+
+**Verdikt:** AUTO_FIXABLE (ISBN-potvrzené) / NEEDS_REVIEW (přesná shoda bez
+ISBN důkazu)
+
 ## EMPTY_BOOK — Mrtvý záznam (knižní soubor chybí)
 
 Složka obsahuje jen metadata, jejich zálohy a případně obálku — žádný

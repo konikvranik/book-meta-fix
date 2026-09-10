@@ -242,7 +242,10 @@ def apply_bulk_field(entries: list[dict], indices, field: str, value: str | None
 	and a bulk edit IS the decision (the same rule the ∅ button follows);
 	existing decisions are never overridden. The series ORDER stays
 	per-book — only the name is touched, ``series_index`` is never merged.
-	The proposal dict is REBOUND, never mutated in place: a library-served
+	Entries decided as ``merge`` are SKIPPED: apply's merge branch ignores
+	field proposals (it only consumes ``merge_into``), so a field edit on
+	them would be silently lost — un-decide them first. The proposal dict
+	is REBOUND, never mutated in place: a library-served
 	entry shares its ``proposed`` with the pristine index (search serves
 	shallow copies), which must stay untouched. Returns how many entries
 	were touched.
@@ -255,6 +258,8 @@ def apply_bulk_field(entries: list[dict], indices, field: str, value: str | None
 		if not (0 <= i < len(entries)):
 			continue
 		e = entries[i]
+		if e.get("action") == "merge":
+			continue
 		e["proposed"] = {**(e.get("proposed") or {}), field: v}
 		if not e.get("action"):
 			e["action"] = "accept"
@@ -1435,6 +1440,7 @@ class _BookList:
 		"accept": ("✔", "#4e9a06"),
 		"delete": ("⌫", "#a40000"),
 		"keep": ("◆", "#06989a"),
+		"merge": ("⇥", "#75507b"),
 	}
 	AUTHOR_INDENT = 12
 
@@ -1856,7 +1862,7 @@ class ReviewEditorApp:
 	"""The review.yaml editor window and all its behaviour."""
 
 	# Action radio values; "pending" serialises to ``action: null``.
-	ACTIONS = ["pending", "accept", "delete", "keep"]
+	ACTIONS = ["pending", "accept", "delete", "keep", "merge"]
 
 	# Cover-preview slot (px): every preview cell in a row occupies the SAME
 	# box whether the image is present, smaller, or missing, so the cells stay
@@ -2047,7 +2053,7 @@ class ReviewEditorApp:
 		ttk.Label(filt, text=_("Action:")).pack(side="left")
 		self._action_combo = ttk.Combobox(
 			filt, textvariable=self._filter_action, state="readonly", width=9,
-			values=["all", "pending", "accept", "delete", "keep", "verified"],
+			values=["all", "pending", "accept", "delete", "keep", "merge", "verified"],
 		)
 		self._action_combo.pack(side="left", padx=(2, 8))
 		self._action_combo.bind("<<ComboboxSelected>>", lambda *_: self.refresh_list())
@@ -3158,12 +3164,16 @@ class ReviewEditorApp:
 			if dfiles:
 				files_note = "\n" + _("invalid files proposed for deletion: {files}").format(
 					files=", ".join(str(f) for f in dfiles))
+			merge_note = ""
+			merge_into = (e.get("proposed") or {}).get("merge_into")
+			if merge_into:
+				merge_note = "\n" + _("merge into the same-work folder: {path}").format(path=merge_into)
 			self._header_lbl.configure(
 				text=_("Entry {i}/{n}   uuid: {uuid}\n"
 				       "diagnosis: {cat} – {reason} [{conf}]{extra}").format(
 					i=idx + 1, n=len(self.entries), uuid=uuid,
 					cat=diag.get("category", "—"), reason=diag.get("reason", ""),
-					conf=diag.get("confidence", "—"), extra=extra) + lib_note + files_note,
+					conf=diag.get("confidence", "—"), extra=extra) + lib_note + files_note + merge_note,
 			)
 			self._path_link.configure(text=path or _("(no path)"))
 			# Fields. Entries prefill proposed > current; the RO column

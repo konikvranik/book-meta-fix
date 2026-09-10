@@ -34,7 +34,7 @@ from .models import BookMeta, Diagnosis
 
 log = logging.getLogger(__name__)
 
-Action = Literal["accept", "delete", "keep"]
+Action = Literal["accept", "delete", "keep", "merge"]
 
 
 @dataclass
@@ -74,6 +74,8 @@ def _header(count: int) -> str:
 		"#             analyzer; a `null` value DELETES the field)\n"
 		"#   delete  - remove the book folder (C6 ~$ Word lock-file; tar.gz-backed)\n"
 		"#   keep    - apply like accept, but the entry stays in this file\n"
+		"#   merge   - fold this folder into `proposed.merge_into` (C19 duplicate\n"
+		"#             of the same work; files are moved, never overwritten)\n"
 		"# Set `verified: true` to mark a book OK: apply stores the flag in\n"
 		"# metadata.json, later analyze runs skip the book and apply moves it\n"
 		"# to the target folder (`proposed.location`) like a clean book.\n"

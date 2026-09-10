@@ -19,7 +19,7 @@ při opětovném prohledání.
 | [docs/cs/diagrams.md](docs/cs/diagrams.md) | UML diagramy — sekvice analyze/apply, rozhodovací tok jedné knihy, lifecycle review záznamu (Mermaid) |
 | [docs/cs/concepts.md](docs/cs/concepts.md) | Skupiny verdiktů, filozofie verifikace, kaskáda oprav, smyčka LLM, formát review.yaml |
 | [docs/cs/how-to/](docs/cs/how-to/index.md) | Návody krok za krokem (spustit dávku, vyladit rate limit, ladit, …) |
-| [docs/cs/corruption-catalog.md](docs/cs/corruption-catalog.md) | Kategorie C1–C18 s reálnými příklady |
+| [docs/cs/corruption-catalog.md](docs/cs/corruption-catalog.md) | Kategorie C1–C19 s reálnými příklady |
 | [AGENTS.md](AGENTS.md) | Průvodce pro AI agenty upravující tento kód (konvence, rozložení, zádrhele) |
 
 ## Stav
@@ -104,10 +104,13 @@ zůstane zachován, abyste mohli obnovit stav před během.
 | `bmf report` | Spustí detektorová pravidla C1–C14, zobrazí rozdělení do kategorií + ukázky |
 | `bmf analyze` | Úplná pipeline (sken+detekce+extrakce+verifikace+obohacení) → vygeneruje `review.yaml` |
 | `bmf analyze --normalize` | Napojí průchod normalize napříč knihovnou (C15/C16/C18) na konec analyze — clustering běží nad knihami, které pipeline už nascannovala (bez druhého průchodu knihovnou) a návrhy se po finalizaci writeru přidají do téhož review.yaml; rozhodnuté položky se nikdy nepřepisují |
+| `bmf analyze --merge` | Napojí sweep duplicitních složek C19 na konec analyze, nad týmž scanem — složky téhož díla (shodný zfoldovaný autor+název, nebo stejné platné ISBN; lišící se roky na obou stranách znamenají různá vydání a zůstávají stranou, pokud si ISBN neodpovídají) dostanou návrhy `action: merge`; ISBN-potvrzené předvyplněné, ostatní pending |
 | `bmf apply <file>` | Aplikuje schválené změny z review.yaml (ve výchozím nastavení dry-run) |
 | `bmf apply --apply <file>` | Skutečně zapíše `metadata.json` + `metadata.opf` |
 | `bmf gui` | Interaktivní Tkinter editor ovládaný klávesnicí pro `review.yaml` |
 | `bmf series` | Přehled sérií jen pro čtení: každá série s počty knih, pokrytím dílů (chybějící díly jsou informace, duplicity varování), pravopisnými variantami a podezřelými dvojicemi téže série (důkaz číslováním/online) |
+| `bmf merge` | Sweep C19 napříč knihovnou: najde duplicitní složky téhož díla a vypíše clustery (přeživší na cluster: platné ISBN přednostně, pak nejnižší id). Dry-run: jen výpis |
+| `bmf merge --apply` | Naplní review.yaml záznamy C19 `action: merge` (ISBN-potvrzené předvyplněné, přesné shody autora+názvu bez ISBN důkazu pending); `bmf apply` pak včlení každou duplicitu do jejího přeživšího — soubory se přesouvají (nikdy nepřepisují; kolize jmen se přejmenuje s id poraženého), metadata se sloučí pole po poli přeživší-první, sidecary + obálka poraženého jedou do tar.gz snapshotu. Každé sloučení se před provedením znovu zkontroluje (`same_book`) |
 | `bmf normalize` | Průchod celou knihovnou: naklastruje varianty jmen autorů (C15 — iniciály vs celá jména, diakritika, tituly, anonymní zápisy, prohozené pořadí), sjednotí žánry/tagy na české názvy (C16 — duplicity velikost písmen/diakritika/pořadí slov, aliasy EN→CZ) a sjednotí názvy sérií (C18 — fold varianty, kurátorovaná alias tabulka, předponová/fuzzy podezření vážená číslováním dílů; pořadové číslo dílu se nikdy nemění). Dry-run: vypíše clustery |
 | `bmf normalize --apply` | Naplní review.yaml návrhy C15/C16/C18 (deterministické s předvyplněným `accept`, úsudkové zůstanou pending); `--authors`/`--genres`/`--tags`/`--series` zúží rozsah, `--online` váží podezřelé dvojice sérií proti databazeknih apod. (cachováno). Zápis na disk dělá až `bmf apply`; přejmenování autora přesouvá složky, takže práci zakončete `bmf abs-rescan` |
 | `bmf apply --apply <file>` | Zapíše `metadata.json` + `metadata.opf` A umístí knihu: čisté/`verified` → vzor cesty, nevyřešené → `needfix/`, mrtvé záznamy → `needfix/empty/` |
@@ -708,7 +711,7 @@ $EDITOR src/book_meta_fix/locales/cs/LC_MESSAGES/bmf.po
 make i18n-compile   # .po -> .mo
 ```
 
-## Kategorie poškození (C1–C18)
+## Kategorie poškození (C1–C19)
 
 Úplný katalog s reálnými příklady najdete v
 [`docs/cs/corruption-catalog.md`](docs/cs/corruption-catalog.md). Souhrn:
@@ -733,6 +736,7 @@ make i18n-compile   # .po -> .mo
 | C16 | varianty názvů žánrů/tagů (velikost písmen, pořadí slov, EN/CZ, pravopis) — úroveň knihovny, emituje jen `bmf normalize` | AUTO_FIXABLE |
 | C17 | neplatný soubor e-knihy (obsah neodpovídá žádnému formátu knihy) — emituje jen `bmf clean --files` | NEEDS_REVIEW (návrh smazání) |
 | C18 | varianty názvů sérií (fold, alias tabulka, podezření doložená číslováním/online) — úroveň knihovny, emituje jen `bmf normalize`; pořadové číslo dílu se nikdy nenavrhuje | AUTO_FIXABLE / NEEDS_REVIEW |
+| C19 | duplicitní složky téhož díla (zfoldovaný autor+název, nebo shodné platné ISBN; páry s rozdílnými roky zůstávají stranou, pokud si ISBN neodpovídají) — úroveň knihovny, emituje jen `bmf merge`; sloučuje `bmf apply` přes `action: merge` | AUTO_FIXABLE (ISBN-potvrzené) / NEEDS_REVIEW |
 | — | EMPTY_BOOK (jen metadata/zálohy/obálka — knižní soubor chybí) | AUTO_FIXABLE (`needfix/empty/`) |
 | — | MISSING_ISBN / MISSING_YEAR | AUTO_FIXABLE (obohacení) |
 | — | MISSING_COVER (chybí přiložený `cover.jpg`) | AUTO_FIXABLE (stažení) |

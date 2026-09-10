@@ -175,6 +175,35 @@ src/book_meta_fix/
                    entries (proposed.delete_files) into review.yaml via the
                    merge_normalizations contract (decided never touched, pending only
                    overlaid); apply re-checks each file before unlink and snapshots it
+  duplicates.py    LIBRARY-WIDE C19 pass (`bmf merge`, or `analyze --merge` over the
+                   run's scan): duplicate folders of the SAME WORK — the default
+                   {id} pattern keeps a double import's paths apart, so apply's
+                   collision-merge can never reach them. Detection is EXACT-ONLY
+                   on purpose: identical folded first author + folded title (the
+                   fold_series recipe), or the same canonical ISBN; NO fuzzy tier
+                   (a library-wide 0.85 sweep over ~5k books multiplies false
+                   pairs — misspellings belong to C15). Final gate mover.same_book
+                   (year tie-breaker → year-differing pairs never merge UNLESS
+                   the ISBNs already match — a matching ISBN identifies the
+                   edition even with a wrong year in one record), dead
+                   records excluded (EMPTY_BOOK owns them). Survivor =
+                   mover._pick_base (valid ISBN first, lowest calibre_id) —
+                   deterministic; every other member becomes a review entry with
+                   proposed.merge_into naming the survivor.
+                   merge_duplicate_proposals follows the C17 contract (decided
+                   untouched, pending overlaid, fresh entries pre-filled
+                   `action: merge` ONLY when both sides carry the same valid
+                   ISBN — the exact-match-without-proof tier stays pending;
+                   never born verified). apply executes merges BEFORE its main
+                   loop (a survivor may be moved by its own placement later in
+                   the run), re-checks same_book on FRESH disk state per merge
+                   (stale proposal → skipped, entry kept), spools the loser's
+                   sidecars + cover into the shared deletion tar.gz (the folder
+                   is already gone when the snapshot runs — copies go to a
+                   run-lifetime spool dir with explicit arcnames), leaves a
+                   survivor with its own decided whole-folder delete alone
+                   (conflict of decisions), and invalidates the cache rows of
+                   BOTH folders
   text_meta.py     offline page-text mining (1st stage of fix cascade)
   encoding.py      mojibake detection + repair
   isbn.py          ISBN extract/canonicalize/validate
@@ -484,12 +513,16 @@ src/book_meta_fix/
                   automatic gap-fill (survivor's value, else first found), so confirming
                   as-is loses nothing
   cli.py           click commands: scan, report, analyze, apply, epubgen, crosscheck,
-                  strip-covers, normalize, series, abs-rescan, gui
+                  strip-covers, normalize, series, merge, abs-rescan, gui
                   (series = the READ-ONLY C18 companion — overview table of
                   every series with book counts, volume coverage and the
                   suspect pairs, writes nothing; normalize gained --series/
                   --online selectors and analyze --normalize runs the series
-                  tier too; organize is a deprecation stub — placement lives in apply; in abs_rescan
+                  tier too; merge = the C19 duplicate sweep — dry-run reports
+                  the clusters, --apply fills review.yaml via duplicates.
+                  merge_duplicate_proposals, and analyze --merge chains the
+                  same pass over the run's scan (after review_writer.finish(),
+                  same ordering rule as the --normalize tail); organize is a deprecation stub — placement lives in apply; in abs_rescan
                   the two _() header strings sit OUTSIDE the f-string — babel on py3.10
                   cannot extract calls from f-string holes — the SAME reason the ACP info
                   line's "fast tier"/"no Z.AI fallback" strings are hoisted into locals
@@ -894,6 +927,17 @@ src/book_meta_fix/
   carries over (decided-prior path in `review_writer._handle`). A kept entry
   whose folder was moved by apply's placement gets its `path` rewritten
   (`review.update_paths`).
+- **The `merge` action (C19) folds a duplicate folder into its survivor.**
+  `action: merge` + `proposed.merge_into` (the survivor's library-relative
+  path) comes from `bmf merge`/`analyze --merge` (see duplicates.py in the
+  module layout for the detection policy). `apply_review` runs merges BEFORE
+  its main loop — a survivor may be moved by its own placement later in the
+  run — and the entry is pruned once merged (counted in
+  `summary["merged_folders"]`; the placement-merge counter `merged` is a
+  different thing). Field proposals are IGNORED for merge entries (the merge
+  branch consumes only `merge_into`; the GUI's bulk field edit skips them for
+  the same reason). `keep`-semantics do not apply: there is no retain variant
+  of a merge.
 - **The book `uuid` is the unified identity** (`models.BookMeta.uuid`): it lives
   in `metadata.json` (source of truth), mirrored to `metadata.opf`, and is the
   single key for **carry-over** (`.bak` match), **pruning** (`apply` drops
