@@ -19,6 +19,7 @@ from book_meta_fix.normalize import (
 	build_genre_clusters,
 	build_known_author_pool,
 	build_series_clusters,
+	canonical_language,
 	fold_genre,
 	fold_series,
 )

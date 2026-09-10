@@ -228,7 +228,7 @@ these fields (omit any you cannot determine):
   - "series_index": position in series (optional, string)
   - "publisher": publisher name (optional)
   - "year": publication year as integer (optional)
-  - "language": ISO 639-2 code like "ces", "slk", "eng" (optional)
+  - "language": ISO 639-1 two-letter code like "cs", "sk", "en" (optional)
 
 IMPORTANT JSON rules (GLM models frequently get these wrong):
   - Use JSON null, NOT Python None.

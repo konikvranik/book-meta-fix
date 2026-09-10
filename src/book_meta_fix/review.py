@@ -31,6 +31,7 @@ from .detectors import all_diagnoses
 from .extractors import ExtractedMeta
 from .i18n import _
 from .models import BookMeta, Diagnosis
+from .normalize import canonical_language
 
 log = logging.getLogger(__name__)
 
@@ -279,8 +280,13 @@ def _build_proposed(
 		# Language: fetched by Google Books / OpenLibrary / databazeknih / LLM,
 		# but historically never proposed — the apply branch existed with
 		# nothing feeding it. Same pattern as publisher: propose on difference.
-		if enriched.language and (not meta.language or enriched.language != meta.language):
-			proposed["language"] = enriched.language
+		# The value is canonicalized first (ISO 639-2 families → the BCP 47
+		# two-letter form): the LLM prompt used to request "ces"/"slk" and the
+		# enrichment cache still holds those rows, so a raw comparison would
+		# re-propose the 639-2 spelling onto books C20 already normalized.
+		lang = canonical_language(enriched.language)
+		if lang and (not meta.language or lang != meta.language):
+			proposed["language"] = lang
 			source_parts.append(enriched.source)
 		# Description (annotation) — only from sources that return a REAL
 		# annotation. legie.info stashes the original title in the field (a
@@ -516,14 +522,14 @@ def merge_normalizations(
 	"""Merge `bmf normalize` proposals into review.yaml (in place, atomic).
 
 	*proposals* is a list of ``normalize.BookProposal`` (C15 author variants /
-	C16 genre-tag variants / C18 series-name variants — library-level
-	diagnoses no per-book detector can see). Existing entries are matched by
-	uuid:
+	C16 genre-tag variants / C18 series-name variants / C20 language-code
+	variants — library-level diagnoses no per-book detector can see).
+	Existing entries are matched by uuid:
 
 	- a PENDING entry gets the proposed ``authors``/``genres``/``tags``/
-	  ``series`` keys overlaid onto its ``proposed`` block (other keys
-	  untouched) and the C15/C16/C18 diagnoses appended to its
-	  ``diagnoses`` list;
+	  ``series``/``language`` keys overlaid onto its ``proposed`` block
+	  (other keys untouched) and the C15/C16/C18/C20 diagnoses appended
+	  to its ``diagnoses`` list;
 	- a DECIDED entry (action set) is left alone — the user already judged
 	  that book against its previous proposal;
 	- a book with no entry yet gets a fresh one, ``action: accept`` pre-filled
@@ -555,7 +561,7 @@ def merge_normalizations(
 			continue
 		fields = {
 			k: getattr(prop, k)
-			for k in ("authors", "genres", "tags", "series")
+			for k in ("authors", "genres", "tags", "series", "language")
 			if getattr(prop, k) is not None
 		}
 		if not fields:
@@ -579,6 +585,14 @@ def merge_normalizations(
 			diags_new.append({
 				"category": "C18",
 				"reason": "; ".join(prop.series_reasons),
+				"confidence": "HIGH" if prop.high_confidence else "MEDIUM",
+			})
+		# C20 is a curated-table mapping — always deterministic HIGH in
+		# practice; the confidence ride-along keeps the shape uniform.
+		if prop.language is not None and prop.language_reasons:
+			diags_new.append({
+				"category": "C20",
+				"reason": "; ".join(prop.language_reasons),
 				"confidence": "HIGH" if prop.high_confidence else "MEDIUM",
 			})
 		existing = by_uuid.get(prop.uuid)

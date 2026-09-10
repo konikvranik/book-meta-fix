@@ -654,10 +654,10 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 		if interrupted:
 			console.print("[yellow]" + _("--normalize skipped: run was interrupted") + "[/yellow]")
 		elif scanned_books:
-			title = _("Normalizing authors and genres")
+			title = _("Normalizing library-wide variants")
 			console.print()
 			console.print(f"[bold]{title}[/bold] [cyan]{cfg.library}[/cyan] [WRITE]", highlight=False)
-			_run_normalize_pass(cfg, scanned_books, review_file=out, fields=("authors", "genres", "tags", "series"), samples=3, do_apply=True)
+			_run_normalize_pass(cfg, scanned_books, review_file=out, fields=("authors", "genres", "tags", "series", "language"), samples=3, do_apply=True)
 
 	# --merge: the C19 duplicate sweep rides the same scan. Same ordering rule
 	# as --normalize — strictly after review_writer.finish(), because the
@@ -1555,39 +1555,42 @@ def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: boo
 @click.option("--genres", "do_genres", is_flag=True, default=False, help=_("Canonicalize genres to Czech names (C16: case/diacritics/word-order duplicates, English→Czech and singular/plural aliases)"))
 @click.option("--tags", "do_tags", is_flag=True, default=False, help=_("Canonicalize tags the same way as genres (shares the vocabulary)"))
 @click.option("--series", "do_series", is_flag=True, default=False, help=_("Unify series-name variants (C18: case/diacritics duplicates, curated alias table, prefix/fuzzy suspects weighed by volume numbering — the volume index is never changed)"))
+@click.option("--language", "do_language", is_flag=True, default=False, help=_("Normalize language codes (C20: ISO 639-2/B like cze/slk and 639-2/T like ces/slo mapped to the BCP 47 two-letter form cs/sk — the EPUB dc:language norm)"))
 @click.option("--online", "do_online", is_flag=True, default=False, help=_("Weigh suspected series pairs against online sources (databazeknih etc.; results are cached; needs network)"))
 @click.option("--samples", type=int, default=25, help=_("Number of clusters to show per table"))
-@click.option("--apply", "do_apply", is_flag=True, help=_("Write the proposals into review.yaml as C15/C16/C18 entries (book metadata itself is written later by `bmf apply`; default: dry-run)"))
-def normalize(library: Path | None, no_cache: bool, limit: int | None, do_authors: bool, do_genres: bool, do_tags: bool, do_series: bool, do_online: bool, samples: int, do_apply: bool) -> None:
-	"""Unify author-name variants, genre tags and series names across the whole library.
+@click.option("--apply", "do_apply", is_flag=True, help=_("Write the proposals into review.yaml as C15/C16/C18/C20 entries (book metadata itself is written later by `bmf apply`; default: dry-run)"))
+def normalize(library: Path | None, no_cache: bool, limit: int | None, do_authors: bool, do_genres: bool, do_tags: bool, do_series: bool, do_language: bool, do_online: bool, samples: int, do_apply: bool) -> None:
+	"""Unify author-name variants, genre tags, series names and language codes across the whole library.
 
 	The per-book detectors judge one folder in isolation; a "Robert A.
 	Heinlein" vs "Robert Anson Heinlein" pair or a "sci-fi"/"Sci-fi"/
 	"Science Fiction" trio only becomes visible across books. This command
 	clusters them and (with --apply) fills review.yaml with C15 (author
-	variant / swapped name order), C16 (genre/tag variant) and C18 (series
-	name variant) entries — deterministic fixes arrive pre-filled `accept`,
-	judgement calls (letter variants, unevidenced comma reorders, alias
-	rows and suspected series merges) stay pending. Run `bmf apply`
-	afterwards to write them; author renames also move folders, so finish
-	with `bmf abs-rescan`. Without a selector flag all four categories run.
+	variant / swapped name order), C16 (genre/tag variant), C18 (series
+	name variant) and C20 (language-code variant) entries — deterministic
+	fixes arrive pre-filled `accept`, judgement calls (letter variants,
+	unevidenced comma reorders, alias rows and suspected series merges)
+	stay pending. Run `bmf apply` afterwards to write them; author renames
+	also move folders, so finish with `bmf abs-rescan`. Without a selector
+	flag all five categories run.
 	"""
 	cfg = Config.from_env()
 	if library is not None:
 		cfg.library = library
 
-	if not (do_authors or do_genres or do_tags or do_series):
-		do_authors = do_genres = do_tags = do_series = True
+	if not (do_authors or do_genres or do_tags or do_series or do_language):
+		do_authors = do_genres = do_tags = do_series = do_language = True
 
 	_validate_library(cfg.library)
 	# The two _() header strings sit OUTSIDE the f-string — babel on py3.10
 	# cannot extract calls from f-string holes (same as abs_rescan).
-	title = _("Normalizing authors and genres")
+	title = _("Normalizing library-wide variants")
 	mode = "WRITE" if do_apply else "DRY-RUN"
 	console.print(f"[bold]{title}[/bold] [cyan]{cfg.library}[/cyan] [{mode}]", highlight=False)
-	console.print("[dim]" + _("authors: {a}, genres: {g}, tags: {t}, series: {s}").format(
+	console.print("[dim]" + _("authors: {a}, genres: {g}, tags: {t}, series: {s}, language: {l}").format(
 		a=_("on") if do_authors else _("off"), g=_("on") if do_genres else _("off"),
 		t=_("on") if do_tags else _("off"), s=_("on") if do_series else _("off"),
+		l=_("on") if do_language else _("off"),
 	) + "[/dim]")
 
 	cache = _open_cache(cfg.cache_db, no_cache=no_cache)
@@ -1605,7 +1608,7 @@ def normalize(library: Path | None, no_cache: bool, limit: int | None, do_author
 	_run_normalize_pass(
 		cfg, books,
 		review_file=cfg.review_file,
-		fields=tuple(n for n, on in (("authors", do_authors), ("genres", do_genres), ("tags", do_tags), ("series", do_series)) if on),
+		fields=tuple(n for n, on in (("authors", do_authors), ("genres", do_genres), ("tags", do_tags), ("series", do_series), ("language", do_language)) if on),
 		samples=samples,
 		do_apply=do_apply,
 		series_online=do_online,
@@ -1619,10 +1622,10 @@ def _run_normalize_pass(
 	"""Post-scan half of `bmf normalize`, shared by the command and `analyze --normalize`.
 
 	Runs the library-wide clustering over an ALREADY-SCANNED book list and
-	merges the C15/C16/C18 proposals into *review_file*. `analyze --normalize`
-	reuses this over run_pipeline's scan because re-walking the tree (minutes
-	on NFS even fully cached) would dominate the cost of the clustering
-	itself.
+	merges the C15/C16/C18/C20 proposals into *review_file*. `analyze
+	--normalize` reuses this over run_pipeline's scan because re-walking the
+	tree (minutes on NFS even fully cached) would dominate the cost of the
+	clustering itself.
 	"""
 	from .normalize import analyze_library
 	from .review import merge_normalizations
@@ -1728,6 +1731,24 @@ def _print_normalize_clusters(result, samples: int) -> None:  # noqa: ANN001
 		console.print(t)
 		if len(result.series_suspects) > samples:
 			console.print(f"[dim]… {len(result.series_suspects) - samples} " + _("more") + "[/dim]")
+	if result.language_clusters:
+		t = Table(title=_("Language clusters (C20)"), show_header=True, header_style="bold cyan")
+		t.add_column(_("Canonical"))
+		t.add_column(_("Variants"), style="dim", max_width=60)
+		t.add_column(_("Books"), justify="right")
+		for c in result.language_clusters[:samples]:
+			vars_ = "; ".join(f"{v} ×{n}" for v, n in c.variants)
+			t.add_row(f"[green]{c.canonical}[/green]", vars_[:110], str(c.books))
+		console.print(t)
+		if len(result.language_clusters) > samples:
+			console.print(f"[dim]… {len(result.language_clusters) - samples} " + _("more") + "[/dim]")
+	if result.unknown_languages:
+		t = Table(title=_("Skipped: unrecognized language values (extend LANGUAGE_ALIASES in normalize.py)"), show_header=True, header_style="bold yellow")
+		t.add_column(_("Value"))
+		t.add_column(_("Books"), justify="right")
+		for raw, n in result.unknown_languages[: samples]:
+			t.add_row(raw[:70], str(n))
+		console.print(t)
 	if result.glued_series:
 		t = Table(title=_("Skipped: series order glued into the name (C14 splits it)"), show_header=True, header_style="bold yellow")
 		t.add_column(_("Series"))

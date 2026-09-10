@@ -15,6 +15,11 @@ messes this module targets only become visible ACROSS the library:
   suffixed sibling "Mark Stone"/"Mark Stone (edice)" (suspect tier, weighed
   by volume-numbering complementarity and an optional online existence
   check). The volume INDEX is never proposed — only the name changes.
+* C20 — language codes recorded in mixed families: ISO 639-1 ("cs", "sk"),
+  ISO 639-2/B ("cze", "slk") and ISO 639-2/T ("ces", "slo") for the same
+  languages, mapped to the BCP 47 two-letter form (the EPUB dc:language /
+  RFC 5646 norm) via a curated table. Unknown values are reported, never
+  rewritten.
 
 The engine is pure (no I/O): `analyze_library` takes the scanned BookMetas
 and returns clusters + per-book proposals. The CLI turns those into review.yaml
@@ -1105,6 +1110,76 @@ class SeriesGroup:
 
 
 # ---------------------------------------------------------------------------
+# Language-code canonicalization (C20)
+# ---------------------------------------------------------------------------
+
+# The library records the SAME languages in three code families: ISO 639-1
+# two-letter codes (cs, sk — what Google Books returns), ISO 639-2/B
+# bibliographic codes (cze, slk, fre — the MARC/library tradition) and
+# ISO 639-2/T ≈ ISO 639-3 codes (ces, slo, fra — what the LLM prompt used
+# to request). The book norm — EPUB dc:language per RFC 5646 (BCP 47) and
+# the ABS metadata.json — prefers the two-letter form (the IANA registry
+# carries cze/ces only as subtags with Preferred-Value: cs), so that is the
+# canonical shape. "cz"/"csy" are not ISO 639 codes at all (country code /
+# legacy Windows locale) but map to cs defensively. Measured 2026-09-10
+# over the real library: ces ×3335, cs ×1386, eng ×353, slk ×95, fra ×15,
+# sk ×8, deu ×8, cze ×2, fre ×1, cs-CZ ×1, plus singletons. Keys are
+# casefolded PRIMARY subtags.
+LANGUAGE_ALIASES: dict[str, str] = {
+	# Czech / Slovak (both B and T three-letter forms + junk spellings)
+	"ces": "cs", "cze": "cs", "cz": "cs", "csy": "cs",
+	"slk": "sk", "slo": "sk",
+	# The library's observed tail + the common European set (B/T pairs both)
+	"eng": "en",
+	"fre": "fr", "fra": "fr",
+	"ger": "de", "deu": "de",
+	"rus": "ru", "spa": "es", "pol": "pl", "jpn": "ja", "nor": "no",
+	"ita": "it", "por": "pt", "nld": "nl", "dut": "nl",
+	"hun": "hu", "ukr": "uk", "hrv": "hr", "ell": "el", "gre": "el",
+	"swe": "sv", "dan": "da", "fin": "fi", "bul": "bg",
+	"ron": "ro", "rum": "ro",
+}
+
+# The two-letter targets above are the canonical set; any primary subtag
+# outside it that survives canonical_language unchanged is unrecognized.
+_CANONICAL_LANGUAGES = frozenset(LANGUAGE_ALIASES.values())
+
+
+def canonical_language(value: str | None) -> str | None:
+	"""Map a language-code variant to its BCP 47 two-letter primary subtag.
+
+	Region/script suffixes ("cs-CZ") reduce to the bare primary — the library
+	convention is a lone primary tag, and placement's {language} pattern
+	segment would otherwise split "cs" and "cs-CZ" books into different
+	folders. An UNKNOWN value is returned UNCHANGED: the tier never rewrites
+	what the table cannot prove; unrecognized values surface in
+	NormalizeResult.unknown_languages so the table can grow.
+	"""
+	if not value:
+		return value
+	v = value.strip()
+	primary = re.split(r"[-_]", v.casefold())[0]
+	if primary in LANGUAGE_ALIASES:
+		return LANGUAGE_ALIASES[primary]
+	if primary in _CANONICAL_LANGUAGES:
+		return primary
+	return v
+
+
+@dataclass
+class LanguageCluster:
+	"""One canonical code and the raw spellings it unifies (display-only —
+	the mapping is a curated table, every proposal is deterministic HIGH)."""
+
+	canonical: str
+	variants: list[tuple[str, int]] = field(default_factory=list)
+
+	@property
+	def books(self) -> int:
+		return sum(n for _raw, n in self.variants)
+
+
+# ---------------------------------------------------------------------------
 # Library pass
 # ---------------------------------------------------------------------------
 
@@ -1122,16 +1197,19 @@ class BookProposal:
 	# C18: canonical series NAME only — the book's series index is never
 	# proposed (_apply_fields keeps the current half of the pair).
 	series: str | None = None
-	# Per-diagnosis reason pools (C15 authors / C16 genres+tags / C18 series);
-	# `reasons` is their union for flat CLI display.
+	# C20: canonical BCP 47 two-letter language code.
+	language: str | None = None
+	# Per-diagnosis reason pools (C15 authors / C16 genres+tags / C18 series /
+	# C20 language); `reasons` is their union for flat CLI display.
 	author_reasons: list[str] = field(default_factory=list)
 	genre_reasons: list[str] = field(default_factory=list)
 	series_reasons: list[str] = field(default_factory=list)
+	language_reasons: list[str] = field(default_factory=list)
 	high_confidence: bool = True
 
 	@property
 	def reasons(self) -> list[str]:
-		return [*self.author_reasons, *self.genre_reasons, *self.series_reasons]
+		return [*self.author_reasons, *self.genre_reasons, *self.series_reasons, *self.language_reasons]
 
 	@property
 	def categories(self) -> list[str]:
@@ -1142,6 +1220,8 @@ class BookProposal:
 			cats.append("C16")
 		if self.series is not None:
 			cats.append("C18")
+		if self.language is not None:
+			cats.append("C20")
 		return cats
 
 
@@ -1159,6 +1239,10 @@ class NormalizeResult:
 	# one series (applying a single-name proposal would drop the rest).
 	glued_series: list[tuple[str, int]] = field(default_factory=list)
 	multi_series: list[tuple[str, int]] = field(default_factory=list)
+	# C20: values the alias table cannot prove — surfaced so it can grow,
+	# never rewritten.
+	language_clusters: list[LanguageCluster] = field(default_factory=list)
+	unknown_languages: list[tuple[str, int]] = field(default_factory=list)
 	proposals: list[BookProposal] = field(default_factory=list)
 
 
@@ -1169,7 +1253,7 @@ def _dedupe(items: list[str]) -> list[str]:
 def analyze_library(
 	books: list[BookMeta],
 	*,
-	fields: tuple[str, ...] = ("authors", "genres", "tags", "series"),
+	fields: tuple[str, ...] = ("authors", "genres", "tags", "series", "language"),
 	series_online_check=None,
 ) -> NormalizeResult:
 	"""Cluster authors/genres/series across the library and build per-book proposals."""
@@ -1276,6 +1360,32 @@ def analyze_library(
 			key=lambda g: (-g.books, g.canonical.lower()),
 		)
 
+	if "language" in fields:
+		lcounter: Counter[str] = Counter()
+		for b in books:
+			if b.language:
+				lcounter[b.language] += 1
+		lang_by_canonical: dict[str, list[tuple[str, int]]] = defaultdict(list)
+		unknown: Counter[str] = Counter()
+		for raw, n in lcounter.items():
+			canon = canonical_language(raw)
+			if canon == raw:
+				# Survived unchanged: either already canonical or unrecognized —
+				# only the latter is a report item (non-canonical spellings like
+				# "CS" differ from their canonical form and never reach here).
+				if raw.casefold() not in _CANONICAL_LANGUAGES:
+					unknown[raw] += n
+				continue
+			lang_by_canonical[canon].append((raw, n))
+		result.language_clusters = sorted(
+			(
+				LanguageCluster(canonical=c, variants=sorted(vs, key=lambda it: -it[1]))
+				for c, vs in lang_by_canonical.items()
+			),
+			key=lambda c: (-c.books, c.canonical),
+		)
+		result.unknown_languages = sorted(unknown.items(), key=lambda it: -it[1])
+
 	for b in books:
 		proposal = BookProposal(uuid=b.uuid, path=b.path, calibre_id=b.calibre_id)
 		high = True
@@ -1313,9 +1423,17 @@ def analyze_library(
 					proposal.series_reasons.append(f"series '{name}' → '{c.canonical}' ({c.reason})")
 					if c.confidence is not Confidence.HIGH:
 						high = False
+		if "language" in fields and b.language:
+			# Curated-table lookup — deterministic, so unlike the cluster tiers
+			# above this can never downgrade the proposal to pending.
+			canon = canonical_language(b.language)
+			if canon != b.language:
+				proposal.language = canon
+				proposal.language_reasons.append(f"language '{b.language}' → '{canon}' (ISO 639-1 / BCP 47)")
 		proposal.author_reasons = list(dict.fromkeys(proposal.author_reasons))
 		proposal.genre_reasons = list(dict.fromkeys(proposal.genre_reasons))
 		proposal.series_reasons = list(dict.fromkeys(proposal.series_reasons))
+		proposal.language_reasons = list(dict.fromkeys(proposal.language_reasons))
 		proposal.high_confidence = high
 		if proposal.categories:
 			result.proposals.append(proposal)
