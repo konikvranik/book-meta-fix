@@ -115,6 +115,15 @@ def _fold_word(s: str) -> str:
 	return s.strip(".,;:!()'\"").translate(_DIA_MAP).lower()
 
 
+def _cz_sort_key(s: str) -> str:
+	"""Casefolded, diacritics-folded sort key (Ú under U, not after Z).
+
+	The CLI cluster tables (C15 authors / C16 genres+tags / C18 series) are
+	LOOKUP aids — the user scans them for a known name, so they sort
+	alphabetically, not by cluster size."""
+	return _nfc(s).casefold().translate(_DIA_MAP)
+
+
 def _looks_garbled(folded_tokens: list[str]) -> bool:
 	"""True when any folded token carries non-CZ/SK high bytes (mojibake)."""
 	return any(any(ord(c) >= 0x80 and c not in _LEGIT_LOWER for c in t) for t in folded_tokens)
@@ -1142,7 +1151,7 @@ def analyze_library(
 		seen: dict[int, AuthorCluster] = {}
 		for cluster in author_map.values():
 			seen.setdefault(id(cluster), cluster)
-		result.author_clusters = sorted(seen.values(), key=lambda c: -sum(n for _, n in c.variants))
+		result.author_clusters = sorted(seen.values(), key=lambda c: _cz_sort_key(c.canonical))
 
 	if "genres" in fields or "tags" in fields:
 		gcounter: Counter[str] = Counter()
@@ -1166,8 +1175,8 @@ def analyze_library(
 		gseen: dict[int, GenreCluster] = {}
 		for c in gmap.values():
 			gseen.setdefault(id(c), c)
-		result.genre_clusters = sorted(gseen.values(), key=lambda c: -sum(n for _, n in c.variants))
-		result.tag_clusters = sorted(gseen.values(), key=lambda c: -sum(n for _, n in c.variants))
+		result.genre_clusters = sorted(gseen.values(), key=lambda c: _cz_sort_key(c.canonical))
+		result.tag_clusters = result.genre_clusters
 
 	if "series" in fields:
 		scounter: Counter[str] = Counter()
@@ -1206,12 +1215,7 @@ def analyze_library(
 		sseen: dict[int, SeriesCluster] = {}
 		for c in smap.values():
 			sseen.setdefault(id(c), c)
-		# Alphabetical, diacritics-folded (Ú under U, not after Z) — unlike the
-		# count-sorted C15/C16 tables: the point of this table is LOOKING UP a
-		# known series name, not ranking the biggest messes.
-		result.series_clusters = sorted(
-			sseen.values(), key=lambda c: c.canonical.casefold().translate(_DIA_MAP)
-		)
+		result.series_clusters = sorted(sseen.values(), key=lambda c: _cz_sort_key(c.canonical))
 		# The overview mirrors the DISK state (plain fold groups, alias/suspect
 		# merges are only proposals) — `bmf series` annotates, never presumes.
 		overview: dict[str, list[tuple[str, int]]] = defaultdict(list)

@@ -487,6 +487,28 @@ class TestAnalyzeLibrary:
 		res = analyze_library(self._books(), fields=("authors",))
 		assert all(p.genres is None and p.tags is None for p in res.proposals)
 
+	def test_cluster_tables_sorted_alphabetically(self):
+		"""The C15/C16 cluster tables share the C18 alphabetical order with
+		the diacritics-folded key (Ú under U, Ž last) — lookup aids, not size
+		rankings. The counts here make count-order differ from alphabetical."""
+		books = [
+			*[BookMeta(uuid=f"z{i}", path=f"/z{i}", title="T", authors=["Zilka Jan"]) for i in range(4)],
+			BookMeta(uuid="z9", path="/z9", title="T", authors=["Žilka Jan"]),
+			BookMeta(uuid="u1", path="/u1", title="T", authors=["Úr Jan"]),
+			BookMeta(uuid="u2", path="/u2", title="T", authors=["Ur Jan"]),
+			BookMeta(uuid="g1", path="/g1", title="T", authors=["G H"], genres=["žába"]),
+			BookMeta(uuid="g2", path="/g2", title="T", authors=["G H"], genres=["Žába"]),
+			BookMeta(uuid="g3", path="/g3", title="T", authors=["G H"], genres=["žába"]),
+			BookMeta(uuid="g4", path="/g4", title="T", authors=["G H"], genres=["Ábie"]),
+			BookMeta(uuid="g5", path="/g5", title="T", authors=["G H"], genres=["Abie"]),
+		]
+		res = analyze_library(books)
+		# Žilka has MORE books (5 vs 2) — alphabetical still puts Úr first;
+		# the diacritic spelling stays the canonical despite ×4 ASCII copies.
+		assert [c.canonical for c in res.author_clusters] == ["Úr Jan", "Žilka Jan"]
+		# žába ×3 beats Ábie ×2 — alphabetical still puts Ábie first.
+		assert [c.canonical for c in res.genre_clusters] == ["Ábie", "žába"]
+
 
 class TestApplyTags:
 	def test_tags_list_replaces(self):
