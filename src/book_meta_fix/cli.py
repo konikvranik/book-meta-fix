@@ -1658,7 +1658,24 @@ def _run_normalize_pass(
 		if not result.proposals:
 			console.print("[dim]" + _("Nothing to write.") + "[/dim]")
 			return
-		summary = merge_normalizations(review_file, result.proposals, books, library_root=cfg.library)
+		from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
+		with Progress(
+			SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+			BarColumn(complete_style="#00b4d8", finished_style="#00b4d8", pulse_style="#00b4d8"), TextColumn("{task.completed}/{task.total}"),
+			TimeRemainingColumn(), console=console, transient=True,
+		) as prog:
+			n = len(result.proposals)
+			task_id = prog.add_task(
+				_("Writing {n} proposals to review.yaml …").format(n=n),
+				total=n,
+			)
+
+			def _cb(done: int, total: int) -> None:
+				if prog.tasks[0].total != total:
+					prog.update(task_id, total=total)
+				prog.update(task_id, completed=done)
+
+			summary = merge_normalizations(review_file, result.proposals, books, library_root=cfg.library, progress_callback=_cb)
 		console.print(
 			_("review.yaml updated: {added} entry/entries added, {updated} updated, {skipped} already decided (skipped)").format(
 				added=summary["added"], updated=summary["updated"], skipped=summary["skipped_decided"],

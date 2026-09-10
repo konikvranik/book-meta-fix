@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -518,6 +519,7 @@ def merge_normalizations(
 	proposals: list,
 	books: list,
 	library_root: Path | None = None,
+	progress_callback: Callable[[int, int], None] | None = None,
 ) -> dict[str, int]:
 	"""Merge `bmf normalize` proposals into review.yaml (in place, atomic).
 
@@ -555,7 +557,10 @@ def merge_normalizations(
 	by_uuid = {e.get("uuid"): e for e in entries if e.get("uuid")}
 	metas = {b.uuid: b for b in books if b.uuid}
 	added = updated = skipped = verified = 0
-	for prop in proposals:
+	n_proposals = len(proposals)
+	for i, prop in enumerate(proposals, 1):
+		if progress_callback is not None:
+			progress_callback(i, n_proposals)
 		meta = metas.get(prop.uuid)
 		if meta is None:
 			continue
@@ -630,7 +635,18 @@ def merge_normalizations(
 				"proposed": proposed,
 				"action": "accept" if prop.high_confidence else None,
 			}
-			if prop.high_confidence and projected_clean(meta, proposed):
+			# Skip projected_clean for pure-C20 proposals: a language-code
+			# canonicalization alone never closes a book (language is not an
+			# identity field), so the check always returns False and costs a
+			# full detector run for nothing.
+			pure_c20 = (
+				prop.language is not None
+				and prop.authors is None
+				and prop.genres is None
+				and prop.tags is None
+				and prop.series is None
+			)
+			if prop.high_confidence and not pure_c20 and projected_clean(meta, proposed):
 				entry["verified"] = True
 				verified += 1
 			if len(diags_new) > 1:
@@ -641,7 +657,13 @@ def merge_normalizations(
 	if not (added or updated):
 		return {"added": 0, "updated": 0, "skipped_decided": skipped, "verified_prefilled": 0}
 	header = _header(len(entries))
-	body = "\n".join(_render_entry(e) for e in entries)
+	total = len(entries)
+	parts: list[str] = []
+	for i, e in enumerate(entries, 1):
+		parts.append(_render_entry(e))
+		if progress_callback is not None:
+			progress_callback(i, total)
+	body = "\n".join(parts)
 	if body:
 		body += "\n"
 	p = Path(path)
