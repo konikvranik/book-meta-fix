@@ -5,6 +5,8 @@ single-list), and the format's backward compatibility.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from book_meta_fix.enrichers import EnrichedMeta
 from book_meta_fix.models import BookMeta, Confidence, Diagnosis, Verdict
 from book_meta_fix.review import _build_current, _build_proposed, _header, build_review, parse_review, update_paths
@@ -470,3 +472,88 @@ class TestC14SeriesSplitProposal:
 		proposed = _build_proposed(meta, None, enriched, diag)
 		assert proposed["series"] == "Mark Stone"
 		assert "databazeknih" in proposed["source"]
+
+
+class TestMergeEmptyDeletions:
+	"""merge_empty_deletions (bmf clean --empty): the opt-in delete path for
+	EMPTY_BOOK dead records — decided never touched, pending gets the delete
+	pre-filled, fresh entries are born action: delete."""
+
+	def _empty_folder(self, tmp_path, name: str = "Autor/Kniha (1)") -> Path:
+		folder = tmp_path / name
+		folder.mkdir(parents=True)
+		(folder / "metadata.json").write_text("{}", encoding="utf-8")
+		(folder / "cover.jpg").write_bytes(b"cover-bytes")
+		return folder
+
+	def _book(self, folder: Path, calibre_id: int = 1, uuid: str = "u1") -> BookMeta:
+		return BookMeta(
+			calibre_id=calibre_id, uuid=uuid, title="Kniha", authors=["Autor"],
+			path=str(folder), primary_file=None,
+		)
+
+	def test_fresh_entry_prefilled_delete(self, tmp_path):
+		from book_meta_fix.review import merge_empty_deletions
+
+		folder = self._empty_folder(tmp_path)
+		review = tmp_path / "review.yaml"
+		summary = merge_empty_deletions(review, [self._book(folder)], tmp_path)
+		assert summary == {"added": 1, "updated": 0, "skipped_decided": 0}
+		items = parse_review(review)
+		assert len(items) == 1
+		assert items[0].action == "delete"
+		assert items[0].diagnosis["category"] == "EMPTY_BOOK"
+		assert items[0].proposed["source"] == "empty"
+		assert items[0].path == "Autor/Kniha (1)"
+
+	def test_pending_entry_gets_delete_prefilled_and_diagnosis_appended(self, tmp_path):
+		from book_meta_fix.review import merge_empty_deletions
+
+		folder = self._empty_folder(tmp_path)
+		review = tmp_path / "review.yaml"
+		review.write_text(
+			"---\nid: 1\nuuid: u1\npath: Autor/Kniha (1)\n"
+			"diagnosis: {category: C2, reason: x, confidence: HIGH}\n"
+			"current: {title: Kniha}\naction: null\n",
+			encoding="utf-8",
+		)
+		summary = merge_empty_deletions(review, [self._book(folder)], tmp_path)
+		assert summary == {"added": 0, "updated": 1, "skipped_decided": 0}
+		items = parse_review(review)
+		assert len(items) == 1
+		assert items[0].action == "delete"
+		assert [d.get("category") for d in items[0].diagnoses] == ["C2", "EMPTY_BOOK"]
+
+	def test_decided_entry_is_never_touched(self, tmp_path):
+		from book_meta_fix.review import merge_empty_deletions
+
+		folder = self._empty_folder(tmp_path)
+		review = tmp_path / "review.yaml"
+		review.write_text(
+			"---\nid: 1\nuuid: u1\npath: Autor/Kniha (1)\n"
+			"diagnosis: {category: EMPTY_BOOK, reason: x, confidence: HIGH}\n"
+			"current: {title: Kniha}\naction: accept\n",
+			encoding="utf-8",
+		)
+		summary = merge_empty_deletions(review, [self._book(folder)], tmp_path)
+		assert summary == {"added": 0, "updated": 0, "skipped_decided": 1}
+		assert "action: accept" in review.read_text(encoding="utf-8")
+
+	def test_folder_with_ebook_file_is_not_proposed(self, tmp_path):
+		from book_meta_fix.review import merge_empty_deletions
+
+		folder = self._empty_folder(tmp_path)
+		(folder / "kniha.epub").write_bytes(b"epub-bytes")
+		review = tmp_path / "review.yaml"
+		summary = merge_empty_deletions(review, [self._book(folder)], tmp_path)
+		assert summary == {"added": 0, "updated": 0, "skipped_decided": 0}
+		assert not review.exists()
+
+	def test_relative_path_falls_back_when_outside_library(self, tmp_path):
+		from book_meta_fix.review import merge_empty_deletions
+
+		folder = self._empty_folder(tmp_path)
+		review = tmp_path / "review.yaml"
+		merge_empty_deletions(review, [self._book(folder)], None)
+		items = parse_review(review)
+		assert items[0].path == str(folder)

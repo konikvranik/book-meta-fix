@@ -120,6 +120,7 @@ can recover the pre-run state.
 | `bmf clean --apply` | Actually rename bad covers to `.bak`, strip embedded placeholder covers, and clear `verified` flags on books with no ISBN whose author/series cannot be confirmed online |
 | `bmf clean --apply --clear-all-verified` | Also clear `verified` flags from ALL books unconditionally (resetting them to review) |
 | `bmf clean --min-size 300 --apply` | Also rename real-but-SMALL covers (shorter side below N pixels — e.g. the databazeknih thumbnails) to `.bak`; the book re-enters review (`verified` cleared) and the next `analyze` + `apply` re-fetches a bigger cover, with sources cross-compared by image size (`Enricher.upgrade_cover`). Default threshold: `BMF_COVER_MIN_SIZE`, otherwise off |
+| `bmf clean --empty --apply` | Write `action: delete` proposals for dead records (EMPTY_BOOK — folders holding no ebook file, only metadata sidecars) into review.yaml; `bmf apply` then deletes the folders (whole folder, tar.gz snapshot). The default fate of a dead record is quarantine under `needfix/empty/`; run this selector AFTER `analyze` — a later analyze rebuilds pending EMPTY_BOOK entries back to accept |
 | `bmf strip-covers` | Remove generated covers (dry-run: list affected books) |
 | `bmf strip-covers --apply` | Actually remove them: `cover.jpg` → `.bak` + embedded EPUB covers stripped |
 | `bmf strip-covers --invalid` | Remove INVALID covers instead: image-extension / `cover.*` files no decoder can read (behind ABS's ffmpeg "Invalid data found" errors) |
@@ -230,6 +231,17 @@ entries dropped — review.yaml is saved right after the merge, so the file
 agrees with the disk. This is the explicit, user-driven counterpart of the
 automatic merge apply performs when two folders collide at the same
 placement target.
+
+**Split a wrongly merged folder (`Ctrl+Shift+J`).** The undo of the merge:
+when two *unrelated* books ended up sharing one folder (a merge that should
+not have happened), focus the entry and press `Ctrl+Shift+J`. The dialog
+lists the folder's ebook files with their embedded title/author (loaded in
+the background); the checked files move out into a **new book** placed by
+the same path pattern apply uses, with a fresh uuid, both metadata sidecars
+written and the cover recovered best-effort from the moved file. The new
+book joins the list as a library-served entry (editable right away, written
+to review.yaml only once changed); the source entry keeps its folder,
+identity and review decision.
 
 **Whole-library search (`+ library`).** The `Search:` box filters review
 entries; tick `+ library` next to it and the same query also sweeps the

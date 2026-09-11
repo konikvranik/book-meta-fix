@@ -50,6 +50,7 @@ from .covers import (
 	download_cover,
 	epub_cover_image,
 	extract_cover_from_book,
+	recover_cover_from_book,
 	strip_cover_from_book,
 )
 from .detectors import split_series_index
@@ -57,8 +58,14 @@ from .encoding import detect_double_decode, recode, recode_failure_reason, repai
 from .extractors import FULL_TEXT_LIMIT, extract, stream_full_text
 from .i18n import _
 from .library import _META_FILES, Cache, _is_excluded, iter_book_folders
-from .models import series_entry_pair
-from .mover import merge_folders, merge_meta, same_book
+from .models import BookMeta, series_entry_pair
+from .mover import (
+	DEFAULT_PATH_PATTERN,
+	compute_target_path,
+	merge_folders,
+	merge_meta,
+	same_book,
+)
 from .readers import EBOOK_EXTS, read_book_folder
 from .review import _build_current, _header, _load_raw_entries, _render_entry
 from .writers import ensure_uuid, write_book_meta
@@ -687,6 +694,146 @@ def execute_merge(entries: list[dict], winner_idx: int, loser_idxs,
 		failures=failures,
 		moved_files=moved,
 	)
+
+
+class SplitOutcome(NamedTuple):
+	"""Result of :func:`execute_split` (the inverse of :func:`execute_merge`)."""
+
+	entry: dict             # the source review entry (identity-stable, stays in the list)
+	new_entry: dict | None  # review-shaped entry for the NEW book (library-served shape)
+	new_meta: BookMeta | None  # what was written to the new folder (None on failure)
+	new_path: str | None    # library-relative path of the new folder
+	moved_files: list       # filenames that left the source folder
+	cover_extracted: bool   # did the new book get a cover out of its own file
+	error: str | None       # localized failure reason (None on success)
+
+
+def execute_split(entry: dict, move_names: list[str], library: Path | str, *,
+                  pattern: str | None = None,
+                  values: dict | None = None) -> SplitOutcome:
+	"""Split one book folder in two: *move_names* leave, a NEW book is born.
+
+	The undo of a wrong merge (Ctrl+J here, or apply's C19 / placement merges):
+	two UNRELATED works sometimes end up sharing one folder because they were
+	judged the same book, and with the folder merged no placement pass can
+	ever separate them again — the files must be pulled apart by hand. The
+	checked files move into a fresh folder placed by the same *pattern* apply
+	uses (collisions — including the degenerate "new book computes onto the
+	source folder" — get the ``(dup N)`` suffix :func:`mover.move_book` would
+	add); the source folder KEEPS its metadata sidecars and identity, only its
+	file set shrinks, so the review entry survives with its decisions intact
+	(``current`` is refreshed from disk for the caller).
+
+	The new book's metadata starts from the primary moved file's EMBEDDED
+	block (:func:`extractors.extract`), falling back to the text-mined
+	fields when the embedded block is empty (txt files carry none) — with
+	the dialog's *values* (author/title) overriding both: embedded values
+	are exactly what calibre wrote at import, the thing this project exists
+	to repair, so they are a prefill, never the last word. A fresh uuid is
+	minted (the book's identity is its own from birth) and the metadata
+	written via :func:`writers.write_book_meta`;
+	its cover is recovered best-effort from the moved file
+	(:func:`covers.recover_cover_from_book`, generated placeholders rejected —
+	without a cover MISSING_COVER simply re-fires and the enrichers retry).
+	On failure nothing is left half-done: files already moved are rolled back
+	into the source folder.
+
+	Cache invalidation and the review.yaml write are the CALLER's job (see
+	``_after_split`` — the same contract ``_after_merge`` follows). The new
+	book is born OUTSIDE review.yaml, as a library-served entry; it is
+	written only once the user decides or edits it (``entries_to_write``).
+	"""
+	library = Path(library)
+	if not entry.get("path"):
+		return SplitOutcome(entry, None, None, None, [], False,
+			_("entry has no folder path"))
+	folder = (library / entry["path"]).resolve()
+	if not folder.is_dir():
+		return SplitOutcome(entry, None, None, None, [], False,
+			_("folder not found"))
+	files = list_format_files(folder)
+	by_name = {p.name: p for p in files}
+	moves = [n for n in move_names if n in by_name]
+	if not moves:
+		return SplitOutcome(entry, None, None, None, [], False,
+			_("no files to move — at least one file must leave for the new book"))
+	if len(moves) >= len(files):
+		return SplitOutcome(entry, None, None, None, [], False,
+			_("cannot move every file — at least one must stay with this book"))
+	primary = next(p for p in files if p.name in moves)  # readers' preference order
+	ext = extract(primary)
+	# Embedded block first, else the text-mined fields (the independent
+	# evidence — for txt files there is no embedded block at all).
+	meta = BookMeta(
+		title=ext.title or ext.title_from_text or "",
+		authors=list(ext.authors or ext.authors_from_text or []),
+		isbn=ext.isbn,
+		publisher=ext.publisher,
+		language=ext.language,
+	)
+	values = values or {}
+	v = str(values.get("title") or "").strip()
+	if v:
+		meta.title = v
+	v = str(values.get("author") or "").strip()
+	if v:
+		meta.authors = [v]
+	if not meta.title:
+		return SplitOutcome(entry, None, None, None, [], False,
+			_("the new book needs a title"))
+	if not meta.authors:
+		return SplitOutcome(entry, None, None, None, [], False,
+			_("the new book needs an author"))
+	dest = compute_target_path(meta, pattern or DEFAULT_PATH_PATTERN, library)
+	n = 1
+	while dest.exists():  # includes dest == the source folder itself
+		dest = dest.with_name(f"{dest.name} (dup {n})")
+		n += 1
+	dest.mkdir(parents=True)
+	moved: list[str] = []
+	failed: str | None = None
+	try:
+		for name in moves:
+			failed = name
+			shutil.move(str(by_name[name]), str(dest / name))
+			moved.append(name)
+			failed = None
+	except OSError as e:
+		# A half-split folder is the worst state to leave behind (both books'
+		# files scattered over two folders) — put back what already moved.
+		for name in moved:
+			try:
+				shutil.move(str(dest / name), str(by_name[name]))
+			except OSError:
+				pass
+		try:
+			dest.rmdir()
+		except OSError:
+			pass
+		return SplitOutcome(entry, None, None, None, [], False,
+			_("moving {name} failed: {err}").format(name=failed or "?", err=e))
+	cover_ok = False
+	try:
+		cover_ok = recover_cover_from_book(dest / primary.name, dest / COVER_FILE)
+	except Exception:  # noqa: BLE001 - best-effort; MISSING_COVER re-fires otherwise
+		cover_ok = False
+	meta.uuid = str(uuid4())
+	meta.path = str(dest)
+	meta.formats = [by_name[name].suffix.lower() for name in moves]
+	meta.primary_file = primary.name
+	res = write_book_meta(meta, dry_run=False, backup=True)
+	if res.get("error"):
+		return SplitOutcome(entry, None, None, None, moved, cover_ok, str(res["error"]))
+	try:
+		entry["current"] = _build_current(read_book_folder(folder))
+	except Exception:  # noqa: BLE001 - display-only refresh
+		pass
+	new_entry = library_entry_from_meta(meta, library)
+	try:
+		rel = str(dest.relative_to(library))
+	except ValueError:
+		rel = str(dest)
+	return SplitOutcome(entry, new_entry, meta, rel, moved, cover_ok, None)
 
 
 def render_review_text(entries: list[dict]) -> str:
@@ -3046,6 +3193,7 @@ class ReviewEditorApp:
 				"m": self.bulk_delete_covers,
 				"d": self.bulk_clear_action,
 				"r": self.remove_from_review,
+				"j": self.split_book,
 			}
 			handler = shift_dispatch.get(k)
 			if handler is not None:
@@ -4570,6 +4718,219 @@ class ReviewEditorApp:
 		self._flash(_("merged {n} books, {m} files moved").format(
 			n=outcome.merged_count, m=outcome.moved_files))
 
+	def split_book(self) -> None:
+		"""Ctrl+Shift+J: split the FOCUSED book's folder into two books.
+
+		The undo of a wrong merge: two unrelated works sometimes end up
+		sharing one folder (a C19/placement merge that should not have
+		happened). The dialog lists the folder's ebook files — the embedded
+		title/author of each loads in the background, extraction can spawn a
+		calibre subprocess — and the checked ones move out into a NEW book
+		folder placed by the same pattern apply uses. The new book's
+		author/title prefill from the first checked file's embedded metadata
+		(only into EMPTY fields, never over the user's typing) and a
+		``same_book`` warning flags the probably-pointless split (two copies
+		of ONE book) without blocking it — here the user decides, exactly like
+		in the merge dialog.
+		"""
+		self._collect_current()
+		if not (0 <= self._cur < len(self.entries)):
+			return
+		e = self.entries[self._cur]
+		if not e.get("path"):
+			self._flash(_("this entry has no folder"))
+			return
+		folder = self.library / e["path"]
+		files = list_format_files(folder)
+		if len(files) < 2:
+			self._flash(_("split needs at least two ebook files in the folder"))
+			return
+		try:
+			survivor_meta = read_book_folder(folder)
+		except Exception:  # noqa: BLE001 - the warning is optional decoration
+			survivor_meta = None
+		win = tk.Toplevel(self.root)
+		win.title(_("Split book into two"))
+		win.transient(self.root)
+		win.resizable(False, False)
+		ttk.Label(win, text=_(
+			"Two unrelated books sharing one folder (a wrong merge): the checked "
+			"files move out into a NEW book; the unchecked ones stay here."),
+			wraplength=560, justify="left").pack(fill="x", padx=10, pady=(10, 4))
+		rows = ttk.Frame(win)
+		rows.pack(fill="x", padx=10)
+		vars: dict[str, object] = {}
+		hints: dict[str, object] = {}
+		default_move = {p.name for p in files[1:]}  # the primary file stays
+		for p in files:
+			row = ttk.Frame(rows)
+			row.pack(fill="x", pady=1)
+			var = tk.BooleanVar(value=p.name in default_move)
+			vars[p.name] = var
+			ttk.Checkbutton(row, text="→ " + p.name, variable=var).pack(side="left")
+			hint = ttk.Label(row, text=_("reading embedded metadata…"), foreground="#555")
+			hint.pack(side="left", padx=(8, 0))
+			hints[p.name] = hint
+
+		ttk.Label(win, text=_("New book (the checked files move to it):"),
+		          anchor="w").pack(fill="x", padx=10, pady=(8, 2))
+		fields = ttk.Frame(win)
+		fields.pack(fill="x", padx=10)
+		title_var = tk.StringVar()
+		author_var = tk.StringVar()
+		for col, (label, var) in enumerate((
+				(_("Title"), title_var), (_("Author"), author_var))):
+			ttk.Label(fields, text=label).grid(row=0, column=col * 2, sticky="w", padx=(0, 4))
+			ent = ttk.Entry(fields, textvariable=var, width=34)
+			ent.grid(row=0, column=col * 2 + 1, padx=(0, 12))
+			self._bind_select_all(ent)
+		preview = ttk.Label(win, text="", foreground="#555",
+		                    wraplength=560, justify="left")
+		preview.pack(fill="x", padx=10, pady=(6, 0))
+		warn = ttk.Label(win, text="", foreground="#a40000",
+		                 wraplength=560, justify="left")
+		warn.pack(fill="x", padx=10, pady=(4, 0))
+
+		def _refresh_preview(*_args) -> None:
+			"""Target-folder preview + the same-work warning, live as you type."""
+			author = author_var.get().strip()
+			title = title_var.get().strip()
+			probe = BookMeta(title=title, authors=[author] if author else [])
+			dest = compute_target_path(
+				probe, self.cfg.path_pattern or DEFAULT_PATH_PATTERN, self.library)
+			n = 1
+			while dest.exists():
+				dest = dest.with_name(f"{dest.name} (dup {n})")
+				n += 1
+			try:
+				shown = str(dest.relative_to(self.library))
+			except ValueError:
+				shown = str(dest)
+			preview.configure(text=_("Target folder: {path}").format(path=shown))
+			if (survivor_meta is not None and title and author
+					and same_book(probe, survivor_meta)):
+				warn.configure(text=_(
+					"⚠ the new book looks like the SAME work as what stays here — "
+					"a split would create two copies of one book"))
+			else:
+				warn.configure(text="")
+
+		title_var.trace_add("write", _refresh_preview)
+		author_var.trace_add("write", _refresh_preview)
+		_refresh_preview()
+
+		def _worker() -> None:
+			"""Embedded hints per file, off the Tk thread (subprocess-capable)."""
+			for p in files:
+				try:
+					em = extract(p)
+				except Exception:  # noqa: BLE001 - a hint that never lands is fine
+					em = None
+
+				def _paint(pn=p.name, em=em) -> None:
+					if not self._alive or not win.winfo_exists():
+						return
+					title = ((em.title or em.title_from_text) if em else "") or ""
+					authors = list(em.authors or em.authors_from_text) if em else []
+					author = ", ".join(authors)
+					if title or author:
+						hints[pn].configure(
+							text="• " + (f"{title} — {author}" if title and author
+							            else (title or author)))
+					else:
+						hints[pn].configure(text=_("embedded metadata unreadable"))
+					# Prefill the new book's identity from the first CHECKED
+					# file whose extraction lands — empty fields only.
+					if vars.get(pn) is not None and vars[pn].get():
+						if not title_var.get() and title:
+							title_var.set(title)
+						if not author_var.get() and author:
+							author_var.set(author.split(", ")[0])
+
+				self._after(_paint)
+
+		threading.Thread(target=_worker, daemon=True).start()
+
+		def _apply(_event=None):
+			move_names = [nm for nm, v in vars.items() if v.get()]
+			if not move_names:
+				warn.configure(text=_("check at least one file to move out"))
+				return
+			if len(move_names) >= len(files):
+				warn.configure(text=_("leave at least one file here — this book must keep its text"))
+				return
+			if not title_var.get().strip() or not author_var.get().strip():
+				warn.configure(text=_("fill in the new book's title and author"))
+				return
+			if not messagebox.askyesno(
+					"bmf gui", _("Move {n} files into a new book?").format(
+						n=len(move_names)), parent=win):
+				return
+			outcome = execute_split(e, move_names, self.library,
+				pattern=self.cfg.path_pattern, values={
+					"title": title_var.get().strip(),
+					"author": author_var.get().strip(),
+				})
+			win.destroy()
+			self._after_split(outcome)
+			return "break"
+
+		btns = ttk.Frame(win)
+		btns.pack(fill="x", padx=10, pady=10)
+		ttk.Button(btns, text=_("Split"), command=_apply).pack(side="left", padx=2)
+		ttk.Button(btns, text=_("Cancel"), command=win.destroy).pack(side="left", padx=2)
+		win.bind("<Return>", _apply)
+		win.bind("<Escape>", lambda _e: (win.destroy(), "break")[1])
+		self._modal_over_main(win)
+
+	def _after_split(self, outcome: SplitOutcome) -> None:
+		"""Post-split cleanup: new book joins the list, cache dropped, save.
+
+		Mirror of :meth:`_after_merge` — disk and review.yaml must agree right
+		now. The NEW book joins the list as a library-served entry (the
+		``_apply_lib_search`` convention: appended, uuid registered in
+		``_lib_uuids`` with the same haystack the startup index builds, so
+		the list filter exempts it and "+ library" semantics stay honest; a
+		STARTUP sweep picks it up from disk next session — written to
+		review.yaml only once the user decides or edits it). The source entry
+		stays selected with its decisions intact.
+		"""
+		if outcome.error:
+			messagebox.showwarning("bmf gui",
+				_("split failed:\n{err}").format(err=outcome.error))
+			return
+		if outcome.new_entry is not None:
+			self.entries.append(outcome.new_entry)
+			u = outcome.new_entry.get("uuid")
+			if u:
+				hay = (f"{entry_search_haystack(outcome.new_entry)}"
+				       f" {_library_extra_hay(outcome.new_meta)}").lower()
+				self._lib_uuids[u] = hay
+		paths = [str(self.library / outcome.entry.get("path", ""))]
+		if outcome.new_path:
+			paths.append(str(self.library / outcome.new_path))
+		try:
+			cache = Cache(self.cfg.cache_db)
+			try:
+				cache.invalidate_many(paths)
+			finally:
+				cache.close()
+		except Exception:  # noqa: BLE001
+			log.debug("cache invalidation after split failed", exc_info=True)
+		if self._do_save():
+			self._dirty = False
+		self.refresh_list()
+		idx = next((i for i, en in enumerate(self.entries) if en is outcome.entry), 0)
+		self.tree.selection_set(str(idx), silent=True)
+		self.tree.see(str(idx))
+		# _load_book alone does NOT move _cur (that is _select_index's job);
+		# _refresh_covers indexes entries[_cur], so keep it in step.
+		self._cur = idx
+		self._load_book(idx)
+		self._reload_thumbs([idx, len(self.entries) - 1])  # new book may have a cover
+		self._flash(_("split: {n} files moved to {path}").format(
+			n=len(outcome.moved_files), path=outcome.new_path or "?"))
+
 	def _copy_current(self, role: str) -> None:
 		# Copies whatever the RO label currently DISPLAYS (mode-dependent).
 		self._fields[role]["value"].set(self._fields[role]["current"].get())
@@ -5323,6 +5684,7 @@ class ReviewEditorApp:
 			("Ctrl+Shift+D", _("bulk: clear the decision (→ pending) for all selected books — the mass veto for pre-filled delete/accept")),
 			("Ctrl+Shift+R", _("bulk: remove the selected books from review.yaml (no files touched)")),
 			("Ctrl+J", _("merge the selected books into one (files move to the survivor)")),
+			("Ctrl+Shift+J", _("split the focused book's folder in two — the checked files become a NEW book (the undo of a wrong merge)")),
 			("∅ / ↺", _("field button: apply the field as EMPTY (wrong proposal, correct value unknown)")),
 			("Ctrl+D", "delete"),
 			("Ctrl+R", _("merge — fold this folder into the same-work survivor (proposed.merge_into)")),

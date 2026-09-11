@@ -9,6 +9,7 @@ skip when tkinter or a display is unavailable.
 from __future__ import annotations
 
 import io
+import json
 import zipfile
 from pathlib import Path
 
@@ -17,6 +18,7 @@ import pytest
 import book_meta_fix.gui as gui
 from book_meta_fix.gui import (
 	MergeOutcome,
+	SplitOutcome,
 	action_value,
 	apply_bulk_action,
 	apply_bulk_field,
@@ -36,6 +38,7 @@ from book_meta_fix.gui import (
 	entry_sort_key,
 	execute_bulk_cover_delete,
 	execute_merge,
+	execute_split,
 	extract_series_values,
 	library_entry_changed,
 	library_entry_from_meta,
@@ -377,6 +380,13 @@ class TestCtrlKeyDispatch:
 		res = app._on_ctrl_key(type("E", (), {"keysym": "j", "state": 0})())
 		assert res == "break"
 		assert app.calls == ["merge_selected"]
+
+	def test_shift_plus_j_dispatches_split(self):
+		app = self._bare_app()
+		app.split_book = lambda: app.calls.append("split_book")
+		res = app._on_ctrl_key(type("E", (), {"keysym": "J", "state": 0x0001})())
+		assert res == "break"
+		assert app.calls == ["split_book"]
 
 
 class TestExecuteBulkCoverDelete:
@@ -736,6 +746,301 @@ class TestAfterMerge:
 		app._after_merge(out, "/x", [])
 		assert app.flashes == ["nothing merged"]
 		assert app.saved == []  # no save, nothing changed
+
+
+class TestExecuteSplit:
+	"""Ctrl+Shift+J: the checked files leave, a NEW book folder is born."""
+
+	def _setup(self, tmp_path, rel="A/Hlavní (1)"):
+		folder = _make_lib_book(tmp_path, rel, "us",
+		                        title="Hlavní", author="A", fmts=(".epub",))
+		# The wrongly-merged second work: a txt (pure-Python extractor — no
+		# calibre subprocess, so the embedded-prefill behaviour of the test
+		# does not depend on what is installed on the machine).
+		(folder / "Vedlejsi - B.txt").write_text(
+			"content of the second book\n", encoding="utf-8")
+		entry = {"uuid": "us", "path": rel,
+		         "current": {"title": "Hlavní", "author": "A"},
+		         "proposed": {"language": "cs"}, "action": None}
+		return folder, entry
+
+	def test_moves_files_and_mints_a_new_book(self, tmp_path):
+		folder, entry = self._setup(tmp_path)
+		out = execute_split(entry, ["Vedlejsi - B.txt"], tmp_path,
+		                    values={"author": "B", "title": "Vedlejsi"})
+		assert out.error is None
+		assert out.moved_files == ["Vedlejsi - B.txt"]
+		# Default pattern {author}/{title} ({id}); a split book carries no
+		# calibre id, so the folder name gets (noid).
+		assert out.new_path == str(Path("B") / "Vedlejsi (noid)")
+		dest = tmp_path / "B" / "Vedlejsi (noid)"
+		assert (dest / "Vedlejsi - B.txt").is_file()
+		assert not (folder / "Vedlejsi - B.txt").exists()
+		assert (folder / "Hlavní - A.epub").is_file()  # the survivor keeps its file
+		md = json.loads((dest / "metadata.json").read_text(encoding="utf-8"))
+		assert md["title"] == "Vedlejsi"
+		assert md["authors"] == ["B"]
+		assert md["uuid"] and md["uuid"] != "us"
+		assert (dest / "metadata.opf").is_file()
+		# The source book keeps its identity; its entry survives with its
+		# decisions/proposal untouched (apply finishes it later).
+		src = json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
+		assert src["uuid"] == "us"
+		assert entry["uuid"] == "us"
+		assert entry["proposed"] == {"language": "cs"}
+		# The new book's library-served entry is review-shaped and pending.
+		assert out.new_entry["current"]["title"] == "Vedlejsi"
+		assert out.new_entry["action"] is None
+
+	def test_custom_pattern_places_the_new_book(self, tmp_path):
+		_folder, entry = self._setup(tmp_path)
+		out = execute_split(entry, ["Vedlejsi - B.txt"], tmp_path,
+		                    pattern="{author}/{title}",
+		                    values={"author": "B", "title": "Vedlejsi"})
+		assert out.error is None
+		assert out.new_path == str(Path("B") / "Vedlejsi")
+
+	def test_occupied_target_gets_dup_suffix(self, tmp_path):
+		_folder, entry = self._setup(tmp_path)
+		(tmp_path / "B" / "Vedlejsi (noid)").mkdir(parents=True)
+		out = execute_split(entry, ["Vedlejsi - B.txt"], tmp_path,
+		                    values={"author": "B", "title": "Vedlejsi"})
+		assert out.error is None
+		assert out.new_path == str(Path("B") / "Vedlejsi (noid) (dup 1)")
+
+	def test_target_equal_to_source_folder_is_disambiguated(self, tmp_path):
+		# A source folder literally named like the pattern output for the new
+		# book must not swallow the moved files back into itself.
+		folder, entry = self._setup(tmp_path, rel="B/Vedlejsi (noid)")
+		out = execute_split(entry, ["Vedlejsi - B.txt"], tmp_path,
+		                    values={"author": "B", "title": "Vedlejsi"})
+		assert out.error is None
+		assert out.new_path == str(Path("B") / "Vedlejsi (noid) (dup 1)")
+		assert (folder / "Hlavní - A.epub").is_file()
+
+	def test_text_mined_identity_when_embedded_block_is_empty(self, tmp_path, monkeypatch):
+		from book_meta_fix.extractors import ExtractedMeta
+
+		folder, entry = self._setup(tmp_path)
+		monkeypatch.setattr(gui, "extract",
+			lambda p: ExtractedMeta(title_from_text="Vedlejsi",
+			                        authors_from_text=["B"]))
+		out = execute_split(entry, ["Vedlejsi - B.txt"], tmp_path,
+		                    pattern="{author}/{title}")
+		assert out.error is None
+		md = json.loads((tmp_path / "B" / "Vedlejsi" / "metadata.json")
+		                .read_text(encoding="utf-8"))
+		assert md["title"] == "Vedlejsi"
+		assert md["authors"] == ["B"]
+
+	def test_values_override_the_embedded_prefill(self, tmp_path, monkeypatch):
+		from book_meta_fix.extractors import ExtractedMeta
+
+		_folder, entry = self._setup(tmp_path)
+		monkeypatch.setattr(gui, "extract",
+			lambda p: ExtractedMeta(title="Corrupted", authors=["Calibre"]))
+		out = execute_split(entry, ["Vedlejsi - B.txt"], tmp_path,
+		                    pattern="{author}/{title}",
+		                    values={"author": "B", "title": "Vedlejsi"})
+		assert out.error is None
+		md = json.loads((tmp_path / "B" / "Vedlejsi" / "metadata.json")
+		                .read_text(encoding="utf-8"))
+		assert md["title"] == "Vedlejsi"
+		assert md["authors"] == ["B"]
+
+	def test_no_move_and_move_all_are_errors(self, tmp_path):
+		folder, entry = self._setup(tmp_path)
+		vals = {"author": "B", "title": "Vedlejsi"}
+		out = execute_split(entry, [], tmp_path, values=vals)
+		assert out.error and "at least one file must leave" in out.error
+		out = execute_split(entry, ["Hlavní - A.epub", "Vedlejsi - B.txt"],
+		                    tmp_path, values=vals)
+		assert out.error and "at least one must stay" in out.error
+		# nothing happened on disk
+		assert (folder / "Vedlejsi - B.txt").is_file()
+		assert (folder / "Hlavní - A.epub").is_file()
+
+	def test_missing_title_is_an_error_and_moves_nothing(self, tmp_path):
+		folder, entry = self._setup(tmp_path)
+		out = execute_split(entry, ["Vedlejsi - B.txt"], tmp_path,
+		                    values={"author": "B"})
+		assert out.error and "needs a title" in out.error
+		assert (folder / "Vedlejsi - B.txt").is_file()
+
+	def test_missing_folder_is_an_error(self, tmp_path):
+		entry = {"uuid": "x", "path": "A/Chybi (9)", "current": {},
+		         "proposed": None, "action": None}
+		out = execute_split(entry, ["a.epub"], tmp_path,
+		                    values={"author": "B", "title": "T"})
+		assert out.error and "folder not found" in out.error
+
+	def test_cover_recovered_best_effort(self, tmp_path, monkeypatch):
+		_folder, entry = self._setup(tmp_path)
+
+		def _fake_recover(src, dest):
+			Path(dest).write_bytes(b"cover")
+			return True
+
+		monkeypatch.setattr(gui, "recover_cover_from_book", _fake_recover)
+		out = execute_split(entry, ["Vedlejsi - B.txt"], tmp_path,
+		                    pattern="{author}/{title}",
+		                    values={"author": "B", "title": "Vedlejsi"})
+		assert out.cover_extracted is True
+		assert (tmp_path / "B" / "Vedlejsi" / "cover.jpg").read_bytes() == b"cover"
+
+
+class TestAfterSplit:
+	"""Post-split cleanup: new book joins the list, save, selection."""
+
+	def _bare_app(self, entries, tmp_path):
+		import types
+
+		app = gui.ReviewEditorApp.__new__(gui.ReviewEditorApp)
+		app.entries = entries
+		app.library = tmp_path
+		app._lib_uuids = {}
+		app._lib_index = []
+		app.cfg = types.SimpleNamespace(cache_db=tmp_path / "cache.db")
+		app.saved = []
+		app._do_save = lambda: (app.saved.append(1), True)[1]
+		app._dirty = True
+		app.refreshed = []
+		app.refresh_list = lambda: app.refreshed.append(1)
+		app.picked = []
+		app.tree = types.SimpleNamespace(
+			selection_set=lambda iid, silent=False: app.picked.append(iid),
+			see=lambda iid: None)
+		app.loaded = []
+		app._load_book = lambda idx: app.loaded.append(idx)
+		app.reloads = []
+		app._reload_thumbs = lambda idxs: app.reloads.append(list(idxs))
+		app.flashes = []
+		app._flash = lambda msg, seconds=None: app.flashes.append(msg)
+		return app
+
+	def test_appends_new_entry_saves_and_keeps_source_selected(self, tmp_path):
+		_folder, entry = TestExecuteSplit()._setup(tmp_path)
+		out = execute_split(entry, ["Vedlejsi - B.txt"], tmp_path,
+		                    pattern="{author}/{title}",
+		                    values={"author": "B", "title": "Vedlejsi"})
+		app = self._bare_app([entry], tmp_path)
+		app._cur = 0
+		app._after_split(out)
+		# review.yaml must agree with the disk RIGHT NOW.
+		assert app.saved == [1]
+		assert app._dirty is False
+		# The new book joined the list as a library-served entry, the source
+		# entry stays selected with its identity intact.
+		assert len(app.entries) == 2
+		assert app.entries[0] is entry
+		assert app.entries[1] is out.new_entry
+		assert out.new_entry["uuid"] in app._lib_uuids  # list-filter exemption
+		assert "vedlejsi" in app._lib_uuids[out.new_entry["uuid"]]
+		assert app.picked == ["0"]
+		assert app.loaded == [0]
+		assert app._cur == 0
+		assert app.flashes and app.flashes[0].startswith("split: ")
+
+	def test_error_shows_warning_and_touches_nothing(self, tmp_path, monkeypatch):
+		if gui.ttk is None:
+			pytest.skip("tkinter unavailable")
+		_folder, entry = TestExecuteSplit()._setup(tmp_path)
+		warns = []
+		monkeypatch.setattr(gui.messagebox, "showwarning",
+			lambda *a, **k: warns.append(a))
+		out = SplitOutcome(entry=entry, new_entry=None, new_meta=None,
+			new_path=None, moved_files=[], cover_extracted=False, error="boom")
+		app = self._bare_app([entry], tmp_path)
+		app._after_split(out)
+		assert len(warns) == 1
+		assert app.saved == []
+		assert len(app.entries) == 1
+		assert app.flashes == []
+
+
+class TestSplitDialog:
+	"""Widget-level smoke: dialog builds, background hints land, validation gates.
+
+	Must run inside a real mainloop (the AGENTS Xvfb rule): the embedded-
+	metadata hints arrive from a worker thread via root.after, which only
+	dispatches while a main loop runs.
+	"""
+
+	def _walk(self, w):
+		yield w
+		for c in w.winfo_children():
+			yield from self._walk(c)
+
+	def test_dialog_builds_validates_and_cancels(self, tmp_path, monkeypatch):
+		root = _tk_root()
+		try:
+			_folder, entry = TestExecuteSplit()._setup(tmp_path)
+			import types
+
+			app = gui.ReviewEditorApp.__new__(gui.ReviewEditorApp)
+			app.root = root
+			app.library = tmp_path
+			app.entries = [entry]
+			app._cur = 0
+			app.cfg = types.SimpleNamespace(path_pattern=None)
+			app._alive = True
+			app.flashes = []
+			app._flash = lambda msg, seconds=None: app.flashes.append(msg)
+			app._collect_current = lambda: None
+			app._bind_select_all = lambda ent: None
+			app._modal_over_main = lambda win, focus=None: None
+			splits = []
+			app._after_split = lambda outcome: splits.append(outcome)
+			confirms = []
+			monkeypatch.setattr(gui.messagebox, "askyesno",
+				lambda *a, **kw: confirms.append(1) or False)
+
+			state = {}
+
+			def _step1():
+				tops = [w for w in root.winfo_children()
+				        if isinstance(w, gui.tk.Toplevel)]
+				assert tops, "split dialog not built"
+				state["win"] = tops[-1]
+				boxes = [w for w in self._walk(state["win"])
+				         if isinstance(w, gui.ttk.Checkbutton)]
+				assert len(boxes) == 2  # one row per ebook file
+				root.after(400, _step2)  # let the background hints land
+
+			def _step2():
+				win = state["win"]
+				labels = [str(l.cget("text")) for l in self._walk(win)
+				          if isinstance(l, gui.ttk.Label)]
+				# Dummy files carry no readable embedded metadata — every hint
+				# must have ARRIVED from the worker (not still "reading…").
+				assert any("embedded metadata unreadable" in t for t in labels)
+				split_btn = next(b for b in self._walk(win)
+				                 if isinstance(b, gui.ttk.Button)
+				                 and str(b.cget("text")) == "Split")
+				# Empty new-book fields → validation warning, no confirm box.
+				split_btn.invoke()
+				assert confirms == []
+				ents = [w for w in self._walk(win)
+				        if isinstance(w, gui.ttk.Entry)]
+				ents[0].insert(0, "Vedlejsi")
+				ents[1].insert(0, "B")
+				split_btn.invoke()
+				assert confirms == [1]  # confirm shown; user said no
+				root.after(60, _step3)
+
+			def _step3():
+				assert splits == []  # cancelled — nothing executed
+				state["win"].destroy()
+				root.quit()
+
+			def _run():
+				app.split_book()
+				_step1()
+
+			root.after(60, _run)
+			root.mainloop()
+		finally:
+			root.destroy()
 
 
 class TestCoverPaths:

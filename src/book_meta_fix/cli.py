@@ -1322,12 +1322,13 @@ def _print_strip_covers_summary(results, do_apply: bool, reopened: int = 0) -> N
 @click.option("--invalid", "invalid", type=click.Choice(_STRIP_SCOPES), is_flag=False, flag_value="both", default=None, help=_("Scope of invalid-cover removal — files no image decoder can read (HTML saved as .jpg, cover.html). Scope: external, embedded or both (default). Implies --covers."))
 @click.option("--min-size", "min_size", type=click.IntRange(min=1), default=None, help=_("Minimum cover image size in pixels (shorter side). Covers below it (e.g. the small databazeknih thumbnails) are renamed to .bak and their books return to review (the `verified` flag is cleared), so the next `bmf analyze` re-fetches a bigger cover — sources are cross-compared by image size. Implies --covers. Default: BMF_COVER_MIN_SIZE or off."))
 @click.option("--files/--no-files", "clean_files", default=False, help=_("Probe ebook files for unrecoverable content (recognized as no book format at all) and propose deletion in review.yaml (C17). Content-based detection: a valid book with a wrong extension is never proposed; every file is re-checked at apply time. Default: no."))
+@click.option("--empty/--no-empty", "clean_empty", default=False, help=_("Propose deleting book folders that hold no ebook file, only metadata sidecars (EMPTY_BOOK dead records). With --apply writes `action: delete` proposals into review.yaml; the deletion itself happens in `bmf apply` (whole folder, tar.gz snapshot). Default: no — dead records are only quarantined under needfix/empty/. Run AFTER `bmf analyze`: a later analyze rebuilds pending EMPTY_BOOK entries back to accept."))
 @click.option("--unverified/--no-unverified", "clean_unverified", default=True, help=_("Clear `verified` flag from books whose author/series cannot be confirmed online (default: yes)"))
 @click.option("--clear-all-verified", "clear_all_verified", is_flag=True, help=_("Clear `verified` flag from ALL books unconditionally (default: no)"))
 def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: bool,
 		clean_covers: bool, generated: str | None, invalid: str | None,
 		min_size: int | None,
-		clean_files: bool, clean_unverified: bool, clear_all_verified: bool) -> None:
+		clean_files: bool, clean_empty: bool, clean_unverified: bool, clear_all_verified: bool) -> None:
 	"""Clean invalid data and unconfirmed verified flags from the library.
 
 	Unifies cleanup operations in a single pass (dry-run by default):
@@ -1344,17 +1345,26 @@ def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: boo
 	   A valid book saved under a wrong extension is recognized by its content
 	   and never proposed; deletion itself happens in `bmf apply`, which
 	   re-checks every file and snapshots it into the deletion tar.gz.
-	3. --unverified: Audits books marked as `verified: true`. If a book has no
+	3. --empty: Finds folders that hold no ebook file at all, only metadata
+	   sidecars (EMPTY_BOOK dead records), and — with --apply — writes
+	   `action: delete` proposals into review.yaml. By default such records
+	   are only quarantined under needfix/empty/; this selector is the opt-in
+	   delete path. Deletion itself happens in `bmf apply` (whole folder,
+	   tar.gz snapshot). Run it AFTER `bmf analyze`: a later analyze rebuilds
+	   pending EMPTY_BOOK entries back to accept.
+	4. --unverified: Audits books marked as `verified: true`. If a book has no
 	   ISBN and its author/series does not exist online (suspected LLM hallucination),
 	   its `verified` flag is cleared, returning it to review.
-	4. --clear-all-verified: Clears `verified` flag unconditionally from all
+	5. --clear-all-verified: Clears `verified` flag unconditionally from all
 	   books, returning the entire library to review.
 	"""
 	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 
 	from .covers import strip_generated_covers
+	from .detectors import rule_empty_book
 	from .enrichers import Enricher
 	from .filecheck import merge_file_deletions, scan_invalid_files
+	from .review import merge_empty_deletions
 	from .writers import clear_verified
 
 	cfg = Config.from_env()
@@ -1384,7 +1394,8 @@ def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: boo
 	small_desc = str(min_size) if (clean_covers and min_size) else "off"
 	covers_desc = f"generated={eff_generated or 'off'}, invalid={eff_invalid or 'off'}, small={small_desc}" if clean_covers else _("off")
 	files_desc = _("on") if clean_files else _("off")
-	console.print("[dim]" + _("covers: {covers}, files: {files}, unverified: {unverified}").format(covers=covers_desc, files=files_desc, unverified=unverified_desc) + "[/dim]")
+	empty_desc = _("on") if clean_empty else _("off")
+	console.print("[dim]" + _("covers: {covers}, files: {files}, empty: {empty}, unverified: {unverified}").format(covers=covers_desc, files=files_desc, empty=empty_desc, unverified=unverified_desc) + "[/dim]")
 
 	cache = _open_cache(cfg.cache_db, no_cache=no_cache)
 	need_audit = (clean_unverified or clear_all_verified)
@@ -1407,6 +1418,7 @@ def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: boo
 		small_refetch_reopened: list[str] = []
 		file_findings: list = []
 		file_notes: list[str] = []
+		empty_books: list = []
 
 		with Progress(
 			SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
@@ -1441,7 +1453,12 @@ def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: boo
 					except Exception as e:  # noqa: BLE001
 						log.warning("file probe failed for %s: %s", meta.path, e)
 
-				# 2. Audit unverified books
+				# 3. Dead records (EMPTY_BOOK): folders with no ebook file at
+				# all, only metadata sidecars — the opt-in delete proposals.
+				if clean_empty and rule_empty_book(meta) is not None:
+					empty_books.append(meta)
+
+				# 4. Audit unverified books
 				if need_audit and meta.verified:
 					if clear_all_verified:
 						is_safe = False
@@ -1525,6 +1542,39 @@ def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: boo
 
 		if not do_apply:
 			console.print("[dim]" + _("Dry-run: nothing written to review.yaml. Re-run with --apply to write the delete proposals; `bmf apply` then deletes (after re-checking every file, with a tar.gz snapshot).") + "[/dim]")
+
+	if clean_empty:
+		empty_merge = None
+		if do_apply and empty_books:
+			empty_merge = merge_empty_deletions(cfg.review_file, empty_books, library_root=cfg.library)
+		console.print()
+		t = Table(title=_("Empty Book Folders (EMPTY_BOOK)"), show_header=True, header_style="bold cyan")
+		t.add_column(_("Metric"), style="bold")
+		t.add_column(_("Count"), justify="right")
+		t.add_row(_("books scanned"), str(len(books)), style="dim")
+		t.add_row(_("dead records (no ebook file)"), str(len(empty_books)))
+		if empty_merge is not None:
+			t.add_row(_("review entries added"), str(empty_merge["added"]))
+			t.add_row(_("review entries updated"), str(empty_merge["updated"]))
+			t.add_row(_("decided entries skipped"), str(empty_merge["skipped_decided"]), style="dim")
+		console.print(t)
+
+		if empty_books:
+			console.print()
+			t = Table(title=_("Affected books (first 25)"), show_header=True, header_style="bold cyan")
+			t.add_column(_("Book folder"))
+			for m in empty_books[:25]:
+				try:
+					shown = str(Path(m.path).relative_to(cfg.library))
+				except ValueError:
+					shown = m.path
+				t.add_row(shown[:80])
+			if len(empty_books) > 25:
+				t.add_row("…", f"({len(empty_books) - 25} more)")
+			console.print(t)
+
+		if not do_apply:
+			console.print("[dim]" + _("Dry-run: nothing written to review.yaml. Re-run with --empty --apply to write the delete proposals; `bmf apply` then deletes the folders (with a tar.gz snapshot).") + "[/dim]")
 
 	if need_audit:
 		console.print()
@@ -2110,6 +2160,18 @@ def abs_rescan(library: Path | None, since: str, url: str | None, abs_library: s
 			TimeRemainingColumn(), console=console,
 		)
 
+	# The library walk has no known total (changed_folders discovers folders
+	# lazily while descending — a counting pre-pass would double the NFS stat
+	# round trips), so its bar pulses and shows just the folders-checked
+	# counter; transient, because a frozen pulse bar carries no completion
+	# record the way the determinate bars above do.
+	def _new_pulse_progress(bar_style: str = "#e83b3b") -> Progress:
+		return Progress(
+			SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+			BarColumn(complete_style=bar_style, finished_style=bar_style, pulse_style=bar_style), TextColumn("{task.completed}"),
+			console=console, transient=True,
+		)
+
 	libs = client.libraries()
 	if libs is None:
 		console.print(f"[bold red]{_('Error:')}[/bold red] " + _("Cannot reach Audiobookshelf at {url} — check the URL and token.").format(url=base_url))
@@ -2143,7 +2205,13 @@ def abs_rescan(library: Path | None, since: str, url: str | None, abs_library: s
 			console.print(f"[bold red]{_('Error:')}[/bold red] " + _("Cannot list ABS library items — check the URL/token."))
 			sys.exit(1)
 		abs_folders = [str(f.get("fullPath") or "") for f in (selected.get("folders") or [])]
-		broken = broken_cover_items(items, cfg.library, abs_folders)
+		with _new_progress() as progress:
+			task_id = progress.add_task(_("Auditing item covers"), total=len(items))
+
+			def _audit_cb(done: int, total: int) -> None:
+				progress.update(task_id, completed=done)
+
+			broken = broken_cover_items(items, cfg.library, abs_folders, progress_callback=_audit_cb)
 		if not broken:
 			console.print("[green]" + _("No broken item covers found in the ABS database.") + "[/green]")
 		else:
@@ -2178,7 +2246,15 @@ def abs_rescan(library: Path | None, since: str, url: str | None, abs_library: s
 			sys.exit(1)
 		return
 
-	folders = changed_folders(cfg.library, since_ts)
+	# The stat-only NFS walk over the whole library: silent tens of seconds
+	# without a bar, in dry-run too (the bars further below need --apply).
+	with _new_pulse_progress() as progress:
+		task_id = progress.add_task(_("Scanning library folders"), total=None)
+
+		def _walk_cb(done: int) -> None:
+			progress.update(task_id, completed=done)
+
+		folders = changed_folders(cfg.library, since_ts, progress_callback=_walk_cb)
 	mres = None
 	if folders:
 		if items is None:

@@ -123,6 +123,7 @@ zůstane zachován, abyste mohli obnovit stav před během.
 | `bmf clean --apply` | Skutečně přejmenuje vadné obálky na `.bak`, odstřihne embedded placeholder obálky a odebere příznak `verified` u knih bez ISBN, jejichž autor/série neexistuje online |
 | `bmf clean --apply --clear-all-verified` | Navíc bezpodmínečně vymaže příznak `verified` ze VŠECH knih (vrátí je všechny do review) |
 | `bmf clean --min-size 300 --apply` | Navíc přejmenuje reálné, ale MALÉ obálky (kratší strana pod N pixelů — např. náhledy z databazeknih) na `.bak`; kniha se vrátí do review (`verified` se zruší) a další `analyze` + `apply` stáhne větší obálku — zdroje se porovnávají podle velikosti obrázku (`Enricher.upgrade_cover`). Výchozí práh: `BMF_COVER_MIN_SIZE`, jinak vypnuto |
+| `bmf clean --empty --apply` | Zapíše návrhy `action: delete` pro mrtvé záznamy (EMPTY_BOOK — složky bez souboru e-knihy, jen metadata) do review.yaml; složky pak smaže `bmf apply` (celá složka, záloha tar.gz). Výchozím osudem mrtvého záznamu je karanténa v `needfix/empty/`; tento selektor pouštějte PO `analyze` — pozdější analyze přepíše nerozhodnuté položky EMPTY_BOOK zpět na accept |
 | `bmf strip-covers` | Odstraní vygenerované obálky (dry-run: jen vypíše postižené knihy) |
 | `bmf strip-covers --apply` | Skutečně je odstraní: `cover.jpg` → `.bak` a vysoupne embedded obálky EPUB |
 | `bmf strip-covers --invalid` | Místo toho odstraní NEVALIDNÍ obálky: soubory s obrázkovou příponou / `cover.*`, které žádný dekodér nepřečte (příčina chyb „Invalid data found“ u ffmpeg v ABS) |
@@ -234,6 +235,17 @@ odstraní a jejich review záznamy vypadnou — review.yaml se uloží hned po
 sloučení, takže soubor souhlasí s diskem. Jde o explicitní, uživatelem
 řízený protějšek automatického slučování, které apply provede, když se dvě
 složky srazí na stejném cílovém místě.
+
+**Rozdělení chybně sloučené složky (`Ctrl+Shift+J`).** Odvolání sloučení:
+když v jedné složce skončily dvě *nesouvisející* knihy (sloučení, které
+nemělo nastat), zaměřte záznam a stiskněte `Ctrl+Shift+J`. Dialog vypíše
+soubory e-knih ve složce s jejich vloženým titulkem a autorem (načítané na
+pozadí); zaškrtnuté soubory se přesunou ven do **nové knihy** umístěné
+podle téhož vzoru cesty, jaký používá apply, s čerstvým uuid, zapsanými
+oběma metadatovými sidecary a obálkou best-effort zachráněnou z
+přesunutého souboru. Nová kniha se přidá do seznamu jako knihovní záznam
+(hned upravitelná, do review.yaml se zapíše, teprve když se změní);
+zdrojový záznam si podrží složku, identitu i review rozhodnutí.
 
 **Vyhledávání v celé knihovně (`+ knihovna`).** Pole `Hledat:` filtruje
 záznamy review; zaškrtněte vedle něj `+ knihovna` a tentýž dotaz projde

@@ -416,6 +416,12 @@ předvyplněné `action: accept` — přesun je mechanický a vratný. Složka
 obsahující jakýkoli jiný soubor (nerozpoznaný formát, zatoulaný dokument)
 nebo podadresář prázdná NENÍ.
 
+Cesta ke smazání je opt-in přes `bmf clean --empty`: zapíše návrhy
+`action: delete` do review.yaml (`--apply`; rozhodnuté položky se nikdy
+nesahají) a `bmf apply` pak složky odstraní se zálohou tar.gz. Spouštějte
+po `bmf analyze` — pozdější analyze přepíše nerozhodnuté položky EMPTY_BOOK
+zpět na accept.
+
 **Verdikt:** AUTO_FIXABLE (karanténa do `needfix/empty/`)
 
 ## MISSING_ISBN / MISSING_YEAR

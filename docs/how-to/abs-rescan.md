@@ -35,6 +35,9 @@ anything else with 403.
 
 1. Finds book folders in your library whose files changed within `--since`
    (default 24 h) — the max file mtime, so a swapped `cover.jpg` counts too.
+   The stat-only walk needs no total (folders are discovered while
+   descending), so its progress bar pulses and counts the folders checked —
+   over NFS this phase alone takes tens of seconds for a few thousand books.
 2. Maps each folder to an ABS library item: exact path → `relPath` (the usual
    case: the same storage mounted under different prefixes) → a unique
    folder-name match (covers books moved by apply's placement).
@@ -45,7 +48,7 @@ anything else with 403.
    thousand items take minutes — the items are scanned by a small worker
    pool (`--abs-workers`, default 4, env `BMF_ABS_WORKERS`; `1` = serial)
    and a progress bar with an ETA tracks the run (the `--fix-covers`
-   cover-clearing pass shows one too). (There is also
+   cover audit and cover-clearing pass show one too). (There is also
    a batch endpoint — it answers 200 immediately and is supposed to scan in
    the background, but on a real server it was measured accepting ~1100 ids
    and processing none, so bmf does not use it.)
@@ -75,7 +78,9 @@ ffmpeg — the `[FfmpegHelpers] Resize Image Error … Invalid data found
 when processing input` log lines.
 
 `--fix-covers` adds a pass over **all** items (a stale row is usually
-years old, `--since` does not filter it):
+years old, `--since` does not filter it). The audit probes one stored
+cover path per item — another slow NFS sweep on a big library, tracked by
+its own progress bar:
 
 - **dry-run** (default): lists the broken rows — item title, stored cover
   path, reason (not an image file / file missing).

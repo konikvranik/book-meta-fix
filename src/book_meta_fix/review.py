@@ -28,7 +28,7 @@ from typing import Any, Literal
 
 import yaml
 
-from .detectors import all_diagnoses
+from .detectors import all_diagnoses, rule_empty_book
 from .extractors import ExtractedMeta
 from .i18n import _
 from .models import BookMeta, Diagnosis
@@ -671,3 +671,81 @@ def merge_normalizations(
 	tmp.write_text(header + body, encoding="utf-8")
 	os.replace(tmp, p)
 	return {"added": added, "updated": updated, "skipped_decided": skipped, "verified_prefilled": verified}
+
+
+def merge_empty_deletions(
+	path: str | Path,
+	metas: list[BookMeta],
+	library_root: Path | None = None,
+) -> dict[str, int]:
+	"""Merge EMPTY_BOOK delete proposals into review.yaml (in place, atomic).
+
+	The opt-in delete path for dead records (``bmf clean --empty``): by
+	default the pipeline only QUARANTINES them — analyze pre-fills accept and
+	apply parks the folder under needfix/empty/. Same three-way contract as
+	:func:`book_meta_fix.filecheck.merge_file_deletions`:
+
+	- a PENDING entry gets ``action: delete`` pre-filled and the EMPTY_BOOK
+	  diagnosis appended (the user's bulk-veto workflow — the GUI filters by
+	  the delete state and mass-clears what should survive);
+	- a DECIDED entry is never touched — including the accept analyze
+	  pre-fills for EMPTY_BOOK (the veto path: clear the decision in the GUI,
+	  re-run ``clean --empty``);
+	- a book without an entry gets a fresh one with ``action: delete``
+	  pre-filled.
+
+	The empty-folder fact is re-checked per book via
+	:func:`book_meta_fix.detectors.rule_empty_book`, so a folder that gained
+	a real file since the caller's scan is left alone (nothing written for
+	it). A delete has no fields to propose, so fresh entries carry only a
+	provenance ``source``. Returns ``{added, updated, skipped_decided}``.
+	"""
+	p = Path(path)
+	entries = _load_raw_entries(p) if p.is_file() else []
+	by_uuid = {e.get("uuid"): e for e in entries if e.get("uuid")}
+	added = updated = skipped = 0
+	for meta in metas:
+		diagnosis = rule_empty_book(meta)
+		if diagnosis is None:
+			continue
+		diag = {
+			"category": diagnosis.category,
+			"reason": diagnosis.reason,
+			"confidence": diagnosis.confidence.value,
+		}
+		existing = by_uuid.get(meta.uuid)
+		if existing is not None:
+			if existing.get("action") is not None:
+				skipped += 1
+				continue
+			existing["action"] = "delete"
+			diags = existing.get("diagnoses") or ([existing["diagnosis"]] if existing.get("diagnosis") else [])
+			if not any(d.get("category") == "EMPTY_BOOK" for d in diags):
+				diags.append(diag)
+			if diags:
+				existing["diagnoses"] = diags
+			updated += 1
+		else:
+			entry = {
+				"id": meta.calibre_id,
+				"uuid": meta.uuid,
+				"path": _relative_path(meta, library_root),
+				"diagnosis": diag,
+				"current": _build_current(meta),
+				"proposed": {"source": "empty"},
+				"action": "delete",
+			}
+			entries.append(entry)
+			if meta.uuid:
+				by_uuid[meta.uuid] = entry
+			added += 1
+	if not (added or updated):
+		return {"added": 0, "updated": 0, "skipped_decided": skipped}
+	header = _header(len(entries))
+	body = "\n".join(_render_entry(e) for e in entries)
+	if body:
+		body += "\n"
+	tmp = p.with_suffix(p.suffix + ".tmp")
+	tmp.write_text(header + body, encoding="utf-8")
+	os.replace(tmp, p)
+	return {"added": added, "updated": updated, "skipped_decided": skipped}

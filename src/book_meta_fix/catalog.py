@@ -161,7 +161,8 @@ CATEGORY_HELP: dict[str, tuple[str, str]] = {
 		_("Dead record (the book file is gone)"),
 		_("The folder holds only metadata sidecars and their backups — no ebook "
 		  "file, nothing to repair. The record moves to needfix/empty/; "
-		  "metadata are left untouched."),
+		  "metadata are left untouched. 'bmf clean --empty' is the opt-in "
+		  "path to propose deleting these folders instead."),
 	),
 	"MISSING_ISBN": (
 		_("No ISBN"),

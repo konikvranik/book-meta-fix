@@ -166,6 +166,33 @@ folders are gone, and the file must agree with the disk (a stale entry
 would fail the next apply with "folder not found"). The survivor keeps its
 review decision; `bmf apply` finishes it later as usual.
 
+## Split a wrongly merged folder (`Ctrl+Shift+J`)
+
+The undo of the merge: two UNRELATED books sometimes end up sharing one
+folder — a `Ctrl+J` or an automatic merge (C19, a placement collision)
+that should not have happened. Focus the entry and press `Ctrl+Shift+J`
+(the folder must hold at least two ebook files). The dialog lists every
+ebook file with its embedded title/author (loaded in the background —
+extraction can take a moment); check the files that belong to the OTHER
+work and they move out into a **new book**.
+
+The new book's title and author prefill from the first checked file's
+embedded metadata (text-mined when the format carries none) — editable,
+and required. The target folder follows the same path pattern apply uses
+(previewed live as you type); an occupied name gets the `(dup N)` suffix.
+On confirm the new folder is created, the checked files move, a fresh uuid
+is minted, both metadata sidecars are written, and the cover is recovered
+best-effort from the moved file (generated placeholders are rejected —
+otherwise MISSING_COVER re-fires and the enrichers fetch a real one). A
+`same_book` warning flags the probably-pointless split (two copies of ONE
+book) without blocking it — here you decide, like in the merge dialog.
+
+The source entry keeps its folder, identity and review decision — only its
+file set shrinks. The new book joins the list as a library-served entry
+(`+ library` semantics): editable right away, written into review.yaml
+only once you decide or edit it. review.yaml is saved right after the
+split, and both folders' cache rows are invalidated.
+
 ## Verified (the OK mark)
 
 Next to the action radios sits a **Verified** checkbox (`Ctrl+O` toggles

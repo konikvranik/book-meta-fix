@@ -133,6 +133,17 @@ class TestChangedFolders:
 	def test_empty_library(self, tmp_path: Path) -> None:
 		assert changed_folders(tmp_path, time.time() - 60) == []
 
+	def test_progress_callback_counts_every_folder(self, tmp_path: Path) -> None:
+		# The walk feeds the CLI bar one count per folder checked (the total
+		# is unknown ahead — the walk is lazy), so the counts must arrive
+		# strictly increasing and end at the folder count.
+		_make_book(tmp_path, "Autor/Nova kniha")
+		_make_book(tmp_path, "Autor/Stara kniha", age_sec=7 * 86400)
+		_make_book(tmp_path, "Jiny/Blika", age_sec=7 * 86400)
+		seen: list[int] = []
+		assert changed_folders(tmp_path, time.time() - 24 * 3600, progress_callback=seen.append) == [tmp_path / "Autor/Nova kniha"]
+		assert seen == [1, 2, 3]
+
 
 # ---------------------------------------------------------------------------
 # match_items
@@ -393,3 +404,18 @@ class TestBrokenCoverItems:
 		items = [self._item("a", "/somewhere/else/x/metadata.json")]
 		broken = broken_cover_items(items, tmp_path, [])
 		assert [(b.item.id, b.reason) for b in broken] == [("a", "ext")]
+
+	def test_progress_callback_reports_done_total(self, tmp_path: Path) -> None:
+		# Same (done, total) contract as scan_items — the audit stats one
+		# file per item over NFS, so the CLI renders it as a determinate bar.
+		items = [
+			self._item("a", "/data/books/a/metadata.json"),
+			self._item("b", "/data/books/Autor/Kniha (1)/cover.jpg"),
+			self._item("c", ""),
+		]
+		(tmp_path / "Autor/Kniha (1)").mkdir(parents=True)
+		(tmp_path / "Autor/Kniha (1)/cover.jpg").write_bytes(b"\xff\xd8jpg")
+		seen: list[tuple[int, int]] = []
+		broken = broken_cover_items(items, tmp_path, ["/data/books"], progress_callback=lambda d, t: seen.append((d, t)))
+		assert [b.item.id for b in broken] == ["a"]
+		assert seen == [(1, 3), (2, 3), (3, 3)]

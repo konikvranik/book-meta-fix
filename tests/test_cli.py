@@ -687,6 +687,57 @@ class TestCleanCommand:
 		assert calls["n"] == 0
 		assert "Invalid Ebook Files" not in result.output
 
+	def test_clean_empty_dry_run_reports_without_writing(self, tmp_path: Path, monkeypatch) -> None:
+		"""--empty lists dead records (metadata sidecars only); dry-run writes
+		nothing to review.yaml (deletion itself is a later `bmf apply` step)."""
+		monkeypatch.setenv("BMF_CACHE", str(tmp_path / "cache.db"))
+		monkeypatch.setenv("BMF_REVIEW", str(tmp_path / "review.yaml"))
+		lib = tmp_path / "lib"
+		b = self._make_book(lib / "Autor" / "Kniha (1)")
+		(b / "cover.jpg").write_bytes(b"cover-bytes")
+
+		result = CliRunner().invoke(main, ["clean", "--library", str(lib), "--no-covers", "--empty"])
+		assert result.exit_code == 0
+		assert "Empty Book Folders (EMPTY_BOOK)" in result.output
+		assert "dead records (no ebook file)" in result.output
+		assert "Autor/Kniha (1)" in result.output
+		assert "Dry-run: nothing written to review.yaml" in result.output
+		assert not (tmp_path / "review.yaml").exists()
+
+	def test_clean_empty_apply_writes_delete_proposals(self, tmp_path: Path, monkeypatch) -> None:
+		monkeypatch.setenv("BMF_CACHE", str(tmp_path / "cache.db"))
+		monkeypatch.setenv("BMF_REVIEW", str(tmp_path / "review.yaml"))
+		lib = tmp_path / "lib"
+		b = self._make_book(lib / "Autor" / "Kniha (1)")
+		(b / "cover.jpg").write_bytes(b"cover-bytes")
+
+		result = CliRunner().invoke(main, ["clean", "--library", str(lib), "--no-covers", "--empty", "--apply"])
+		assert result.exit_code == 0
+		assert "review entries added" in result.output
+		review = tmp_path / "review.yaml"
+		assert review.is_file()
+		from book_meta_fix.review import parse_review
+
+		items = parse_review(review)
+		assert len(items) == 1
+		assert items[0].action == "delete"
+		assert items[0].diagnosis["category"] == "EMPTY_BOOK"
+		# Nothing was deleted yet — clean only writes the proposal.
+		assert (b / "metadata.json").is_file()
+
+	def test_clean_empty_default_off(self, tmp_path: Path, monkeypatch) -> None:
+		"""Without --empty the dead-record pass does not run (opt-in safety:
+		the default EMPTY_BOOK path is quarantine, not delete)."""
+		monkeypatch.setenv("BMF_CACHE", str(tmp_path / "cache.db"))
+		monkeypatch.setenv("BMF_REVIEW", str(tmp_path / "review.yaml"))
+		lib = tmp_path / "lib"
+		self._make_book(lib / "Autor" / "Kniha (1)")
+
+		result = CliRunner().invoke(main, ["clean", "--library", str(lib), "--no-covers"])
+		assert result.exit_code == 0
+		assert "Empty Book Folders" not in result.output
+		assert not (tmp_path / "review.yaml").exists()
+
 	def _cover(self, folder: Path, name: str = "cover.jpg", size: tuple[int, int] = (120, 180)) -> Path:
 		"""A real, decodable cover image of the given pixel size."""
 		from PIL import Image

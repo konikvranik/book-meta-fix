@@ -414,6 +414,12 @@ possible later manual recovery. The entry is pre-filled `action: accept` —
 the move is mechanical and reversible. A folder containing any other file
 (an unrecognized format, a stray document) or a subdirectory is NOT empty.
 
+The opt-in delete path is `bmf clean --empty`: it writes `action: delete`
+proposals into review.yaml (`--apply`; decided entries are never touched),
+and `bmf apply` then removes the folders with a tar.gz snapshot. Run it
+after `bmf analyze` — a later analyze rebuilds pending EMPTY_BOOK entries
+back to accept.
+
 **Verdict:** AUTO_FIXABLE (quarantine to `needfix/empty/`)
 
 ## MISSING_ISBN / MISSING_YEAR

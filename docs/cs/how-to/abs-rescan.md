@@ -34,7 +34,10 @@ Token musí patřit **adminovi** — scan endpointy vše ostatní odmítnou s 40
 
 1. Najde složky knih v knihovně, jejichž soubory se změnily v okně `--since`
    (výchozí 24 h) — bere max mtime souborů, takže počítá i vyměněný
-   `cover.jpg`.
+   `cover.jpg`. Samotný průchod jen statuje, ale total předem nezná (složky
+   se objevují až během sestupu), takže jeho progressbar pulzuje a počítá
+   prošlé složky — po NFS tato fáze sama trvá desítky sekund pro pár tisíc
+   knih.
 2. Namapuje každou složku na položku ABS knihovny: přesná cesta → `relPath`
    (nejčastější případ: téže úložiště přimontované pod jinými prefixy) →
    jednoznačná shoda jména složky (pokryje knihy přesunuté placementem).
@@ -44,7 +47,8 @@ Token musí patřit **adminovi** — scan endpointy vše ostatní odmítnou s 40
    položku znovu načte, takže i paralelně trvá pár tisíc položek minuty —
    položky skenuje malý fond workerů (`--abs-workers`, výchozí 4, env
    `BMF_ABS_WORKERS`; `1` = sériově) a průběh sleduje progressbar s
-   odhadem času (ETA), vlastní progressbar má i čisticí pass `--fix-covers`.
+   odhadem času (ETA), vlastní progressbar má i audit obálek i čisticí
+   pass `--fix-covers`.
    (Batch endpoint existuje taky —
    odpoví okamžitě 200 a měl by skenovat na pozadí, ale na reálném serveru
    byl naceněn tak, že ~1100 id přijal a nezpracoval žádné, takže ho bmf
@@ -77,7 +81,9 @@ obnovení cover cache ffmpeg dostane ten soubor k resizu — logové řádky
 input`.
 
 `--fix-covers` přidává pass přes **všechny** položky (zastaralý řádek je
-obvykle roky starý, `--since` ho nefiltruje):
+obvykle roky starý, `--since` ho nefiltruje). Audit otestuje jednu
+uloženou cestu obálky na položku — na velké knihovně další pomalé NFS
+sweepování, se svým progressbarem:
 
 - **dry-run** (výchozí): vypíše rozbité řádky — název položky, uloženou
   cestu obálky, důvod (není obrázkový soubor / soubor chybí).

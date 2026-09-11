@@ -166,6 +166,34 @@ souhlasit s diskem (zastaralý záznam by příští apply selhal na „folder n
 found"). Survivor si podrží své review rozhodnutí; `bmf apply` ho pak
 dokončí jako obvykle.
 
+## Rozdělení chybně sloučené složky (`Ctrl+Shift+J`)
+
+Odvolání sloučení: dvě NESOUVISEJÍCÍ knihy občas skončí v jedné složce —
+`Ctrl+J` nebo automatické sloučení (C19, kolize při umísťování), které
+nemělo nastat. Zaměřte záznam a stiskněte `Ctrl+Shift+J` (ve složce musí
+být aspoň dva soubory e-knih). Dialog vypíše všechny soubory e-knih s
+vloženým titulkem a autorem (načítá se na pozadí — extrakce chvíli trvá);
+zaškrtněte soubory, které patří DRUHÉMU dílu, a ty se přesunou ven do
+**nové knihy**.
+
+Titulek a autor nové knihy se předvyplní z vložených metadat prvního
+zaškrtnutého souboru (u formátů, které žádná nemají, z hodnot vytěžených
+z textu) — jdou upravit a jsou povinné. Cílová složka následuje stejný
+vzor cesty jako apply (náhled se mění už při psaní); obsazené jméno dostane
+příponu `(dup N)`. Po potvrzení se nová složka vytvoří, zaškrtnuté soubory
+se přesunou, vyrobí se čerstvé uuid, zapíšou se oba metadatové sidecary a
+obálka se best-effort zachrání z přesunutého souboru (generované
+zástupné se odmítají — jinak MISSING_COVER znovu nastane a enrichery
+stáhnou skutečnou). Varování `same_book` upozorní na zřejmě zbytečné
+rozdělení (dvě kopie JEDNÉ knihy), ale neblokuje ho — tady rozhodujete vy,
+jako v dialogu slučování.
+
+Zdrojový záznam si podrží složku, identitu i review rozhodnutí — jen
+zmenší svou sadu souborů. Nová kniha se přidá do seznamu jako knihovní
+záznam (sémantika `+ knihovna`): hned upravitelná, do review.yaml se
+zapíše, teprve když ji rozhodnete či upravíte. review.yaml se uloží hned
+po rozdělení a cache řádky obou složek se zneplatní.
+
 ## Verified (značka OK)
 
 Vedle radiobuttonů akcí je checkbox **Verified** (přepíná `Ctrl+O`;

@@ -295,7 +295,7 @@ def parse_since_duration(text: str) -> float:
 	return value * mult
 
 
-def changed_folders(library_root: Path, since_ts: float) -> list[Path]:
+def changed_folders(library_root: Path, since_ts: float, progress_callback: Any = None) -> list[Path]:
 	"""Book folders under *library_root* whose files changed at/after *since_ts*.
 
 	The check is the max file mtime of the folder (the same signal the
@@ -304,12 +304,23 @@ def changed_folders(library_root: Path, since_ts: float) -> list[Path]:
 	any file — this is a stat-only walk. The mtimes come from the machine
 	bmf runs on, i.e. the same client that just wrote the files, so a stale
 	NFS attribute cache on some other host cannot mislead it.
+
+	*progress_callback* (called as ``callback(done)`` after every folder
+	checked) lets the CLI drive a progress bar — the walk is the slow part
+	over NFS (tens of seconds for ~5k folders) and without feedback it
+	looks hung. The total is deliberately NOT part of the contract: the
+	walk is lazy, folders are discovered while descending, and a counting
+	pre-pass would double the stat round trips.
 	"""
 	out: list[Path] = []
+	done = 0
 	for folder in iter_book_folders(library_root):
 		max_mtime, _ = _stat_folder(folder)
 		if max_mtime >= since_ts:
 			out.append(folder)
+		done += 1
+		if progress_callback is not None:
+			progress_callback(done)
 	return out
 
 
@@ -345,6 +356,7 @@ class BrokenCover:
 
 def broken_cover_items(
 	items: list[AbsItem], library_root: Path, abs_folder_paths: list[str],
+	progress_callback: Any = None,
 ) -> list[BrokenCover]:
 	"""Pick the items whose ABS-DB coverPath row is junk, not a real cover.
 
@@ -359,24 +371,42 @@ def broken_cover_items(
 	library folders (ABS's own uploaded covers under its /metadata dir) get
 	the extension check only: their storage belongs to the ABS server, not
 	to our mount.
+
+	*progress_callback* (called as ``callback(done, total)`` after every
+	item audited, same contract as scan_items) lets the CLI drive a progress
+	bar: auditing EVERY item of a ~5k-book library costs one ``exists()``
+	stat per stored cover row, another slow NFS sweep after the item
+	listing itself.
 	"""
 	folders = [_norm_posix(f) for f in abs_folder_paths if str(f or "").strip("/")]
+	total = len(items)
 	out: list[BrokenCover] = []
+	done = 0
 	for item in items:
-		cover = _norm_posix(item.cover_path or "")
-		if not cover or "/" not in cover:
-			continue  # nothing stored — the scanner is free to pick a cover
-		if Path(cover).suffix.lower() not in ABS_IMAGE_EXTS:
-			out.append(BrokenCover(item=item, cover_path=cover, reason="ext"))
-			continue
-		rel = ""
-		for folder in folders:
-			if cover.startswith(folder + "/"):
-				rel = cover[len(folder) + 1:]
-				break
-		if rel and not (library_root / rel).exists():
-			out.append(BrokenCover(item=item, cover_path=cover, reason="missing"))
+		broken = _broken_cover_row(item, library_root, folders)
+		if broken is not None:
+			out.append(broken)
+		done += 1
+		if progress_callback is not None:
+			progress_callback(done, total)
 	return out
+
+
+def _broken_cover_row(item: AbsItem, library_root: Path, folders: list[str]) -> BrokenCover | None:
+	"""The broken-cover verdict for one item (None = the row is fine)."""
+	cover = _norm_posix(item.cover_path or "")
+	if not cover or "/" not in cover:
+		return None  # nothing stored — the scanner is free to pick a cover
+	if Path(cover).suffix.lower() not in ABS_IMAGE_EXTS:
+		return BrokenCover(item=item, cover_path=cover, reason="ext")
+	rel = ""
+	for folder in folders:
+		if cover.startswith(folder + "/"):
+			rel = cover[len(folder) + 1:]
+			break
+	if rel and not (library_root / rel).exists():
+		return BrokenCover(item=item, cover_path=cover, reason="missing")
+	return None
 
 
 def _norm_posix(path: str | Path) -> str:

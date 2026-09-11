@@ -401,6 +401,13 @@ src/book_meta_fix/
                    so apply fixes AND closes it; a leftover MISSING_* keeps
                    the book open on purpose, a spelling fix is not identity
                    evidence and closing would cancel the enricher retries)
+                   + merge_empty_deletions (bmf clean --empty --apply writes
+                   EMPTY_BOOK delete proposals IN PLACE: pending entries get
+                   action: delete pre-filled + the diagnosis appended, DECIDED
+                   entries skipped — including analyze's pre-filled accept —
+                   unknown books get fresh action: delete entries; the
+                   empty-folder fact re-verified per book via rule_empty_book
+                   at write time)
   writers.py       atomic metadata.json/.opf writers + ensure_uuid + clear_verified
   mover.py         move/merge engine used by apply's placement (organize fn kept for tests)
   epubgen.py       bmf epubgen
@@ -438,7 +445,13 @@ src/book_meta_fix/
                   default 4, 1 = serial; per-thread SCAN_CALL_PAUSE keeps each connection's
                   burst gentle) and drives a progress_callback(done, total) under the counter
                   lock — the CLI renders it as a rich progress bar with ETA because the
-                  synchronous per-item scans run for minutes even in parallel. With --apply,
+                  synchronous per-item scans run for minutes even in parallel. The two
+                  pre-scan sweeps take callbacks too: changed_folders fires done-only
+                  (lazy walk, total unknowable without doubling the stat RPCs → the CLI's
+                  pulsing TRANSIENT bar counts folders; the walk is silent tens of
+                  seconds over NFS and happens in dry-run as well), broken_cover_items
+                  fires (done, total) per item (each stored cover row costs one exists()
+                  stat — a determinate bar under --fix-covers). With --apply,
                   unmatched folders (moved/new — no item id to scan) additionally get a PLAIN
                   library scan fired AFTER the per-item loop (async server-side, fire-and-
                   forget; after the loop on purpose — a racing library scanner would double
@@ -581,10 +594,32 @@ src/book_meta_fix/
                   and the picks (execute_merge values=) override the automatic merge:
                   _apply_merge_choice writes them onto the merged metadata, merge_choice_
                   proposal REBASES only CONFLICTING existing proposed keys (no proposal
-                  noise for clean fields; a stale analyzer suggestion cannot undo an
-                  explicit pick at the next apply); untouched defaults reproduce the
-                  automatic gap-fill (survivor's value, else first found), so confirming
-                  as-is loses nothing
+	                  noise for clean fields; a stale analyzer suggestion cannot undo an
+	                  explicit pick at the next apply); untouched defaults reproduce the
+	                  automatic gap-fill (survivor's value, else first found), so confirming
+	                  as-is loses nothing. Ctrl+Shift+J split-book is the UNDO of a wrong
+	                  merge (execute_split + split_book dialog + _after_split): two
+	                  UNRELATED works sharing one folder (a C19/placement merge that
+	                  should not have happened) — the dialog lists the folder's ebook
+	                  files (embedded title/author hints load in a BACKGROUND thread,
+	                  extract() may spawn a calibre subprocess), the checked ones move
+	                  out into a NEW book folder placed by mover.compute_target_path
+	                  with cfg.path_pattern (collisions incl. dest == the source folder
+	                  get move_book's "(dup N)"; a split book has no calibre id, so the
+	                  default {id} pattern yields "(noid)"); the new book's metadata
+	                  prefills from the primary moved file's EMBEDDED block, falling
+	                  back to the text-mined fields (txt carries no embedded block),
+	                  with the dialog's author/title values overriding, gets a FRESH
+	                  uuid + write_book_meta + a best-effort cover via
+	                  recover_cover_from_book (generated placeholders rejected, so
+	                  MISSING_COVER re-fires and the enrichers retry); a failed move
+	                  ROLLS BACK the already-moved files (no half-split folders); the
+	                  source entry keeps its identity/decision (only its file set
+	                  shrinks, current refreshed), and the new book joins the list as
+	                  a LIBRARY-served entry (library_entry_from_meta + _lib_uuids hay
+	                  registration — editable at once, written to review.yaml only
+	                  once changed); cache rows of both folders invalidated, review.yaml
+	                  saved IMMEDIATELY (same disk-agrees contract as the merge)
   cli.py           click commands: scan, report, analyze, apply, epubgen, crosscheck,
                   strip-covers, normalize, series, merge, abs-rescan, gui
                   (series = the READ-ONLY C18 companion — overview table of
@@ -614,7 +649,16 @@ src/book_meta_fix/
                   engine's min_size selector, and the touched books ALSO get their
                   `verified` flag cleared (else analyze's skip-verified default would
                   never re-fire MISSING_COVER, so the bigger cover would never be
-                  fetched); analyze
+                  fetched), and a FIFTH --empty (default OFF, plain boolean): dead
+                  records (EMPTY_BOOK folders — no ebook file, only metadata
+                  sidecars) get `action: delete` proposals written into review_file
+                  via review.merge_empty_deletions (same three-way contract as
+                  filecheck.merge_file_deletions: decided never touched, pending
+                  overlaid, fresh born delete; the empty-folder fact re-checked per
+                  book through rule_empty_book at write time). The OPT-IN delete
+                  path — the default EMPTY_BOOK fate stays quarantine in
+                  needfix/empty/. Run AFTER analyze: a later analyze rebuilds
+                  pending EMPTY_BOOK entries back to accept; analyze
                   takes --llm-provider/--antigravity-cmd/--antigravity-model and closes
                   the provider in its finally block — only the ACP provider actually
                   holds subprocesses — and --normalize, which chains the normalize
