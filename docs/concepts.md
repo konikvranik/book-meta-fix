@@ -250,12 +250,11 @@ the winning lookup.
 
 ## Placement patterns
 
-`bmf apply` places each applied book: clean/`verified` ones move to a path
-built from a format string (default `{author}/{title} ({id})`); books with
-unresolved problems go to `<library>/<needfix-dir>/<original relative
-path>` (default `needfix/`), preserving the structure so you can trace
-provenance; dead records (no ebook file) to `needfix/empty/`. A resolved
-book moves back out of needfix on the next apply.
+`bmf apply` places each applied book: a decided entry (accept/keep) moves
+to a path built from a format string (default `{author}/{title} ({id})`) —
+the decision outranks residual detector complaints, so an accepted book
+always moves back out of needfix; dead records (no ebook file) go to
+`needfix/empty/`, preserving the structure so you can trace provenance.
 
 | Field | Example | Notes |
 |---|---|---|

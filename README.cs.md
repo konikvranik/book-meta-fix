@@ -30,7 +30,7 @@ při opětovném prohledání.
 - [x] Obohacení (scraping databazeknih.cz pro CZ/SK žánry + metadata; legie.info pro sci-fi/fantasy povídky a série; vlastní instance audiobookshelf_czech_metadata agregující ~17 CZ audioknihových e-shopů; OpenLibrary + Google Books jako fallback)
 - [x] Analýza + YAML revize (`bmf analyze`, `bmf apply`)
 - [x] Normalizace napříč knihovnou (`bmf normalize`) — C15 varianty jmen autorů + C16 varianty žánrů/tagů + C18 varianty názvů sérií, lidsky schvalované přes review.yaml
-- [x] Umísťování (`bmf apply`) — čisté/verified knihy na vzor cesty, nevyřešené do needfix/ (organize sloučeno)
+- [x] Umísťování (`bmf apply`) — accepted knihy na vzor cesty (ven z needfix/), mrtvé záznamy do needfix/empty/ (organize sloučeno)
 - [x] Generování EPUB (`bmf epubgen`)
 - [x] Konzistence napříč formáty (`bmf crosscheck`) — karanténa formátů, jejichž obsah odporuje metadatům
 - [ ] LLM rekonciliace (Z.AI, pro C1/C4/C5) — čeká na `ZAI_API_KEY`
@@ -65,7 +65,7 @@ $EDITOR review.yaml
 bmf apply review.yaml
 
 # 5. Apply for real: zapíše metadata A umístí každou aplikovanou knihu —
-#    čisté/verified na vzor cesty, nevyřešené do needfix/
+#    accepted knihy na vzor cesty (ven z needfix/), mrtvé záznamy do needfix/empty/
 bmf apply --apply review.yaml
 
 # 6. Generate missing EPUBs for OK books
@@ -113,7 +113,7 @@ zůstane zachován, abyste mohli obnovit stav před během.
 | `bmf merge --apply` | Naplní review.yaml záznamy C19 `action: merge` (ISBN-potvrzené předvyplněné, přesné shody autora+názvu bez ISBN důkazu pending); `bmf apply` pak včlení každou duplicitu do jejího přeživšího — soubory se přesouvají (nikdy nepřepisují; kolize jmen se přejmenuje s id poraženého), metadata se sloučí pole po poli přeživší-první, sidecary + obálka poraženého jedou do tar.gz snapshotu. Každé sloučení se před provedením znovu zkontroluje (`same_book`) |
 | `bmf normalize` | Průchod celou knihovnou: naklastruje varianty jmen autorů (C15 — iniciály vs celá jména, diakritika, tituly, anonymní zápisy, prohozené pořadí), sjednotí žánry/tagy na české názvy (C16 — duplicity velikost písmen/diakritika/pořadí slov, aliasy EN→CZ) a sjednotí názvy sérií (C18 — fold varianty, kurátorovaná alias tabulka, předponová/fuzzy podezření vážená číslováním dílů; pořadové číslo dílu se nikdy nemění). Dry-run: vypíše clustery |
 | `bmf normalize --apply` | Naplní review.yaml návrhy C15/C16/C18 (deterministické s předvyplněným `accept`, úsudkové zůstanou pending); `--authors`/`--genres`/`--tags`/`--series` zúží rozsah, `--online` váží podezřelé dvojice sérií proti databazeknih apod. (cachováno). Zápis na disk dělá až `bmf apply`; přejmenování autora přesouvá složky, takže práci zakončete `bmf abs-rescan` |
-| `bmf apply --apply <file>` | Zapíše `metadata.json` + `metadata.opf` A umístí knihu: čisté/`verified` → vzor cesty, nevyřešené → `needfix/`, mrtvé záznamy → `needfix/empty/` |
+| `bmf apply --apply <file>` | Zapíše `metadata.json` + `metadata.opf` A umístí knihu: accept/`keep` → vzor cesty (accepted kniha vždy VEN z `needfix/`), mrtvé záznamy → `needfix/empty/` |
 | `bmf organize` | *(zastaralý stub)* — umísťování bylo sloučeno do `bmf apply` |
 | `bmf epubgen` | Vygeneruje chybějící soubory `.epub` pro knihy OK (z pdb/mobi/pdf/doc/txt) |
 | `bmf epubgen --apply` | Skutečně vygeneruje EPUBy |
@@ -650,8 +650,8 @@ rate limit 1 s na hostitele.
 │       ├── <Title> - <Author>.epub
 │       ├── <Title> - <Author>.pdb
 │       └── cover.jpg
-└── needfix/                  # nevyřešené knihy sem umísťuje `bmf apply`
-    └── empty/                # mrtvé záznamy (žádný knižní soubor)
+└── needfix/                  # mrtvé záznamy sem umísťuje `bmf apply` —
+    └── empty/                # accepted kniha se vždy vrací ven
     └── <Author>/...          #   (preserving the original relative subpath)
 ```
 
@@ -816,12 +816,14 @@ skutečného textu knihy**:
 ## Vzory pro umísťování (apply)
 
 `bmf apply` nezapisuje jen metadata — po aplikaci položky knihu také
-**umístí**: čisté / `verified` knihy se přesunou na cestu složenou z
-formátovacího řetězce (výchozí `{author}/{title} ({id})`), knihy s
-nevyřešenými problémy do `needfix/` a mrtvé záznamy (žádný knižní soubor)
-do `needfix/empty/`. Rozhodnutí se odvozuje z FINÁLNÍCH metadat pomocí
-čistě metadatových detektorů — bez čtení obsahu, takže apply zůstává
-rychlé. Dřívější `bmf organize` (který při každém běhu znovu klasifikoval
+**umístí**: každá rozhodnutá položka (accept/keep) se přesune na cestu
+složenou z formátovacího řetězce (výchozí `{author}/{title} ({id})`) —
+rozhodnutí přebíjí zbytkové námitky detektorů, takže accepted kniha se
+vždy vrátí VEN z `needfix/` (skutečná námitka se znovu ozve při příštím
+analyze; jen `verified` knihu trvale zavírá). Mrtvé záznamy (žádný knižní
+soubor) jdou do `needfix/empty/`. Cíl se počítá z FINÁLNÍCH metadat —
+čistě cestovní matematika bez čtení obsahu, takže apply zůstává rychlý.
+Dřívější `bmf organize` (který při každém běhu znovu klasifikoval
 celou knihovnu) je zastaralý stub; špatně umístěné knihy označí analyze
 pomocí kontroly umístění C13 (s předvyplněným `action: accept`).
 

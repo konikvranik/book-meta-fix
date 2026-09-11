@@ -259,13 +259,12 @@ metadata z vítězného vyhledávání zůstávají.
 
 ## Vzory pro umísťování
 
-`bmf apply` umístí každou aplikovanou knihu: čisté / `verified` se přesunou
-na cestu postavenou z formátovacího řetězce (výchozí
-`{author}/{title} ({id})`); knihy s nevyřešenými problémy jdou do
-`<library>/<needfix-dir>/<original relative path>` (výchozí `needfix/`),
-se zachováním struktury, abyste mohli dohledat provenienci; mrtvé záznamy
-(bez knižního souboru) do `needfix/empty/`. Vyřešená kniha se při příštím
-apply vrátí z needfix zpět ven.
+`bmf apply` umístí každou aplikovanou knihu: rozhodnutá položka (accept/
+keep) se přesune na cestu postavenou z formátovacího řetězce (výchozí
+`{author}/{title} ({id})`) — rozhodnutí přebíjí zbytkové námitky
+detektorů, takže accepted kniha se vždy vrátí z needfix zpět ven; mrtvé
+záznamy (bez knižního souboru) do `needfix/empty/`, se zachováním
+struktury, abyste mohli dohledat provenienci.
 
 | Pole | Příklad | Poznámky |
 |---|---|---|

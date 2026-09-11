@@ -194,8 +194,10 @@ diagnózou obálky C11/MISSING_COVER, kterou apply v témže průchodu zkusí
 obnovit), položka v
 review dostane předvyplněné `action: accept`, takže zdravá, ale špatně
 umístěná kniha se přesune hromadně; návrh, který mění autora/název,
-zůstává na individuální kontrolu. Kniha pod `needfix/`, jejíž problémy
-byly vyřešeny, se stejnou cestou vrací zpět do kořenového stromu.
+zůstává na individuální kontrolu. Accepted kniha se vždy přesune na svou
+cílovou cestu v kořenovém stromu — včetně knihy pod `needfix/`, jejíž
+položka nese i jinou diagnózu (rozhodnutí accept přebíjí zbytkové námitky
+detektorů).
 
 **Verdikt:** AUTO_FIXABLE (přesun)
 

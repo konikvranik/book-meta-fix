@@ -102,7 +102,7 @@ sequenceDiagram
 		end
 		opt placement (default, --no-place skips)
 			AP->>MV: _placement_target(), recomputed from final metadata
-			MV->>FS: move to pattern path / merge same work / "(dup N)"<br/>EMPTY_BOOK → needfix/empty, unresolved → needfix/
+			MV->>FS: move to pattern path / merge same work / "(dup N)"<br/>EMPTY_BOOK → needfix/empty; decided (accept/keep) → always the pattern path
 		end
 	end
 	AP->>RV: prune applied entries (keep retained, paths refreshed)

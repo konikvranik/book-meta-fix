@@ -18,19 +18,19 @@ bmf apply --apply --needfix-dir "_problems"
 bmf apply --apply --no-place      # jen metadata, bez přesunů
 ```
 
-Routing se rozhoduje z FINÁLNÍCH metadat pomocí čistě metadatových
-detektorů (bez čtení obsahu — ta práce patří analyze):
+Routing se počítá z FINÁLNÍCH metadat (čistě cestovní matematika — bez
+čtení obsahu, ta práce patří analyze). Rozhodnutí u položky přebíjí
+zbytkové námitky detektorů:
 
 | stav knihy po apply | cíl |
 |---|---|
-| `verified`, nebo detektory čisté, nebo jen acceptable-missing (MISSING_* bez NEEDS_REVIEW) | cesta podle vzoru, výchozí `{author}/{title} ({id})` |
-| nevyřešené problémy (např. titul C2, který nikdo neopravil) | `<knihovna>/<needfix-dir>/<původní relativní cesta>` |
+| rozhodnuto — accept nebo keep (bez ohledu na zbývající námitky detektorů) | cesta podle vzoru, výchozí `{author}/{title} ({id})` |
 | mrtvý záznam — žádný knižní soubor (EMPTY_BOOK) | `<knihovna>/<needfix-dir>/empty/<původní relativní cesta>` |
 
-Kniha, která skončí v `needfix/`, se při příštím apply vrátí ZPĚT do
-kořenového stromu, jakmile jsou její problémy vyřešeny (prefix se odstraní,
-nikdy se nezdvojuje). Stejně tak `needfix/empty/` — byť mrtvý záznam bez
-knihy už těžko vyřešit jde.
+Accepted kniha se proto vždy vrací ZPĚT z `needfix/` na svou cílovou cestu
+— skutečná námitka se prostě znovu ozve při příštím analyze a kniha se
+vrátí do review; trvale ji zavírá jen příznak `verified`. Mrtvý záznam
+zůstává pod `needfix/empty/` — bez knižního souboru není co umísťovat.
 
 Pole vzoru: `{author}`, `{author_sort}`, `{title}`, `{title_sort}`, `{id}`,
 `{isbn}`, `{year}`, `{language}`, `{series}`, `{series_index}`.

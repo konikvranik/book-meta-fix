@@ -32,9 +32,10 @@ příkazem `bmf analyze --recheck-ok`.
 
 ## Umísťování (dřívější `bmf organize`)
 
-Po zapsání metadat položky apply rozhodne, kam složka patří — čisté /
-`verified` knihy se přesunou na cestu podle vzoru, nevyřešené do
-`needfix/`, mrtvé záznamy (bez knižního souboru) do `needfix/empty/`.
+Po zapsání metadat položky apply rozhodne, kam složka patří — každá
+rozhodnutá položka (accept/keep) se přesune na cestu podle vzoru (accepted
+kniha vždy VEN z `needfix/`); mrtvé záznamy (bez knižního souboru) do
+`needfix/empty/`.
 Viz [Organizace knihovny](organize.md) pro pole vzoru a řešení kolizí.
 `--no-place` přesouvání úplně vypne; `--pattern` / `--needfix-dir`
 (nebo `BMF_PATTERN` / `BMF_NEEDFIX_DIR`) přebijí cíle.

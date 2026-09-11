@@ -101,7 +101,7 @@ sequenceDiagram
 		end
 		opt placement (default, --no-place vynechá)
 			AP->>MV: _placement_target(), přepočítané z finálních metadat
-			MV->>FS: přesun na pattern cestu / merge stejného díla / "(dup N)"<br/>EMPTY_BOOK → needfix/empty, nevyřešené → needfix/
+			MV->>FS: přesun na pattern cestu / merge stejného díla / "(dup N)"<br/>EMPTY_BOOK → needfix/empty; rozhodnuto (accept/keep) → vždy pattern cesta
 		end
 	end
 	AP->>RV: prořezat aplikované záznamy (keep zůstává, cesty přepsány)

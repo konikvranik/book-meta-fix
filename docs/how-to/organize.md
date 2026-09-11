@@ -18,19 +18,20 @@ bmf apply --apply --needfix-dir "_problems"
 bmf apply --apply --no-place      # metadata only, no moves
 ```
 
-Routing, decided from the FINAL metadata by the metadata-only detectors
-(no content reads — that work belongs to analyze):
+Routing is decided from the FINAL metadata (pure path math — no content
+reads, that work belongs to analyze). The entry's decision outranks
+residual detector complaints:
 
 | book state after apply | destination |
 |---|---|
-| `verified`, or detector-clean, or only acceptable-missing (MISSING_* without NEEDS_REVIEW) | the pattern path, default `{author}/{title} ({id})` |
-| unresolved problems (e.g. a C2 title nobody fixed) | `<library>/<needfix-dir>/<original relative path>` |
+| decided — accept or keep (regardless of leftover detector complaints) | the pattern path, default `{author}/{title} ({id})` |
 | dead record — no ebook file at all (EMPTY_BOOK) | `<library>/<needfix-dir>/empty/<original relative path>` |
 
-A book that lands in `needfix/` moves back OUT to the root tree on the next
-apply once its problems are resolved (the prefix is stripped, never
-doubled). The same applies to `needfix/empty/` — though a dead record
-cannot really be resolved without the book file.
+An accepted book therefore always moves back OUT of `needfix/` to its
+pattern target — a leftover complaint that is real simply re-fires on the
+next analyze and re-enters review; only the `verified` flag closes a book
+for good. A dead record stays under `needfix/empty/` — without the book
+file there is nothing to place.
 
 Pattern fields: `{author}`, `{author_sort}`, `{title}`, `{title_sort}`,
 `{id}`, `{isbn}`, `{year}`, `{language}`, `{series}`, `{series_index}`.

@@ -832,16 +832,18 @@ def _print_fix_source_summary(stats: dict) -> None:
 @click.argument("review_file", required=False, type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--library", "library", type=click.Path(file_okay=False, path_type=Path), help=_("Library root"))
 @click.option("--apply", "do_apply", is_flag=True, help=_("Actually write changes (default: dry-run)"))
-@click.option("--pattern", "pattern", default=None, help=_("Target path pattern for OK books (default: '{author}/{title} ({id})'). Applied books whose metadata is clean (or `verified`) move there; books with unresolved problems move to --needfix-dir."))
-@click.option("--needfix-dir", "needfix_dir", default=None, help=_("Folder for books that still have unresolved problems after apply (default: 'needfix'). A resolved book moves back out of it on the next apply."))
+@click.option("--pattern", "pattern", default=None, help=_("Target path pattern for placed books (default: '{author}/{title} ({id})'). Every applied book with a decided action (accept/keep) moves there — an accepted book always moves back out of --needfix-dir."))
+@click.option("--needfix-dir", "needfix_dir", default=None, help=_("Folder for dead records with no ebook file after apply (default: 'needfix'). An accepted book always moves back out of it."))
 @click.option("--no-place", "no_place", is_flag=True, help=_("Write metadata only; do not move folders (placement off)."))
 def apply(review_file: Path | None, library: Path | None, do_apply: bool, pattern: str | None, needfix_dir: str | None, no_place: bool) -> None:
 	"""Apply approved changes from a (human-edited) review.yaml.
 
 	After writing an entry's metadata, apply also PLACES the book (the former
-	`bmf organize`, folded in here): clean / verified books move to the target
-	pattern path, unresolved ones to needfix/. No content reads — the decision
-	is re-derived from the final metadata only.
+	`bmf organize`, folded in): every decided entry (accept/keep) moves to the
+	target pattern path — the decision outranks residual detector complaints,
+	so an accepted book always moves back OUT of needfix/; dead records (no
+	ebook file) go to needfix/empty/. Pure path math on the final metadata —
+	no content reads.
 	"""
 	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 

@@ -33,8 +33,9 @@ never re-enters review. Undo a too-hasty OK with
 ## Placement (the former `bmf organize`)
 
 After writing an entry's metadata, apply also decides where the folder
-belongs — clean/`verified` books move to the pattern path, unresolved ones
-to `needfix/`, dead records (no ebook file) to `needfix/empty/`. See
+belongs — every decided entry (accept/keep) moves to the pattern path (an
+accepted book always moves OUT of `needfix/`); dead records (no ebook
+file) go to `needfix/empty/`. See
 [Organize the library](organize.md) for the pattern fields and collision
 handling. `--no-place` skips moving entirely; `--pattern` /
 `--needfix-dir` (or `BMF_PATTERN` / `BMF_NEEDFIX_DIR`) override the

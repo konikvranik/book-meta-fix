@@ -1403,15 +1403,16 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cach
 
 	PLACEMENT (the former ``bmf organize``, folded in here so review.yaml is
 	the single decision queue): after writing the metadata of an accepted /
-	kept book, apply decides where the folder belongs — NO content reads, no
-	identity gate, just the metadata-only detectors on the FINAL metadata:
+	kept book, apply moves the folder to its pattern target path — the
+	decision outranks residual detector complaints, so an accepted book
+	moves OUT of needfix rather than back into it:
 
-	  - ``verified`` (entry flag, persisted into metadata.json by this very
-	    write) → the root target path, even when detectors still complain;
-	  - clean, or only acceptable-missing (MISSING_* with no NEEDS_REVIEW) →
-	    the root target path;
-	  - anything else → ``needfix/`` (a resolved book moves back OUT of
-	    needfix on the next apply — the prefix is stripped).
+	  - no ebook file at all (EMPTY_BOOK dead record) → ``needfix/empty/``
+	    (a hard fact no approval changes);
+	  - anything else → the root target path.
+
+	A complaint that is real re-fires on the next analyze (the book re-enters
+	review); only the ``verified`` flag closes it for good.
 
 	The destination is always RECOMPUTED from the final metadata (the user may
 	have fixed author/title in the GUI — the review ``location`` proposal is
@@ -1622,7 +1623,7 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cach
 				# --no-place) skips it entirely — metadata only, no moves.
 				move_res = None
 				if place:
-					placement, dest = _placement_target(meta, verified=item.verified, pattern=pat, needfix_dir=nf_dir, library=library)
+					placement, dest = _placement_target(meta, pattern=pat, needfix_dir=nf_dir, library=library)
 					move_res = _place_applied_book(meta, placement, dest, dry_run=dry_run, library=library)
 					if move_res is not None:
 						if move_res.action == "error":
@@ -1747,27 +1748,27 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cach
 	return summary
 
 
-def _placement_target(meta: BookMeta, *, verified: bool, pattern: str, needfix_dir: str, library: Path) -> tuple[str, Path]:
+def _placement_target(meta: BookMeta, *, pattern: str, needfix_dir: str, library: Path) -> tuple[str, Path]:
 	"""Decide where an applied book belongs: ``("ok", dest)`` or ``("needfix", dest)``.
 
-	Deliberately metadata-only (the plain detector, WITHOUT the C13 location
-	rule — the move itself resolves C13, so it must not force needfix) and with
-	NO content reads: the expensive identity/verification work belongs to
-	analyze. The routing rules, in order:
+	Placement runs ONLY for decided entries (accept/keep), and the decision
+	outranks residual detector complaints: a book the user accepted goes to
+	its pattern target, OUT of needfix — not back into quarantine. Routing
+	an accepted book into needfix instead (the former detector-gated
+	behaviour) left genuine fixes cycling: a still-flagged book re-enters
+	review on every analyze, gets re-accepted, and apply buried it in
+	needfix/ again (measured on a C9-whitelist-gap anonym: an accepted C13
+	stayed under needfix forever, ``already_correct``). A complaint that is
+	real simply re-fires on the next analyze; only ``verified`` closes a
+	book for good. The one hard fact no approval changes:
 
 	  - no format files at all (EMPTY_BOOK dead record) → ``needfix/empty/``,
-	    even when verified — the book file is missing, that is a hard fact no
-	    approval changes. The needfix prefix (and a nested ``empty/``) is
-	    stripped first, so re-runs are idempotent;
-	  - ``verified`` → root, unconditionally (the human's decision outranks
-	    the detectors — e.g. an unrecoverable missing cover);
-	  - detector-clean, or only acceptable-missing (MISSING_* with no
-	    co-occurring NEEDS_REVIEW) → root (mirrors classify's
-	    is_acceptable_missing semantics);
-	  - anything else → needfix/ (compute_needfix_path strips an existing
-	    needfix/ prefix, so a resolved book moves back out).
+	    even when verified — the book file is missing. The needfix prefix
+	    (and a nested ``empty/``) is stripped first, so re-runs are
+	    idempotent;
+	  - anything else → the pattern target path.
 	"""
-	from .mover import compute_needfix_path, compute_target_path
+	from .mover import compute_target_path
 
 	if not meta.formats:
 		try:
@@ -1780,12 +1781,7 @@ def _placement_target(meta: BookMeta, *, verified: bool, pattern: str, needfix_d
 			if len(parts) > 1 and parts[0] == "empty":
 				parts = parts[1:]
 		return "needfix", library / needfix_dir / "empty" / Path(*parts)
-	if verified:
-		return "ok", compute_target_path(meta, pattern, library)
-	diag = detect_fn(meta)
-	if diag.verdict == Verdict.OK or is_acceptable_missing(diag):
-		return "ok", compute_target_path(meta, pattern, library)
-	return "needfix", compute_needfix_path(meta, library, needfix_dir)
+	return "ok", compute_target_path(meta, pattern, library)
 
 
 def _place_applied_book(meta: BookMeta, placement: str, dest: Path, *, dry_run: bool, library: Path) -> Any:

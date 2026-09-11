@@ -29,7 +29,7 @@ Audiobookshelf and Kavita pick up the fixes on rescan.
 - [x] Enrich (databazeknih.cz scraping for CZ/SK genres + metadata; legie.info for sci-fi/fantasy short stories & series; a self-hosted audiobookshelf_czech_metadata instance aggregating ~17 CZ audiobook storefronts; OpenLibrary + Google Books fallback)
 - [x] Analyze + YAML review (`bmf analyze`, `bmf apply`)
 - [x] Library-wide normalize (`bmf normalize`) — C15 author-name variants + C16 genre/tag variants + C18 series-name variants, human-gated via review.yaml
-- [x] Placement (`bmf apply`) — clean/verified books to the pattern path, unresolved to needfix/ (organize merged in)
+- [x] Placement (`bmf apply`) — accepted books to the pattern path (out of needfix/), dead records to needfix/empty/ (organize merged in)
 - [x] EPUB generation (`bmf epubgen`)
 - [x] Cross-format consistency (`bmf crosscheck`) — quarantine formats whose content differs from metadata
 - [ ] LLM reconciliation (Z.AI, for C1/C4/C5) — pending `ZAI_API_KEY`
@@ -64,7 +64,7 @@ $EDITOR review.yaml
 bmf apply review.yaml
 
 # 5. Apply for real: writes metadata AND places each applied book —
-#    clean/verified books to the pattern path, unresolved to needfix/
+#    accepted books to the pattern path (out of needfix/), dead records to needfix/empty/
 bmf apply --apply review.yaml
 
 # 6. Generate missing EPUBs for OK books
@@ -104,7 +104,7 @@ can recover the pre-run state.
 | `bmf analyze --normalize` | Chain the library-wide normalize pass (C15/C16/C18) onto the end of analyze — clustering runs over the books the pipeline already scanned (no second library walk) and merges its proposals into the same review.yaml after the writer finalizes; decided entries are never touched |
 | `bmf analyze --merge` | Chain the C19 duplicate-folder sweep onto the end of analyze, over the same scan — same-work folders (identical folded author+title, or the same valid ISBN; differing years on both sides mean different editions and stay apart unless the ISBNs match) get `action: merge` proposals; ISBN-confirmed ones pre-filled, the rest pending |
 | `bmf apply <file>` | Apply approved changes from a review.yaml (dry-run by default) |
-| `bmf apply --apply <file>` | Write `metadata.json` + `metadata.opf` AND place each book: clean/`verified` → target pattern path, unresolved → `needfix/`, dead records → `needfix/empty/` |
+| `bmf apply --apply <file>` | Write `metadata.json` + `metadata.opf` AND place each book: accepted/`keep` → target pattern path (an accepted book moves OUT of `needfix/`), dead records → `needfix/empty/` |
 | `bmf gui` | Interactive keyboard-driven Tkinter editor for `review.yaml` |
 | `bmf series` | Read-only series overview: every series with book counts, volume coverage (missing volumes are information, duplicates are warnings), spelling variants and suspected same-series pairs (numbering/online evidence) |
 | `bmf merge` | Library-wide C19 sweep: find duplicate folders of the same work and show the clusters (survivor per cluster: valid ISBN first, then lowest id). Dry-run: report only |
@@ -642,8 +642,8 @@ Download is one HTTP request per replaced cover, rate-limited at 1 s/host.
 │       ├── <Title> - <Author>.epub
 │       ├── <Title> - <Author>.pdb
 │       └── cover.jpg
-└── needfix/                  # unresolved books placed here by `bmf apply`
-    └── empty/                # dead records (no ebook file at all)
+└── needfix/                  # dead records placed here by `bmf apply` — an
+    └── empty/                # accepted book always moves back out
     └── <Author>/...          #   (preserving the original relative subpath)
 ```
 
@@ -806,11 +806,13 @@ text** can confirm a record:
 ## Placement patterns (apply)
 
 `bmf apply` does not only write metadata — after applying an entry it also
-**places the book**: clean / `verified` books move to a path built from a
-format string (default `{author}/{title} ({id})`), books with unresolved
-problems move to `needfix/`, and dead records (no ebook file at all) to
-`needfix/empty/`. The decision is re-derived from the FINAL metadata using
-the metadata-only detectors — no content reads, so apply stays fast. The
+**places the book**: every decided entry (accept/keep) moves to a path
+built from a format string (default `{author}/{title} ({id})`) — the
+decision outranks residual detector complaints, so an accepted book always
+moves OUT of `needfix/` (a complaint that is real re-fires on the next
+analyze; only `verified` closes a book for good). Dead records (no ebook
+file at all) go to `needfix/empty/`. The destination is re-derived from the
+FINAL metadata — pure path math, no content reads, so apply stays fast. The
 former `bmf organize` command (which re-classified the whole library on
 every run) is a deprecation stub; analyze flags misplaced books for you via
 the C13 location check (pre-filled `action: accept`).

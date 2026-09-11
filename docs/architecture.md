@@ -100,7 +100,7 @@ All source lives under `src/book_meta_fix/`. Tests mirror the module name
 | `review_writer.py` | Streaming `review.yaml` writer: a queue + writer thread appends one YAML document per finished book (Unix-pipe style). `.bak` carry-over preserves prior user decisions. |
 | `review.py` | Parse `review.yaml` (multi-doc stream + legacy single-list) → review entries with `action`. |
 | `writers.py` | Atomic writers for `metadata.json` + `metadata.opf` (`.tmp` + `os.replace`, `.bak` history). |
-| `mover.py` | the move/merge engine used by apply's placement: clean/verified books to the pattern path, unresolved to `needfix/`, dead records to `needfix/empty/`. |
+| `mover.py` | the move/merge engine used by apply's placement: decided entries (accept/keep) to the pattern path — an accepted book moves OUT of `needfix/` — dead records to `needfix/empty/`. |
 | `epubgen.py` | `bmf epubgen`: generate missing `.epub` from the best sibling format (calibre `ebook-convert` → `pandoc`). |
 | `crosscheck.py` | `bmf crosscheck`: verify multi-format folders hold the *same* book; quarantine rogue format files into isolated `needfix/` folders. |
 | `covers.py` | Detect generated (Calibre placeholder) covers by pixel analysis; download real covers from enricher `cover_url`. C11 + MISSING_COVER. |
@@ -134,8 +134,9 @@ A book flows `BookMeta → Diagnosis → (ExtractedMeta) → (EnrichedMeta) → 
 `Verdict` decides where it lands: `OK/VERIFIED` books are eligible for
 apply's placement; everything else is `NEEDS_REVIEW` and lands in
 `review.yaml`. `bmf apply` also places every applied book (the former
-`bmf organize`): clean/`verified` → the pattern path, unresolved →
-`needfix/`, dead records → `needfix/empty/`.
+`bmf organize`): every decided entry (accept/keep) → the pattern path —
+the decision outranks residual detector complaints, so an accepted book
+moves OUT of `needfix/` — dead records → `needfix/empty/`.
 
 ## The fix cascade (cheap first)
 

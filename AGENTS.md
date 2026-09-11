@@ -743,12 +743,19 @@ src/book_meta_fix/
 - **Placement lives in `apply`, not a separate command** (the former
   `bmf organize` is a deprecation stub). After writing an entry's metadata,
   `apply_review` routes the folder via `_placement_target` + `_place_applied_book`
-  (`pipeline.py`, using `mover` primitives): `verified` or clean or
-  acceptable-missing → the pattern target path; unresolved → `needfix/`
-  (prefix stripped, so a resolved book moves back OUT). Deliberately
-  metadata-only — the plain detector WITHOUT the C13 rule (the move itself
-  resolves C13) and with NO content reads/identity gate; that expensive work
-  belongs to analyze, which is why apply is fast where organize was slow.
+  (`pipeline.py`, using `mover` primitives): every DECIDED entry (accept/
+  keep) → the pattern target path — the decision outranks residual detector
+  complaints, so an accepted book always moves back OUT of `needfix/`
+  (a complaint that is real re-fires on the next analyze; only `verified`
+  closes a book for good). No ebook file (EMPTY_BOOK) → `needfix/empty/`
+  — the one hard fact no approval changes (needfix prefix, and a nested
+  `empty/`, stripped for idempotent re-runs). Placement no longer runs the
+  detectors at all — pure path math on the final metadata with NO content
+  reads/identity gate; that expensive work belongs to analyze, which is why
+  apply is fast where organize was slow. (The former detector-gated routing
+  buried accepted books: a still-flagged one under needfix/ recomputed its
+  needfix destination, got `already_correct` and cycled forever — measured
+  2026-09-11 on a C9-whitelist-gap anonym accepted via C13.)
   The destination is RECOMPUTED from the final metadata (user may have fixed
   author/title — the review `location` proposal is informational only). An
   occupied target holding the same work is merged (our approved metadata is

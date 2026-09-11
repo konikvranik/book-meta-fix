@@ -191,8 +191,9 @@ most benign extras — OK-verdict, MISSING_*, or a cover diagnosis C11/
 MISSING_COVER, which apply's cover recovery retries in the same pass), the
 review entry is pre-filled `action: accept`, so a misplaced-but-healthy
 book is moved in bulk; a proposal that changes title/author keeps the entry
-for individual review. A book under `needfix/` whose problems were resolved
-moves back out to the root tree the same way.
+for individual review. An accepted book always moves to its root target —
+including one under `needfix/` whose entry still carries another diagnosis
+(the accept decision outranks residual detector complaints).
 
 **Verdict:** AUTO_FIXABLE (move)
 

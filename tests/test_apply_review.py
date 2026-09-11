@@ -770,9 +770,11 @@ class TestAcceptNullDeletesField:
 
 class TestPlacement:
 	"""apply_review's placement step (the former `bmf organize`): after writing
-	an entry's metadata, the book is routed to the root target path (clean /
-	verified / acceptable-missing) or needfix/ (unresolved problems). The
-	destination is recomputed from the FINAL metadata; no content is read."""
+	an entry's metadata, the DECIDED book (accept/keep) is routed to its root
+	target path — the user's decision outranks residual detector complaints,
+	so an accepted book always moves OUT of needfix. Dead records (no ebook
+	file) are the one exception (needfix/empty/). The destination is
+	recomputed from the FINAL metadata; no content is read."""
 
 	def _seed(self, library: Path, rel: str, *, title="Kniha", author="Jan Novak", isbn="9788020403117", year=2001) -> Path:
 		import json as _json
@@ -783,9 +785,10 @@ class TestPlacement:
 		if isbn:
 			manifest["isbn"] = isbn
 		(folder / "metadata.json").write_text(_json.dumps(manifest), encoding="utf-8")
-		# NB: the file name must differ from the title ("Kniha") — a stem equal
-		# to the title is the C2 filename-as-title signal and would route the
-		# book to needfix instead of the root path.
+		# Keep the file name distinct from the title so the seed is a clean,
+		# deterministic book ("Kniha" vs "book.epub") — placement itself no
+		# longer keys on the detectors, but the tests assert moved_to_root on
+		# books whose only problem is the location.
 		(folder / "book.epub").write_text("x", encoding="utf-8")
 		return folder
 
@@ -822,14 +825,36 @@ class TestPlacement:
 		assert summary["moved_to_needfix"] == 0
 		assert (library / "Jan Novak" / "Kniha (7)").is_dir()
 
-	def test_unresolved_problems_route_to_needfix(self, tmp_path):
+	def test_accepted_problems_still_move_to_root(self, tmp_path):
+		"""An accepted book whose metadata still trips a NEEDS_REVIEW detector
+		(C2 filename-as-title) goes to its root target path anyway — the
+		accept decision outranks the residual complaint (a real complaint
+		re-fires on the next analyze; it is review's job, not placement's)."""
 		library = tmp_path / "lib"
-		self._seed(library, "Jan Novak/soubor_epub.epub (1)", title="soubor_epub.epub")
+		self._seed(library, "Spatne/Misto (1)", title="soubor_epub.epub")
 		review = tmp_path / "review.yaml"
-		_write_review(review, [self._entry("Jan Novak/soubor_epub.epub (1)", category="C2")])
+		_write_review(review, [self._entry("Spatne/Misto (1)", category="C2")])
 		summary = apply_review(review, library, dry_run=False)
-		assert summary["moved_to_needfix"] == 1
-		assert (library / "needfix" / "Jan Novak" / "soubor_epub.epub (1)" / "metadata.json").is_file()
+		assert summary["moved_to_root"] == 1
+		assert summary["moved_to_needfix"] == 0
+		assert (library / "Jan Novak" / "soubor_epub.epub (1)" / "metadata.json").is_file()
+		assert not (library / "needfix").exists()
+
+	def test_accepted_book_moves_out_of_needfix_despite_problems(self, tmp_path):
+		"""Regression (2026-09-11): a book under needfix/ whose accepted entry
+		still carries a NEEDS_REVIEW diagnosis (the C9 anonym whitelist gap —
+		e.g. 'Epos o Gilgamešovi') must move OUT to its root target. The former
+		detector-gated routing recomputed the needfix destination, got
+		`already_correct` and left the accepted book quarantined forever."""
+		library = tmp_path / "lib"
+		self._seed(library, "needfix/Anonym/Epos o Gilgamešovi (4948)",
+		           author="Anonym", title="Epos o Gilgamešovi", isbn=None, year=None)
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._entry("needfix/Anonym/Epos o Gilgamešovi (4948)", category="C13")])
+		summary = apply_review(review, library, dry_run=False)
+		assert summary["moved_to_root"] == 1
+		assert (library / "Anonym" / "Epos o Gilgamešovi (4948)" / "metadata.json").is_file()
+		assert not (library / "needfix").exists()
 
 	def test_resolved_book_moves_out_of_needfix(self, tmp_path):
 		"""A clean book sitting under needfix/ moves back out to the root path
@@ -843,10 +868,11 @@ class TestPlacement:
 		assert (library / "Jan Novak" / "Kniha (7)" / "metadata.json").is_file()
 		assert not (library / "needfix" / "Jan Novak" / "Kniha (7)").exists()
 
-	def test_verified_overrides_problems_and_persists(self, tmp_path):
-		"""verified: true routes the book to the root path even with an
-		unresolved C2, is persisted into metadata.json — and NOT into the OPF
-		mirror (Calibre must never see it)."""
+	def test_verified_persists_into_manifest_not_opf(self, tmp_path):
+		"""verified: true is persisted into metadata.json — and NOT into the OPF
+		mirror (Calibre must never see it). Placement-wise it no longer differs
+		from a plain accept: every decided book routes to its root target, so
+		the flag's remaining role is the persistent user-OK mark analyze skips."""
 		import json as _json
 
 		library = tmp_path / "lib"

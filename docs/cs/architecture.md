@@ -100,7 +100,7 @@ Veškerý zdrojový kód leží v `src/book_meta_fix/`. Testy zrcadlí název mo
 | `review_writer.py` | Streamovaný zapisovač `review.yaml`: fronta + zapisovací vlákno přidává jeden YAML dokument za každou dokončenou knihu (styl unixové roury). Přenos `.bak` zachovává předchozí rozhodnutí uživatele. |
 | `review.py` | Parsuje `review.yaml` (multi-doc stream + legacy jeden seznam) → revizní záznamy s `action`. |
 | `writers.py` | Atomické zapisovače pro `metadata.json` + `metadata.opf` (`.tmp` + `os.replace`, historie `.bak`). |
-| `mover.py` | move/merge engine pro umísťování v apply: čisté/verified knihy na vzor cesty, nevyřešené do `needfix/`, mrtvé záznamy do `needfix/empty/`. |
+| `mover.py` | move/merge engine pro umísťování v apply: rozhodnuté položky (accept/keep) na vzor cesty — accepted kniha vždy ven z `needfix/` — mrtvé záznamy do `needfix/empty/`. |
 | `epubgen.py` | `bmf epubgen`: generuje chybějící `.epub` z nejlepšího sourozeneckého formátu (calibre `ebook-convert` → `pandoc`). |
 | `crosscheck.py` | `bmf crosscheck`: ověřuje, že víceformátové složky obsahují *tu samou* knihu; soubory cizích formátů karanténuje do izolovaných složek `needfix/`. |
 | `covers.py` | Detekuje vygenerované (zástupné Calibre) obálky pixelovou analýzou; stahuje skutečné obálky z `cover_url` enricheru. C11 + MISSING_COVER. |
@@ -132,7 +132,10 @@ ReconciledMeta  raw LLM output (title, authors, isbn, ..., confidence, reasoning
 
 Kniha protéká `BookMeta → Diagnosis → (ExtractedMeta) → (EnrichedMeta) → review`.
 `Verdict` rozhoduje, kde skončí: knihy `OK/VERIFIED` jsou způsobilé pro
-umísťování v apply; vše ostatní je `NEEDS_REVIEW` a skončí v `review.yaml`. `bmf apply` navíc umístí každou aplikovanou knihu (dřívější `bmf organize`): čisté/`verified` → vzor cesty, nevyřešené → `needfix/`, mrtvé záznamy → `needfix/empty/`.
+umísťování v apply; vše ostatní je `NEEDS_REVIEW` a skončí v `review.yaml`. `bmf apply` navíc umístí každou aplikovanou knihu (dřívější `bmf organize`):
+každá rozhodnutá položka (accept/keep) → vzor cesty — rozhodnutí uživatele
+přebíjí zbytkové námitky detektorů, takže accepted kniha vždy vypadne z
+`needfix/` — mrtvé záznamy → `needfix/empty/`.
 
 ## Kaskáda oprav (nejdřív levné)
 
