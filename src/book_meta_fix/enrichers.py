@@ -16,8 +16,10 @@ Status of sources (verified against this library's CZ/SK content):
 - Google Books ISBN:   rate-limited without API key (shared quota)
 - obalkyknih.cz API:   requires library API key (returns empty otherwise)
 
-The lookup is best-effort: we try each source in order and take the first
-hit. Results are cached in a SQLite table to avoid re-querying.
+The lookup is best-effort: all applicable sources run in parallel and their
+same-book results are merged (first hit in priority order anchors the fields,
+the others only fill what is missing — a result of a DIFFERENT book is never
+merged). Results are cached in a SQLite table to avoid re-querying.
 """
 from __future__ import annotations
 
@@ -26,6 +28,7 @@ import logging
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -293,6 +296,14 @@ _TAG_RE = _re.compile(
 	r'''<a\s+class=["']tag["'][^>]*?title=["']([^"']+)["']''',
 	_re.IGNORECASE,
 )
+# Series box on a detail page: <a class='odright_pet' href='/serie/agent-jfk-11342?lang=cz' title='Agent JFK'>Agent JFK</a> série
+# (inside div.book_detail_serie_info). The series INDEX is not on the page
+# (only prev/next-volume arrows), so only the NAME is recovered — a name-only
+# series is valid in the manifest and C14 does not fire for it.
+_DBK_SERIES_RE = _re.compile(
+	r'''<a\s+class=["']odright_pet["'][^>]*?href=["']/serie/[^"']+["'][^>]*?title=["']([^"']+)["']''',
+	_re.IGNORECASE,
+)
 
 
 def _http_get_html(url: str, *, timeout: float = 15.0, rate: float = 1.0) -> str | None:
@@ -439,6 +450,11 @@ def _parse_databazeknih_detail(html: str) -> EnrichedMeta | None:
 		if t not in genres:
 			genres.append(t)
 	em.genres = genres
+
+	# Series name from the series box (name only — the page carries no index).
+	series_m = _DBK_SERIES_RE.search(html)
+	if series_m:
+		em.series = _collapse_ws(series_m.group(1)) or None
 
 	if not (em.title or em.isbn):
 		return None  # nothing usable
@@ -833,15 +849,16 @@ def lookup_abs_czech(*, base_url: str, title: str, author: str | None = None, to
 
 
 def _cover_same_book(alt: EnrichedMeta, title: str, author: str | None) -> bool:
-	"""Fuzzy same-book gate before borrowing another source's cover: title
-	must reach >= 70, and when *author* is known the alternative must either
-	carry an AGREEING author (>= 80) or be author-less with a near-exact
-	title (>= 90) — a conflicting author always rejects. This is what keeps
-	an irrelevant cover (a keyword-similar junk row with a huge CDN image)
-	from being glued onto the record."""
+	"""Fuzzy same-book gate for cross-source borrowing — the single definition
+	used by the cover upgrade AND the parallel-lookup field merge: title must
+	reach >= 70, and when *author* is known the alternative must either carry
+	an AGREEING author (>= 80) or be author-less with a near-exact title
+	(>= 90) — a conflicting author always rejects. This is what keeps an
+	irrelevant record (a keyword-similar junk row of a DIFFERENT book, with
+	its cover and metadata) from being merged into the proposal."""
 	from rapidfuzz import fuzz
 
-	if not alt.title:
+	if not alt.title or not title:
 		return False
 	tscore = fuzz.token_sort_ratio(title.lower(), alt.title.lower())
 	if tscore < 70:
@@ -850,6 +867,55 @@ def _cover_same_book(alt: EnrichedMeta, title: str, author: str | None) -> bool:
 		return True
 	if alt.authors:
 		return fuzz.token_sort_ratio(author.lower(), alt.authors[0].lower()) >= 80
+	return tscore >= 90
+
+
+# Fields a same-book secondary result may FILL (never overwrite — editions of
+# the same work legitimately disagree on e.g. the year, and the
+# higher-priority source won the anchor slot).
+_MERGE_FILL_FIELDS = (
+	"isbn", "publisher", "year", "language", "description",
+	"cover_url", "series", "series_index",
+)
+
+
+def _merge_fill(anchor: EnrichedMeta, extra: EnrichedMeta) -> None:
+	"""Fill the anchor's missing fields from a same-book secondary result.
+
+	Fill-only on purpose: a conflicting value stays with the anchor (the
+	higher-priority source), an empty anchor slot takes the secondary's value.
+	Genres union (tags are source-specific vocabularies, not identity);
+	authors fill only when the anchor has none (a partial co-author list from
+	one source must not overwrite a complete one from another)."""
+	for f in _MERGE_FILL_FIELDS:
+		if getattr(anchor, f) in (None, "", []) and getattr(extra, f) not in (None, "", []):
+			setattr(anchor, f, getattr(extra, f))
+	if not anchor.authors and extra.authors:
+		anchor.authors = list(extra.authors)
+	if extra.genres:
+		anchor.genres = list(dict.fromkeys(anchor.genres + extra.genres))
+
+
+def _merge_same_book(secondary: EnrichedMeta, anchor_title: str, anchor_author: str | None) -> bool:
+	"""Same-book gate for the parallel-lookup MERGE — deliberately stricter
+	than _cover_same_book (cover borrowing): a secondary contributes identity-
+	adjacent fields (isbn, series, publisher), so when the author cannot be
+	compared on at least one side, a NEAR-EXACT title (>= 90) is required.
+	Cross-source title similarity alone (>= 70) is exactly how a same-titled
+	DIFFERENT work slips in ('Válka s mloky' vs 'Nová válka s mloky')."""
+	from rapidfuzz import fuzz
+
+	if not secondary.title or not anchor_title:
+		return False
+	tscore = fuzz.token_sort_ratio(anchor_title.lower(), secondary.title.lower())
+	if tscore < 70:
+		return False
+	if anchor_author and secondary.authors:
+		return fuzz.token_sort_ratio(anchor_author.lower(), secondary.authors[0].lower()) >= 80
+	if anchor_author is None and not secondary.authors:
+		# No author signal anywhere — near-exact title only.
+		return tscore >= 90
+	# One side carries an author the other cannot confirm.
 	return tscore >= 90
 
 
@@ -997,24 +1063,31 @@ class Enricher:
 
 
 	def lookup(self, *, isbn: str | None = None, title: str | None = None, author: str | None = None, year: int | None = None) -> EnrichedMeta | None:
-		"""Try sources in order. Returns first hit or None.
+		"""Query all applicable sources in PARALLEL and merge same-book results.
 
-		Order (gated by *_enabled flags / configured URL):
+		Every enabled source that can serve the query runs concurrently (each
+		is a different host; the per-host rate limiter still spaces same-host
+		starts). The first hit in the source priority order is the ANCHOR; the
+		other results may only FILL fields the anchor lacks, and only after
+		passing the same-book gate (_cover_same_book — a conflicting author or
+		a merely title-similar row of a DIFFERENT book is dropped, never
+		merged). Priority order (gated by *_enabled flags / configured URL):
+
 		  1. databazeknih.cz by ISBN (exact; best for CZ/SK + genres)
 		  2. audiobookshelf_czech provider by title (self-hosted CZ storefront
-		     aggregator; audio-edition metadata, so it outranks the remaining
-		     title sources for this audiobook library — and being the user's
-		     own service it is faster and gentler than scraping)
+		     aggregator; with its databazeknih scraper enabled it also serves
+		     structured DBK rows — audio-edition metadata)
 		  3. databazeknih.cz by title (fuzzy >= 70; prefers year-matching edition)
 		  4. legie.info by title
-		  5. OpenLibrary by ISBN
-		  6. Google Books by ISBN
-		  7. OpenLibrary by title
+		  5. OpenLibrary / Google Books by ISBN
+		  6. OpenLibrary by title
 
-		*year* is used only by the databazeknih title search to disambiguate
-		editions; ISBN lookups are exact. databazeknih by ISBN goes first: it's
-		an exact match and the only way to reach the strongest CZ/SK source when
-		the library title is corrupt.
+		An ISBN-anchored fan-out merges without the fuzzy gate: every source
+		in it answered the SAME exact key, so same-book is definitional (the
+		titles may still legitimately differ, e.g. '1984' vs 'Nineteen
+		Eighty-Four'). *year* is used only by the databazeknih title search to
+		disambiguate editions. Returns None when nothing hits — cached as a
+		negative like before.
 		"""
 		cache_key = self._cache_key(isbn=isbn, title=title, author=author, year=year)
 		cached = self._cache_get(cache_key)
@@ -1028,36 +1101,65 @@ class Enricher:
 				return None
 			return cached
 
-		result: EnrichedMeta | None = None
-		# databazeknih by ISBN (exact match) — the strongest CZ/SK source, and
-		# the only way to reach it for a book whose title is corrupt but that
-		# has an ISBN. Goes first when an ISBN is available.
-		if result is None and self.databazeknih_enabled and isbn:
-			result = lookup_databazeknih_isbn(isbn)
-		# Self-hosted CZ audiobook storefront aggregator (opt-in via URL, no
-		# ISBN endpoint — title+author only; see the section comment above).
-		if result is None and self.abs_czech_url and title:
-			result = lookup_abs_czech(base_url=self.abs_czech_url, title=title, author=author, token=self.abs_czech_token)
-		# databazeknih by title (search). Best CZ/SK source + genres.
-		if result is None and self.databazeknih_enabled and title:
-			result = lookup_databazeknih(title=title, author=author, year=year)
-		# legie.info by title — catches CZ/SK sci-fi/fantasy short stories and
-		# series that databazeknih's book search does not index. No ISBN/Year here,
-		# so it only helps identity (title/author), not CZ-edition metadata.
-		if result is None and self.legie_enabled and title:
-			result = lookup_legie(title=title, author=author)
-		# ISBN-based lookups (authoritative when available).
-		if result is None and isbn:
+		# (label, callable) in priority order; each callable is one source's
+		# full lookup (internally 1-2 HTTP calls, sequential within itself).
+		tasks: list[tuple[str, Callable[[], EnrichedMeta | None]]] = []
+		if self.databazeknih_enabled and isbn:
+			tasks.append(("databazeknih_isbn", lambda: lookup_databazeknih_isbn(isbn)))
+		if self.abs_czech_url and title:
+			tasks.append(("abs_czech", lambda: lookup_abs_czech(
+				base_url=self.abs_czech_url, title=title, author=author, token=self.abs_czech_token,
+			)))
+		if self.databazeknih_enabled and title:
+			tasks.append(("databazeknih", lambda: lookup_databazeknih(title=title, author=author, year=year)))
+		if self.legie_enabled and title:
+			tasks.append(("legie", lambda: lookup_legie(title=title, author=author)))
+		if isbn:
 			if self.openlibrary_enabled:
-				result = lookup_openlibrary_isbn(isbn)
-			if result is None and self.google_books_enabled:
-				result = lookup_google_books_isbn(isbn)
-		# Fallback: OpenLibrary title search.
-		if result is None and title and self.openlibrary_enabled:
-			result = lookup_openlibrary_title(title, author)
+				tasks.append(("openlibrary_isbn", lambda: lookup_openlibrary_isbn(isbn)))
+			if self.google_books_enabled:
+				tasks.append(("google_books_isbn", lambda: lookup_google_books_isbn(isbn)))
+		if title and self.openlibrary_enabled:
+			tasks.append(("openlibrary_title", lambda: lookup_openlibrary_title(title, author)))
 
-		self._cache_put(cache_key, result)
-		return result
+		results: list[EnrichedMeta | None] = [None] * len(tasks)
+		if tasks:
+			# Fan out; a task's exception never fails the lookup (a dead
+			# source is a None, same as its own HTTP-failure path).
+			from concurrent.futures import ThreadPoolExecutor
+
+			def _run(i: int, fn: Callable[[], EnrichedMeta | None]) -> EnrichedMeta | None:
+				try:
+					return fn()
+				except Exception as e:  # noqa: BLE001
+					log.debug("lookup task %s failed: %s", tasks[i][0], e)
+					return None
+
+			with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+				futures = [pool.submit(_run, i, fn) for i, (_label, fn) in enumerate(tasks)]
+				results = [f.result() for f in futures]
+
+		merged: EnrichedMeta | None = None
+		for (label, _fn), em in zip(tasks, results, strict=True):
+			if em is None:
+				continue
+			if merged is None:
+				merged = em
+				continue
+			# Same-book gate before any field is taken from a secondary result
+			# (stricter than the cover-borrow gate — see _merge_same_book). A
+			# pure-ISBN fan-out skips it: every task answered the same exact
+			# key; when a title rode along on the query, the title sources in
+			# the fan-out must still pass the gate.
+			if title is not None and not _merge_same_book(
+				em, merged.title or title, merged.authors[0] if merged.authors else author,
+			):
+				log.debug("merge: dropped %s result of a different book (%r)", label, em.title)
+				continue
+			_merge_fill(merged, em)
+
+		self._cache_put(cache_key, merged)
+		return merged
 
 	def upgrade_cover(self, result: EnrichedMeta, *, title: str, author: str | None = None, year: int | None = None) -> EnrichedMeta:
 		"""Cross-source cover upgrade for a book with a cover diagnosis

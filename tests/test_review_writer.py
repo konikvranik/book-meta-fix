@@ -310,6 +310,25 @@ class TestCarryOverUnprocessed:
 		# Book 2 was refreshed by the new run.
 		assert by_id[2].current["title"] == "B-new"
 
+	def test_retired_c2_stem_prior_not_carried(self, tmp_path):
+		"""A pending prior whose only diagnosis is the retired C2 stem match
+		must NOT be carried over — the analyzer no longer flags the book, so
+		carrying it would re-serve the stale entry forever."""
+		out = tmp_path / "review.yaml"
+		seed = (
+			"---\nid: 1\nuuid: u1\ncurrent: {title: A}\naction: null\n"
+			"diagnoses: [{category: C2, reason: 'title == primary file stem', confidence: HIGH, verdict: NEEDS_REVIEW}]\n"
+			"---\nid: 2\nuuid: u2\ncurrent: {title: B}\naction: null\n"
+			"diagnoses: [{category: MISSING_COVER, reason: no cover, confidence: LOW, verdict: AUTO_FIXABLE}]\n"
+		)
+		out.write_text(seed, encoding="utf-8")
+		w = ReviewWriter(out)
+		# A run that processes neither book (e.g. --limit elsewhere).
+		_submit_all_and_finish(w, [])
+		parsed = parse_review(out)
+		# The stem noise is gone; the real pending entry is carried.
+		assert [p.id for p in parsed] == [2]
+
 
 class TestStreamingConcurrency:
 	def test_parallel_submissions_no_interleaving(self, tmp_path):
@@ -907,25 +926,6 @@ class TestIdentityVerified:
 		assert parsed[0].action == "accept"
 		assert parsed[0].verified is False
 		assert summary["verified_prefilled"] == 0
-
-	def test_c2_stem_leftover_credited_when_identity_confirmed(self, tmp_path):
-		"""A diacritic-free title that equals the (never-renamed) ebook file's
-		stem keeps C2 firing on every projection — even when the title was
-		just confirmed correct by databazeknih. The file name is an artifact
-		nothing reads (the library shows folder names, and placement
-		regenerates those), so the stem-match reason is credited inside the
-		identity gate: measured 148 otherwise-finished books were cycling in
-		review on this noise alone."""
-		meta = self._book_folder(tmp_path, isbn=None, title="Kniha", file_name="Kniha.epub")
-		diag = Diagnosis(category="MISSING_ISBN", reason="no isbn", confidence=Confidence.LOW, verdict=Verdict.AUTO_FIXABLE)
-		enriched = EnrichedMeta(identity_confirmed=True, source="databazeknih", publisher="Argo")
-		out = tmp_path / "review.yaml"
-		w = ReviewWriter(out)
-		summary = _submit_all_and_finish(w, [(meta, diag, None, enriched)])
-		parsed = parse_review(out)
-		assert parsed[0].action == "accept"
-		assert parsed[0].verified is True
-		assert summary["verified_prefilled"] == 1
 
 	def test_swap_overriding_online_title_blocks_verified(self, tmp_path):
 		"""A C1-swap merged from diag.proposed overrides the online-confirmed

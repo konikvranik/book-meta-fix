@@ -907,14 +907,15 @@ class TestAnalyzeNormalize:
 	def _seed_library(self, root: Path) -> None:
 		"""Three books: the majority spelling 'Jan Novák' ×2 and one diacritics-less
 		'Jan Novak' — a deterministic C15 cluster (case/diacritics variant). The
-		odd book's file is named exactly like its title so C2 (filename-as-title)
-		flags it NEEDS_REVIEW — its analyze entry stays PENDING (the MISSING_*
-		only accept pre-fill needs a clean primary), which is the state the
-		normalize merge is allowed to overlay."""
+		odd book's title carries a truncated slug marker so C2 flags it
+		NEEDS_REVIEW — its analyze entry stays PENDING (the MISSING_* only
+		accept pre-fill needs a clean primary), which is the state the
+		normalize merge is allowed to overlay. (The title used to equal the
+		file stem, but stem equality is no longer a C2 signal.)"""
 		import json
 
 		for i, (author, title) in enumerate(
-			[("Jan Novák", "Kniha A"), ("Jan Novák", "Kniha B"), ("Jan Novak", "Kniha C")],
+			[("Jan Novák", "Kniha A"), ("Jan Novák", "Kniha B"), ("Jan Novak", "Kniha C_txt")],
 			start=1,
 		):
 			folder = root / author / f"{title} ({i})"
@@ -922,8 +923,7 @@ class TestAnalyzeNormalize:
 			(folder / "metadata.json").write_text(
 				json.dumps({"authors": [author], "title": title}), encoding="utf-8"
 			)
-			stem = title if author == "Jan Novak" else f"kniha_{i}"
-			(folder / f"{stem}.epub").write_text("not a real epub", encoding="utf-8")
+			(folder / f"{title}.epub").write_text("not a real epub", encoding="utf-8")
 
 	def _run_analyze(self, tmp_path: Path, *extra: str):
 		import yaml

@@ -138,30 +138,32 @@ class TestC9Anonym:
 
 
 class TestC2FilenameTitle:
-	"""rule_c2_filename_title had a massive false-positive: the stem-match
-	signal compared title to the filename stem AFTER accent-stripping, which
-	matched every healthy CZ/SK book (calibre strips diacritics from
-	filenames). Now compares directly — only genuine filename-as-title fires."""
+	"""rule_c2_filename_title catches filename ARTEFACTS in the title value
+	(extension, Word temp prefix, truncated markers) — not the title merely
+	equaling the file stem. The historic stem-match signal was removed
+	(2026-09-11, owner decision): the filename is an artifact nothing reads,
+	and flagging on it dragged fine books through the extract/online/LLM
+	ladder. (Before that, the stem match itself had a false-positive era:
+	it compared accent-stripped, matching every healthy CZ/SK book.)"""
 
 	def test_healthy_title_with_diacritics_not_c2(self):
-		"""The bug: title 'Čas přílivu' matched filename 'Cas prilivu' after
-		accent-stripping. A healthy title must NOT fire C2."""
+		"""A healthy title 'Čas přílivu' next to filename 'Cas prilivu' must
+		not fire C2."""
 		m = _meta(
 			title="Čas přílivu",
 			primary_file="/lib/!as py!livu/Cas prilivu - !as py!livu.epub",
 		)
 		assert rule_c2_filename_title(m) is None
 
-	def test_title_equals_filename_stem_fires_c2(self):
-		"""Genuine case: the title field IS the filename (no diacritics)."""
+	def test_title_equals_filename_stem_not_c2(self):
+		"""The retired signal: title == filename stem alone is NOT corruption —
+		the filename is an artifact nothing reads (the library shows folder
+		names, placement regenerates them)."""
 		m = _meta(
 			title="Cas prilivu",
 			primary_file="/lib/Author/Cas prilivu - Author.epub",
 		)
-		d = rule_c2_filename_title(m)
-		assert d is not None
-		assert d.category == "C2"
-		assert "primary file stem" in d.reason
+		assert rule_c2_filename_title(m) is None
 
 	def test_extension_in_title_fires_c2(self):
 		"""File extension in the title is a strong filename signal."""
@@ -189,15 +191,14 @@ class TestC2FilenameTitle:
 		m = _meta(title="Báječná léta pod psa")
 		assert rule_c2_filename_title(m) is None
 
-	def test_stem_match_case_insensitive(self):
-		"""Title matching the stem in different case still fires C2."""
+	def test_stem_match_case_insensitive_not_c2(self):
+		"""Title matching the stem in different case must not fire either —
+		case never rescues the retired signal."""
 		m = _meta(
 			title="SOME BOOK",
 			primary_file="/lib/Author/Some Book - Author.epub",
 		)
-		d = rule_c2_filename_title(m)
-		assert d is not None
-		assert d.category == "C2"
+		assert rule_c2_filename_title(m) is None
 
 
 class TestC12BadAuthor:
@@ -696,10 +697,15 @@ class TestC1KnownAuthor:
 	def _pool(self):
 		from book_meta_fix.normalize import build_known_author_pool
 
+		# Dněprov cluster = 3 books (2 spellings union), Novák = 3 books —
+		# the pool pattern requires >= _POOL_AUTHOR_MIN_BOOKS per author.
 		books = [
 			BookMeta(calibre_id="1", uuid="u1", title="Den zkázy", authors=["Anatolij Dněprov"], path="/lib/1"),
 			BookMeta(calibre_id="2", uuid="u2", title="Návrat", authors=["A. Dněprov"], path="/lib/2"),
-			BookMeta(calibre_id="3", uuid="u3", title="Biografie", authors=["Jan Novák"], path="/lib/3"),
+			BookMeta(calibre_id="3", uuid="u3", title="Třetí síla", authors=["Anatolij Dněprov"], path="/lib/4"),
+			BookMeta(calibre_id="4", uuid="u4", title="Biografie", authors=["Jan Novák"], path="/lib/3"),
+			BookMeta(calibre_id="5", uuid="u5", title="Podruhé", authors=["Jan Novák"], path="/lib/5"),
+			BookMeta(calibre_id="6", uuid="u6", title="Potřetí", authors=["Jan Novák"], path="/lib/6"),
 		]
 		return build_known_author_pool(books)
 
@@ -743,6 +749,26 @@ class TestC1KnownAuthor:
 		# pattern (here the author shares no token either).
 		m = _meta(authors=["Karel May"], title="Vinnetou", author_folder="Karel May")
 		assert rule_c1_swap(m, known_authors=self._pool()) is None
+
+	def test_small_cluster_not_fired(self):
+		"""The R.U.R. regression: ONE corrupted record (a title stored in an
+		author field) mints a 1-book "author" cluster — below the pool bar it
+		is not a known author, so a legitimate title of the same name is never
+		flagged as a swap."""
+		from book_meta_fix.normalize import build_known_author_pool
+
+		pool = build_known_author_pool([
+			BookMeta(calibre_id="9", uuid="u9", title="Světové drama", authors=["R.U.R."], path="/lib/9"),
+		])
+		m = _meta(authors=["Karel Čapek"], title="R.U.R.", author_folder="Karel Čapek")
+		assert rule_c1_swap(m, known_authors=pool) is None
+
+	def test_particle_name_folder_is_not_a_title(self):
+		"""Pattern 2: a multi-token PERSON name with nobility/origin particles
+		("Antoine de Saint-Exupéry") is a name, not a sentence-length title —
+		Citadela is a legitimate short title, not a swapped author."""
+		m = _meta(authors=["Antoine de Saint-Exupéry"], title="Citadela", author_folder="Antoine de Saint-Exupéry")
+		assert rule_c1_swap(m) is None
 
 	def test_detect_passes_pool_through(self):
 		# detect(known_authors=...) threads the pool into the rule (the

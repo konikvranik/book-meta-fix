@@ -165,18 +165,19 @@ class TestEnricherLegieIntegration:
 		assert e.lookup(title="Ženská intuice") is None
 		assert called == [0]
 
-	def test_databazeknih_tried_before_legie(self, monkeypatch):
-		"""legie is a fallback AFTER databazeknih: a dbk hit must short-circuit
-		and legie must not be called."""
-		order: list[str] = []
+	def test_databazeknih_anchors_over_legie(self, monkeypatch):
+		"""legie runs in the same parallel fan-out as databazeknih, but a dbk
+		hit ANCHORS the merged result (higher priority); legie's same-book hit
+		may only fill fields the anchor lacks."""
+		calls: list[str] = []
 
 		def fake_dk(*, title, author=None, year=None):
-			order.append("databazeknih")
+			calls.append("databazeknih")
 			return EnrichedMeta(title=title, source="databazeknih")
 
 		def fake_legie(*, title, author=None):
-			order.append("legie")
-			return EnrichedMeta(title=title, source="legie")
+			calls.append("legie")
+			return EnrichedMeta(title=title, source="legie", series="Nadace")
 
 		monkeypatch.setattr(enrichers, "lookup_databazeknih", fake_dk)
 		monkeypatch.setattr(enrichers, "lookup_legie", fake_legie)
@@ -185,4 +186,6 @@ class TestEnricherLegieIntegration:
 		em = e.lookup(title="1984")
 		assert em is not None
 		assert em.source == "databazeknih"
-		assert order == ["databazeknih"]  # legie never reached
+		# legie ran too, and its series (a field the anchor lacked) merged in.
+		assert set(calls) == {"databazeknih", "legie"}
+		assert em.series == "Nadace"

@@ -107,12 +107,19 @@ src/book_meta_fix/
                    gains a POOL pattern when detect() gets known_authors= —
                    run_pipeline builds a KnownAuthorPool from the whole scan
                    and threads it through its detect wrapper: the TITLE
-                   string resolving to a known library author fires C1 HIGH
+                   string resolving to an ESTABLISHED library author (cluster
+                   >= _POOL_AUTHOR_MIN_BOOKS books, defined here and shared
+                   with pipeline — a 1-2 book "author" is one corrupted
+                   record away from a fake and must not flag legit titles
+                   like "R.U.R.") fires C1 HIGH
                    either as a variant pair (title and author are the same
                    person in two spellings — real title lost) or a classic
                    swap (author field holds the real title; when it is ITSELF
                    another known author the reason flags ambiguity — biography
-                   territory). Other callers stay library-blind, same as C13)
+                   territory). Pattern 2 skips author folders carrying
+                   nobility/origin particles (_NAME_PARTICLES — "de
+                   Saint-Exupéry" is a 4-token NAME, not a title). Other
+                   callers stay library-blind, same as C13)
   normalize.py     LIBRARY-WIDE pass (`bmf normalize`, the only emitter of C15
                    author-name variants — initials vs full names, diakritika,
                    titles, anonym family, swapped/comma order — and C16 genre/
@@ -228,8 +235,28 @@ src/book_meta_fix/
   enrichers.py     databazeknih.cz / legie.info / self-hosted audiobookshelf_czech_metadata
                    provider (opt-in via BMF_ABS_CZECH_URL, aggregates ~17 CZ audiobook
                    storefronts behind ABS's /search contract; source key "abs_czech",
-                   no ISBN endpoint — title+author only, narrator/duration unmodelled)
-                   / OpenLibrary / Google Books → EnrichedMeta. Cover resolution
+                   no ISBN endpoint — title+author only, narrator/duration unmodelled;
+                   when the instance enables its databazeknih scraper the provider's
+                   /search also serves structured DBK rows — measured 2026-09-11 those
+                   rows carry title/author/publisher/publishedYear/description/cover
+                   but NO isbn/genres/series, and the storefront scrapers return empty
+                   under the provider's 8 s budget unless it is a warm query)
+                   / OpenLibrary / Google Books → EnrichedMeta. Enricher.lookup runs
+                   ALL applicable sources in PARALLEL and MERGES same-book results:
+                   the first hit in priority order (dbk-isbn > abs_czech > dbk-title >
+                   legie > OL/GB-isbn > OL-title) is the ANCHOR whose fields win;
+                   every other result may only FILL empty fields (_merge_fill —
+                   editions of one work legitimately disagree on year/isbn, so
+                   fill-only, plus genre union) and only after the strict same-book
+                   gate _merge_same_book: title >= 70 AND author agreement >= 80, or
+                   a near-exact title >= 90 whenever the author cannot be compared
+                   on either side — a same-titled DIFFERENT work ("Nová válka s
+                   mloky") must never contribute a field. A pure-ISBN fan-out skips
+                   the gate (every source answered the same exact key); a title
+                   riding on an isbn query is still gated. databazeknih's detail
+                   parse also recovers the series NAME from the detail page's
+                   series box (_DBK_SERIES_RE — the page carries no volume index,
+                   series_index stays None). Cover resolution
                    preference: equivalent provider matches (near-tied title+author)
                    are decided by probe_image_size (streaming image-HEADER read, no
                    body download), and Enricher.upgrade_cover cross-compares the two
@@ -280,8 +307,11 @@ src/book_meta_fix/
                    classic swap is only trusted when the mined title AGREES
                    with the author field (a biography titled with its subject
                    has both names in its text and would survive a naive swap
-                   self-test); every failure stays for review with the
-                   raw-swap hint; counted in stats[swap_fixed]. Runs after
+                   self-test); every failure stays for review — the classic
+                   swap with review's raw-swap hint (which fires ONLY for
+                   HIGH classic-swap C1, never the MEDIUM heuristics or the
+                   variant pair — see _build_proposed), the variant pair
+                   with no proposal at all; counted in stats[swap_fixed]. Runs after
                    _try_deterministic_fix and only when that returned nothing
                    — _content_proposal's _is_better gate refuses exactly the
                    stuck clean-looking-but-wrong titles, so the two tiers
@@ -389,6 +419,15 @@ src/book_meta_fix/
                    lets the decided accept-missing pool (~867 books) close on
                    the first re-analyze instead of re-extracting forever)
   review.py        parse review.yaml (multi-doc + legacy list) + update_paths
+                   + _is_retired_c2_stem (load-time retirement of the removed
+                   C2 stem-match entries: a PENDING entry whose ONLY diagnosis
+                   is reason "title == primary file stem" is DROPPED wherever
+                   review.yaml loads — _load_raw_entries, review_writer's
+                   .bak prior path and generate_review — else finish() would
+                   carry the stale noise forever, the analyzer no longer
+                   flagging those books; DECIDED entries and mixed-reason/
+                   multi-diagnosis entries stay, the latter get rebuilt fresh
+                   by the next analyze)
                    + merge_normalizations (bmf normalize --apply merges C15/C16/C18
                    proposals IN PLACE: pending entries get proposed.authors/
                    genres/tags overlaid + the diagnoses appended, DECIDED
@@ -859,12 +898,11 @@ src/book_meta_fix/
   checks
   the projected identity still agrees with the confirmed record (an
   extracted/C1-swap title must not have overridden it), and the projected
-  state may keep only benign leftovers (OK-verdict or MISSING_*), plus a C2
-  whose reason is only "title == primary file stem" — a confirmed title
-  equaling the never-renamed ebook file's name is noise, not corruption (the
-  library shows folder names, and placement regenerates those); other C2
-  reasons still block. A NEEDS_REVIEW leftover or EMPTY_BOOK blocks
-  the pre-fill. Counted as `verified_prefilled` in the analyze summary.
+  state may keep only benign leftovers (OK-verdict or MISSING_*); any C2
+  blocks (the stem-match reason was retired with its detector — see
+  detectors.rule_c2_filename_title). A NEEDS_REVIEW leftover or EMPTY_BOOK
+  blocks the pre-fill. Counted as `verified_prefilled` in the analyze
+  summary.
   The DECIDED-prior carry path in `review_writer._handle` stamps the same
   flag on an already-accepted prior whose proposal projects clean (same
   guards: `keep` exempt, unconfirmed `llm:` proposals never auto-closed) —
@@ -1036,7 +1074,10 @@ src/book_meta_fix/
   action anymore; legacy files are migrated on load (`review._migrate_entry`:
   `edited` merges over `proposed`, `edit`→`accept`, `reject`/`swap`→pending)
   in `_load_raw_entries`, `_load_prior` and `generate_review`. C1 swaps are
-  proposed by the analyzer itself (`_build_proposed`'s C1 fallback), and the
+  proposed by the analyzer itself (`_build_proposed`'s C1 fallback, gated to
+  the HIGH classic-swap shape only — MEDIUM heuristic hits and variant pairs
+  stay proposal-free: a mechanical swap there would mangle a correct record
+  or re-spell the same wrong one), and the
   GUI's `Ctrl+W` merely swaps the two field values. A DECIDED entry's
   `proposed` (user adjustments incl. nulls) is carried verbatim through the
   next `analyze` (review_writer's prior path / `_entry_dict`); undecided
@@ -1139,6 +1180,18 @@ src/book_meta_fix/
   ``_encode_dropping`` → decode, budgeted orphan-drop) and the GUI applies
   it automatically, naming the chain in the hint; it never fires when the
   plain single-layer repair already succeeds.
+- **The test suite runs on a private Xvfb, not on the desktop.** The Tk
+  smoke tests in ``tests/test_gui.py`` build real widgets; a session-scoped
+  autouse fixture in ``tests/conftest.py`` starts a dedicated Xvfb
+  (``:99``–``:144``, first free display) and points ``DISPLAY`` at it for
+  the whole run, so GUI test windows render into an invisible framebuffer
+  instead of popping up over the user's work (the agent shell inherits
+  ``DISPLAY=:1`` — without this every ``make test`` flashes ~25 windows on
+  the desktop). Headless machines gain too: the Tk tests now run instead of
+  skipping. Graceful fallback: no Xvfb binary or no free display → the old
+  behaviour (desktop windows / skip). ``BMF_TEST_REAL_DISPLAY=1`` opts out
+  for visually debugging a GUI test. When running smoke harnesses OUTSIDE
+  pytest, wrap them in ``xvfb-run`` yourself.
 - **GUI smoke harnesses under Xvfb must run their checks inside a real
   ``mainloop()``** (``root.after(60, check); root.mainloop()``), never an
   ``update()``-polling loop. This box has a threaded Tcl build: a worker

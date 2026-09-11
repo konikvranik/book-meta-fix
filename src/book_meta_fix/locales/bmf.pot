@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-09-11 16:47+0200\n"
+"POT-Creation-Date: 2026-09-11 17:31+0200\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -33,22 +33,24 @@ msgid ""
 msgstr ""
 
 #: src/book_meta_fix/catalog.py:32
-msgid "Filename used as title"
+msgid "Filename artefacts in the title"
 msgstr ""
 
 #: src/book_meta_fix/catalog.py:33
 msgid ""
-"The title is the ebook's file name: diacritics lost, underscores for "
-"spaces, or an artefact like 'Microsoft Word - …'. Calibre imported the "
-"file before real metadata existed. The real title has to be recovered "
-"from the book's content or an online source."
+"The title carries remnants of the ebook's file name: a file extension "
+"('kniha.epub'), a 'Microsoft Word - …' temp-file prefix, or truncated "
+"slug markers like '_n_'/'_txt' from a diacritics-stripped import. A title"
+" that merely equals the file name is fine — the name is an artifact "
+"nothing reads. The real title has to be recovered from the book's content"
+" or an online source."
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:39
+#: src/book_meta_fix/catalog.py:41
 msgid "Series, library or publisher in the author field"
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:40
+#: src/book_meta_fix/catalog.py:42
 msgid ""
 "The author field carries a collection/series name (e.g. 'abeles'), a "
 "publisher, or another non-person label instead of the author. These "
@@ -56,11 +58,11 @@ msgid ""
 "whatever was at hand."
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:46
+#: src/book_meta_fix/catalog.py:48
 msgid "Encoding corruption (mojibake)"
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:47
+#: src/book_meta_fix/catalog.py:49
 msgid ""
 "The text was decoded through the wrong code page and saved again, so the "
 "metadata carry unrepairable mojibake (Czech diacritics turned into "
@@ -69,11 +71,11 @@ msgid ""
 "correct values must come from an online source."
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:54
+#: src/book_meta_fix/catalog.py:56
 msgid "Placeholder record"
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:55
+#: src/book_meta_fix/catalog.py:57
 msgid ""
 "The metadata are literal placeholders ('author', 'title', 'subject') — "
 "Calibre overwrote the real values during a failed import. The book file "
@@ -81,33 +83,33 @@ msgid ""
 "proposal only after the content was checked."
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:61
+#: src/book_meta_fix/catalog.py:63
 msgid "MS-Word lock-file duplicate"
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:62
+#: src/book_meta_fix/catalog.py:64
 msgid ""
 "The folder holds a '~$…' lock file that Calibre imported as a book — a "
 "Word temp file, not a real ebook. The record is a duplicate of nothing "
 "and the file is junk: proposed for deletion."
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:67
+#: src/book_meta_fix/catalog.py:69
 msgid "Glued authors"
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:68
+#: src/book_meta_fix/catalog.py:70
 msgid ""
 "Several author names are glued into one string without a separator (e.g. "
 "'byKathy SierraandBert Bates'). Needs the correct split — the author list"
 " must be reconstructed by hand or from an online record."
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:73
+#: src/book_meta_fix/catalog.py:75
 msgid "Translator credited as the author"
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:74
+#: src/book_meta_fix/catalog.py:76
 msgid ""
 "The author field holds the translator (a 'přeložil …' credit) instead of,"
 " or in front of, the real author. A translator AMONG the authors is kept "
@@ -115,11 +117,11 @@ msgid ""
 " book searchable by translator."
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:80
+#: src/book_meta_fix/catalog.py:82
 msgid "Anonym (mostly fake)"
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:81
+#: src/book_meta_fix/catalog.py:83
 msgid ""
 "The author is an 'unknown' spelling ('Neznamy', 'Unknown', …). Most of "
 "these are corrupted records, not genuine anonymous works — a whitelist "
@@ -127,22 +129,22 @@ msgid ""
 "real author recovered."
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:87
+#: src/book_meta_fix/catalog.py:89
 msgid "Long multi-author list (retired)"
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:88
+#: src/book_meta_fix/catalog.py:90
 msgid ""
 "Retired rule (2026-09): books with many authors were flagged as "
 "suspicious, but real anthologies and textbooks made the signal too noisy."
 " The rule no longer fires; old review entries keep the code."
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:93
+#: src/book_meta_fix/catalog.py:95
 msgid "Generated placeholder cover"
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:94
+#: src/book_meta_fix/catalog.py:96
 msgid ""
 "The cover.jpg is a Calibre-generated placeholder (a flat gradient from "
 "title text), detected by pixel analysis. A real cover is proposed from "
@@ -150,11 +152,11 @@ msgid ""
 " cover from inside the book file."
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:100
+#: src/book_meta_fix/catalog.py:102
 msgid "Author field pollution (slug/artefact)"
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:101
+#: src/book_meta_fix/catalog.py:103
 msgid ""
 "The author field carries filename-slug junk: a leading '_'/'*' or lost "
 "capitalization ('anthony burgess') — clearly not a real name. Only the "
@@ -162,11 +164,11 @@ msgid ""
 "is C13's business (placement regenerates the folder)."
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:107
+#: src/book_meta_fix/catalog.py:109
 msgid "Location mismatch"
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:108
+#: src/book_meta_fix/catalog.py:110
 msgid ""
 "The folder no longer matches the path pattern derived from the book's own"
 " metadata (author/title changed, or the book sits under needfix/). "
@@ -174,22 +176,22 @@ msgid ""
 "pre-filled as accepted."
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:114
+#: src/book_meta_fix/catalog.py:116
 msgid "Series order glued into the series name"
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:115
+#: src/book_meta_fix/catalog.py:117
 msgid ""
 "The volume number is part of the series NAME ('Mark Stone #73') instead "
 "of its index. The rule splits the name losslessly and pre-fills the fix; "
 "the book's own index half is kept when present."
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:120
+#: src/book_meta_fix/catalog.py:122
 msgid "Author-name variants (library-level)"
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:121
+#: src/book_meta_fix/catalog.py:123
 msgid ""
 "The same author is spelled several ways across the library (initials vs "
 "full names, diacritics, swapped/comma order, titles). Emitted only by "
@@ -197,11 +199,11 @@ msgid ""
 "Deterministic clusters pre-fill accept, fuzzy ones wait in review."
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:127
+#: src/book_meta_fix/catalog.py:129
 msgid "Genre/tag name variants (library-level)"
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:128
+#: src/book_meta_fix/catalog.py:130
 msgid ""
 "The same genre/tag exists under several spellings ('SciFi', 'sci-fi', …)."
 " Emitted only by 'bmf normalize'; genres canonicalize to Czech via a "
@@ -209,11 +211,11 @@ msgid ""
 "fuzzy guesses."
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:134
+#: src/book_meta_fix/catalog.py:136
 msgid "Invalid ebook file"
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:135
+#: src/book_meta_fix/catalog.py:137
 msgid ""
 "The file's CONTENT matches no known book format (probed, not just the "
 "extension — a valid book under a wrong extension is never flagged). "
@@ -221,11 +223,11 @@ msgid ""
 "files and apply re-checks every file before unlink."
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:141
+#: src/book_meta_fix/catalog.py:143
 msgid "Series-name variants (library-level)"
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:142
+#: src/book_meta_fix/catalog.py:144
 msgid ""
 "The same series is spelled several ways ('Mark Stone' vs 'Mark Stone "
 "(edice)'). Emitted only by 'bmf normalize'. Close sub-series stay apart "
@@ -233,11 +235,11 @@ msgid ""
 "decide; the volume index itself is never proposed."
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:148
+#: src/book_meta_fix/catalog.py:150
 msgid "Duplicate folders of the same work"
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:149
+#: src/book_meta_fix/catalog.py:151
 msgid ""
 "Two folders hold the same book (double import — folded author+title "
 "match, or the same valid ISBN). Emitted by 'bmf merge'. One folder "
@@ -245,22 +247,22 @@ msgid ""
 "them in (files move, metadata field-merge, covers optional)."
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:155
+#: src/book_meta_fix/catalog.py:157
 msgid "Language-code normalization"
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:156
+#: src/book_meta_fix/catalog.py:158
 msgid ""
 "The language field holds a variant spelling of a code the library already"
 " canonicalizes ('cs' vs 'cze' vs 'Czech'). Emitted only by 'bmf "
 "normalize'; the replacement is deterministic and pre-filled."
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:161
+#: src/book_meta_fix/catalog.py:163
 msgid "Dead record (the book file is gone)"
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:162
+#: src/book_meta_fix/catalog.py:164
 msgid ""
 "The folder holds only metadata sidecars and their backups — no ebook "
 "file, nothing to repair. The record moves to needfix/empty/; metadata are"
@@ -268,11 +270,11 @@ msgid ""
 "deleting these folders instead."
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:168
+#: src/book_meta_fix/catalog.py:170
 msgid "No ISBN"
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:169
+#: src/book_meta_fix/catalog.py:171
 msgid ""
 "The record (and the book's content) carries no ISBN. Not corruption by "
 "itself: when author+title are confirmed against the content the book is "
@@ -280,55 +282,55 @@ msgid ""
 "recover the field from online sources."
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:175
+#: src/book_meta_fix/catalog.py:177
 msgid "No publication year"
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:176
+#: src/book_meta_fix/catalog.py:178
 msgid ""
 "The record carries no publication year. Same policy as MISSING_ISBN: "
 "identified content is sufficient, the year is never required for identity"
 " — enrichers still try to fill it."
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:181
+#: src/book_meta_fix/catalog.py:183
 msgid "No cover"
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:182
+#: src/book_meta_fix/catalog.py:184
 msgid ""
 "The folder has no usable cover image. Apply tries the enrichers' "
 "cover_url and then extracts a cover from inside the book file (generated "
 "placeholders are rejected)."
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:187
+#: src/book_meta_fix/catalog.py:189
 msgid "Content does not match the record"
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:188
+#: src/book_meta_fix/catalog.py:190
 msgid ""
 "The book's actual text disagrees with the metadata identity (title or "
 "author not found in the content). The record is what needs fixing — or "
 "the file is the wrong book entirely. Never auto-fixed."
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:193
+#: src/book_meta_fix/catalog.py:195
 msgid "Processing error"
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:194
+#: src/book_meta_fix/catalog.py:196
 msgid ""
 "bmf itself failed while processing this book (extraction crashed, "
 "unexpected exception). Nothing was changed; re-running analyze retries "
 "the book."
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:199
+#: src/book_meta_fix/catalog.py:201
 msgid "No problem found"
 msgstr ""
 
-#: src/book_meta_fix/catalog.py:200
+#: src/book_meta_fix/catalog.py:202
 msgid ""
 "The record passed detection. Listed here only because something else on "
 "the book is pending (a cover, a location note) or the entry carries "

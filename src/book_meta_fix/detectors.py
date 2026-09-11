@@ -368,6 +368,27 @@ def rule_c7_glued_authors(meta: BookMeta) -> Diagnosis | None:
 	return None
 
 
+# The pool tier's author bar: a spelling resolving to a cluster with at least
+# this many books is an established library author. Typos, nicknames and
+# polluted fields almost never carry that many books under one folded cluster
+# (variant spellings union at build time); anonym spellings are excluded from
+# the pool entirely. Below the bar the pool says nothing about the author —
+# and a lone corrupted record (a book whose author field holds a TITLE like
+# "R.U.R.") must not mint a "known author" that then flags every legitimate
+# book titled the same as a swap. Shared with pipeline (_pool_confirms_author,
+# _try_known_author_swap).
+_POOL_AUTHOR_MIN_BOOKS = 3
+
+# Nobility/origin particles marking a multi-token PERSON name ("Antoine de
+# Saint-Exupéry", "Walter von der Vogelweide") — their presence makes a 4+
+# token author_folder a name, not a sentence-length book title.
+_NAME_PARTICLES = {
+	"de", "der", "den", "des", "di", "da", "do", "das", "dos", "du", "della",
+	"del", "van", "von", "vor", "zu", "zur", "ter", "ten", "te", "mac", "mc",
+	"saint", "st", "san", "santa", "abu", "ibn", "ben", "bat",
+}
+
+
 def rule_c1_swap(meta: BookMeta, *, known_authors: Any | None = None) -> Diagnosis | None:
 	"""C1: author/title swapped. Detects two patterns:
 
@@ -380,7 +401,10 @@ def rule_c1_swap(meta: BookMeta, *, known_authors: Any | None = None) -> Diagnos
 	With *known_authors* (a normalize.KnownAuthorPool built from the whole
 	library by run_pipeline) a third, library-wide pattern runs FIRST — it
 	answers a question no per-book heuristic can: is the TITLE string a known
-	library author?
+	library author? Only clusters with >= _POOL_AUTHOR_MIN_BOOKS books count:
+	a 1-2 book "author" is indistinguishable from one corrupted record (a
+	title stored in an author field) and must not flag every legitimate book
+	titled the same as a swap.
 
 	3a. Title resolves to a known author AND the author field is a variant of
 	    the SAME person ("Anatolij Dněprov" / "A. Dněprov") — the real title is
@@ -396,10 +420,12 @@ def rule_c1_swap(meta: BookMeta, *, known_authors: Any | None = None) -> Diagnos
 	against the book's own text before accepting anything.
 	"""
 	# Pool-armed pattern (3): the title IS a known library author. Strongest
-	# evidence first — library-wide, unlike the token heuristics below.
+	# evidence first — library-wide, unlike the token heuristics below. Only
+	# ESTABLISHED authors pass (_POOL_AUTHOR_MIN_BOOKS): a 1-2 book cluster is
+	# indistinguishable from one corrupted record minting a fake author.
 	if known_authors is not None and meta.title and meta.authors:
 		hit = known_authors.lookup(meta.title)
-		if hit is not None:
+		if hit is not None and hit[1] >= _POOL_AUTHOR_MIN_BOOKS:
 			canon, n_books = hit
 			first_author = meta.authors[0]
 			if known_authors.same_person(meta.title, first_author):
@@ -413,7 +439,8 @@ def rule_c1_swap(meta: BookMeta, *, known_authors: Any | None = None) -> Diagnos
 					verdict=Verdict.NEEDS_REVIEW,
 				)
 			note = ""
-			if known_authors.lookup(first_author) is not None:
+			note_hit = known_authors.lookup(first_author)
+			if note_hit is not None and note_hit[1] >= _POOL_AUTHOR_MIN_BOOKS:
 				note = "; author field is also a known author — ambiguous, possibly a biography"
 			return Diagnosis(
 				category="C1",
@@ -464,11 +491,16 @@ def rule_c1_swap(meta: BookMeta, *, known_authors: Any | None = None) -> Diagnos
 					confidence=Confidence.MEDIUM,
 					verdict=Verdict.NEEDS_REVIEW,
 				)
-	# Pattern 2: author_folder looks like a title (4+ words) AND title looks like a name
+	# Pattern 2: author_folder looks like a title (4+ words) AND title looks like a name.
+	# _NAME_PARTICLES excludes multi-token PERSON names (de Saint-Exupéry…)
+	# from the "looks like a title" judgment.
 	af = meta.author_folder
 	if _is_clean_name(af):
 		af_tokens = [t for t in re.split(r"[\s_-]+", af) if t]
-		if len(af_tokens) >= 4 and not any(t.lower() in _CZ_NAME_HINTS for t in af_tokens):
+		if (
+			len(af_tokens) >= 4
+			and not any(t.lower() in _CZ_NAME_HINTS or t.lower() in _NAME_PARTICLES for t in af_tokens)
+		):
 			title_tokens = [t for t in re.split(r"\s+", meta.title) if t]
 			if 1 <= len(title_tokens) <= 3 and all(t[0].isupper() or not t[0].isalpha() for t in title_tokens):
 				return Diagnosis(
@@ -481,19 +513,18 @@ def rule_c1_swap(meta: BookMeta, *, known_authors: Any | None = None) -> Diagnos
 
 
 def rule_c2_filename_title(meta: BookMeta) -> Diagnosis | None:
-	"""C2: title is actually a filename (diacritics stripped, extension present).
+	"""C2: title carries filename artefacts (extension, temp prefix, slug markers).
 
 	Alone, '_' in title is too noisy (47% of library). We require a STRONGER
 	signal: either a file extension in the title, or a Word-temp prefix, or a
-	truncated marker, or a near-exact match with the primary file's stem.
+	truncated marker.
 
-	The filename-stem match compares the title to the primary file's stem
-	(minus extension and ' - Author' suffix) **directly** (case-insensitive,
-	not accent-stripped). Calibre strips diacritics from filenames but not
-	from the title field, so a healthy book whose title is "Čas přílivu" will
-	have a filename "Cas prilivu - Author.epub" — the stem and title do NOT
-	match without accent-stripping, so the rule does not fire. Only when the
-	title field itself IS the filename (no diacritics) does the match succeed.
+	A title merely EQUALING the primary file's stem is deliberately NOT a
+	signal (removed 2026-09-11, owner decision): the ebook filename is an
+	artifact nothing reads — the library shows folder names and placement
+	regenerates those from metadata — so title == stem is noise, not
+	corruption. It used to drag books through the extract/online/LLM ladder
+	for a "fix" nobody wanted.
 	"""
 	reasons: list[str] = []
 	if _EXTENSION_RE.search(meta.title):
@@ -502,24 +533,6 @@ def rule_c2_filename_title(meta: BookMeta) -> Diagnosis | None:
 		reasons.append("MS-Word temp filename prefix")
 	if _TRUNCATED_RE.search(meta.title):
 		reasons.append("truncated slug marker (_n_ / _txt)")
-	# Filename-stem match: title IS the primary file's stem (minus ' - Author'
-	# suffix). Compare directly (case-insensitive), NOT accent-stripped — a
-	# healthy book's title has diacritics that the filename lacks, so they
-	# won't match. This only fires when the title field is literally the
-	# filename (a genuine filename-as-title corruption).
-	if meta.primary_file:
-		import os
-
-		stem = os.path.basename(meta.primary_file)
-		# Strip extension
-		for ext in (".azw3", ".azw", ".prc", ".epub", ".pdb", ".pdf", ".mobi", ".doc", ".rtf", ".txt", ".lit", ".djvu"):
-			if stem.lower().endswith(ext):
-				stem = stem[: -len(ext)]
-				break
-		# Strip trailing ' - <something>' (author)
-		stem = re.sub(r"\s*-\s*[^-]+$", "", stem).strip()
-		if stem and stem.lower() == meta.title.lower():
-			reasons.append("title == primary file stem")
 	if reasons:
 		return Diagnosis(
 			category="C2",

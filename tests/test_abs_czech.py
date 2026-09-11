@@ -320,25 +320,31 @@ class TestHttpGetHeaderMerge:
 
 
 class TestEnricherWiring:
-	def test_consulted_after_databazeknih_isbn_before_title_sources(self, monkeypatch):
-		"""With an ISBN + title identity: databazeknih ISBN (exact) first, then
-		the provider; the databazeknih TITLE lookup never fires (provider hit)."""
+	def test_abs_czech_hit_anchors_parallel_fan_out(self, monkeypatch):
+		"""With an ISBN + title identity every applicable source runs in
+		parallel; the provider's hit ANCHORS the merged result (it outranks the
+		databazeknih TITLE lookup in priority — the exact ISBN source only
+		anchors when it hits)."""
 		calls: list[str] = []
 		monkeypatch.setattr(enrichers, "lookup_databazeknih_isbn", lambda isbn: calls.append("dk_isbn") or None)
 		monkeypatch.setattr(enrichers, "lookup_databazeknih", lambda **kw: calls.append("dk_title") or None)
 		monkeypatch.setattr(enrichers, "lookup_legie", lambda **kw: calls.append("legie") or None)
 		monkeypatch.setattr(enrichers, "lookup_openlibrary_isbn", lambda isbn: calls.append("ol_isbn") or None)
+		monkeypatch.setattr(enrichers, "lookup_openlibrary_title", lambda t, author=None: calls.append("ol_title") or None)
 		monkeypatch.setattr(
 			enrichers, "lookup_abs_czech",
 			lambda **kw: calls.append("abs_czech") or enrichers._abs_match_to_meta(_MATCHES["matches"][1]),
 		)
-		e = Enricher(databazeknih_enabled=True, legie_enabled=True, abs_czech_url="http://p:8000")
+		e = Enricher(databazeknih_enabled=True, legie_enabled=True, abs_czech_url="http://p:8000",
+					 openlibrary_enabled=True, google_books_enabled=False)
 		em = e.lookup(title="1984", author="George Orwell", isbn="9788073099993")
 		assert em is not None
 		assert em.source == "abs_czech"
-		assert calls == ["dk_isbn", "abs_czech"]
+		# The title lookup ran too (parallel fan-out — no short-circuit), it
+		# just cannot anchor over the provider hit.
+		assert set(calls) == {"dk_isbn", "dk_title", "legie", "ol_isbn", "ol_title", "abs_czech"}
 
-	def test_falls_through_to_databazeknih_title_on_miss(self, monkeypatch):
+	def test_all_sources_miss_returns_none(self, monkeypatch):
 		calls: list[str] = []
 		monkeypatch.setattr(enrichers, "lookup_abs_czech", lambda **kw: calls.append("abs_czech") or None)
 		monkeypatch.setattr(enrichers, "lookup_databazeknih_isbn", lambda isbn: calls.append("dk_isbn") or None)
@@ -348,7 +354,7 @@ class TestEnricherWiring:
 		monkeypatch.setattr(enrichers, "lookup_openlibrary_title", lambda t, author=None: calls.append("ol_title") or None)
 		e = Enricher(databazeknih_enabled=True, abs_czech_url="http://p:8000")
 		assert e.lookup(title="1984", author="George Orwell", isbn="9788073099993") is None
-		assert calls == ["dk_isbn", "abs_czech", "dk_title", "ol_isbn", "gb_isbn", "ol_title"]
+		assert set(calls) == {"dk_isbn", "abs_czech", "dk_title", "ol_isbn", "gb_isbn", "ol_title"}
 
 	def test_disabled_without_url(self, monkeypatch):
 		calls: list[str] = []

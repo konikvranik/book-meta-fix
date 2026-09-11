@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-09-11 16:47+0200\n"
+"POT-Creation-Date: 2026-09-11 17:31+0200\n"
 "PO-Revision-Date: 2026-08-15 10:28+0200\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: cs\n"
@@ -40,26 +40,29 @@ msgstr ""
 "review."
 
 #: src/book_meta_fix/catalog.py:32
-msgid "Filename used as title"
-msgstr "Název souboru použitý jako titul"
+msgid "Filename artefacts in the title"
+msgstr "Artefakty názvu souboru v titulu"
 
 #: src/book_meta_fix/catalog.py:33
 msgid ""
-"The title is the ebook's file name: diacritics lost, underscores for "
-"spaces, or an artefact like 'Microsoft Word - …'. Calibre imported the "
-"file before real metadata existed. The real title has to be recovered "
-"from the book's content or an online source."
+"The title carries remnants of the ebook's file name: a file extension "
+"('kniha.epub'), a 'Microsoft Word - …' temp-file prefix, or truncated "
+"slug markers like '_n_'/'_txt' from a diacritics-stripped import. A title"
+" that merely equals the file name is fine — the name is an artifact "
+"nothing reads. The real title has to be recovered from the book's content"
+" or an online source."
 msgstr ""
-"Titul je název souboru e-knihy: ztracená diakritika, podtržítka místo "
-"mezer nebo artefakt jako „Microsoft Word - …“. Calibre importoval soubor "
-"dřív, než existovala skutečná metadata. Skutečný titul je třeba získat z "
-"obsahu knihy nebo z online zdroje."
+"Titul nese zbytky názvu souboru ebooku: příponu souboru („kniha.epub“), "
+"prefix dočasného souboru „Microsoft Word - …“ nebo zkrácené slug markery "
+"jako „_n_“/„_txt“ z importu bez diakritiky. Titul, který se pouze shoduje "
+"s názvem souboru, je v pořádku — název souboru je artefakt, který nic "
+"nečte. Skutečný titul je třeba získat z obsahu knihy nebo z online zdroje."
 
-#: src/book_meta_fix/catalog.py:39
+#: src/book_meta_fix/catalog.py:41
 msgid "Series, library or publisher in the author field"
 msgstr "Série, knihovna nebo vydavatel v poli autora"
 
-#: src/book_meta_fix/catalog.py:40
+#: src/book_meta_fix/catalog.py:42
 msgid ""
 "The author field carries a collection/series name (e.g. 'abeles'), a "
 "publisher, or another non-person label instead of the author. These "
@@ -70,11 +73,11 @@ msgstr ""
 "jiný neosobní štítek místo autora. Tyto záznamy obvykle pocházejí z "
 "hromadných importů, kde se pole vyplnilo tím, co bylo po ruce."
 
-#: src/book_meta_fix/catalog.py:46
+#: src/book_meta_fix/catalog.py:48
 msgid "Encoding corruption (mojibake)"
 msgstr "Poškozené kódování (mojibake)"
 
-#: src/book_meta_fix/catalog.py:47
+#: src/book_meta_fix/catalog.py:49
 msgid ""
 "The text was decoded through the wrong code page and saved again, so the "
 "metadata carry unrepairable mojibake (Czech diacritics turned into "
@@ -88,11 +91,11 @@ msgstr ""
 "případů (recode nástroj GUI, nebo LLM úroveň); jinak musí správné hodnoty"
 " přijít z online zdroje."
 
-#: src/book_meta_fix/catalog.py:54
+#: src/book_meta_fix/catalog.py:56
 msgid "Placeholder record"
 msgstr "Zástupný záznam"
 
-#: src/book_meta_fix/catalog.py:55
+#: src/book_meta_fix/catalog.py:57
 msgid ""
 "The metadata are literal placeholders ('author', 'title', 'subject') — "
 "Calibre overwrote the real values during a failed import. The book file "
@@ -104,11 +107,11 @@ msgstr ""
 "knihy často stále nese skutečný titul/autora, proto jde o návrh na "
 "smazání až po kontrole obsahu."
 
-#: src/book_meta_fix/catalog.py:61
+#: src/book_meta_fix/catalog.py:63
 msgid "MS-Word lock-file duplicate"
 msgstr "Duplikát z zamykacího souboru MS-Wordu"
 
-#: src/book_meta_fix/catalog.py:62
+#: src/book_meta_fix/catalog.py:64
 msgid ""
 "The folder holds a '~$…' lock file that Calibre imported as a book — a "
 "Word temp file, not a real ebook. The record is a duplicate of nothing "
@@ -118,11 +121,11 @@ msgstr ""
 "knihu — wordový dočasný soubor, ne skutečná e-kniha. Záznam je duplikátem"
 " ničeho a soubor je odpad: navrženo ke smazání."
 
-#: src/book_meta_fix/catalog.py:67
+#: src/book_meta_fix/catalog.py:69
 msgid "Glued authors"
 msgstr "Slepená jména autorů"
 
-#: src/book_meta_fix/catalog.py:68
+#: src/book_meta_fix/catalog.py:70
 msgid ""
 "Several author names are glued into one string without a separator (e.g. "
 "'byKathy SierraandBert Bates'). Needs the correct split — the author list"
@@ -132,11 +135,11 @@ msgstr ""
 "„byKathy SierraandBert Bates“). Potřebuje správné rozdělení — seznam "
 "autorů je třeba rekonstruovat ručně nebo z online záznamu."
 
-#: src/book_meta_fix/catalog.py:73
+#: src/book_meta_fix/catalog.py:75
 msgid "Translator credited as the author"
 msgstr "Překladatel uveden jako autor"
 
-#: src/book_meta_fix/catalog.py:74
+#: src/book_meta_fix/catalog.py:76
 msgid ""
 "The author field holds the translator (a 'přeložil …' credit) instead of,"
 " or in front of, the real author. A translator AMONG the authors is kept "
@@ -148,11 +151,11 @@ msgstr ""
 "knihovna nemá pole překladatele a credit drží knihu dohledatelnou podle "
 "překladatele."
 
-#: src/book_meta_fix/catalog.py:80
+#: src/book_meta_fix/catalog.py:82
 msgid "Anonym (mostly fake)"
 msgstr "Anonym (většinou falešný)"
 
-#: src/book_meta_fix/catalog.py:81
+#: src/book_meta_fix/catalog.py:83
 msgid ""
 "The author is an 'unknown' spelling ('Neznamy', 'Unknown', …). Most of "
 "these are corrupted records, not genuine anonymous works — a whitelist "
@@ -164,11 +167,11 @@ msgstr ""
 "Korán, …) chrání pravé. Každý další záznam potřebuje doplnit skutečného "
 "autora."
 
-#: src/book_meta_fix/catalog.py:87
+#: src/book_meta_fix/catalog.py:89
 msgid "Long multi-author list (retired)"
 msgstr "Dlouhý seznam autorů (vyřazeno)"
 
-#: src/book_meta_fix/catalog.py:88
+#: src/book_meta_fix/catalog.py:90
 msgid ""
 "Retired rule (2026-09): books with many authors were flagged as "
 "suspicious, but real anthologies and textbooks made the signal too noisy."
@@ -178,11 +181,11 @@ msgstr ""
 "podezřelé, ale skutečné antologie a učebnice signál příliš šumily. "
 "Pravidlo už se nespouští; staré review záznamy kód podrží."
 
-#: src/book_meta_fix/catalog.py:93
+#: src/book_meta_fix/catalog.py:95
 msgid "Generated placeholder cover"
 msgstr "Vygenerovaná zástupná obálka"
 
-#: src/book_meta_fix/catalog.py:94
+#: src/book_meta_fix/catalog.py:96
 msgid ""
 "The cover.jpg is a Calibre-generated placeholder (a flat gradient from "
 "title text), detected by pixel analysis. A real cover is proposed from "
@@ -194,11 +197,11 @@ msgstr ""
 " z enricherů, když nějaká je; GUI umí také získat vloženou obálku ze "
 "souboru knihy."
 
-#: src/book_meta_fix/catalog.py:100
+#: src/book_meta_fix/catalog.py:102
 msgid "Author field pollution (slug/artefact)"
 msgstr "Nečistoty v poli autora (slug/artefakt)"
 
-#: src/book_meta_fix/catalog.py:101
+#: src/book_meta_fix/catalog.py:103
 msgid ""
 "The author field carries filename-slug junk: a leading '_'/'*' or lost "
 "capitalization ('anthony burgess') — clearly not a real name. Only the "
@@ -210,11 +213,11 @@ msgstr ""
 "jméno. Posuzuje se jen POLE autora; odpadní název SLOŽKY vedle čistých "
 "autorů je věc C13 (placement složku přegeneruje)."
 
-#: src/book_meta_fix/catalog.py:107
+#: src/book_meta_fix/catalog.py:109
 msgid "Location mismatch"
 msgstr "Nesoulad umístění"
 
-#: src/book_meta_fix/catalog.py:108
+#: src/book_meta_fix/catalog.py:110
 msgid ""
 "The folder no longer matches the path pattern derived from the book's own"
 " metadata (author/title changed, or the book sits under needfix/). "
@@ -225,11 +228,11 @@ msgstr ""
 "(autor/titul se změnil, nebo kniha leží pod needfix/). Placement v apply "
 "přesune složku na přepočítaný cíl; přesun je předvyplněný jako accepted."
 
-#: src/book_meta_fix/catalog.py:114
+#: src/book_meta_fix/catalog.py:116
 msgid "Series order glued into the series name"
 msgstr "Pořadí série přilepené k názvu série"
 
-#: src/book_meta_fix/catalog.py:115
+#: src/book_meta_fix/catalog.py:117
 msgid ""
 "The volume number is part of the series NAME ('Mark Stone #73') instead "
 "of its index. The rule splits the name losslessly and pre-fills the fix; "
@@ -239,11 +242,11 @@ msgstr ""
 "indexu. Pravidlo bezztrátově rozdělí název a předvyplní opravu; vlastní "
 "indexová půlka knihy se při existenci zachová."
 
-#: src/book_meta_fix/catalog.py:120
+#: src/book_meta_fix/catalog.py:122
 msgid "Author-name variants (library-level)"
 msgstr "Varianty jmen autorů (napříč knihovnou)"
 
-#: src/book_meta_fix/catalog.py:121
+#: src/book_meta_fix/catalog.py:123
 msgid ""
 "The same author is spelled several ways across the library (initials vs "
 "full names, diacritics, swapped/comma order, titles). Emitted only by "
@@ -255,11 +258,11 @@ msgstr ""
 "normalize“; nahrazení celých seznamů se navrhují per kniha. "
 "Deterministické clustery předvyplňují accept, fuzzy čekají v review."
 
-#: src/book_meta_fix/catalog.py:127
+#: src/book_meta_fix/catalog.py:129
 msgid "Genre/tag name variants (library-level)"
 msgstr "Varianty názvů žánrů/štítků (naprič knihovnou)"
 
-#: src/book_meta_fix/catalog.py:128
+#: src/book_meta_fix/catalog.py:130
 msgid ""
 "The same genre/tag exists under several spellings ('SciFi', 'sci-fi', …)."
 " Emitted only by 'bmf normalize'; genres canonicalize to Czech via a "
@@ -271,11 +274,11 @@ msgstr ""
 "kurátorskou alias tabulku — překlepy se stanou explicitními aliasovými "
 "řádky, nikdy fuzzy odhady."
 
-#: src/book_meta_fix/catalog.py:134
+#: src/book_meta_fix/catalog.py:136
 msgid "Invalid ebook file"
 msgstr "Neplatný soubor e-knihy"
 
-#: src/book_meta_fix/catalog.py:135
+#: src/book_meta_fix/catalog.py:137
 msgid ""
 "The file's CONTENT matches no known book format (probed, not just the "
 "extension — a valid book under a wrong extension is never flagged). "
@@ -287,11 +290,11 @@ msgstr ""
 "Emituje jen „bmf clean --files“; návrh na smazání jmenuje přesné soubory "
 "a apply před unlink každý soubor znovu prověří."
 
-#: src/book_meta_fix/catalog.py:141
+#: src/book_meta_fix/catalog.py:143
 msgid "Series-name variants (library-level)"
 msgstr "Varianty názvů sérií (napříč knihovnou)"
 
-#: src/book_meta_fix/catalog.py:142
+#: src/book_meta_fix/catalog.py:144
 msgid ""
 "The same series is spelled several ways ('Mark Stone' vs 'Mark Stone "
 "(edice)'). Emitted only by 'bmf normalize'. Close sub-series stay apart "
@@ -303,11 +306,11 @@ msgstr ""
 "odděleně: rozhoduje číslování svazků, doložené suspect páry a online "
 "kontroly; samotný index svazku se nikdy nenavrhuje."
 
-#: src/book_meta_fix/catalog.py:148
+#: src/book_meta_fix/catalog.py:150
 msgid "Duplicate folders of the same work"
 msgstr "Duplicitní složky téhož díla"
 
-#: src/book_meta_fix/catalog.py:149
+#: src/book_meta_fix/catalog.py:151
 msgid ""
 "Two folders hold the same book (double import — folded author+title "
 "match, or the same valid ISBN). Emitted by 'bmf merge'. One folder "
@@ -320,11 +323,11 @@ msgstr ""
 " ní složí (soubory se přesunou, metadata se sloučí per pole, obálky "
 "volitelně)."
 
-#: src/book_meta_fix/catalog.py:155
+#: src/book_meta_fix/catalog.py:157
 msgid "Language-code normalization"
 msgstr "Normalizace kódu jazyka"
 
-#: src/book_meta_fix/catalog.py:156
+#: src/book_meta_fix/catalog.py:158
 msgid ""
 "The language field holds a variant spelling of a code the library already"
 " canonicalizes ('cs' vs 'cze' vs 'Czech'). Emitted only by 'bmf "
@@ -334,27 +337,27 @@ msgstr ""
 " vs „cze“ vs „Czech“). Emituje jen „bmf normalize“; nahrazení je "
 "deterministické a předvyplněné."
 
-#: src/book_meta_fix/catalog.py:161
+#: src/book_meta_fix/catalog.py:163
 msgid "Dead record (the book file is gone)"
 msgstr "Mrtvý záznam (soubor knihy zmizel)"
 
-#: src/book_meta_fix/catalog.py:162
+#: src/book_meta_fix/catalog.py:164
 msgid ""
 "The folder holds only metadata sidecars and their backups — no ebook "
 "file, nothing to repair. The record moves to needfix/empty/; metadata are"
 " left untouched. 'bmf clean --empty' is the opt-in path to propose "
 "deleting these folders instead."
 msgstr ""
-"Složka obsahuje jen metadata a jejich zálohy — žádný soubor e-knihy, "
-"není co opravovat. Záznam se přesouvá do needfix/empty/; metadata "
-"zůstávají nedotčená. 'bmf clean --empty' je opt-in cesta, jak tyto "
-"složky místo toho navrhnout ke smazání."
+"Složka obsahuje jen metadata a jejich zálohy — žádný soubor e-knihy, není"
+" co opravovat. Záznam se přesouvá do needfix/empty/; metadata zůstávají "
+"nedotčená. 'bmf clean --empty' je opt-in cesta, jak tyto složky místo "
+"toho navrhnout ke smazání."
 
-#: src/book_meta_fix/catalog.py:168
+#: src/book_meta_fix/catalog.py:170
 msgid "No ISBN"
 msgstr "Chybí ISBN"
 
-#: src/book_meta_fix/catalog.py:169
+#: src/book_meta_fix/catalog.py:171
 msgid ""
 "The record (and the book's content) carries no ISBN. Not corruption by "
 "itself: when author+title are confirmed against the content the book is "
@@ -365,11 +368,11 @@ msgstr ""
 "když jsou autor+titul potvrzeny proti obsahu, je kniha přijatelná jak je "
 "— flag jen živí enrichery, které se snaží pole doplnit z online zdrojů."
 
-#: src/book_meta_fix/catalog.py:175
+#: src/book_meta_fix/catalog.py:177
 msgid "No publication year"
 msgstr "Chybí rok vydání"
 
-#: src/book_meta_fix/catalog.py:176
+#: src/book_meta_fix/catalog.py:178
 msgid ""
 "The record carries no publication year. Same policy as MISSING_ISBN: "
 "identified content is sufficient, the year is never required for identity"
@@ -379,11 +382,11 @@ msgstr ""
 "identifikovaný obsah stačí, rok nikdy není pro identitu vyžadován — "
 "enrichery se ho přesto snaží doplnit."
 
-#: src/book_meta_fix/catalog.py:181
+#: src/book_meta_fix/catalog.py:183
 msgid "No cover"
 msgstr "Chybí obálka"
 
-#: src/book_meta_fix/catalog.py:182
+#: src/book_meta_fix/catalog.py:184
 msgid ""
 "The folder has no usable cover image. Apply tries the enrichers' "
 "cover_url and then extracts a cover from inside the book file (generated "
@@ -393,11 +396,11 @@ msgstr ""
 "poté vytáhne obálku ze souboru knihy (vygenerované zástupné obálky se "
 "odmítají)."
 
-#: src/book_meta_fix/catalog.py:187
+#: src/book_meta_fix/catalog.py:189
 msgid "Content does not match the record"
 msgstr "Obsah nesouhlasí se záznamem"
 
-#: src/book_meta_fix/catalog.py:188
+#: src/book_meta_fix/catalog.py:190
 msgid ""
 "The book's actual text disagrees with the metadata identity (title or "
 "author not found in the content). The record is what needs fixing — or "
@@ -407,11 +410,11 @@ msgstr ""
 " obsahu nenašel). Opravy vyžaduje záznam — nebo je soubor úplně špatná "
 "kniha. Nikdy se neopravuje automaticky."
 
-#: src/book_meta_fix/catalog.py:193
+#: src/book_meta_fix/catalog.py:195
 msgid "Processing error"
 msgstr "Chyba zpracování"
 
-#: src/book_meta_fix/catalog.py:194
+#: src/book_meta_fix/catalog.py:196
 msgid ""
 "bmf itself failed while processing this book (extraction crashed, "
 "unexpected exception). Nothing was changed; re-running analyze retries "
@@ -420,11 +423,11 @@ msgstr ""
 "Samo bmf selhalo při zpracování této knihy (extrakce spadla, neočekávaná "
 "výjimka). Nic nebylo změněno; opětovné analyze knihu zopakuje."
 
-#: src/book_meta_fix/catalog.py:199
+#: src/book_meta_fix/catalog.py:201
 msgid "No problem found"
 msgstr "Nebyl nalezen žádný problém"
 
-#: src/book_meta_fix/catalog.py:200
+#: src/book_meta_fix/catalog.py:202
 msgid ""
 "The record passed detection. Listed here only because something else on "
 "the book is pending (a cover, a location note) or the entry carries "
@@ -3931,4 +3934,25 @@ msgstr ""
 #~ "e-knihy, nic k opravě. Záznam se "
 #~ "přesune do needfix/empty/; metadata zůstávají"
 #~ " nedotčena."
+
+#~ msgid "Filename used as title"
+#~ msgstr "Název souboru použitý jako titul"
+
+#~ msgid ""
+#~ "The title is the ebook's file "
+#~ "name: diacritics lost, underscores for "
+#~ "spaces, or an artefact like 'Microsoft"
+#~ " Word - …'. Calibre imported the "
+#~ "file before real metadata existed. The"
+#~ " real title has to be recovered "
+#~ "from the book's content or an "
+#~ "online source."
+#~ msgstr ""
+#~ "Titul je název souboru e-knihy: ztracená"
+#~ " diakritika, podtržítka místo mezer nebo"
+#~ " artefakt jako „Microsoft Word - …“."
+#~ " Calibre importoval soubor dřív, než "
+#~ "existovala skutečná metadata. Skutečný titul"
+#~ " je třeba získat z obsahu knihy "
+#~ "nebo z online zdroje."
 

@@ -195,17 +195,19 @@ class TestEnricherLookupOrder:
 		e = Enricher(databazeknih_enabled=True)
 		assert e.databazeknih_enabled is True
 
-	def test_lookup_uses_databazeknih_first(self, monkeypatch):
-		"""When enabled, databazeknih should be consulted before OpenLibrary."""
+	def test_lookup_databazeknih_isbn_anchors_over_title_sources(self, monkeypatch):
+		"""With an ISBN + title identity, the databazeknih ISBN hit (exact) is
+		the ANCHOR of the parallel fan-out's merged result. All applicable
+		sources run, but the anchor's identity fields win."""
 		calls: list[str] = []
 
 		def fake_dk_isbn(isbn):
 			calls.append("databazeknih_isbn")
-			return None  # ISBN miss → fall through to title lookup
+			return EnrichedMeta(title="1984", source="databazeknih", genres=["Romány"])
 
 		def fake_dk(*, title, author=None, year=None):
 			calls.append("databazeknih")
-			return EnrichedMeta(title=title, source="databazeknih", genres=["Romány"])
+			return None  # title lookup misses
 
 		def fake_ol_isbn(isbn):
 			calls.append("openlibrary_isbn")
@@ -214,13 +216,16 @@ class TestEnricherLookupOrder:
 		monkeypatch.setattr(enrichers, "lookup_databazeknih_isbn", fake_dk_isbn)
 		monkeypatch.setattr(enrichers, "lookup_databazeknih", fake_dk)
 		monkeypatch.setattr(enrichers, "lookup_openlibrary_isbn", fake_ol_isbn)
+		monkeypatch.setattr(enrichers, "lookup_openlibrary_title", lambda t, author=None: None)
+		monkeypatch.setattr(enrichers, "lookup_google_books_isbn", lambda isbn: None)
 
 		e = Enricher(databazeknih_enabled=True)
 		em = e.lookup(title="1984", author="George Orwell", isbn="9788073099993")
 		assert em is not None
 		assert em.source == "databazeknih"
-		# ISBN lookup tried first (miss), then title lookup hits; OL never called.
-		assert calls == ["databazeknih_isbn", "databazeknih"]
+		assert em.genres == ["Romány"]
+		# The fan-out consulted the ISBN source and the title source alike.
+		assert set(calls) == {"databazeknih_isbn", "databazeknih", "openlibrary_isbn"}
 
 	def test_lookup_skips_databazeknih_when_disabled(self, monkeypatch):
 		calls: list[str] = []
@@ -247,11 +252,13 @@ class TestEnricherLookupOrder:
 		monkeypatch.setattr(enrichers, "lookup_databazeknih", fake_dk)
 
 		cache = tmp_path / "cache.db"
-		e = Enricher(cache_db=cache, databazeknih_enabled=True)
+		e = Enricher(cache_db=cache, databazeknih_enabled=True,
+					 openlibrary_enabled=False, google_books_enabled=False)
 		em1 = e.lookup(title="1984", author="George Orwell")
 		assert em1 is not None and em1.genres == ["Sci-fi", "antiutopie"]
 
-		e2 = Enricher(cache_db=cache, databazeknih_enabled=True)
+		e2 = Enricher(cache_db=cache, databazeknih_enabled=True,
+					  openlibrary_enabled=False, google_books_enabled=False)
 		em2 = e2.lookup(title="1984", author="George Orwell")
 		assert em2 is not None
 		assert em2.genres == ["Sci-fi", "antiutopie"]

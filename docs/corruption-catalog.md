@@ -18,13 +18,20 @@ Often a series where the source listed `<author>=series, <title>=contributor`.
 | 4357 | `uzivatelska prirucka 31D30588` | `Peugeot 406 - uzivatelská příručka` | swap |
 
 **Verdict:** NEEDS_REVIEW (LLM or manual fix)
-**Fix action:** `accept` — the analyzer proposes the swap itself into
-`proposed` (title ← author, author ← title) when no better source is found;
-adjust the values before accepting if needed
+**Fix action:** `accept` — for a HIGH-confidence *classic swap* the analyzer
+proposes the swap itself into `proposed` (title ← author, author ← title)
+when no better source is found; adjust the values before accepting if
+needed. The weak MEDIUM heuristics (author token in the title, title-ish
+author folder) never pre-fill a swap — they false-fire on brand/team authors
+("The KiCad Team" / "Getting Started in KiCad") and a mechanical swap would
+mangle a correct record. A flagged book without a proposal is a hint to
+look, not a suggested edit.
 
 During `analyze` the rule is also **pool-armed**: `run_pipeline` builds a
 known-author pool from the whole library (the same clustering `bmf normalize`
 uses), so a record whose TITLE string resolves to a known library author
+(cluster of at least 3 books — a 1–2 book "author" is one corrupted record
+away from a fake and must not flag legitimate titles like `R.U.R.`)
 fires C1 with HIGH confidence — either as a *variant pair* (title and author
 are the same person in two spellings, e.g. title `Anatolij Dněprov` /
 author `A. Dněprov` — the real title is lost from the record) or a *classic
@@ -34,12 +41,18 @@ repair tier (`_try_known_author_swap`) then takes the author from the pool
 canonical and the title from the book's OWN text, bound by `confirm_identity`;
 a classic swap is only trusted when the content-mined title agrees with the
 author field (a biography titled with its subject would survive a naive
-swap self-test). Every failure stays for review with the raw-swap hint.
+swap self-test). Every failure stays for review — classic swaps carry the
+raw-swap hint, variant pairs carry no proposal (a mechanical swap would
+only re-spell the same wrong record; their fix is the content-mined title).
 
-## C2 — Filename used as title (diacritics stripped)
+## C2 — Filename artefacts in the title
 
-Book was imported from a file; the filename became both folder and title.
-Diacritics replaced with `_`. **Most common category (~47% of library).**
+Book was imported from a file before real metadata existed; the filename
+left artefacts in the title value. **Most common category (~47% of library).**
+A title merely EQUALING the ebook file's stem is NOT flagged — the filename
+is an artifact nothing reads (the library shows folder names, and placement
+regenerates them); only garbage in the title value itself fires (extension,
+Word temp prefix, truncated slug markers, heavy underscore loss).
 
 | id | title | formats | shape |
 |----|---|---|---|
@@ -47,7 +60,7 @@ Diacritics replaced with `_`. **Most common category (~47% of library).**
 | 3342 | `Buskov_A-Rytirka_Natal_n_` | epub,pdb | ends `_n_` |
 | 1416 | `Microsoft Word - 4444.doc` | epub,pdf | Word temp filename |
 | 3774 | `Bradbury` | doc | title is just author surname |
-| 2497 | `Cas prilivu` | epub | should be "Čas přílivu" |
+| 2497 | `Cas prilivu` | epub | should be "Čas přílivu" (stem-equal shape — no longer flagged) |
 
 **Verdict:** NEEDS_REVIEW (need content/online to know the correct title)
 **Fix action:** `accept` (edit the `proposed` values if the proposal needs a fix)
@@ -432,8 +445,9 @@ Not corruption — just missing data that can be filled by online lookup
 ## Detector calibration notes
 
 - **C2 alone is holočný** — 47% of titles contain `_`. Requires a stronger
-  signal (file extension in title, Word temp prefix, exact filename match, or
-  3+ underscores) to fire.
+  signal (file extension in title, Word temp prefix, truncated slug marker,
+  or 3+ underscores) to fire. A title merely equaling the file stem stopped
+  being a signal (2026-09-11) — the filename is an artifact nothing reads.
 - **C2 has priority over C1** — polluted titles produce false swap signals
   (the filename contains both author and title).
 - **C9 default is NEEDS_REVIEW**, not OK — the whitelist is the only way to

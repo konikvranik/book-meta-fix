@@ -18,14 +18,21 @@ knih. Často jde o sérii, kde zdroj uváděl `<author>=series, <title>=contribu
 | 4357 | `uzivatelska prirucka 31D30588` | `Peugeot 406 - uzivatelská příručka` | záměna |
 
 **Verdikt:** NEEDS_REVIEW (LLM nebo ruční oprava)
-**Opravná akce:** `accept` — analyzátor sám navrhne záměnu do `proposed`
-(title ← author, author ← title), když nenajde lepší zdroj; v případě
-potřeby hodnoty před přijetím upravte
+**Opravná akce:** `accept` — u *klasické záměny* s HIGH jistotou analyzátor
+sám navrhne záměnu do `proposed` (title ← author, author ← title), když
+nenajde lepší zdroj; v případě potřeby hodnoty před přijetím upravte. Slabé
+MEDIUM heuristiky (token autora v titulu, složka autora vypadající jako
+titul) záměnu nikdy předvyplňují — falešně statí na značkové/týmové autory
+(„The KiCad Team" / „Getting Started in KiCad") a mechanická záměna by
+zmršnila správný záznam. Zaflagovaná kniha bez návrhu je pobídka, aby se na
+ni uživatel podíval, ne navrhovaná úprava.
 
 Při `analyze` je pravidlo navíc **pool-armed**: `run_pipeline` postaví
 pool známých autorů z celé knihovny (stejné klastrování jako `bmf
 normalize`), takže záznam, jehož POLE NÁZVU se rozřeší na známého autora
-knihovny, spustí C1 s HIGH jistotou — buď jako *variabilní pár* (název i
+knihovny (cluster s alespoň 3 knihami — „autor" s 1–2 knihami je jedno
+poškozené záznam od padělku a nesmí flagovat legitimní tituly jako
+`R.U.R.`), spustí C1 s HIGH jistotou — buď jako *variabilní pár* (název i
 autor jsou táž osoba ve dvou pravopisech, např. název `Anatolij Dněprov` /
 autor `A. Dněprov` — skutečný název se ze záznamu ztratil), nebo jako
 *klasická záměna* (pole autora nese skutečný název; když je samo dalším
@@ -34,12 +41,20 @@ opravy (`_try_known_author_swap`) pak vezme autora z kanonického tvaru
 poolu a název z VLASTNÍHO textu knihy, svázané přes `confirm_identity`;
 klasická záměna se věří jen tehdy, když vytěžený název souhlasí s polem
 autora (biografie nazvaná podle svého hrdiny by prošla naivním self-testem
-záměny). Každé selhání zůstává v review s hintem surové záměny.
+záměny). Každé selhání zůstává v review — klasické záměny s hintem surové
+záměny, variabilní páry bez návrhu (mechanická záměna by jen přepsala
+stejně špatný záznam do jiného pravopisu; jejich opravou je titul vytěžený
+z textu).
 
-## C2 — Název souboru použitý jako název (odstraněná diakritika)
+## C2 — Artefakty názvu souboru v titulu
 
-Kniha byla importována ze souboru; název souboru se stal jak složkou, tak
-názvem. Diakritika nahrazena `_`. **Nejčastější kategorie (~47 % knihovny).**
+Kniha byla importována ze souboru dřív, než existovala skutečná metadata;
+název souboru zanechal v hodnotě titulu artefakty. **Nejčastější kategorie
+(~47 % knihovny).** Titul, který se pouze SHODUJE se jménem souboru ebooku,
+flagován NENÍ — název souboru je artefakt, který nic nečte (knihovna
+zobrazuje názvy složek a placement je stejně přegenerovává); flagován je
+jen bordel v samotné hodnotě titulu (přípona, Word temp prefix, zkrácené
+slug markery, těžká ztráta podtržítek).
 
 | id | název | formáty | tvar |
 |----|---|---|---|
@@ -47,7 +62,7 @@ názvem. Diakritika nahrazena `_`. **Nejčastější kategorie (~47 % knihovny).
 | 3342 | `Buskov_A-Rytirka_Natal_n_` | epub,pdb | končí `_n_` |
 | 1416 | `Microsoft Word - 4444.doc` | epub,pdf | dočasný název souboru Wordu |
 | 3774 | `Bradbury` | doc | název je jen příjmení autora |
-| 2497 | `Cas prilivu` | epub | má být „Čas přílivu" |
+| 2497 | `Cas prilivu` | epub | má být „Čas přílivu" (tvar shody se jménem souboru — už se neflaguje) |
 
 **Verdikt:** NEEDS_REVIEW (správný název poznáme až z obsahu/online)
 **Opravná akce:** `accept` (pokud návrh potřebuje opravu, upravte hodnoty
@@ -435,8 +450,9 @@ Není poškození — jen chybějící data, která lze doplnit online dotazem
 
 - **Samotné C2 je holočné** — 47 % názvů obsahuje `_`. Aby pravidlo vůbec
   spustilo, vyžaduje silnější signál (příponu souboru v názvu, prefix
-  dočasného souboru Wordu, přesnou shodu s názvem souboru nebo 3+
-  podtržítka).
+  dočasného souboru Wordu, zkrácený slug marker nebo 3+ podtržítek).
+  Pouhá shoda titulu se jménem souboru přestala být signálem (2026-09-11) —
+  název souboru je artefakt, který nic nečte.
 - **C2 má prioritu před C1** — znečištěné názvy produkují falešné signály
   záměny (název souboru obsahuje autora i název).
 - **Výchozí pro C9 je NEEDS_REVIEW**, ne OK — whitelist je jediná cesta,

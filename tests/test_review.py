@@ -126,6 +126,77 @@ class TestParseLegacySingleList:
 		assert len(parsed) == 2
 
 
+class TestRetiredC2Stem:
+	"""The C2 "title == primary file stem" reason was retired (2026-09-11,
+	owner decision: the filename is an artifact nothing reads). Pending
+	review entries describing ONLY that diagnosis are dropped at load —
+	finish() would otherwise carry them forever, since the analyzer no longer
+	flags the books and nothing rebuilds the entries."""
+
+	_STEM = "title == primary file stem"
+
+	def _seed(self, tmp_path, stem_entry: str) -> Path:
+		seed = f"# header\n{stem_entry}---\nid: 2\npath: b\ncurrent: {{title: B}}\naction: null\n"
+		path = tmp_path / "review.yaml"
+		path.write_text(seed, encoding="utf-8")
+		return path
+
+	def test_pending_stem_only_entry_dropped(self, tmp_path):
+		path = self._seed(
+			tmp_path,
+			"---\nid: 1\npath: a\ncurrent: {title: A}\naction: null\n"
+			f"diagnoses: [{{category: C2, reason: '{self._STEM}', confidence: HIGH, verdict: NEEDS_REVIEW}}]\n",
+		)
+		parsed = parse_review(path)
+		# Only the unrelated entry survives; the stale noise entry is gone.
+		assert [p.id for p in parsed] == [2]
+
+	def test_decided_stem_only_entry_kept(self, tmp_path):
+		"""A user decision must never be silently dropped — apply still needs it."""
+		path = self._seed(
+			tmp_path,
+			"---\nid: 1\npath: a\ncurrent: {title: A}\naction: accept\n"
+			f"diagnoses: [{{category: C2, reason: '{self._STEM}', confidence: HIGH, verdict: NEEDS_REVIEW}}]\n",
+		)
+		parsed = parse_review(path)
+		assert [p.id for p in parsed] == [1, 2]
+		assert parsed[0].action == "accept"
+
+	def test_mixed_reason_entry_kept(self, tmp_path):
+		"""A combined C2 reason (real marker + stem) keeps the entry — the book
+		still fires the real marker and the next analyze rebuilds it fresh."""
+		path = self._seed(
+			tmp_path,
+			"---\nid: 1\npath: a\ncurrent: {title: A}\naction: null\n"
+			"diagnoses: [{category: C2, reason: 'truncated slug marker (_n_ / _txt); "
+			f"{self._STEM}', confidence: HIGH, verdict: NEEDS_REVIEW}}]\n",
+		)
+		parsed = parse_review(path)
+		assert [p.id for p in parsed] == [1, 2]
+
+	def test_multi_diagnosis_entry_kept(self, tmp_path):
+		"""Stem diagnosis + a real co-diagnosis (MISSING_COVER) — the entry
+		stays; only entries whose EVERY diagnosis is the retired one go."""
+		path = self._seed(
+			tmp_path,
+			"---\nid: 1\npath: a\ncurrent: {title: A}\naction: null\n"
+			f"diagnoses: [{{category: C2, reason: '{self._STEM}', confidence: HIGH, verdict: NEEDS_REVIEW}}, "
+			"{category: MISSING_COVER, reason: no cover, confidence: LOW, verdict: AUTO_FIXABLE}]\n",
+		)
+		parsed = parse_review(path)
+		assert [p.id for p in parsed] == [1, 2]
+
+	def test_legacy_single_diagnosis_stem_only_dropped(self, tmp_path):
+		"""Older files carry one ``diagnosis`` instead of ``diagnoses`` — same
+		retirement applies."""
+		path = self._seed(
+			tmp_path,
+			f"---\nid: 1\npath: a\ncurrent: {{title: A}}\naction: null\ndiagnosis: {{category: C2, reason: '{self._STEM}'}}\n",
+		)
+		parsed = parse_review(path)
+		assert [p.id for p in parsed] == [2]
+
+
 def _enriched_with_cover() -> EnrichedMeta:
 	"""An enriched hit that carries a cover_url plus a year, so proposed is
 	guaranteed non-empty even when cover_url is gated out."""
@@ -365,8 +436,37 @@ class TestC1SwapProposal:
 		assert proposed["author"] == "Jan Drda"     # swap filled the gap
 
 	def test_non_c1_never_proposes_swap(self):
-		meta = _meta(1, title="Jan Drda", author="NŘm Barik da")
+		meta = _meta(1, title="Jan Drda", author="NŘm Barikáda")
 		assert _build_proposed(meta, None, None, _diag("C2")) is None
+
+	def test_medium_c1_never_proposes_swap(self):
+		"""The weak MEDIUM heuristics (author token in the title, title-ish
+		author folder) false-fire on brand/team authors — a mechanical swap
+		would mangle a correct record ("The KiCad Team" / "Getting Started
+		in KiCad", "Peugeot" / "Peugeot 406 …"). The swap hint is reserved
+		for HIGH-confidence classic swaps."""
+		meta = _meta(1, title="Getting Started in KiCad", author="The KiCad Team")
+		d = Diagnosis(
+			category="C1",
+			reason="author surname 'kicad' appears in title — possible swap or title pollution",
+			confidence=Confidence.MEDIUM,
+			verdict=Verdict.NEEDS_REVIEW,
+		)
+		assert _build_proposed(meta, None, None, d) is None
+
+	def test_variant_pair_never_proposes_swap(self):
+		"""The variant-pair pool shape: the title field holds the author's
+		NAME — a mechanical swap only re-spells the same wrong record (title
+		"Anatolij Dněprov" / author "A. Dněprov" would become title
+		"A. Dněprov"). That shape's fix is the pipeline's content-mined
+		title (_try_known_author_swap), not a field swap."""
+		meta = _meta(1, title="Anatolij Dněprov", author="A. Dněprov")
+		d = _diag("C1")
+		d.reason = (
+			"title and author are both the known library author "
+			"'Anatolij Dněprov' (3 books) — variant pair, title lost"
+		)
+		assert _build_proposed(meta, None, None, d) is None
 
 
 class TestLocationAndVerified:

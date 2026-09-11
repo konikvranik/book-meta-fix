@@ -760,7 +760,7 @@ make i18n-compile   # .po -> .mo
   path: "Karel Capek/_apek_Karel-RURe_n_ (4895)"
   diagnosis:
     category: C2
-    reason: "title == primary file stem"
+    reason: "truncated slug marker (_n_ / _txt)"
     confidence: HIGH
   current:                # what's in the DB now
     author: Karel Capek

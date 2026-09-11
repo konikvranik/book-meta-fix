@@ -29,10 +29,12 @@ CATEGORY_HELP: dict[str, tuple[str, str]] = {
 		  "agree), otherwise it waits in review."),
 	),
 	"C2": (
-		_("Filename used as title"),
-		_("The title is the ebook's file name: diacritics lost, underscores for "
-		  "spaces, or an artefact like 'Microsoft Word - …'. Calibre imported "
-		  "the file before real metadata existed. The real title has to be "
+		_("Filename artefacts in the title"),
+		_("The title carries remnants of the ebook's file name: a file "
+		  "extension ('kniha.epub'), a 'Microsoft Word - …' temp-file prefix, "
+		  "or truncated slug markers like '_n_'/'_txt' from a diacritics-"
+		  "stripped import. A title that merely equals the file name is fine "
+		  "— the name is an artifact nothing reads. The real title has to be "
 		  "recovered from the book's content or an online source."),
 	),
 	"C3": (

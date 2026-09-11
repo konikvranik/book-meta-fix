@@ -31,7 +31,7 @@ import yaml
 from .detectors import all_diagnoses, rule_empty_book
 from .extractors import ExtractedMeta
 from .i18n import _
-from .models import BookMeta, Diagnosis
+from .models import BookMeta, Confidence, Diagnosis
 from .normalize import canonical_language
 
 log = logging.getLogger(__name__)
@@ -328,7 +328,22 @@ def _build_proposed(
 	# proposes the swap itself — deterministic, no network. `swap` used to be
 	# a review ACTION applied at write time; now it is an ordinary proposal
 	# the user reviews (and can adjust) before accepting.
-	if diag is not None and any(d.category == "C1" for d in all_diagnoses(diag)):
+	# Gated to the HIGH-confidence classic swap (the pool pattern: the title
+	# IS an established library author, the author field holds the real
+	# title). The MEDIUM heuristics (author token in the title, title-ish
+	# author folder) false-fire on records where a mechanical swap is the
+	# wrong repair — brand/team authors ("The KiCad Team" / "Getting Started
+	# in KiCad", "Peugeot" / "Peugeot 406 …") and multi-token names — their
+	# own reason says "possible swap OR TITLE POLLUTION". The variant-pair
+	# pool shape is excluded too: there the title field holds the author's
+	# NAME, so a swap only re-spells the same wrong record; that shape's real
+	# fix is the pipeline's content-mined title (_try_known_author_swap).
+	if diag is not None and any(
+		d.category == "C1"
+		and d.confidence == Confidence.HIGH
+		and "variant pair" not in (d.reason or "")
+		for d in all_diagnoses(diag)
+	):
 		if meta.title and meta.authors:
 			if "title" not in proposed and meta.authors[0]:
 				proposed["title"] = meta.authors[0]
@@ -406,7 +421,11 @@ def _load_raw_entries(path: str | Path) -> list[dict[str, Any]]:
 			raw_entries.append(doc)
 		else:
 			raise ValueError(f"review file must contain YAML dicts/lists, got {type(doc).__name__}")
-	return [_migrate_entry(e) for e in raw_entries if isinstance(e, dict)]
+	return [
+		e
+		for e in raw_entries
+		if isinstance(e, dict) and not _is_retired_c2_stem(_migrate_entry(e))
+	]
 
 
 def _migrate_entry(e: dict[str, Any]) -> dict[str, Any]:
@@ -429,6 +448,39 @@ def _migrate_entry(e: dict[str, Any]) -> dict[str, Any]:
 	elif a in ("reject", "swap"):
 		e["action"] = None
 	return e
+
+
+# The C2 stem-match reason the detector no longer emits (removed 2026-09-11:
+# a title equaling the ebook file's stem is noise, not corruption — see
+# rule_c2_filename_title). Retired here so stale review.yaml entries can be
+# recognized and dropped at load time.
+_RETIRED_C2_STEM_REASON = "title == primary file stem"
+
+
+def _is_retired_c2_stem(e: dict[str, Any]) -> bool:
+	"""True for a PENDING entry whose ONLY diagnosis is the retired C2 stem match.
+
+	The detector stopped emitting "title == primary file stem" (owner
+	decision: the filename is an artifact nothing reads), but review.yaml
+	entries describing just that problem would linger forever — finish()
+	carries unprocessed priors, and a book the analyzer no longer flags never
+	reaches the rebuild that would shed the diagnosis. Such entries are stale
+	noise and are dropped at load; the books are considered fine.
+
+	DECIDED entries are never dropped here (a user decision must survive);
+	neither are mixed-reason or multi-diagnosis entries — a real co-problem
+	keeps the entry, and the next analyze rebuilds it fresh from live
+	detection anyway.
+	"""
+	if e.get("action") is not None:
+		return False
+	diags = e.get("diagnoses") or ([e.get("diagnosis")] if e.get("diagnosis") else [])
+	if not diags:
+		return False
+	return all(
+		isinstance(d, dict) and d.get("category") == "C2" and d.get("reason") == _RETIRED_C2_STEM_REASON
+		for d in diags
+	)
 
 
 def parse_review(path: str | Path) -> list[ReviewItem]:

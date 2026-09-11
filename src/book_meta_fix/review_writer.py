@@ -38,6 +38,7 @@ from .review import (
 	_build_current,
 	_build_proposed,
 	_header,
+	_is_retired_c2_stem,
 	_migrate_entry,
 	_relative_path,
 	_render_entry,
@@ -365,15 +366,11 @@ class ReviewWriter:
 		     would be written is not the identity that was confirmed.
 		  4. Only benign leftovers in the projected state: OK-verdict
 		     diagnoses and genuinely-missing fields (MISSING_ISBN/YEAR/
-		     COVER, a credited cover_url, C13 which the move resolves), and
-		     a C2 whose reason is only "title == primary file stem" — the
-		     confirmed title IS the right title, so the (never-renamed)
-		     ebook filename happening to equal it is noise over an artifact
-		     nothing reads (the library shows folder names, and placement
-		     regenerates those from metadata). A remaining NEEDS_REVIEW
-		     (e.g. C11 with no replacement cover, C2 with a real corruption
-		     reason) or EMPTY_BOOK must stay visible in review —
-		     auto-verifying it would hide a known defect behind the skip.
+		     COVER, a credited cover_url, C13 which the move resolves). A
+		     remaining NEEDS_REVIEW (e.g. C11 with no replacement cover, C2
+		     with a real corruption reason) or EMPTY_BOOK must stay visible
+		     in review — auto-verifying it would hide a known defect behind
+		     the skip.
 		"""
 		if action != "accept" or enriched is None:
 			return False
@@ -399,14 +396,6 @@ class ReviewWriter:
 				return False  # a dead record is not a verified book
 			if d.category in ("C11", "MISSING_COVER") and proposed and proposed.get("cover_url"):
 				continue  # the cover download at apply resolves it
-			if d.category == "C2" and "primary file stem" in (d.reason or ""):
-				# The identity was confirmed (req. 2): the title IS the right
-				# title, so the never-renamed ebook file sharing its name is
-				# not corruption. Other C2 reasons (extension in title, Word
-				# temp prefix, truncated slug) still block — those describe
-				# garbage in the title value itself, which a confirmed record
-				# would not have returned.
-				continue
 			if d.verdict != Verdict.OK and d.category not in ("MISSING_ISBN", "MISSING_YEAR", "MISSING_COVER"):
 				return False
 		return True
@@ -732,5 +721,11 @@ class ReviewWriter:
 				continue
 			for entry in items:
 				if isinstance(entry, dict) and entry.get("uuid") is not None:
-					prior[entry["uuid"]] = _migrate_entry(entry)
+					_migrate_entry(entry)
+					if _is_retired_c2_stem(entry):
+						# Stale noise from the retired C2 stem match — carrying
+						# it would re-serve the entry forever (the analyzer no
+						# longer flags the book, so nothing rebuilds it).
+						continue
+					prior[entry["uuid"]] = entry
 		return prior

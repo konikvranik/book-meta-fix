@@ -25,14 +25,22 @@ from typing import Any
 from uuid import uuid4
 
 from .classify import is_acceptable_missing
-from .detectors import all_diagnoses
+from .detectors import _POOL_AUTHOR_MIN_BOOKS, all_diagnoses
 from .detectors import detect as detect_fn
 from .enrichers import EnrichedMeta, Enricher
 from .extractors import ExtractedMeta
 from .library import DEFAULT_SCAN_WORKERS, Cache, scan_library
 from .models import BookMeta, Confidence, Diagnosis, Verdict, series_entry_pair
 from .normalize import _looks_like_neznamy
-from .review import _COVER_CATEGORIES, _migrate_entry, build_review, parse_review, prune_review, update_paths
+from .review import (
+	_COVER_CATEGORIES,
+	_is_retired_c2_stem,
+	_migrate_entry,
+	build_review,
+	parse_review,
+	prune_review,
+	update_paths,
+)
 from .verifier import (
 	IdentityResult,
 	_normalize,
@@ -808,7 +816,9 @@ def _try_known_author_swap(
 	from rapidfuzz import fuzz
 
 	hit = known_authors.lookup(meta.title)
-	if hit is None or not meta.authors:
+	# Same bar as the C1 pool pattern: a 1-2 book "author" cluster is one
+	# corrupted record away from minting a fake author — never swap on it.
+	if hit is None or hit[1] < _POOL_AUTHOR_MIN_BOOKS or not meta.authors:
 		return None
 	canon, _n_books = hit
 	first = meta.authors[0]
@@ -834,12 +844,9 @@ def _try_known_author_swap(
 	return EnrichedMeta(title=new_title, authors=[canon], source=source, identity_confirmed=True)
 
 
-# The pool tier's author bar: a spelling resolving to a cluster with at least
-# this many books is an established library author. Typos, nicknames and
-# polluted fields almost never carry that many books under one folded cluster
-# (variant spellings union at build time); anonym spellings are excluded from
-# the pool entirely. Below the bar the pool says nothing about the author.
-_POOL_AUTHOR_MIN_BOOKS = 3
+# The pool tier's author bar now lives in detectors (_POOL_AUTHOR_MIN_BOOKS)
+# — shared by the C1 pool pattern, this tier and _pool_confirms_author so all
+# three agree on what counts as a "known library author".
 
 
 def _pool_confirms_author(meta: BookMeta, known_authors: Any, known_series: frozenset[str]) -> bool:
@@ -1249,6 +1256,9 @@ def generate_review(
 			prev = _yaml_safe_load(output)
 			for entry in prev or []:
 				_migrate_entry(entry)  # legacy edited/actions → current shape
+			# Drop stale entries of the retired C2 stem match (pending-only) —
+			# same retirement as _load_raw_entries/_load_prior.
+			prev = [e for e in prev or [] if not _is_retired_c2_stem(e)]
 			for entry in prev or []:
 				eid = entry.get("id")
 				if eid is not None:

@@ -794,10 +794,15 @@ class TestKnownAuthorSwap:
 	def _pool(self):
 		from book_meta_fix.normalize import build_known_author_pool
 
+		# Dněprov cluster = 3 books (2 spellings union), Novák = 3 books — both
+		# above _POOL_AUTHOR_MIN_BOOKS, which the swap tier enforces too.
 		books = [
 			BookMeta(calibre_id="1", uuid="u1", title="Den zkázy", authors=["Anatolij Dněprov"], path="/lib/1"),
 			BookMeta(calibre_id="2", uuid="u2", title="Návrat", authors=["A. Dněprov"], path="/lib/2"),
-			BookMeta(calibre_id="3", uuid="u3", title="Biografie", authors=["Jan Novák"], path="/lib/3"),
+			BookMeta(calibre_id="3", uuid="u3", title="Třetí síla", authors=["Anatolij Dněprov"], path="/lib/4"),
+			BookMeta(calibre_id="4", uuid="u4", title="Biografie", authors=["Jan Novák"], path="/lib/3"),
+			BookMeta(calibre_id="5", uuid="u5", title="Podruhé", authors=["Jan Novák"], path="/lib/5"),
+			BookMeta(calibre_id="6", uuid="u6", title="Potřetí", authors=["Jan Novák"], path="/lib/6"),
 		]
 		return build_known_author_pool(books)
 
@@ -858,6 +863,20 @@ class TestKnownAuthorSwap:
 	def test_no_content_no_repair(self):
 		meta = BookMeta(calibre_id=1, title="Anatolij Dněprov", authors=["A. Dněprov"], path="/lib/x (1)")
 		assert _try_known_author_swap(meta, self._pool(), ExtractedMeta()) is None
+
+	def test_small_cluster_never_swaps(self):
+		# The R.U.R. regression: ONE corrupted record (an author field holding
+		# a title) mints a 1-book "author" cluster. Below the pool bar the
+		# cluster is not a known author — no swap repair even when the content
+		# would have agreed with the author field.
+		from book_meta_fix.normalize import build_known_author_pool
+
+		pool = build_known_author_pool([
+			BookMeta(calibre_id="9", uuid="u9", title="Světové drama", authors=["R.U.R."], path="/lib/9"),
+		])
+		meta = BookMeta(calibre_id=1, title="R.U.R.", authors=["Karel Čapek"], path="/lib/x (1)")
+		ex = self._extract(title_from_text="Karel Čapek")
+		assert _try_known_author_swap(meta, pool, ex) is None
 
 	def test_process_book_wiring_counts_swap_fixed(self):
 		from book_meta_fix import pipeline as pmod
