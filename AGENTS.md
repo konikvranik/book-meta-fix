@@ -72,6 +72,11 @@ src/book_meta_fix/
   models.py        core dataclasses + Verdict/Confidence enums (shared vocab)
   config.py        Config dataclass + .env walk-up loader
   i18n.py          gettext wrapper: _() with English msgids, cs catalog, locale detect
+  catalog.py       diagnosis-code help texts (CATEGORY_HELP: C1–C20, MISSING_*,
+                   EMPTY_BOOK, …) for the GUI's clickable code popups; mirrors
+                   docs/corruption-catalog.md. Msgids are wrapped in _() at MODULE
+                   level on purpose — babel only extracts literal _("…") calls, and
+                   the module imports lazily (first click) long after init_language
   readers.py       parse metadata.json (primary) / metadata.opf (fallback) / path
   library.py       traverse library tree + SQLite cache (parallel scan: the walk
                    splits per top-level dir and the per-folder cache-hit/parse/
@@ -160,7 +165,18 @@ src/book_meta_fix/
                    are SKIPPED (C14's split owns them) and multi-series
                    books are skipped and reported (a single-name proposal
                    would drop the other series)
-  extractors.py    per-format content extraction → ExtractedMeta
+  extractors.py    per-format content extraction → ExtractedMeta; PLUS
+                   stream_full_text (FULL_TEXT_LIMIT = 2M chars): the WHOLE-book
+                   text chunk-by-chunk for the GUI preview — EPUB per spine
+                   member, PDF through a piped pdftotext, TXT raw, .doc via a
+                   piped catdoc, opaque formats (mobi/pdb/…) through ONE
+                   ebook-convert render (nothing streams DURING the render,
+                   that is the "progressively, if possible" caveat), anything
+                   else via extract()'s widest window; _pump_pipe owns the
+                   child reaping (wait after EOF, kill on hang — GeneratorExit
+                   runs the finally too, so closing a stale stream leaves no
+                   zombie poppler). The pipeline's evidence windows
+                   (first_page/broader) are untouched — this is preview-only
   filecheck.py     CONTENT-PROBE validity of ebook files — the engine of `bmf clean --files`
                    (C17 invalid-file delete proposals). Safety model: a file is
                    deletable ONLY when its content is recognizable as NO book format
@@ -440,8 +456,65 @@ src/book_meta_fix/
                   (--since must NOT filter them). Run strip-covers --invalid FIRST — a folder
                   still holding an unreadable cover.jpg would get it re-picked
   gui.py           bmf gui — keyboard-first Tkinter review.yaml editor (no new writer: loads raw
-                  entry dicts, writes via review._header + review._render_entry; scrollable detail
-                  column, Tab-trap bindtag, per-format embedded covers, Ctrl+G double-decode recode,
+                  entry dicts, writes via review._header + review._render_entry; detail split is
+                  RESPONSIVE: WIDE detail pane = the scrollable review form LEFT (header,
+                  Found-problems section, fields, C19 merge panel, covers) + the content text
+                  preview RIGHT across the FULL pane height; NARROW detail (< 940 px — a small
+                  window OR the outer list sash dragged wide) = form on TOP, preview at the
+                  BOTTOM, with hysteresis so a sash drag cannot flap. ttk's Panedwindow -orient
+                  is READ-ONLY and Tk has no reparent, so the switch (_apply_detail_orient)
+                  destroys and recreates only the thin Panedwindow — the pane frames are its
+                  SIBLINGS (children of the detail frame, a layout ttk's content manager
+                  explicitly supports) and thus survive with every widget and half-typed edit
+                  intact; lift() re-stacks them above the fresh widget, and the horizontal
+                  repack must pack the scrollbars BEFORE their clients — pack allocates in
+                  order and the canvas's 720 px request starves a trailing scrollbar to 1x1.
+                  NARROW mode additionally swaps both native scrollbars for ONE chained
+                  scrollbar spanning the detail's right edge: its virtual range concatenates
+                  the form canvas overflow + the preview text overflow, and _chain_scroll
+                  maps a position piecewise — the form scrolls to its end FIRST, the text
+                  picks up only past it (BOTH widgets' moveto fractions span their WHOLE
+                  content, not just the overflow — the canvas follows the Text convention
+                  here). The wheel chains the same way (_on_wheel: a wheel falling off the
+                  form's bottom scrolls the text, the text's bottom is the page end; the
+                  form-fits no-op in _scroll_canvas returns False now so the carry can fire).
+                  The old
+                  drag-to-resize grip is gone — the pane sash IS the resize knob now,
+                  loading the WHOLE book text PROGRESSIVELY via extractors.
+                  stream_full_text (chunks append as they arrive through _after;
+                  _content_gen gates stale streams — the worker STOPS pulling and
+                  closes the generator, which reaps pipe children; an empty stream
+                  falls back to extract()'s widest window or its error message;
+                  mojibake detection/recode defaults run ONCE on the complete text,
+                  per-chunk detection would flicker; a format-radio click reloads via
+                  the _format_var trace/_on_format_changed — historically the radios
+                  had no command at all and a click never reloaded anything; the old
+                  first-page/broader toggle and its Ctrl+T are GONE); the
+                  Found-problems section lists ALL diagnoses via sort_diagnoses (decision-waiting
+                  proposals → damage → MISSING_* info, stable; the old "primary + (+N more)"
+                  header line hid the load-bearing one behind the counter) — the body
+                  is ONE disabled tk.Text styled FLAT on the form background, height
+                  == wrapped rows (recounted on <Configure>, _sync_problems_height)
+                  and NO scrollbar, because a disabled Text still SELECTS with the
+                  mouse: the lines are copyable (Ctrl+C / right-click copy menu —
+                  clipboard writes are MANUAL, event_generate("<<Copy>>") chained
+                  from inside a binding never reaches the class binding) and every
+                  CODE span is clickable, opening catalog.category_help in a popup;
+                  the click resolves on ButtonRelease through a WIDGET-level index
+                  lookup + txt.compare — tag_bind <Button-1> is unreliable under
+                  event_generate — and a drag-selection (sel non-empty) suppresses
+                  the popup; the C19 merge panel
+                  (_load_merge_panel, packed only for merge entries) shows the survivor + pick
+                  reason + cluster siblings and a per-field comparison via merge_projection_rows —
+                  survivor value / this book's value / the EFFECTIVE result computed through the
+                  SAME mover.merge_meta + _apply_fields projection apply executes, so the panel
+                  cannot disagree with the outcome; source radios ⬅/➡ write explicit picks into
+                  proposed[field] (apply's merged_transform stamps them over the automatic
+                  result; ∅ = keep empty), the cover row offers thumbnails of both sides and
+                  proposed.cover_source auto/survivor/loser/loser_epub (the EPUB extraction is
+                  generated-placeholder gated), merge_file_plan pre-reports every move and
+                  name collision, and Reset to automatic drops all picks; Tab-trap bindtag,
+                  per-format embedded covers, Ctrl+G double-decode recode,
                   clickable path link / list double-click = open folder via open_folder_in_manager;
                   Verified checkbox (Ctrl+O) = the persistent user-OK mark; "+ library" search
                   matches the whole library via a fulltext index built by ONE background sweep at
@@ -934,10 +1007,16 @@ src/book_meta_fix/
   its main loop — a survivor may be moved by its own placement later in the
   run — and the entry is pruned once merged (counted in
   `summary["merged_folders"]`; the placement-merge counter `merged` is a
-  different thing). Field proposals are IGNORED for merge entries (the merge
-  branch consumes only `merge_into`; the GUI's bulk field edit skips them for
-  the same reason). `keep`-semantics do not apply: there is no retain variant
-  of a merge.
+  different thing). The OTHER proposed keys are the GUI merge panel's
+  explicit picks and are the OPPOSITE of ignored: after
+  `mover.merge_folders`'s automatic survivor-wins merge, the remaining
+  proposed fields are stamped over the result via the merged_transform hook
+  (a null = ∅ clears the field), and `proposed.cover_source`
+  (survivor/loser/loser_epub) picks which cover.jpg ends up at the survivor
+  — the loser's cover is spooled BEFORE the merge destroys the folder and
+  swapped in AFTER (survivor's old cover → cover.jpg.bak); the bulk field
+  edit still skips merge entries (picks are per-entry). `keep`-semantics do
+  not apply: there is no retain variant of a merge.
 - **The book `uuid` is the unified identity** (`models.BookMeta.uuid`): it lives
   in `metadata.json` (source of truth), mirrored to `metadata.opf`, and is the
   single key for **carry-over** (`.bak` match), **pruning** (`apply` drops

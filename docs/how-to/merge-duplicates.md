@@ -59,6 +59,34 @@ review entry whose `proposed.merge_into` names the survivor's folder.
 `analyze --merge` chains the same sweep onto the end of a run, over the
 books that analyze already scanned — no second (NFS-slow) library walk.
 
+## Reviewing a merge in the GUI
+
+Selecting a merge entry in `bmf gui` shows two things a plain entry does
+not:
+
+- **Found problems** — every diagnosis of the book in one section, sorted
+  by severity (decision-waiting proposals first, then damage, then
+  missing-field info), instead of the old "primary + (+N more)" header
+  line that could hide the important one behind the counter.
+- **Merge panel** (only for merge entries) — the survivor with the reason
+  it was picked (valid ISBN / lowest id), the rest of the cluster, and a
+  per-field comparison of the two folders: survivor's value, this book's
+  value, and the RESULT — computed through the same projection `bmf apply`
+  executes, so what you see is what will be written.
+
+By default the automatic rule decides (survivor wins, this book fills
+gaps). Where you disagree, flip the source radio **⬅ survivor / ➡ this
+book** — the pick lands in `proposed[field]` and apply writes it over the
+automatic result. The **cover** gets its own choice with thumbnails of
+both sides: automatic / the survivor's / this book's `cover.jpg` / this
+book's embedded EPUB cover (extracted with the generated-placeholder
+gate). The file-fate lines show every move and name collision in advance,
+and **Reset to automatic** drops all picks.
+
+The merge action itself is approved via the `merge` radio or **Ctrl+R**;
+`keep` is the veto. Un-decided (pending) merge entries are skipped by
+`bmf apply`.
+
 ## Audiobookshelf
 
 Merging changes the survivor folders on disk (new files move in) and removes

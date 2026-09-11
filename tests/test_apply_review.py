@@ -1124,7 +1124,7 @@ class TestDeleteFiles:
 class TestMergeAction:
 	"""action: merge (C19) — fold a duplicate folder into its survivor."""
 
-	def _seed_dup(self, library: Path) -> tuple[Path, Path]:
+	def _seed_dup(self, library: Path, *, covers: bool = False) -> tuple[Path, Path]:
 		"""Two same-work folders: Author/Book (1) survives, Author/Book (2) merges in."""
 		import json
 
@@ -1137,6 +1137,8 @@ class TestMergeAction:
 				"isbn": "9780306406157",
 			}), encoding="utf-8")
 			(folder / f"Book - Author ({cid}).epub").write_text(f"epub-{cid}", encoding="utf-8")
+			if covers:
+				(folder / "cover.jpg").write_bytes(f"cover-{cid}".encode())
 			folders.append(folder)
 		return folders[0], folders[1]
 
@@ -1194,6 +1196,21 @@ class TestMergeAction:
 		assert not (survivor / "Book - Author (2).epub").exists()
 		assert len(parse_review(review)) == 1  # never pruned in dry-run
 		assert summary["snapshot"] is None
+
+	def test_pending_merge_entry_is_skipped(self, tmp_path):
+		"""action: null is NOT a decision — the merge waits for the user, both
+		folders stay and the entry survives (that is the review gate)."""
+		library = tmp_path / "lib"
+		survivor, loser = self._seed_dup(library)
+		review = tmp_path / "review.yaml"
+		entry = self._merge_entry()
+		entry["action"] = None  # the no-ISBN tier arrives pending
+		_write_review(review, [entry])
+		summary = apply_review(review, library, dry_run=False, place=False)
+		assert summary["merged_folders"] == 0
+		assert summary["errors"] == []
+		assert survivor.is_dir() and loser.is_dir()
+		assert len(parse_review(review)) == 1
 
 	def test_recheck_veto_keeps_changed_loser(self, tmp_path):
 		"""The proposal may predate edits: same_book re-checked on FRESH disk
@@ -1271,3 +1288,104 @@ class TestMergeAction:
 		# The ebook file itself was MOVED, not deleted — it must not be in the
 		# snapshot (it still lives at the survivor).
 		assert not any(n.endswith(".epub") for n in names)
+
+
+class TestMergePicks(TestMergeAction):
+	"""The merge panel's explicit picks: proposed field overrides ride
+	merged_transform over the automatic survivor-wins result; cover_source
+	picks swap/reject covers after the merge."""
+
+	def test_field_pick_overrides_survivor_wins(self, tmp_path):
+		"""The survivor's year wins automatically — an explicit pick for the
+		loser's year must overturn it in the merged metadata."""
+		import json
+
+		library = tmp_path / "lib"
+		survivor, loser = self._seed_dup(library)
+		for folder, year in ((survivor, "2010"), (loser, "1995")):
+			md = json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
+			md["publishedYear"] = year
+			(folder / "metadata.json").write_text(json.dumps(md), encoding="utf-8")
+		review = tmp_path / "review.yaml"
+		entry = self._merge_entry()
+		entry["proposed"]["year"] = 1995  # the panel's explicit "this book" pick
+		_write_review(review, [entry])
+		summary = apply_review(review, library, dry_run=False, place=False)
+		assert summary["merged_folders"] == 1
+		md = json.loads((survivor / "metadata.json").read_text(encoding="utf-8"))
+		assert md["publishedYear"] == "1995"
+
+	def test_cover_source_loser_swaps_survivors_cover(self, tmp_path, monkeypatch):
+		monkeypatch.chdir(tmp_path)
+		library = tmp_path / "lib"
+		survivor, loser = self._seed_dup(library, covers=True)
+		review = tmp_path / "review.yaml"
+		entry = self._merge_entry()
+		entry["proposed"]["cover_source"] = "loser"
+		_write_review(review, [entry])
+		summary = apply_review(review, library, dry_run=False, place=False)
+		assert summary["merged_folders"] == 1
+		assert summary["errors"] == []
+		assert (survivor / "cover.jpg").read_bytes() == b"cover-2"
+		assert (survivor / "cover.jpg.bak").read_bytes() == b"cover-1"
+
+	def test_cover_source_survivor_blocks_gapfill(self, tmp_path, monkeypatch):
+		"""The survivor has NO cover; without a pick the loser's would
+		gap-fill. cover_source=survivor keeps the survivor coverless."""
+		monkeypatch.chdir(tmp_path)
+		library = tmp_path / "lib"
+		survivor, loser = self._seed_dup(library, covers=False)
+		(loser / "cover.jpg").write_bytes(b"cover-2")
+		review = tmp_path / "review.yaml"
+		entry = self._merge_entry()
+		entry["proposed"]["cover_source"] = "survivor"
+		_write_review(review, [entry])
+		summary = apply_review(review, library, dry_run=False, place=False)
+		assert summary["merged_folders"] == 1
+		assert summary["errors"] == []
+		assert not (survivor / "cover.jpg").exists()
+
+	def test_cover_source_loser_epub_extracts(self, tmp_path, monkeypatch):
+		"""cover_source=loser_epub extracts the embedded cover through the
+		same recovery path (generated-placeholder gated) and swaps it in."""
+		monkeypatch.chdir(tmp_path)
+		import book_meta_fix.covers as covers_mod
+
+		library = tmp_path / "lib"
+		survivor, loser = self._seed_dup(library, covers=False)
+		(survivor / "cover.jpg").write_bytes(b"cover-1")
+		review = tmp_path / "review.yaml"
+		entry = self._merge_entry()
+		entry["proposed"]["cover_source"] = "loser_epub"
+		_write_review(review, [entry])
+
+		extracted = b"embedded-cover-bytes"
+		spooled: dict = {}
+
+		def fake_recover(book_path, dest_path):
+			spooled["dest"] = Path(dest_path)
+			Path(dest_path).write_bytes(extracted)
+			return True
+
+		monkeypatch.setattr(covers_mod, "recover_cover_from_book", fake_recover)
+		summary = apply_review(review, library, dry_run=False, place=False)
+		assert summary["merged_folders"] == 1
+		assert summary["errors"] == []
+		assert (survivor / "cover.jpg").read_bytes() == extracted
+		assert (survivor / "cover.jpg.bak").read_bytes() == b"cover-1"
+		# The spool is cleaned up after the run.
+		assert not spooled["dest"].exists()
+
+	def test_cover_source_loser_without_cover_is_an_error(self, tmp_path):
+		library = tmp_path / "lib"
+		survivor, loser = self._seed_dup(library, covers=False)
+		review = tmp_path / "review.yaml"
+		entry = self._merge_entry()
+		entry["proposed"]["cover_source"] = "loser"
+		_write_review(review, [entry])
+		summary = apply_review(review, library, dry_run=False, place=False)
+		assert summary["merged_folders"] == 0
+		assert any("cover_source=loser" in e for e in summary["errors"])
+		# Nothing merged — both folders intact, entry stays for re-decision.
+		assert survivor.is_dir() and loser.is_dir()
+		assert len(parse_review(review)) == 1

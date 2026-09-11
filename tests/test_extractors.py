@@ -515,3 +515,135 @@ class TestEpubSingleOpfRead:
 		# And the semantics survived: ISBN from the colophon, 13 items joined.
 		assert result.isbn_from_text and "9788072072323" in result.isbn_from_text
 		assert result.broader_text and len(result.broader_text) > len(result.first_page_text)
+
+
+# ---------------------------------------------------------------------------
+# Whole-book text streaming (GUI content preview)
+# ---------------------------------------------------------------------------
+
+
+def _make_stream_epub(path: Path, chapters: int = 4) -> Path:
+	"""Minimal multi-chapter EPUB whose spine members carry readable text."""
+	with zipfile.ZipFile(path, "w") as zf:
+		zf.writestr("mimetype", "application/epub+zip")
+		zf.writestr(
+			"META-INF/container.xml",
+			'<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+			'<rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/>'
+			"</rootfiles></container>",
+		)
+		manifest = "".join(
+			f'<item id="c{i}" href="ch{i}.xhtml" media-type="application/xhtml+xml"/>'
+			for i in range(chapters)
+		)
+		spine = "".join(f'<itemref idref="c{i}"/>' for i in range(chapters))
+		zf.writestr(
+			"content.opf",
+			'<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="2.0">'
+			"<metadata/>"
+			f"<manifest>{manifest}</manifest><spine>{spine}</spine></package>",
+		)
+		for i in range(chapters):
+			zf.writestr(
+				f"ch{i}.xhtml",
+				f"<html><body><p>Kapitola číslo {i} s dostatečně dlouhým obsahem pro detekci.</p></body></html>",
+			)
+	return path
+
+
+class TestStreamFullText:
+	def test_epub_streams_per_spine_member(self, tmp_path):
+		"""Whole spine is served, progressively (several chunks, ordered)."""
+		from book_meta_fix.extractors import stream_full_text
+
+		p = _make_stream_epub(tmp_path / "book.epub")
+		chunks = list(stream_full_text(p))
+		assert len(chunks) >= 2  # progressive: one chunk per spine member
+		full = "".join(chunks)
+		assert full.endswith("\n")
+		for i in range(4):
+			assert f"Kapitola číslo {i}" in full
+
+	def test_epub_bad_zip_yields_empty_stream(self, tmp_path):
+		from book_meta_fix.extractors import stream_full_text
+
+		p = tmp_path / "broken.epub"
+		p.write_bytes(b"not a zip")
+		assert list(stream_full_text(p)) == []
+
+	def test_txt_streams_in_chunks_and_full(self, tmp_path, monkeypatch):
+		"""A TXT bigger than the chunk size arrives complete, in many chunks."""
+		import book_meta_fix.extractors as ex
+
+		monkeypatch.setattr(ex, "_READ_CHUNK", 1024)
+		p = tmp_path / "book.txt"
+		p.write_text("první řádka\n" + ("tělo knihy\n" * 400), encoding="utf-8")
+		chunks = list(ex.stream_full_text(p))
+		assert len(chunks) > 2
+		assert "".join(chunks) == p.read_text(encoding="utf-8")
+
+	def test_txt_cp1250_decoded_consistently(self, tmp_path):
+		import book_meta_fix.extractors as ex
+
+		p = tmp_path / "book.txt"
+		p.write_bytes("Pavel Kohout - Horká vlna".encode("cp1250"))
+		full = "".join(ex.stream_full_text(p))
+		assert "Horká vlna" in full
+
+	def test_full_text_limit_truncates(self, tmp_path, monkeypatch):
+		import book_meta_fix.extractors as ex
+
+		monkeypatch.setattr(ex, "FULL_TEXT_LIMIT", 50)
+		p = tmp_path / "book.txt"
+		p.write_text("x" * 10_000, encoding="utf-8")
+		full = "".join(ex.stream_full_text(p))
+		assert len(full) == 50
+
+	def test_unknown_suffix_yields_empty(self, tmp_path):
+		from book_meta_fix.extractors import stream_full_text
+
+		p = tmp_path / "book.xyz"
+		p.write_bytes(b"??")
+		assert list(stream_full_text(p)) == []
+
+	def test_missing_file_yields_empty(self, tmp_path):
+		from book_meta_fix.extractors import stream_full_text
+
+		assert list(stream_full_text(tmp_path / "nope.epub")) == []
+
+	def test_pdf_stream_reads_pipe(self, tmp_path, monkeypatch):
+		"""pdftotext output is consumed from the pipe and the child reaped."""
+		import io as _io
+
+		import book_meta_fix.extractors as ex
+
+		class _FakeProc:
+			def __init__(self, data: bytes):
+				self.stdout = _io.BytesIO(data)
+				self.waited = False
+				self.killed = False
+
+			def wait(self, timeout=None):
+				self.waited = True
+				return 0
+
+			def kill(self):
+				self.killed = True
+
+		proc = _FakeProc(b"Cela kniha v pdf")
+		monkeypatch.setattr(ex.shutil, "which", lambda name: "/usr/bin/pdftotext")
+		monkeypatch.setattr(ex.subprocess, "Popen", lambda *a, **k: proc)
+		p = tmp_path / "book.pdf"
+		p.write_bytes(b"%PDF-")
+		chunks = list(ex.stream_full_text(p))
+		assert "".join(chunks) == "Cela kniha v pdf"
+		assert proc.waited and not proc.killed
+
+	def test_doc_falls_back_to_ebook_convert_without_catdoc(self, tmp_path, monkeypatch):
+		"""catdoc missing → the ebook-convert single-shot serves the whole text."""
+		import book_meta_fix.extractors as ex
+
+		monkeypatch.setattr(ex.shutil, "which", lambda name: None)
+		p = tmp_path / "book.doc"
+		p.write_bytes(b"fake")
+		assert list(ex.stream_full_text(p)) == []  # no catdoc, no ebook-convert

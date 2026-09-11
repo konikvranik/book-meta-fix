@@ -20,12 +20,14 @@ The dispatch function `extract()` picks the right extractor by file extension.
 """
 from __future__ import annotations
 
+import codecs
 import logging
 import os
 import re
 import shutil
 import subprocess
 import zipfile
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -988,3 +990,234 @@ def extract(path: str | Path) -> ExtractedMeta:
 	if not path.is_file():
 		return ExtractedMeta(source_format=suffix.lstrip("."), error="file not found")
 	return extractor(path)
+
+
+# ---------------------------------------------------------------------------
+# Whole-book text streaming (the GUI content preview)
+# ---------------------------------------------------------------------------
+
+# The preview's job is reading / spot-checking, not archiving: a Tk Text stays
+# responsive with a few MB, and dragging tens of MB over NFS per click would
+# hurt more than the truncated tail. The GUI appends a visible truncation
+# note when the stream reaches the cap.
+FULL_TEXT_LIMIT = 2_000_000
+
+_READ_CHUNK = 65536
+
+# Formats only calibre can render (opaque/binary) — ebook-convert serves the
+# whole text as one shot; there is nothing to stream progressively.
+_CONVERT_ONLY_SUFFIXES = frozenset({".pdb", ".mobi", ".azw", ".azw3", ".prc", ".rtf", ".lit", ".djvu"})
+
+
+def stream_full_text(path: str | Path) -> Iterator[str]:
+	"""Yield the book's WHOLE page text progressively, chunk by chunk.
+
+	The GUI content preview consumes this: chunks are appended to the view as
+	they arrive, so a slow extraction (a big file over NFS, an ebook-convert
+	render) shows its head immediately instead of a bare "loading…" until the
+	end. Formats with a real streaming source (EPUB spine members, the PDF
+	pdftotext pipe, TXT bytes, .doc via catdoc) yield many chunks; formats
+	that must render through a converter (ebook-convert) yield the whole text
+	sliced once the render finishes — progressive where possible, whole-text
+	always. That is the point: the old first-page/broader toggle hid all but
+	a 30k-char window; the preview now always loads the entire book.
+
+	An empty stream means nothing could be extracted (unknown format,
+	unreadable file) — the caller decides what to show (the GUI falls back to
+	``extract()`` so its error message survives). Failures are logged at
+	debug, never raised to the consumer.
+
+	Does NOT touch :class:`ExtractedMeta` — the pipeline's evidence windows
+	(first_page/broader) are unchanged; this is a preview-only path.
+	"""
+	path = Path(path)
+	if not path.is_file():
+		return
+	suffix = path.suffix.lower()
+	if suffix == ".epub":
+		yield from _stream_epub(path)
+	elif suffix == ".pdf":
+		yield from _stream_pdf(path)
+	elif suffix == ".txt":
+		yield from _stream_txt(path)
+	elif suffix == ".doc":
+		# catdoc first (instant, reads CP1250 .doc correctly); when it is
+		# missing or fails, calibre renders instead.
+		text = _catdoc_to_text(path)
+		if text:
+			yield from _slices(text)
+		else:
+			yield from _stream_ebook_convert(path)
+	elif suffix in _CONVERT_ONLY_SUFFIXES:
+		yield from _stream_ebook_convert(path)
+	else:
+		# Comics / .mbp sidecars / unknown: no dedicated stream — serve the
+		# windows extract() already knows how to pull.
+		yield from _stream_extract_fallback(path)
+
+
+def _slices(text: str) -> Iterator[str]:
+	"""Yield *text* in read-sized slices so the view paints progressively."""
+	for i in range(0, min(len(text), FULL_TEXT_LIMIT), _READ_CHUNK):
+		yield text[i : i + _READ_CHUNK]
+
+
+def _stream_epub(path: Path) -> Iterator[str]:
+	"""Whole EPUB spine, one stripped member per chunk."""
+	try:
+		with zipfile.ZipFile(path, "r") as zf:
+			container = etree.fromstring(zf.read("META-INF/container.xml"))
+			ns_container = {"c": "urn:oasis:names:tc:opendocument:xmlns:container"}
+			rootfile = container.find(".//c:rootfile", ns_container)
+			if rootfile is None:
+				return
+			opf_path = rootfile.get("full-path")
+			if not opf_path:
+				return
+			opf = etree.fromstring(zf.read(opf_path))
+			total = 0
+			for href in _spine_hrefs_from_opf(opf, opf_path):
+				if total >= FULL_TEXT_LIMIT:
+					return
+				try:
+					text = _strip_html(zf.read(href))
+				except Exception:  # noqa: BLE001 — unreadable member is skipped, as everywhere
+					continue
+				if not text or len(text.strip()) <= 5:
+					continue
+				if total + len(text) > FULL_TEXT_LIMIT:
+					text = text[: FULL_TEXT_LIMIT - total]
+				total += len(text) + 1
+				# A newline between members reads like a chapter break —
+				# unlike the evidence windows this preview is for reading.
+				yield text + "\n"
+	except Exception as e:  # noqa: BLE001
+		log.debug("full-text epub stream failed for %s: %s", path, e)
+
+
+def _pump_pipe(proc: subprocess.Popen, decoder: codecs.IncrementalDecoder) -> Iterator[str]:
+	"""Common read loop for the streaming subprocesses (pdftotext/catdoc).
+
+	The child is waited on after EOF and killed if it will not exit — a
+	GeneratorExit (the GUI moved to another book and stopped consuming) runs
+	this finally block too, so no zombie poppler survives the preview.
+	"""
+	assert proc.stdout is not None
+	total = 0
+	try:
+		while total < FULL_TEXT_LIMIT:
+			raw = proc.stdout.read(_READ_CHUNK)
+			if not raw:
+				break
+			text = decoder.decode(raw)
+			if not text:
+				continue
+			if total + len(text) > FULL_TEXT_LIMIT:
+				text = text[: FULL_TEXT_LIMIT - total]
+			total += len(text)
+			yield text
+		text = decoder.decode(b"", True)
+		if text and total < FULL_TEXT_LIMIT:
+			yield text[: FULL_TEXT_LIMIT - total]
+	finally:
+		proc.stdout.close()
+		try:
+			proc.wait(timeout=10)
+		except Exception:  # noqa: BLE001
+			proc.kill()
+
+
+def _stream_pdf(path: Path) -> Iterator[str]:
+	"""Whole PDF text layer, streamed from poppler's stdout pipe."""
+	pdftotext = shutil.which("pdftotext")
+	if not pdftotext:
+		return
+	try:
+		proc = subprocess.Popen(
+			[pdftotext, "-enc", "UTF-8", "-q", str(path), "-"],
+			stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+		)
+	except (OSError, ValueError) as e:
+		log.debug("pdftotext spawn failed for %s: %s", path, e)
+		return
+	# Incremental decoder: a chunk boundary must not split a multibyte char
+	# into U+FFFD garbage mid-stream.
+	yield from _pump_pipe(proc, codecs.getincrementaldecoder("utf-8")(errors="replace"))
+
+
+def _stream_txt(path: Path) -> Iterator[str]:
+	"""Whole TXT file streamed in chunks (encoding detected on the head).
+
+	Same encoding ladder as extract_txt: utf-8, then the common CZ single-byte
+	suspects, then lossy utf-8 — decided ONCE on the head so the stream is
+	consistent instead of flip-flopping per chunk.
+	"""
+	try:
+		with open(path, "rb") as fh:
+			head = fh.read(15000)
+			enc = "utf-8"
+			for cand in ("utf-8", "cp1250", "iso-8859-2"):
+				try:
+					head.decode(cand)
+					enc = cand
+					break
+				except UnicodeDecodeError:
+					continue
+			fh.seek(0)
+			decoder = codecs.getincrementaldecoder(enc)(errors="replace")
+			total = 0
+			while total < FULL_TEXT_LIMIT:
+				raw = fh.read(_READ_CHUNK)
+				if not raw:
+					break
+				text = decoder.decode(raw)
+				if not text:
+					continue
+				if total + len(text) > FULL_TEXT_LIMIT:
+					text = text[: FULL_TEXT_LIMIT - total]
+				total += len(text)
+				yield text
+	except OSError as e:
+		log.debug("full-text txt stream failed for %s: %s", path, e)
+
+
+def _stream_catdoc(path: Path) -> Iterator[str]:
+	"""Whole legacy .doc text, streamed from catdoc's stdout pipe."""
+	catdoc = shutil.which("catdoc")
+	if not catdoc:
+		return
+	try:
+		proc = subprocess.Popen(
+			[catdoc, "-d", "utf-8", str(path)],
+			stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+		)
+	except (OSError, ValueError) as e:
+		log.debug("catdoc spawn failed for %s: %s", path, e)
+		return
+	# -s would silence garbled-char warnings on stderr; stderr is devnull here.
+	yield from _pump_pipe(proc, codecs.getincrementaldecoder("utf-8")(errors="replace"))
+
+
+def _stream_ebook_convert(path: Path) -> Iterator[str]:
+	"""Whole text of an opaque format (mobi/pdb/...), rendered by calibre.
+
+	ebook-convert writes a temp file, so nothing streams DURING the render —
+	this is the "if possible" caveat of whole-text loading. The finished text
+	is still yielded in slices so the view paints progressively instead of
+	blocking on one huge insert.
+	"""
+	text = _ebook_convert_to_text(path)
+	if text:
+		yield from _slices(text)
+
+
+def _stream_extract_fallback(path: Path) -> Iterator[str]:
+	"""Formats without a real stream: the widest window extract() finds."""
+	try:
+		meta = extract(path)
+	except Exception as e:  # noqa: BLE001
+		log.debug("full-text fallback failed for %s: %s", path, e)
+		return
+	text = meta.broader_text or meta.first_page_text
+	if text:
+		yield text[:FULL_TEXT_LIMIT]

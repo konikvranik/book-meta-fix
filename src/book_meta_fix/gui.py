@@ -54,11 +54,11 @@ from .covers import (
 )
 from .detectors import split_series_index
 from .encoding import detect_double_decode, recode, recode_failure_reason, repair_chain
-from .extractors import extract
+from .extractors import FULL_TEXT_LIMIT, extract, stream_full_text
 from .i18n import _
 from .library import _META_FILES, Cache, _is_excluded, iter_book_folders
 from .models import series_entry_pair
-from .mover import merge_folders, same_book
+from .mover import merge_folders, merge_meta, same_book
 from .readers import EBOOK_EXTS, read_book_folder
 from .review import _build_current, _header, _load_raw_entries, _render_entry
 from .writers import ensure_uuid, write_book_meta
@@ -121,6 +121,14 @@ _FOCUSABLE_CLASSES = frozenset({
 # "move to start"), but it stays here as a passthrough so the generic handler
 # never blocks it.
 _PASSTHROUGH = {"c", "v", "x", "a", "z", "y"}
+
+# Responsive detail split: below this width (px of the DETAIL area, not the
+# whole window — widening the book list with the outer sash counts too) the
+# content preview moves from the right column to a bottom row. It moves back
+# only after the width exceeds the threshold by _DETAIL_HYSTERESIS, so
+# dragging a sash across the boundary cannot flap between the two layouts.
+_DETAIL_NARROW_WIDTH = 940
+_DETAIL_HYSTERESIS = 80
 
 
 # ---------------------------------------------------------------------------
@@ -460,6 +468,140 @@ def merge_choice_proposal(field: str, value) -> dict:
 	if isinstance(value, list):  # authors / genres
 		return {field: list(value)}
 	return {field: value}
+
+
+# Severity order for the "Found problems" section: pending ACTION proposals
+# first (they wait for a decision), then the NEEDS_REVIEW-class damage,
+# MISSING_* info last-ish, unknown categories kept at the very end in the
+# analyzer's own order (the sort is stable).
+_DIAG_SEVERITY: dict[str, int] = {
+	"C6": 0, "C17": 0, "C19": 0,
+	"C1": 1, "C2": 1, "C3": 1, "C4": 1, "C5": 1, "C7": 1, "C8": 1,
+	"C10": 1, "C11": 1, "C12": 1, "C13": 1, "C14": 1,
+}
+_CONFIDENCE_RANK = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+
+
+def _select_all_text(event) -> str:
+	"""Ctrl+A inside a Text widget: select everything.
+
+	X11's Text class binding for Control-a is "beginning of line" (the same
+	surprise as in Entry, which is rebound per-widget); the readonly views
+	want the universal select-all semantics.
+	"""
+	w = event.widget
+	w.tag_add("sel", "1.0", "end")
+	return "break"
+
+
+def sort_diagnoses(diags: list[dict]) -> list[dict]:
+	"""All of an entry's diagnoses, most important first.
+
+	The review header used to show only the primary diagnosis plus
+	"(+N more)" — and WHICH diagnosis landed first was the detector's
+	accident, so the load-bearing one could hide behind the counter. The
+	section lists everything, ordered by a small severity table
+	(decision-waiting proposals → damage → missing-field info), confidence
+	breaking ties.
+	"""
+	def _key(item):
+		i, d = item
+		cat = str(d.get("category") or "")
+		weight = _DIAG_SEVERITY.get(cat, 2 if cat.startswith("MISSING_") else 3)
+		return (weight, _CONFIDENCE_RANK.get(str(d.get("confidence") or "").upper(), 3), i)
+
+	return [d for _, d in sorted(enumerate(diags), key=_key)]
+
+
+def merge_projection_rows(survivor_meta, loser_meta, entry: dict | None = None) -> list[dict]:
+	"""Comparison rows for the C19 merge panel — what apply WILL write.
+
+	One row per :data:`MERGE_FIELDS` entry where the two folders differ or an
+	explicit pick exists. Each row carries the survivor's disk value, the
+	loser's disk value and the EFFECTIVE post-merge value: the automatic
+	survivor-wins result (:func:`mover.merge_meta`) with the entry's explicit
+	``proposed`` picks applied on top — the same projection the apply branch
+	executes, so the panel can never disagree with the outcome. Display
+	strings reuse the merge dialog's cell renderer (∅ = empty).
+	"""
+	merged = merge_meta(survivor_meta, loser_meta)
+	picks: dict = {}
+	if entry is not None:
+		picks = {
+			k: v for k, v in (entry.get("proposed") or {}).items()
+			if k not in ("merge_into", "source", "delete_files", "cover_source")
+		}
+		if picks:
+			from .pipeline import _apply_fields  # lazy: pipeline pulls the world
+
+			_apply_fields(merged, picks)
+	rows = []
+	for field, label in MERGE_FIELDS:
+		sv = merge_field_value(None, survivor_meta, field)
+		lv = merge_field_value(entry, loser_meta, field)
+		ev = merge_field_value(None, merged, field)
+		s_text, l_text, e_text = (merge_cell_text(field, v) for v in (sv, lv, ev))
+		if s_text == l_text and field not in picks:
+			continue  # identical on both sides and unpicked — no decision to show
+		rows.append({
+			"field": field, "label": label,
+			"survivor": sv, "loser": lv, "effective": ev,
+			"s_text": s_text, "l_text": l_text, "e_text": e_text,
+			"picked": field in picks,
+		})
+	return rows
+
+
+def merge_file_plan(loser_folder: Path, survivor_folder: Path,
+                    cover_source: str | None = None) -> list[str]:
+	"""Human-readable fate of the loser's files, using the SAME rules
+	:func:`mover._merge_format_files` applies (pure reporting — no disk
+	changes, identical bytes skipped, name collisions get the ``(id N)``
+	suffix, the survivor's cover wins unless an explicit ``cover_source``
+	pick says otherwise)."""
+	try:
+		survivor_files = {
+			p.name.lower(): p for p in survivor_folder.iterdir() if p.is_file()
+		}
+	except OSError:
+		survivor_files = {}
+	lines: list[str] = []
+	try:
+		entries_iter = sorted(loser_folder.iterdir(), key=lambda p: p.name)
+	except OSError:
+		return lines
+	for p in entries_iter:
+		if not p.is_file():
+			continue
+		lname = p.name.lower()
+		if lname in _META_FILES or lname.endswith(".bak"):
+			continue  # subsumed by the merged metadata
+		is_ebook = p.suffix.lower() in EBOOK_EXTS
+		is_cover = lname == "cover.jpg"
+		if not (is_ebook or is_cover):
+			continue
+		target = survivor_files.get(lname)
+		if is_cover:
+			if cover_source in ("loser", "loser_epub"):
+				lines.append(_("cover.jpg → this book's cover becomes THE cover (survivor's → cover.jpg.bak)"))
+			elif target is not None:
+				lines.append(_("cover.jpg → the survivor's cover wins (this one is discarded)"))
+			else:
+				lines.append(_("cover.jpg → moves to the survivor (it has none)"))
+			continue
+		if target is None:
+			lines.append(_("{name} → moves to the survivor").format(name=p.name))
+			continue
+		try:
+			if (target.stat().st_size == p.stat().st_size
+					and target.read_bytes() == p.read_bytes()):
+				lines.append(_("{name} → identical bytes at the survivor (skipped)").format(name=p.name))
+				continue
+		except OSError:
+			pass
+		lines.append(_('{name} → name collision at the survivor, renamed to "{stem} (id){sfx}"').format(
+			name=p.name, stem=p.stem, sfx=p.suffix))
+	return lines
 
 
 def execute_merge(entries: list[dict], winner_idx: int, loser_idxs,
@@ -1970,16 +2112,25 @@ class ReviewEditorApp:
 		self._cover_imgs: list = []
 		self._cover_caps: list = []
 
-		# Content state.
+		# Content state. The preview always loads the WHOLE book text,
+		# progressively: stream_full_text() yields chunks as they are obtained
+		# and the worker marshals each onto the Tk thread (the old
+		# first-page/broader toggle is gone — a 30k window was the wrong tool
+		# for reading). `_content_gen` invalidates in-flight streams when the
+		# book or format changes mid-flight. The _format_var trace is what
+		# makes a format-radio CLICK load that format (see _refresh_formats).
 		self._format_var = tk.StringVar()
-		self._view_var = tk.StringVar(value="first")
-		self._content_cache: dict[str, object] = {}  # file path -> ExtractedMeta
+		self._format_var.trace_add("write", lambda *_: self._on_format_changed())
+		self._content_gen = 0
+		self._content_path: str | None = None
+		self._content_pieces: list[str] = []  # chunks of the current stream
 		self._format_files: list = []
 		self._recode_var = tk.BooleanVar(value=False)
 		self._recode_from = tk.StringVar(value="cp1250")
 		self._recode_to = tk.StringVar(value="utf-8")
 		self._content_raw = ""
 		self._content_repaired: str | None = None
+		self._help_win: tk.Toplevel | None = None  # category-help popup
 
 		# List cover hover-popup state.
 		self._big_thumbs: dict = {}  # uuid -> PIL or None (on-demand, capped)
@@ -2022,10 +2173,9 @@ class ReviewEditorApp:
 		self._style = ttk.Style(self.root)
 		self._field_bg = self._style.lookup("TEntry", "fieldbackground") or "#ffffff"
 		self._field_fg = self._style.lookup("TEntry", "foreground") or "#000000"
+		self._form_bg = self._style.lookup("TFrame", "background") or "#d9d9d9"
 		try:
-			self.root.configure(
-				background=self._style.lookup("TFrame", "background") or "#d9d9d9"
-			)
+			self.root.configure(background=self._form_bg)
 		except Exception:  # noqa: BLE001
 			pass
 
@@ -2114,15 +2264,38 @@ class ReviewEditorApp:
 
 	def _build_right_panel(self, parent) -> None:
 		frame = ttk.Frame(parent)
+		self._detail_frame = frame
+		# RESPONSIVE detail split: WIDE detail = the scrollable review form
+		# LEFT + the content preview RIGHT across the full pane height
+		# (screens are wider than tall — a tall reading pane is exactly what
+		# the extra width is for); NARROW detail = the form on TOP + the
+		# preview at the BOTTOM. ttk's Panedwindow -orient is READ-ONLY
+		# ("dynamic oriention changes NYI" in the Tk source) and Tk cannot
+		# reparent a widget, so switching orientation means DESTROYING the
+		# Panedwindow and building a new one — which is only survivable
+		# because the panes are NOT its children but its SIBLINGS (children
+		# of this frame): everything built inside them (the whole form, the
+		# streaming preview, half-typed edits) survives the switch. ttk's
+		# content manager explicitly allows managing a sibling ("container
+		# is a descendant of the window's parent"), and the Panedwindow
+		# sits at (0,0) filling the frame, so pane coordinates line up.
+		self._form_pane = ttk.Frame(frame)
+		self._content_pane = ttk.Frame(frame)
+		self._cols = None
+		self._detail_orient = None
+
+		# -- form column: the scrollable detail canvas --------------------
+		form_pane = self._form_pane
 		# Scrollable detail column: Canvas + inner frame + scrollbar.
-		self.canvas = tk.Canvas(frame, highlightthickness=0)
+		self.canvas = tk.Canvas(form_pane, highlightthickness=0, width=720)
 		try:
 			self.canvas.configure(
 				background=self._style.lookup("TFrame", "background") or "#d9d9d9"
 			)
 		except Exception:  # noqa: BLE001
 			pass
-		vsb = ttk.Scrollbar(frame, orient="vertical", command=self.canvas.yview)
+		vsb = ttk.Scrollbar(form_pane, orient="vertical", command=self.canvas.yview)
+		self._form_vsb = vsb
 		self.canvas.configure(yscrollcommand=vsb.set)
 		vsb.pack(side="right", fill="y")
 		self.canvas.pack(side="left", fill="both", expand=True)
@@ -2155,14 +2328,183 @@ class ReviewEditorApp:
 			self._path_link.configure(font=self._link_font)
 		except Exception:  # noqa: BLE001
 			pass
+		self._build_problems_section()
 		self._build_fields_section()
+		self._build_merge_section()
 		self._build_covers_section()
-		self._build_content_section()
+
+		# -- content column: the text preview ------------------------------
+		self._build_content_section(self._content_pane)
+
+		# The stacked (narrow) layout's ONE big scrollbar: spans the whole
+		# detail column and CHAINS the two scroll areas — the form canvas
+		# first, then the whole book text below it (see _chain_scroll). The
+		# native per-widget scrollbars hide while it is out.
+		self._chain_vsb = ttk.Scrollbar(frame, orient="vertical", command=self._chain_scroll)
+		# Keep the chained thumb in sync with either area's size/content.
+		self.canvas.bind("<Configure>", lambda _e: self._chain_update(), add="+")
+		self._content_txt.bind("<Configure>", lambda _e: self._chain_update(), add="+")
+
+		self._apply_detail_orient("horizontal")
+		# Follow the actual width: a narrow window (or the outer list sash
+		# dragged wide) restacks the preview below the form.
+		frame.bind("<Configure>", self._on_detail_configure, add="+")
 		parent.add(frame, weight=3)
+
+	def _apply_detail_orient(self, orient: str) -> None:
+		"""Rebuild the detail Panedwindow in the given orientation.
+
+		The pane frames are SIBLINGS of the Panedwindow (see
+		_build_right_panel), so this destroys and recreates only the thin
+		splitter widget — the form, the preview and their state survive.
+		The stacked layout additionally swaps the two native scrollbars for
+		ONE big chained scrollbar (form first, then the whole text).
+		"""
+		if orient == self._detail_orient:
+			return
+		if self._chain_vsb is not None:
+			self._chain_vsb.pack_forget()
+		if self._cols is not None:
+			self._cols.destroy()
+		self._cols = ttk.Panedwindow(self._detail_frame, orient=orient)
+		self._cols.add(self._form_pane, weight=3)
+		self._cols.add(self._content_pane, weight=2)
+		if orient == "vertical":
+			# Claim the right edge BEFORE the split, so the one scrollbar
+			# spans both stacked areas.
+			self._chain_vsb.pack(side="right", fill="y")
+			self._form_vsb.pack_forget()
+			self._content_vsb.pack_forget()
+			self.canvas.configure(yscrollcommand=self._chain_update)
+			self._content_txt.configure(yscrollcommand=self._chain_update)
+		else:
+			# Repack with the scrollbars FIRST: pack allocates in order, so
+			# a scrollbar appended AFTER its (wide-requesting) client gets
+			# squeezed to nothing — the form canvas requests 720 px and
+			# starves a trailing vsb whenever the pane is narrower.
+			self.canvas.pack_forget()
+			self._content_txt.pack_forget()
+			self._form_vsb.pack(side="right", fill="y")
+			self.canvas.pack(side="left", fill="both", expand=True)
+			self._content_vsb.pack(side="right", fill="y")
+			self._content_txt.pack(side="left", fill="both", expand=True)
+			self.canvas.configure(yscrollcommand=self._form_vsb.set)
+			self._content_txt.configure(yscrollcommand=self._content_vsb.set)
+		self._cols.pack(fill="both", expand=True)
+		# The fresh Panedwindow is the youngest child of the frame and would
+		# stack above the panes; lift them back on top. The sashes stay
+		# exposed — the panes never cover the sash gaps between them.
+		self._form_pane.lift(self._cols)
+		self._content_pane.lift(self._cols)
+		self._detail_orient = orient
+		self._chain_update()
+
+	def _chain_state(self):
+		"""Virtual pixel geometry of the stacked detail as ONE scroll flow.
+
+		Returns (form_range, form_pos, text_range, text_pos, form_view,
+		text_total) — the scrollable overflow of the form canvas and of the
+		preview text plus the current positions, or None when unreachable.
+		Both widgets' yview fractions span their WHOLE content (the canvas's
+		scrollregion, the text's body), so each total height is estimated
+		from the visible fraction — a uniform, widget-honest conversion
+		(good enough for a thumb; wrapped line heights vary anyway).
+		"""
+		try:
+			form_view = max(1, self.canvas.winfo_height())
+			a0, a1 = self.canvas.yview()
+			visible_a = max(1e-9, a1 - a0)
+			form_total = form_view / visible_a
+			a_range = max(0.0, form_total - form_view)
+			a_pos = a0 * form_total
+			f0, f1 = self._content_txt.yview()
+			text_view = max(1, self._content_txt.winfo_height())
+			visible_frac = max(1e-9, f1 - f0)
+			text_total = text_view / visible_frac
+			b_range = max(0.0, text_total - text_view)
+			b_pos = f0 * text_total
+		except Exception:  # noqa: BLE001
+			return None
+		return a_range, a_pos, b_range, b_pos, form_view, text_total
+
+	def _chain_update(self, *_args) -> None:
+		"""Sync the chained scrollbar's thumb from both areas' state."""
+		if self._detail_orient != "vertical" or self._chain_vsb is None:
+			return
+		st = self._chain_state()
+		if st is None:
+			return
+		a_range, a_pos, b_range, b_pos, form_view, text_total = st
+		total = a_range + b_range
+		if total <= 0:
+			self._chain_vsb.set(0.0, 1.0)
+			return
+		pos = a_pos + b_pos
+		# The thumb covers whichever area the viewport is currently "in".
+		view = form_view if a_pos < a_range - 1 else (text_total - b_range)
+		self._chain_vsb.set(pos / total, min(1.0, (pos + view) / total))
+
+	def _chain_scroll(self, action: str, *args) -> None:
+		"""The chained scrollbar's command: form FIRST, then the text.
+
+		The virtual range concatenates both areas' overflow; a position
+		inside the form part keeps the text at its top, a position past it
+		pins the form to its end and drives the text.
+		"""
+		st = self._chain_state()
+		if st is None:
+			return
+		a_range, a_pos, b_range, b_pos, form_view, text_total = st
+		total = a_range + b_range
+		if total <= 0:
+			return
+		if action == "moveto":
+			target = max(0.0, min(1.0, float(args[0]))) * total
+		elif action == "delta":
+			# Arrow-head clicks: +/- lines. Approximate a line by the
+			# form's scroll unit — the exact step is cosmetic here.
+			target = a_pos + b_pos + float(args[0]) * 40
+			target = max(0.0, min(total, target))
+		else:  # "scale" — a trough jump: most of the active viewport
+			view = form_view if a_pos < a_range - 1 else (text_total - b_range)
+			step = view * 0.9 * (1 if float(args[0]) > 0 else -1)
+			target = max(0.0, min(total, a_pos + b_pos + step))
+		try:
+			form_total = a_range + form_view
+			if target <= a_range:
+				# Both widgets' moveto fractions span their WHOLE content
+				# (scrollregion / body), not just the overflow.
+				self.canvas.yview_moveto(target / form_total if form_total else 0.0)
+				if b_range > 0:
+					self._content_txt.yview_moveto(0.0)
+			else:
+				if a_range > 0:
+					self.canvas.yview_moveto(1.0)
+				self._content_txt.yview_moveto((target - a_range) / text_total)
+		except Exception:  # noqa: BLE001
+			pass
+
+	def _on_detail_configure(self, event) -> None:
+		# width <= 1 is the pre-map Configure noise. The hysteresis keeps a
+		# sash drag across the threshold from flapping between layouts.
+		width = getattr(event, "width", 0)
+		if width <= 1:
+			return
+		if self._detail_orient == "horizontal":
+			if width < _DETAIL_NARROW_WIDTH:
+				self._apply_detail_orient("vertical")
+		elif width >= _DETAIL_NARROW_WIDTH + _DETAIL_HYSTERESIS:
+			self._apply_detail_orient("horizontal")
 
 	def _on_canvas_configure(self, event) -> None:
 		try:
 			self.canvas.itemconfigure(self._inner_win, width=event.width)
+			# The path link wraps to the canvas width, not a fixed 1200 px
+			# (which would clip once the detail goes narrow/stacked). The
+			# link may not exist yet during early Configure events.
+			link = getattr(self, "_path_link", None)
+			if link is not None:
+				link.configure(wraplength=max(80, event.width - 16))
 			# Re-assert "fixed when it fits": a resize that makes the form fit
 			# the viewport again must snap the view back to the top (no
 			# lingering half-scrolled state on a fixed form).
@@ -2175,12 +2517,17 @@ class ReviewEditorApp:
 	def _on_inner_configure(self, _event) -> None:
 		try:
 			self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+			# The form's height changed — the chained scrollbar's virtual
+			# range must follow (no canvas <Configure> fires when only the
+			# inner content grows).
+			self._chain_update()
 		except Exception:  # noqa: BLE001
 			pass
 
 	def _build_fields_section(self) -> None:
 		box = ttk.LabelFrame(self._scroll_inner, text=_("Fields"))
 		box.pack(fill="x", padx=8, pady=4)
+		self._fields_frame = box
 		# RO column source toggle: the sunken labels show either the book's
 		# current (on-disk) values or the analyze-time proposals; the ➡ copies
 		# whichever set is displayed into the editable Entry. Default is the
@@ -2359,6 +2706,7 @@ class ReviewEditorApp:
 	def _build_covers_section(self) -> None:
 		box = ttk.LabelFrame(self._scroll_inner, text=_("Covers"))
 		box.pack(fill="x", padx=8, pady=4)
+		self._covers_frame = box
 		# Selection checkboxes sit directly ON each cover (top-left overlay,
 		# the customary selection spot); "Delete checked" then removes what
 		# is checked. The recommended cover is a URL preview, not a file, so
@@ -2392,20 +2740,14 @@ class ReviewEditorApp:
 		ttk.Button(btns, text=_("Apply new (Ctrl+N)"), command=self.cover_new).pack(side="left", padx=2)
 		ttk.Button(btns, text=_("Delete checked (Ctrl+M)"), command=self.cover_delete_checked).pack(side="left", padx=10)
 
-	def _build_content_section(self) -> None:
-		box = ttk.LabelFrame(self._scroll_inner, text=_("Content"))
+	def _build_content_section(self, parent) -> None:
+		box = ttk.LabelFrame(parent, text=_("Content (whole book, loads progressively)"))
 		box.pack(fill="both", expand=True, padx=8, pady=4)
 		top = ttk.Frame(box)
 		top.pack(fill="x", padx=6, pady=4)
 		ttk.Label(top, text=_("Format:")).pack(side="left")
 		self._format_holder = ttk.Frame(top)
 		self._format_holder.pack(side="left", fill="x", expand=True, padx=6)
-		view = ttk.Frame(box)
-		view.pack(fill="x", padx=6)
-		ttk.Label(view, text=_("View:")).pack(side="left")
-		ttk.Radiobutton(view, text=_("first page"), value="first", variable=self._view_var).pack(side="left", padx=4)
-		ttk.Radiobutton(view, text=_("broader text"), value="broader", variable=self._view_var).pack(side="left", padx=4)
-		self._view_var.trace_add("write", lambda *_: self._apply_content())
 		rec = ttk.Frame(box)
 		rec.pack(fill="x", padx=6, pady=(2, 4))
 		self._recode_chk = ttk.Checkbutton(
@@ -2450,88 +2792,59 @@ class ReviewEditorApp:
 		tbody.pack(fill="both", expand=True, padx=6, pady=0)
 		self._content_body = tbody
 		self._content_txt = self._style_text(
-			tk.Text(tbody, wrap="word", state="disabled", height=12)
+			tk.Text(tbody, wrap="word", state="disabled")
 		)
 		self._content_txt.pack(side="left", fill="both", expand=True)
-		vsb = ttk.Scrollbar(tbody, orient="vertical", command=self._content_txt.yview)
-		self._content_txt.configure(yscrollcommand=vsb.set)
-		vsb.pack(side="right", fill="y")
-		# Pixel-continuous height: a Text's own height option is quantized to
-		# whole LINES by Tk (that was the choppy one-line-at-a-time drag), so
-		# propagation is turned off and body's -height — pixels — rules; the
-		# Text and scrollbar just fill it. Horizontal sizing is unaffected
-		# (body is packed fill="both").
-		tbody.pack_propagate(False)
-		try:
-			ls = max(1, int(self.root.tk.call(
-				"font", "metrics", self._content_txt.cget("font"), "-linespace",
-			)))
-		except Exception:  # noqa: BLE001
-			ls = 16  # typical 10pt line; resize still works
-		self._content_linespace = ls
-		self._preview_h_default = 12 * ls + 8  # ~the old 12-line height
-		tbody.configure(height=self._preview_h_default)
-		# Drag-to-resize grip flush with the preview's bottom edge. Inside the
-		# scrollable column the Text's height IN LINES is the only geometry
-		# knob that matters (the inner frame grows, _on_inner_configure
-		# re-derives the scrollregion), so a plain drag handle suffices — no
-		# PanedWindow. Highlight ring instead of a fill so the bar reads as an
-		# edge, both on light and dark themes.
-		try:
-			grip_bg = self._style.lookup("TFrame", "background") or "#d9d9d9"
-		except Exception:  # noqa: BLE001
-			grip_bg = "#d9d9d9"
-		self._content_grip = tk.Frame(
-			box, height=7, cursor="sb_v_double_arrow", background=grip_bg,
-			highlightthickness=1, highlightbackground="#999999",
-		)
-		self._content_grip.pack(fill="x", padx=6, pady=(2, 6))
-		self._content_grip.bind("<Button-1>", self._start_preview_resize)
-		self._content_grip.bind("<B1-Motion>", self._drag_preview_resize)
-		self._content_grip.bind(
-			"<Double-Button-1>", lambda _e: self._set_preview_height(self._preview_h_default),
-		)
-		self._grip_tip = _Tooltip(
-			self._content_grip,
-			_("Drag up/down to change the preview height (double-click = default height)"),
-		)
+		self._content_vsb = ttk.Scrollbar(tbody, orient="vertical", command=self._content_txt.yview)
+		self._content_txt.configure(yscrollcommand=self._content_vsb.set)
+		self._content_vsb.pack(side="right", fill="y")
+		self._attach_text_copy_menu(self._content_txt)
+		# The preview lives in its own Panedwindow pane (full pane height —
+		# the drag-to-resize grip is gone with the old scroll-column layout:
+		# the pane's sash IS the resize knob now).
+		return "break"
 
-	def _set_preview_height(self, px: int) -> None:
-		"""Set the content preview height in pixels, clamped to sane bounds.
+	def _copy_text_to_clipboard(self, txt, *, all_text: bool = False) -> None:
+		"""Write the Text's selection (or whole content) into the clipboard.
 
-		The bounds are expressed in lines (3–80) so they track the actual
-		font, but the value itself is raw pixels — no line quantization.
-		Deliberately does NOT touch the canvas scrollregion here: this runs
-		inside motion events, where ``bbox("all")`` still reflects the OLD
-		geometry (layout happens at idle), so setting it synchronously means
-		TWO clashing updates per mouse move — the visible jerk. The inner
-		frame's <Configure> binding (_on_inner_configure) recomputes it once,
-		after the real layout lands.
+		Done manually instead of ``event_generate("<<Copy>>")`` so the copy
+		also works when the virtual event would nest inside another handler
+		and never reaches the widget's class binding.
 		"""
-		ls = getattr(self, "_content_linespace", 16)
-		px = max(3 * ls, min(80 * ls, int(px)))
-		self._content_body.configure(height=px)
+		rng = txt.tag_ranges("sel")
+		text = txt.get("1.0", "end-1c") if (all_text or not rng) else txt.get(*rng)
+		self.root.clipboard_clear()
+		if text:
+			self.root.clipboard_append(text)
 
-	def _start_preview_resize(self, event) -> str | None:
-		# Defaults via getattr: B1-Motion cannot arrive without a Button-1 on
-		# the same widget (implicit pointer grab), these are pure paranoia.
-		self._resize_y0 = event.y_root
-		# Snap the request to the CURRENT allocation: when the window is
-		# large enough that the parcel exceeds the request, a drag would feel
-		# dead until the request passes the allocation (and then jump).
-		# Snapping is visually a no-op and makes every pixel 1:1 from here on.
-		self._resize_h0 = self._content_body.winfo_height()
-		self._set_preview_height(self._resize_h0)
-		return "break"
+	def _attach_text_copy_menu(self, txt) -> None:
+		"""Right-click menu (copy selection / copy all) for a readonly Text.
 
-	def _drag_preview_resize(self, event) -> str | None:
-		dy = event.y_root - getattr(self, "_resize_y0", event.y_root)
-		h0 = getattr(self, "_resize_h0", self._content_body.winfo_height())
-		# Absolute (not incremental) mapping from the press anchor: rounding
-		# cannot accumulate jitter across motion events — and in pixels there
-		# is nothing left to quantize.
-		self._set_preview_height(h0 + dy)
-		return "break"
+		Both readonly views (Found problems, content preview) are disabled-state
+		Text widgets, so mouse selection already works (Tk allows selecting in a
+		disabled Text — only editing is blocked). The explicit Ctrl+C binding
+		adds the copy shortcut X11's Text lacks; Ctrl+A selects everything.
+		"""
+		menu = tk.Menu(txt, tearoff=0)
+		menu.add_command(
+			label=_("Copy selection"), command=lambda: self._copy_text_to_clipboard(txt))
+		menu.add_command(
+			label=_("Copy all"), command=lambda: self._copy_text_to_clipboard(txt, all_text=True))
+
+		def _menu(_event) -> str:
+			try:
+				menu.tk_popup(_event.x_root, _event.y_root)
+			finally:
+				menu.grab_release()
+			return "break"
+
+		def _copy(_event) -> str:
+			self._copy_text_to_clipboard(txt)
+			return "break"
+
+		txt.bind("<Button-3>", _menu)
+		txt.bind("<Control-c>", _copy)
+		txt.bind("<Control-a>", _select_all_text)
 
 	def _build_status_bar(self) -> None:
 		self._status = tk.StringVar(value="")
@@ -2638,7 +2951,15 @@ class ReviewEditorApp:
 			return None
 		while node is not None and node is not self.root:
 			if node is self.canvas:
-				self._scroll_canvas(up)
+				if not self._scroll_canvas(up):
+					# Stacked layout: a wheel that falls off the form's
+					# bottom (or a form that fits) continues into the book
+					# text below it — the chained flow.
+					if self._detail_orient == "vertical" and not up:
+						try:
+							self._content_txt.yview_scroll(1, "units")
+						except Exception:  # noqa: BLE001
+							pass
 				return "break"
 			# The book list scrolls itself (its own wheel binding) — the
 			# form stays put. NB: _BookList is a COMPOSITION, the actual
@@ -2648,27 +2969,37 @@ class ReviewEditorApp:
 			if node.winfo_class() == "Text":
 				if self._can_y_scroll(node, up):
 					return "break"  # the Text class binding already scrolled it
+				if node is self._content_txt and self._detail_orient == "vertical" and not up:
+					return "break"  # chained page end — nothing below the text
 				# stuck at the Text's edge -> the form takes over
 				self._scroll_canvas(up)
 				return "break"
 			node = node.master
 		return None
 
-	def _scroll_canvas(self, up: bool) -> None:
+	def _scroll_canvas(self, up: bool) -> bool:
 		"""Scroll the form column — a hard no-op while the form fits.
 
 		The form must sit FIXED at the top when its content fits the viewport;
 		it only starts scrolling once it actually overflows the canvas.
+		Returns whether the canvas actually scrolled (False also at its
+		edges — the stacked layout chains the wheel on from there).
 		"""
 		try:
 			bbox = self.canvas.bbox("all")
 			if not bbox:
-				return
+				return False
 			if (bbox[3] - bbox[1]) - self.canvas.winfo_height() <= 0:
-				return  # fits -> fixed
+				return False  # fits -> fixed
+			first, last = self.canvas.yview()
+			if up and first <= 0.0:
+				return False  # already at the top
+			if not up and last >= 1.0:
+				return False  # already at the bottom
 			self.canvas.yview_scroll(-1 if up else 1, "units")
+			return True
 		except Exception:  # noqa: BLE001
-			pass
+			return False
 
 	def _on_tab(self, event) -> str | None:
 		# Only the field entries are trapped; from any other widget (notes,
@@ -2729,9 +3060,10 @@ class ReviewEditorApp:
 			"0": self.act_clear, "s": self.save, "q": self.quit_app,
 			"w": self.swap_fields, "f": self.copy_current_to_focused,
 			"e": self.bulk_edit, "j": self.merge_selected,
+			"r": self.act_merge,
 			"n": self.cover_new,
 			"b": self.cover_restore_bak, "p": self.cover_keep, "m": self.cover_delete_checked,
-			"t": self.content_toggle_view, "g": self.content_recode_toggle,
+			"g": self.content_recode_toggle,
 		}
 		handler = dispatch.get(k)
 		if handler is not None:
@@ -3147,11 +3479,12 @@ class ReviewEditorApp:
 		self._loading = True
 		try:
 			# Header. The path lives on its own clickable line (open folder).
-			diag = e.get("diagnosis") or {}
+			# The diagnoses are NOT crammed in here anymore — they render in
+			# their own "Found problems" section (all of them, sorted by
+			# severity), which replaced the old "primary + (+N more)" line
+			# that could hide the load-bearing problem behind the counter.
 			uuid = e.get("uuid") or "—"
 			path = e.get("path") or ""
-			all_d = e.get("diagnoses") or [diag]
-			extra = _("  (+{n} more)").format(n=len(all_d) - 1) if len(all_d) > 1 else ""
 			# A library-loaded book (the "+ library" search) is not in
 			# review.yaml yet — say so where the diagnosis line would carry
 			# the context for review entries.
@@ -3159,21 +3492,9 @@ class ReviewEditorApp:
 			if e.get("uuid") and e["uuid"] in self._lib_uuids:
 				lib_note = "\n" + _(
 					"not in review.yaml — deciding or editing it adds it to review on save")
-			files_note = ""
-			dfiles = (e.get("proposed") or {}).get("delete_files")
-			if dfiles:
-				files_note = "\n" + _("invalid files proposed for deletion: {files}").format(
-					files=", ".join(str(f) for f in dfiles))
-			merge_note = ""
-			merge_into = (e.get("proposed") or {}).get("merge_into")
-			if merge_into:
-				merge_note = "\n" + _("merge into the same-work folder: {path}").format(path=merge_into)
 			self._header_lbl.configure(
-				text=_("Entry {i}/{n}   uuid: {uuid}\n"
-				       "diagnosis: {cat} – {reason} [{conf}]{extra}").format(
-					i=idx + 1, n=len(self.entries), uuid=uuid,
-					cat=diag.get("category", "—"), reason=diag.get("reason", ""),
-					conf=diag.get("confidence", "—"), extra=extra) + lib_note + files_note + merge_note,
+				text=_("Entry {i}/{n}   uuid: {uuid}").format(
+					i=idx + 1, n=len(self.entries), uuid=uuid) + lib_note,
 			)
 			self._path_link.configure(text=path or _("(no path)"))
 			# Fields. Entries prefill proposed > current; the RO column
@@ -3210,6 +3531,8 @@ class ReviewEditorApp:
 		finally:
 			self._loading = False
 		# Covers + content for the new book.
+		self._load_problems(e)
+		self._load_merge_panel(e)
 		self._refresh_covers()
 		self._refresh_formats()
 		# Scroll the detail column back to the top for the new book.
@@ -3384,6 +3707,381 @@ class ReviewEditorApp:
 		else:
 			self._field_cleared_ui(f, False)
 			f["value"].set(f.get("pre_delete") or "")
+
+	# ------------------------------------------------------------------
+	# Problems section + C19 merge panel
+	# ------------------------------------------------------------------
+
+	def _build_problems_section(self) -> None:
+		"""The frame for ALL of the entry's diagnoses (most important first).
+
+		The review header used to carry only the primary diagnosis plus
+		"(+N more)" — which hid the load-bearing problem behind the counter.
+		The body is ONE disabled Text widget, not a stack of labels: the lines
+		are mouse-selectable and copyable (a disabled Tk Text still selects —
+		only editing is blocked), and each diagnosis CODE is underlined and
+		clickable, opening its detailed description (see catalog.CATEGORY_HELP).
+		It is styled FLAT on the form background (no field look, no border,
+		no scrollbar) and its height always equals the number of wrapped
+		rows — it reads like the labels it replaced, the outer form canvas
+		is the only scroller.
+		"""
+		self._problems_frame = ttk.LabelFrame(self._scroll_inner, text=_("Found problems"))
+		self._problems_frame.pack(fill="x", padx=8, pady=4)
+		txt = tk.Text(
+			self._problems_frame, wrap="word", height=1, state="disabled",
+			relief="flat", borderwidth=0, highlightthickness=0,
+			background=self._form_bg, foreground=self._field_fg,
+			selectbackground="#b3d7ff", selectforeground="#000000",
+			cursor="arrow",
+		)
+		txt.pack(fill="x", expand=True, padx=(10, 8), pady=(4, 6))
+		self._problems_txt = txt
+		self._attach_text_copy_menu(txt)
+		# Click on a code (not a drag-selection) opens its help popup.
+		txt.bind("<ButtonRelease-1>", self._on_problems_click, add="+")
+		# Wrapped continuation lines of a reason indent under the reason
+		# column (code 14 + confidence 7 chars of the Text font).
+		try:
+			from tkinter.font import Font
+
+			self._problems_indent = int(Font(font=txt.cget("font")).measure("0")) * 21
+		except Exception:  # noqa: BLE001
+			self._problems_indent = 170
+		# Height must follow the content — but wrapped rows are only known
+		# once the widget has its real width, so recount on every resize too.
+		txt.bind("<Configure>", self._sync_problems_height, add="+")
+
+	def _sync_problems_height(self, _event=None) -> None:
+		"""Set the problems Text height to its wrapped row count.
+
+		At load time the widget may still be unmapped (width 1) and every
+		line counts as many wrapped rows; the <Configure> that comes with the
+		_real_ width recounts. Setting height triggers another Configure —
+		guarded by the != check, so the resize storm settles immediately.
+		"""
+		txt = self._problems_txt
+		try:
+			if txt.winfo_width() <= 10:
+				return
+			n = txt.count("1.0", "end-1c", "displaylines")
+			rows = int(n[0]) if n else 1
+		except Exception:  # noqa: BLE001
+			return
+		rows = max(1, rows)
+		if int(txt.cget("height")) != rows:
+			txt.configure(height=rows)
+
+	def _on_problems_click(self, event) -> str | None:
+		"""ButtonRelease over the problems list — plain click on a CODE opens
+		its help popup; a drag (selection present) selects instead."""
+		txt = self._problems_txt
+		try:
+			if txt.tag_ranges("sel"):
+				return None  # the user dragged a selection — keep it
+			idx = txt.index(f"@{event.x},{event.y}")
+		except Exception:  # noqa: BLE001
+			return None
+		for tag in txt.tag_names():
+			if not tag.startswith("code_"):
+				continue
+			rng = txt.tag_ranges(tag)
+			for i in range(0, len(rng), 2):
+				# index comparison via compare() — a lexical compare of
+				# "1.10" vs "1.2" would order wrongly.
+				if txt.compare(idx, ">=", rng[i]) and txt.compare(idx, "<", rng[i + 1]):
+					self._show_category_help(txt.get(rng[i], rng[i + 1]))
+					return None
+		return None
+
+	def _load_problems(self, e: dict) -> None:
+		txt = self._problems_txt
+		txt.configure(state="normal")
+		txt.delete("1.0", "end")
+		for tag in txt.tag_names():
+			# tag_names() carries the built-ins (sel, …) — only ours are removed.
+			if tag.startswith(("code_", "reason_")):
+				txt.tag_delete(tag)
+		diags = e.get("diagnoses") or ([e["diagnosis"]] if e.get("diagnosis") else [])
+		for i, d in enumerate(sort_diagnoses(diags)):
+			code = str(d.get("category") or "—")
+			conf = str(d.get("confidence") or "").upper()
+			colour = {"HIGH": "#a40000", "MEDIUM": "#b26800"}.get(conf, "#555753")
+			reason = str(d.get("reason") or "")
+			start = txt.index("end-1c")
+			txt.insert("end", f"{code:<14}{conf:<7}{reason}\n")
+			code_tag = f"code_{i}"
+			txt.tag_add(code_tag, start, f"{start} + {len(code)}c")
+			txt.tag_configure(code_tag, foreground=colour, underline=True)
+			txt.tag_bind(code_tag, "<Enter>", lambda _ev: txt.configure(cursor="hand2"))
+			txt.tag_bind(code_tag, "<Leave>", lambda _ev: txt.configure(cursor=""))
+			reason_tag = f"reason_{i}"
+			txt.tag_add(reason_tag, f"{start} + 21c", f"{start} lineend")
+			txt.tag_configure(reason_tag, lmargin2=self._problems_indent)
+		txt.configure(state="disabled")
+		self._sync_problems_height()
+
+	def _show_category_help(self, code: str) -> None:
+		"""Popup with the detailed description of a diagnosis code.
+
+		Non-modal (the review continues behind it), one instance at a time —
+		clicking another code replaces the window. The body is the same
+		readonly-selectable Text recipe as the problems list, so the
+		description can be copied too.
+		"""
+		from .catalog import category_help
+
+		if self._help_win is not None and self._help_win.winfo_exists():
+			self._help_win.destroy()
+		pair = category_help(code)
+		if pair is None:
+			title, detail = _("no description for this code"), ""
+		else:
+			title, detail = pair
+		win = tk.Toplevel(self.root)
+		self._help_win = win
+		win.title(f"{code} — {title}")
+		win.transient(self.root)
+		body = self._style_text(tk.Text(win, wrap="word", width=74, state="disabled"))
+		body.configure(state="normal")
+		body.insert("1.0", f"{code} — {title}\n\n{detail}\n")
+		body.configure(state="disabled")
+		body.pack(fill="both", expand=True, padx=10, pady=(10, 2))
+		try:
+			# Size the window to its content: displaylines needs the real
+			# wrap width, which only exists once the popup geometry settled.
+			win.update_idletasks()
+			n = body.count("1.0", "end-1c", "displaylines")
+			body.configure(height=max(2, min(int(n[0]), 22)) if n else 12)
+		except Exception:  # noqa: BLE001
+			pass
+		ttk.Label(win, text=_("select the text to copy it (Ctrl+C) — close with Esc"),
+		          foreground="#555753").pack(anchor="w", padx=10, pady=(0, 8))
+		self._attach_text_copy_menu(body)
+		win.bind("<Escape>", lambda _ev: win.destroy())
+		win.geometry(f"+{self.root.winfo_x() + 90}+{self.root.winfo_y() + 140}")
+		win.focus_set()
+
+	def _build_merge_section(self) -> None:
+		"""The C19 merge frame — NOT packed here: :meth:`_load_merge_panel`
+		packs it only for entries carrying ``proposed.merge_into``, so the
+		scroll column stays honest for every other book."""
+		self._merge_frame = ttk.LabelFrame(self._scroll_inner, text=_("Merge into the same-work folder (C19)"))
+		self._merge_ctx: dict | None = None
+
+	def _load_merge_panel(self, e: dict) -> None:
+		self._merge_ctx = None
+		merge_into = (e.get("proposed") or {}).get("merge_into")
+		if not merge_into:
+			self._merge_frame.pack_forget()
+			return
+		survivor_folder = self.library / str(merge_into)
+		loser_folder = self.library / (e.get("path") or "")
+		for w in self._merge_frame.winfo_children():
+			w.destroy()
+		self._merge_frame.pack(fill="x", padx=8, pady=4, before=self._covers_frame)
+		if not survivor_folder.is_dir():
+			ttk.Label(self._merge_frame, foreground="#a40000", text=_(
+				"merge target not found on disk: {path}").format(path=merge_into),
+			).pack(anchor="w", padx=6, pady=6)
+			return
+		if not loser_folder.is_dir():
+			ttk.Label(self._merge_frame, foreground="#a40000", text=_(
+				"this book's folder is missing on disk: {path}").format(path=e.get("path")),
+			).pack(anchor="w", padx=6, pady=6)
+			return
+		survivor_meta = read_book_folder(survivor_folder)
+		loser_meta = read_book_folder(loser_folder)
+		self._merge_ctx = {
+			"entry": e, "merge_into": str(merge_into),
+			"survivor_meta": survivor_meta, "loser_meta": loser_meta,
+			"survivor_folder": survivor_folder, "loser_folder": loser_folder,
+		}
+		self._render_merge_panel()
+
+	def _merge_pick_side(self, field: str) -> str:
+		"""Which radio side an override currently expresses ("s"/"l")."""
+		e = self._merge_ctx["entry"]
+		prop = e.get("proposed") or {}
+		if field in prop:
+			# an explicit pick; a null pick is the ∅ "keep the survivor's
+			# (empty) state" mark → survivor side
+			return "l" if prop[field] is not None else "s"
+		# automatic: the survivor's value wins; the loser's fills a gap
+		sv = merge_field_value(None, self._merge_ctx["survivor_meta"], field)
+		return "s" if not _merge_value_empty(sv) else "l"
+
+	def _merge_pick_field(self, field: str, side: str) -> None:
+		"""One field source pick: writes into ``proposed`` (the same surface
+		the apply branch consumes over the automatic merge result)."""
+		ctx = self._merge_ctx
+		e = ctx["entry"]
+		prop = dict(e.get("proposed") or {})
+		if side == "loser":
+			val = merge_field_value(e, ctx["loser_meta"], field)
+			if _merge_value_empty(val):
+				prop[field] = None  # explicit empty — same ∅ semantics
+			elif field == "series":
+				name, idx = val if isinstance(val, tuple) else (val, "")
+				prop["series"] = name or None
+				if idx:
+					prop["series_index"] = str(idx)
+				else:
+					prop.pop("series_index", None)
+			else:
+				prop[field] = list(val) if isinstance(val, list) else val
+		else:  # survivor
+			sv = merge_field_value(None, ctx["survivor_meta"], field)
+			if _merge_value_empty(sv):
+				prop[field] = None  # keep it empty — do not pull the loser's
+			else:
+				prop.pop(field, None)  # automatic already yields the survivor's value
+				if field == "series":
+					prop.pop("series_index", None)
+		e["proposed"] = prop
+		self._mark_dirty()
+		self._render_merge_panel()
+
+	def _merge_pick_cover(self, choice: str) -> None:
+		ctx = self._merge_ctx
+		e = ctx["entry"]
+		prop = dict(e.get("proposed") or {})
+		if choice == "auto":
+			prop.pop("cover_source", None)
+		else:
+			prop["cover_source"] = choice  # survivor | loser | loser_epub
+		e["proposed"] = prop
+		self._mark_dirty()
+		self._render_merge_panel()
+
+	def _merge_reset(self) -> None:
+		"""Drop every explicit pick — back to the pure automatic merge."""
+		e = self._merge_ctx["entry"]
+		skip = {f for f, _ in MERGE_FIELDS} | {"cover_source"}
+		e["proposed"] = {
+			k: v for k, v in (e.get("proposed") or {}).items() if k not in skip
+		}
+		self._mark_dirty()
+		self._render_merge_panel()
+
+	def _render_merge_panel(self) -> None:
+		ctx = self._merge_ctx
+		if ctx is None:
+			return
+		e = ctx["entry"]
+		prop = e.get("proposed") or {}
+		box = ttk.Frame(self._merge_frame)
+		box.pack(fill="x", padx=6, pady=4)
+
+		# Context: the survivor, why it survives, and the rest of the cluster.
+		from .isbn import canonicalize
+
+		s_isbn = canonicalize(ctx["survivor_meta"].isbn or "") if ctx["survivor_meta"].isbn else ""
+		l_isbn = canonicalize(ctx["loser_meta"].isbn or "") if ctx["loser_meta"].isbn else ""
+		why = _("valid ISBN") if (s_isbn and not l_isbn) else _("lowest calibre id")
+		head = ttk.Frame(box)
+		head.pack(fill="x", pady=(0, 2))
+		ttk.Label(head, text=_("survivor:")).pack(side="left")
+		survivor_link = ttk.Label(head, text=ctx["merge_into"], foreground="#1a5fb4",
+		                          cursor="hand2")
+		survivor_link.pack(side="left", padx=(4, 8))
+		survivor_link.bind("<Button-1>", lambda _e: open_folder_in_manager(ctx["survivor_folder"]))
+		_Tooltip(survivor_link, _("Open the survivor's folder in the file manager"))
+		ttk.Label(head, text=_("(picked by: {why})").format(why=why)).pack(side="left")
+		others = [
+			x.get("path") for x in self.entries
+			if x is not e and (x.get("proposed") or {}).get("merge_into") == ctx["merge_into"]
+		]
+		if others:
+			ttk.Label(box, text=_("also merging into the same survivor: {paths}").format(
+				paths=", ".join(str(p) for p in others)),
+			).pack(anchor="w", pady=(0, 4))
+
+		# Field comparison + source picks (only the differing rows).
+		grid = ttk.Frame(box)
+		grid.pack(fill="x", pady=2)
+		grid.columnconfigure(3, weight=1)
+		ttk.Label(grid, text=_("field")).grid(row=0, column=0, sticky="w")
+		ttk.Label(grid, text=_("survivor")).grid(row=0, column=1, sticky="w", padx=(8, 8))
+		ttk.Label(grid, text=_("this book")).grid(row=0, column=2, sticky="w", padx=(0, 8))
+		ttk.Label(grid, text=_("result")).grid(row=0, column=3, sticky="w")
+		ttk.Label(grid, text=_("source")).grid(row=0, column=4, sticky="w", padx=(8, 0))
+		for r, row in enumerate(merge_projection_rows(
+				ctx["survivor_meta"], ctx["loser_meta"], e), start=1):
+			fg = "#1a5fb4" if row["picked"] else None
+			ttk.Label(grid, text=row["label"]).grid(row=r, column=0, sticky="w")
+			ttk.Label(grid, text=row["s_text"], relief="sunken", anchor="w",
+			          width=26).grid(row=r, column=1, sticky="we", padx=(8, 4), pady=1)
+			ttk.Label(grid, text=row["l_text"], relief="sunken", anchor="w",
+			          width=26).grid(row=r, column=2, sticky="we", padx=(0, 4), pady=1)
+			ttk.Label(grid, text=row["e_text"], anchor="w", foreground=fg,
+			          font=self._link_font if row["picked"] else None,
+			          ).grid(row=r, column=3, sticky="w")
+			var = tk.StringVar(value=self._merge_pick_side(row["field"]))
+			rad = ttk.Frame(grid)
+			rad.grid(row=r, column=4, sticky="w", padx=(8, 0))
+			ttk.Radiobutton(rad, text="⬅", value="s", variable=var, width=3,
+			                command=lambda f=row["field"]: self._merge_pick_field(f, "survivor"),
+			                ).pack(side="left")
+			ttk.Radiobutton(rad, text="➡", value="l", variable=var, width=3,
+			                command=lambda f=row["field"]: self._merge_pick_field(f, "loser"),
+			                ).pack(side="left")
+			_Tooltip(rad, _("result source: survivor (⬅) or this book (➡); "
+			                "the pick lands in proposed and apply writes it "
+			                "over the automatic result"))
+
+		# Cover row: thumbnails of both sides + the source choice.
+		cvr = ttk.Frame(box)
+		cvr.pack(fill="x", pady=(6, 2))
+		ttk.Label(cvr, text=_("cover:")).pack(side="left", anchor="n")
+
+		s_cover = cover_paths(self.library, ctx["merge_into"])[0]
+		l_cover = cover_paths(self.library, e.get("path", ""))[0]
+		choices = [("auto", _("automatic")), ("survivor", _("survivor's"))]
+		cover_var = tk.StringVar(value=(prop.get("cover_source") or "auto"))
+		for side, path in ((_("survivor's"), s_cover), (_("this book's"), l_cover)):
+			cell = ttk.Frame(cvr)
+			cell.pack(side="left", padx=6)
+			try:
+				pil = load_thumb(path, 96, 128) if path.is_file() else None
+			except Exception:  # noqa: BLE001
+				pil = None
+			if pil is not None:
+				photo = ImageTk.PhotoImage(pil)
+				self._cover_photos[f"_merge_{side}"] = photo  # GC pin
+				ttk.Label(cell, image=photo, relief="sunken").pack()
+			else:
+				ttk.Label(cell, text=_("no cover.jpg"), relief="sunken",
+				          width=10, anchor="center").pack()
+			ttk.Label(cell, text=side).pack()
+		has_embedded = False
+		try:
+			primary = ctx["loser_folder"] / ctx["loser_meta"].primary_file \
+				if ctx["loser_meta"].primary_file else None
+			if primary is not None and primary.suffix.lower() == ".epub" and primary.is_file():
+				has_embedded = epub_cover_image(primary) is not None
+		except Exception:  # noqa: BLE001
+			has_embedded = False
+		choices.append(("loser", _("this book's cover.jpg")))
+		if has_embedded:
+			choices.append(("loser_epub", _("this book's embedded (EPUB)")))
+		pick = ttk.Frame(cvr)
+		pick.pack(side="left", padx=10, anchor="n")
+		for value, label in choices:
+			ttk.Radiobutton(pick, text=label, value=value, variable=cover_var,
+			                command=lambda v=value: self._merge_pick_cover(v),
+			                ).pack(anchor="w")
+
+		# File fate + reset.
+		for line in merge_file_plan(ctx["loser_folder"], ctx["survivor_folder"],
+		                            prop.get("cover_source")):
+			ttk.Label(box, text=line, foreground="#555753").pack(anchor="w")
+		ttk.Button(box, text=_("Reset to automatic"), command=self._merge_reset,
+		           ).pack(anchor="w", pady=(6, 0))
+
+	def act_merge(self) -> None:
+		"""Ctrl+R: approve the C19 merge (fold this folder into merge_into)."""
+		self.set_action("merge")
 
 	# ------------------------------------------------------------------
 	# Bulk edit (multi-selection)
@@ -4137,7 +4835,9 @@ class ReviewEditorApp:
 		folder = self.library / e.get("path", "")
 		for child in self._format_holder.winfo_children():
 			child.destroy()
-		self._content_cache.clear()
+		# Invalidate any in-flight content stream of the previous book — its
+		# chunks must never paint into this book's view.
+		self._content_gen += 1
 		files = list_format_files(folder)
 		self._format_files = files
 		if not files:
@@ -4156,39 +4856,114 @@ class ReviewEditorApp:
 			).pack(side="left", padx=4)
 		# Format radios are rebuilt per book, so re-trap them for Tab.
 		self._trap_subtree(self._format_holder)
+		# The _format_var trace loads the content (a radio click and this
+		# programmatic set take the same path — historically the radios had no
+		# command at all and a click never reloaded the preview).
 		self._format_var.set(first)
-		self._load_content(first)
+
+	def _on_format_changed(self, *_args) -> None:
+		"""A format radio was clicked (or the var set for a new book) — load it."""
+		fp = self._format_var.get()
+		if fp and fp != getattr(self, "_content_path", None):
+			self._content_path = fp
+			self._load_content(fp)
 
 	def _load_content(self, file_path: str) -> None:
+		"""Load the WHOLE book text, progressively.
+
+		One worker thread per format switch; ``_content_gen`` invalidates stale
+		ones — a stale worker STOPS PULLING its stream (the pipe child is
+		reaped via the generator's finally) and any chunk that already crossed
+		is dropped at the Tk-thread gate, so paging quickly through books
+		never interleaves two books' texts. Chunks land as they are extracted
+		(stream_full_text yields per EPUB member / pipe chunk), so a slow NFS
+		read or a converter render shows its head immediately instead of
+		"loading…" until the end. The mojibake detection + recode defaults run
+		ONCE on the complete text (per-chunk detection would flicker hints on
+		partial evidence).
+		"""
+		self._content_gen += 1
+		gen = self._content_gen
+		self._content_path = file_path
+		self._content_pieces = []
+		self._content_raw = ""
+		self._content_repaired = None
+		self._recode_var.set(False)
+		self._recode_chk.configure(state="disabled")
+		self._recode_hint.configure(text="", cursor="")
 		self._set_content_text(_("(loading…)"))
 
 		def work():
-			meta = self._content_cache.get(file_path)
-			if meta is None:
-				meta = extract(file_path)
-				self._content_cache[file_path] = meta
+			delivered = False
+			stream = stream_full_text(file_path)
+			try:
+				for chunk in stream:
+					if not self._alive or gen != self._content_gen:
+						return  # stale: stop pulling; close() below reaps the pipe
+					delivered = True
+					self._after(lambda c=chunk: self._content_append(gen, c))
+			except Exception:  # noqa: BLE001 — the extract() fallback below decides what shows
+				log.debug("content stream failed for %s", file_path, exc_info=True)
+			finally:
+				# Generators take GeneratorExit here (their finally reaps the
+				# pipe child); a duck-typed test double may have no close().
+				close = getattr(stream, "close", None)
+				if close is not None:
+					close()
+			if not delivered and self._alive:
+				# Nothing streamed (unknown format, unreadable file): fall back
+				# to extract() so its error message still reaches the user.
+				try:
+					meta = extract(file_path)
+				except Exception:  # noqa: BLE001
+					meta = None
+				self._after(lambda: self._content_fallback(gen, meta))
 			if self._alive:
-				self._after(self._apply_content)
+				self._after(lambda: self._content_done(gen))
 
 		threading.Thread(target=work, daemon=True).start()
 
-	def _apply_content(self) -> None:
-		fp = self._format_var.get()
-		meta = self._content_cache.get(fp)
-		if meta is None:
-			self._content_raw = ""
-			self._content_repaired = None
-			self._recode_chk.configure(state="disabled")
-			self._recode_hint.configure(text="", cursor="")
-			self._set_content_text("")
+	def _content_append(self, gen: int, chunk: str) -> None:
+		"""Tk-thread: append one streamed chunk (stale generations dropped)."""
+		if gen != self._content_gen or not self._alive:
 			return
-		view = self._view_var.get()
-		raw = (meta.broader_text if view == "broader" else meta.first_page_text) or ""
-		if not raw and meta.error:
-			raw = _("(extraction failed: {err})").format(err=meta.error)
-		elif not raw:
+		if not self._content_pieces:
+			# First chunk: drop the "(loading…)" placeholder.
+			self._content_txt.configure(state="normal")
+			self._content_txt.delete("1.0", "end")
+		self._content_pieces.append(chunk)
+		self._content_txt.insert("end", chunk)
+		self._content_txt.configure(state="disabled")
+
+	def _content_fallback(self, gen: int, meta) -> None:
+		"""Tk-thread: the empty-stream fallback — extract()'s widest window.
+
+		Serves the windows (broader/first-page) a format without a real stream
+		produced, or surfaces the extraction error verbatim.
+		"""
+		if gen != self._content_gen or not self._alive:
+			return
+		raw = ""
+		if meta is not None:
+			raw = meta.broader_text or meta.first_page_text or ""
+			if not raw and meta.error:
+				raw = _("(extraction failed: {err})").format(err=meta.error)
+		if raw:
+			self._content_append(gen, raw)
+
+	def _content_done(self, gen: int) -> None:
+		"""Tk-thread: the stream finished — freeze the raw text, detect mojibake."""
+		if gen != self._content_gen or not self._alive:
+			return
+		raw = "".join(self._content_pieces)
+		if not raw:
 			raw = _("(no text)")
 		self._content_raw = raw
+		if len(raw) >= FULL_TEXT_LIMIT:
+			self._content_txt.configure(state="normal")
+			self._content_txt.insert(
+				"end", _("  [… truncated at {limit} characters]").format(limit=f"{FULL_TEXT_LIMIT:,}"))
+			self._content_txt.configure(state="disabled")
 		# Detect double-encoding (utf-8 mis-decoded twice): default the z/do
 		# selectors to the usual CZ suspect. A clean book keeps the user's
 		# last pair, so manual experimenting works even when the detector
@@ -4262,10 +5037,10 @@ class ReviewEditorApp:
 		self._swap_recode_codecs()
 
 	def _recode_changed(self, *_args) -> None:
-		"""A codec was picked (z/do) — live-preview the result from page one.
+		"""A codec was picked (z/do) — live-preview the result from the top.
 
 		NB: no auto-checking here either. This trace fires for PROGRAMMATIC
-		pair defaults too (the detector in _apply_content sets cp1250/utf-8),
+		pair defaults too (the detector in _content_done sets cp1250/utf-8),
 		so an auto-check in this path is exactly the "toggle keeps turning
 		itself on while paging books" loop — the checkbox is the user's.
 		"""
@@ -4277,17 +5052,13 @@ class ReviewEditorApp:
 				text=_("{frm} → {to} ✓").format(frm=self._recode_from.get(), to=self._recode_to.get()))
 		self._apply_content_text()
 		try:
-			self._content_txt.yview_moveto(0.0)  # first-page preview
+			self._content_txt.yview_moveto(0.0)  # re-read from the top
 		except Exception:  # noqa: BLE001
 			pass
 
 	def _apply_content_text(self) -> None:
 		repaired = self._content_repaired if (self._recode_var.get() and self._content_repaired) else None
 		self._set_content_text(repaired if repaired is not None else self._content_raw)
-
-	def content_toggle_view(self) -> None:
-		self._view_var.set("broader" if self._view_var.get() == "first" else "first")
-		self._apply_content()
 
 	def content_recode_toggle(self) -> None:
 		if not self._content_repaired:
@@ -4554,6 +5325,7 @@ class ReviewEditorApp:
 			("Ctrl+J", _("merge the selected books into one (files move to the survivor)")),
 			("∅ / ↺", _("field button: apply the field as EMPTY (wrong proposal, correct value unknown)")),
 			("Ctrl+D", "delete"),
+			("Ctrl+R", _("merge — fold this folder into the same-work survivor (proposed.merge_into)")),
 			("Ctrl+K", _("keep (applies like accept; the entry stays in review)")),
 			("Ctrl+O", _("verified — mark the book OK: apply stores the flag in metadata.json, analyze skips the book, apply places it on the target path")),
 			("Ctrl+0", _("clear → pending")),
@@ -4565,7 +5337,8 @@ class ReviewEditorApp:
 			("Ctrl+B", _("cover: restore .bak")),
 			("Ctrl+P", _("cover: keep")),
 			("Ctrl+M", _("cover: delete checked cover/.bak, strip embedded covers")),
-			("Ctrl+T", _("content: first page / broader text")),
+			("Ctrl+C", _("copy the text selected with the mouse in the Found-problems list / content preview / detail popups")),
+			("Click a problem code", _("open the detailed description of that diagnosis (C1…C20, MISSING_*, …)")),
 			("Ctrl+G", _("content: recode („read as“ = the wrong read, „actually is“ = the real encoding; result always UTF-8)")),
 			("↑ ↓ / Enter", _("author & series: autocomplete from the library (arrows pick, Enter inserts; Tab inserts only after an arrow pick — otherwise it leaves your text)")),
 			("", _("(click on a cover = ☑; click on path / double-click in the list = open folder)")),

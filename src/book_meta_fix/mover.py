@@ -496,6 +496,7 @@ def merge_folders(
 	dry_run: bool = True,
 	cache: Cache | None = None,
 	library: Path | None = None,
+	merged_transform: Any = None,
 ) -> MoveResult:
 	"""Merge *loser_meta*'s folder into *winner_folder* (a single book result).
 
@@ -505,7 +506,13 @@ def merge_folders(
 	dropped — the merged metadata subsumes them.
 
 	*winner_meta* provides the metadata baseline (the cluster's base); its
-	values are field-merged with *loser_meta*. Returns a :class:`MoveResult`
+	values are field-merged with *loser_meta*. *merged_transform* (a callable)
+	runs on the merged metadata IN PLACE after the field merge and before the
+	write — apply's C19 branch uses it to stamp the user's explicit
+	``proposed`` field picks over the automatic survivor-wins result (a
+	callable, not a dict: mover must not import pipeline's _apply_fields,
+	which mutates in place and returns None — so the return value is ignored).
+	Returns a :class:`MoveResult`
 	with ``action='merged'`` and the per-file moves in ``details``.
 	"""
 	from .writers import write_book_meta
@@ -513,6 +520,8 @@ def merge_folders(
 	winner_folder = Path(winner_folder)
 	loser_folder = Path(loser_meta.path)
 	merged = merge_meta(winner_meta, loser_meta)
+	if merged_transform is not None:
+		merged_transform(merged)
 	merged.path = str(winner_folder)
 	moves = _merge_format_files(loser_folder, winner_folder, loser_meta.calibre_id, dry_run=dry_run)
 	if not dry_run:

@@ -1500,6 +1500,27 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cach
 			if not mover.same_book(loser_meta, survivor_meta):
 				summary["skipped_merges"].append(f"{item.path}: no longer the same work as the target (re-run `bmf merge`)")
 				continue
+			# The GUI merge panel's explicit picks: proposed carries field
+			# overrides (applied over merge_meta's survivor-wins result) and
+			# cover_source (survivor | loser | loser_epub — which cover.jpg
+			# ends up at the survivor). _apply_fields ignores keys it does
+			# not know, so passing the whole rest of proposed is safe.
+			proposed = item.proposed or {}
+			picks = {k: v for k, v in proposed.items() if k not in ("merge_into", "source", "delete_files", "cover_source")}
+			cover_source = proposed.get("cover_source")
+			loser_cover = loser / "cover.jpg"
+			if cover_source == "loser" and not loser_cover.is_file():
+				summary["errors"].append(f"id={item.id}: cover_source=loser but the duplicate has no cover.jpg")
+				continue
+			spooled_cover: Path | None = None
+			if cover_source == "loser_epub":
+				extracted = _extract_loser_epub_cover(loser_meta, merge_spool)
+				if extracted is None:
+					summary["errors"].append(f"id={item.id}: cover_source=loser_epub but no embedded cover could be extracted")
+					continue
+				merge_spool, spooled_cover = extracted
+			# Spool the loser's sidecars + cover for the shared deletion
+			# snapshot BEFORE merge_folders removes the folder.
 			for name in ("metadata.json", "metadata.opf", "cover.jpg"):
 				cand = loser / name
 				if not cand.is_file():
@@ -1508,15 +1529,22 @@ def apply_review(review_path: Path, library: Path, *, dry_run: bool = True, cach
 					merge_spool = Path(tempfile.mkdtemp(prefix="bmf-merge-spool-"))
 				spooled = merge_spool / f"{len(merge_snapshot_paths):04d}_{cand.name}"
 				shutil.copy2(cand, spooled)
+				if name == "cover.jpg":
+					spooled_cover = spooled_cover or spooled
 				try:
 					arc = str(cand.relative_to(library))
 				except ValueError:
 					arc = str(cand)
 				merge_snapshot_paths.append((spooled, arc))
-			res = mover.merge_folders(survivor, survivor_meta, loser_meta, dry_run=dry_run, library=library)
+			res = mover.merge_folders(
+				survivor, survivor_meta, loser_meta, dry_run=dry_run, library=library,
+				merged_transform=(lambda m, _picks=picks: _apply_fields(m, _picks)) if picks else None,
+			)
 			if res.action == "error":
 				summary["errors"].append(f"id={item.id}: merge failed: {res.error}")
 				continue
+			if not dry_run and cover_source:
+				_cover_swap_after_merge(survivor, spooled_cover, cover_source, res, summary, item.id)
 			summary["merged_folders"] += 1
 			if not dry_run:
 				if item.uuid is not None:
@@ -1796,6 +1824,83 @@ def _place_applied_book(meta: BookMeta, placement: str, dest: Path, *, dry_run: 
 				mover._prune_empty_parents(src.parent, library)
 			return mover.MoveResult(str(src), str(dest), "merged", details=details)
 	return move_book(src, dest, dry_run=dry_run, library=library)
+
+
+def _extract_loser_epub_cover(loser_meta: BookMeta, merge_spool: Path | None) -> tuple[Path, Path] | None:
+	"""Extract the loser's EMBEDDED cover into the merge spool (C19 cover_source=loser_epub).
+
+	Uses the same recovery path as apply's cover recovery — calibre
+	extraction + the generated-placeholder gate, so a calibre-written
+	placeholder can never win the choice. Returns ``(spool_dir, spool_file)``
+	or None when the book has no primary file, no embedded cover, or only a
+	generated one. Never raises.
+	"""
+	import shutil
+	import tempfile
+
+	from .covers import recover_cover_from_book
+
+	if not loser_meta.primary_file:
+		return None
+	try:
+		if merge_spool is None:
+			merge_spool = Path(tempfile.mkdtemp(prefix="bmf-merge-spool-"))
+		dest = merge_spool / "epub_cover.jpg"
+		if dest.exists():
+			dest.unlink()
+		if not recover_cover_from_book(loser_meta.primary_file, dest):
+			return None
+		return merge_spool, dest
+	except Exception:  # noqa: BLE001
+		log.warning("embedded-cover extraction failed for %s", loser_meta.path, exc_info=True)
+		if merge_spool is not None:
+			shutil.rmtree(merge_spool, ignore_errors=True)
+		return None
+
+
+def _cover_swap_after_merge(survivor: Path, spooled_cover: Path | None, cover_source: str, res: Any, summary: dict, item_id: Any) -> None:
+	"""Enforce the GUI's ``proposed.cover_source`` choice AFTER merge_folders ran.
+
+	Default (no key) behavior already happened inside the merge: the
+	survivor's cover wins, the loser's fills only a gap. Explicit choices:
+
+	  - ``survivor``: keep the survivor's state — if the loser's cover
+	    gap-filled (the survivor had none), it is removed again;
+	  - ``loser`` / ``loser_epub``: the chosen cover becomes THE cover —
+	    the survivor's current ``cover.jpg`` moves to ``cover.jpg.bak`` and
+	    the spooled copy takes its place. When the loser's sidecar cover
+	    already gap-filled, it IS the chosen cover and nothing swaps.
+
+	Failures land in ``summary["errors"]`` (the user explicitly asked for
+	this cover — silence would mislead); the merged metadata is never
+	touched.
+	"""
+	import shutil
+
+	gap_filled = any(
+		name == "cover.jpg" and outcome == "cover.jpg"
+		for name, outcome in (res.details or [])
+	)
+	target = survivor / "cover.jpg"
+	if cover_source == "survivor":
+		if gap_filled:
+			try:
+				target.unlink()
+			except OSError as e:
+				summary["errors"].append(f"id={item_id}: cover_source=survivor cleanup failed: {e}")
+		return
+	# "loser" / "loser_epub"
+	if gap_filled:
+		return  # the loser's own sidecar cover already sits at the survivor
+	if spooled_cover is None or not spooled_cover.is_file():
+		summary["errors"].append(f"id={item_id}: cover_source={cover_source} but no cover landed in the spool")
+		return
+	try:
+		if target.is_file():
+			target.replace(survivor / "cover.jpg.bak")
+		shutil.copy2(spooled_cover, target)
+	except OSError as e:
+		summary["errors"].append(f"id={item_id}: cover swap failed: {e}")
 
 
 def _snapshot_deletions(paths: list, library: Path) -> Path | None:

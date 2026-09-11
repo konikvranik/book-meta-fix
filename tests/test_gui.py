@@ -1967,3 +1967,635 @@ class TestBulkClearAndRemove:
 		assert app._on_ctrl_key(type("E", (), {"keysym": "D", "state": 0x0001})()) == "break"
 		assert app._on_ctrl_key(type("E", (), {"keysym": "R", "state": 0x0001})()) == "break"
 		assert app.calls == ["bulk_clear_action", "remove_from_review"]
+
+
+class TestSortDiagnoses:
+	"""The Found-problems section order: decision-waiting proposals first,
+	then damage, then MISSING_* info; confidence breaks ties; unknown
+	categories keep the analyzer's order at the end."""
+
+	def test_action_proposals_lead(self):
+		d = [
+			{"category": "MISSING_YEAR", "confidence": "HIGH"},
+			{"category": "C2", "confidence": "LOW"},
+			{"category": "C19", "confidence": "MEDIUM"},
+			{"category": "C6", "confidence": "HIGH"},
+			{"category": "C11", "confidence": "HIGH"},
+		]
+		assert [x["category"] for x in gui.sort_diagnoses(d)] == [
+			"C6", "C19", "C11", "C2", "MISSING_YEAR",
+		]
+
+	def test_confidence_breaks_ties_stably(self):
+		d = [
+			{"category": "C2", "confidence": "LOW"},
+			{"category": "C2", "confidence": "HIGH"},
+			{"category": "C2", "confidence": "MEDIUM"},
+		]
+		assert [x["confidence"] for x in gui.sort_diagnoses(d)] == ["HIGH", "MEDIUM", "LOW"]
+
+	def test_unknown_categories_stay_last_in_order(self):
+		d = [
+			{"category": "C99", "confidence": "HIGH"},
+			{"category": "C1", "confidence": "LOW"},
+			{"category": "C98", "confidence": "LOW"},
+		]
+		assert [x["category"] for x in gui.sort_diagnoses(d)] == ["C1", "C99", "C98"]
+
+
+class TestMergeProjectionRows:
+	"""The merge panel's comparison rows: only differing/picked fields, and
+	the effective column is the SAME projection apply executes."""
+
+	def _meta(self, tmp_path, name, *, year=None, publisher=None):
+		from book_meta_fix.models import BookMeta
+
+		return BookMeta(
+			calibre_id=1, title="Kniha", authors=["Autor"],
+			path=str(tmp_path / name), year=year, publisher=publisher,
+			formats=[".epub"],
+		)
+
+	def test_only_differing_fields_listed(self, tmp_path):
+		a = self._meta(tmp_path, "a", year=2010, publisher="Odeon")
+		b = self._meta(tmp_path, "b", year=1995, publisher="Odeon")
+		rows = gui.merge_projection_rows(a, b)
+		assert [r["field"] for r in rows] == ["year"]
+		row = rows[0]
+		assert row["s_text"] == "2010" and row["l_text"] == "1995"
+		assert row["e_text"] == "2010"  # automatic: survivor wins
+		assert row["picked"] is False
+
+	def test_explicit_pick_overrides_effective_column(self, tmp_path):
+		a = self._meta(tmp_path, "a", year=2010, publisher="Odeon")
+		b = self._meta(tmp_path, "b", year=1995, publisher="Odeon")
+		entry = {"proposed": {"year": 1995, "merge_into": "x"}}
+		rows = gui.merge_projection_rows(a, b, entry)
+		assert rows[0]["e_text"] == "1995"
+		assert rows[0]["picked"] is True
+
+	def test_gapfill_row_shows_loser_value(self, tmp_path):
+		a = self._meta(tmp_path, "a", year=2010, publisher=None)
+		b = self._meta(tmp_path, "b", year=2010, publisher="Svoboda")
+		rows = gui.merge_projection_rows(a, b)
+		assert [r["field"] for r in rows] == ["publisher"]
+		assert rows[0]["e_text"] == "Svoboda"  # automatic: loser fills the gap
+
+
+class TestMergeFilePlan:
+	"""The file-fate lines mirror mover._merge_format_files's rules."""
+
+	def _folders(self, tmp_path, *, same_bytes=False, survivor_cover=True):
+		surv = tmp_path / "s"
+		lose = tmp_path / "l"
+		surv.mkdir()
+		lose.mkdir()
+		(surv / "book.epub").write_bytes(b"surv-epub")
+		(lose / "book.epub").write_bytes(b"surv-epub" if same_bytes else b"lose-epub")
+		(lose / "extra.pdf").write_bytes(b"pdf")
+		if survivor_cover:
+			(surv / "cover.jpg").write_bytes(b"s-cover")
+		(lose / "cover.jpg").write_bytes(b"l-cover")
+		return surv, lose
+
+	def test_moves_and_collisions(self, tmp_path):
+		surv, lose = self._folders(tmp_path)
+		lines = gui.merge_file_plan(lose, surv)
+		joined = "\n".join(lines)
+		assert "extra.pdf" in joined and "moves" in joined
+		assert "book.epub" in joined and "renamed" in joined
+		assert "cover.jpg" in joined and "survivor's cover wins" in joined
+
+	def test_identical_bytes_skipped(self, tmp_path):
+		surv, lose = self._folders(tmp_path, same_bytes=True)
+		joined = "\n".join(gui.merge_file_plan(lose, surv))
+		assert "identical bytes" in joined
+
+	def test_cover_source_pick_changes_the_cover_line(self, tmp_path):
+		surv, lose = self._folders(tmp_path)
+		joined = "\n".join(gui.merge_file_plan(lose, surv, cover_source="loser"))
+		assert "becomes THE cover" in joined
+
+
+class TestMergePanel:
+	"""Tk-gated smoke: the C19 merge panel builds for a merge entry, picks
+	land in proposed, reset clears them."""
+
+	def _seed(self, tmp_path):
+		import json
+
+		for cid, year in ((1, 2010), (2, 1995)):
+			folder = tmp_path / "A" / f"Kniha ({cid})"
+			folder.mkdir(parents=True)
+			(folder / "metadata.json").write_text(json.dumps({
+				"title": "Kniha", "authors": ["Autor"], "uuid": f"u{cid}",
+				"isbn": "9780306406157", "publishedYear": str(year),
+			}), encoding="utf-8")
+			(folder / f"kniha-{cid}.epub").write_text(f"x{cid}", encoding="utf-8")
+		return tmp_path / "A" / "Kniha (1)", tmp_path / "A" / "Kniha (2)"
+
+	def _bare_app(self, root, library, entries):
+		app = gui.ReviewEditorApp.__new__(gui.ReviewEditorApp)
+		app.root = root
+		app.library = library
+		app.entries = entries
+		app._cover_photos = {}
+		app._link_font = None
+		app._loading = False
+		app._dirty = False
+		app._set_status = lambda: None
+		app._scroll_inner = gui.ttk.Frame(root)
+		app._covers_frame = gui.ttk.Frame(app._scroll_inner)
+		app._build_merge_section()
+		return app
+
+	def test_panel_builds_picks_and_resets(self, tmp_path):
+		surv, lose = self._seed(tmp_path)
+		loser_entry = {
+			"id": 2, "uuid": "u2", "path": "A/Kniha (2)",
+			"proposed": {"merge_into": "A/Kniha (1)"}, "action": "merge",
+		}
+		root = _tk_root()
+		try:
+			app = self._bare_app(root, tmp_path, [{}, loser_entry])
+			app._covers_frame.pack()  # pack(before=…) needs an already-packed anchor
+			app._load_merge_panel(loser_entry)
+			assert app._merge_frame.winfo_manager() == "pack"  # packed for a merge entry
+			assert app._merge_ctx is not None
+			# year differs → an override row exists; pick this book's year.
+			app._merge_pick_field("year", "loser")
+			assert loser_entry["proposed"]["year"] == 1995
+			# cover source pick rides proposed.cover_source.
+			app._merge_pick_cover("loser")
+			assert loser_entry["proposed"]["cover_source"] == "loser"
+			# reset drops every pick, the merge_into stays.
+			app._merge_reset()
+			assert "year" not in loser_entry["proposed"]
+			assert "cover_source" not in loser_entry["proposed"]
+			assert loser_entry["proposed"]["merge_into"] == "A/Kniha (1)"
+		finally:
+			root.destroy()
+
+	def test_non_merge_entry_leaves_panel_unpacked(self, tmp_path):
+		root = _tk_root()
+		try:
+			app = self._bare_app(root, tmp_path, [])
+			e = {"id": 1, "uuid": "u1", "path": "A/B", "proposed": {}}
+			app._load_merge_panel(e)
+			assert app._merge_frame.winfo_manager() == ""  # never packed
+			assert app._merge_ctx is None
+		finally:
+			root.destroy()
+
+
+
+class TestProblemsSection:
+	"""The Found-problems list is ONE readonly Text: selectable + copyable,
+	with each diagnosis CODE clickable (detailed description popup)."""
+
+	def _app(self, root):
+		app = gui.ReviewEditorApp.__new__(gui.ReviewEditorApp)
+		app.root = root
+		app._field_bg = "#ffffff"
+		app._field_fg = "#000000"
+		app._form_bg = "#d9d9d9"
+		app._help_win = None
+		app._scroll_inner = gui.tk.Frame(root)
+		app._scroll_inner.pack(fill="both", expand=True)  # map → width for wrap math
+		app._build_problems_section()
+		return app
+
+	def test_lines_sorted_and_code_tagged(self):
+		root = _tk_root()
+		try:
+			app = self._app(root)
+			app._load_problems({"diagnoses": [
+				{"category": "MISSING_YEAR", "reason": "no year", "confidence": None},
+				{"category": "C11", "reason": "cover looks generated", "confidence": "HIGH"},
+			]})
+			txt = app._problems_txt
+			body = txt.get("1.0", "end")
+			assert "C11" in body and "cover looks generated" in body
+			assert "MISSING_YEAR" in body
+			# severity sort: the decision-waiting proposal before the info
+			assert body.index("C11") < body.index("MISSING_YEAR")
+			# the code span is its own tagged range (underline + click binding)
+			assert txt.tag_ranges("code_0")
+		finally:
+			root.destroy()
+
+	def test_no_scrollbar_and_height_follows_rows(self):
+		"""Flat label-look: no scrollbar, height == wrapped row count."""
+		root = _tk_root()
+		try:
+			app = self._app(root)
+			app._load_problems({"diagnoses": [
+				{"category": "C11", "reason": "cover looks generated", "confidence": "HIGH"},
+				{"category": "MISSING_YEAR", "reason": "no year", "confidence": None},
+			]})
+			root.update()
+			txt = app._problems_txt
+			# no scrollbar child anywhere in the section
+			from tkinter import ttk as _ttk
+
+			for w in app._problems_frame.winfo_children():
+				assert not isinstance(w, _ttk.Scrollbar)
+			n = txt.count("1.0", "end-1c", "displaylines")
+			rows = int(n[0]) if n else 1
+			assert int(txt.cget("height")) == rows
+			# label look: form background, flat relief, not a field
+			assert txt.cget("background") == "#d9d9d9"
+			assert str(txt.cget("relief")) == "flat"
+		finally:
+			root.destroy()
+
+	def test_plain_click_on_code_opens_popup_but_drag_does_not(self):
+		root = _tk_root()
+		try:
+			app = self._app(root)
+			app._load_problems({"diagnoses": [
+				{"category": "C11", "reason": "cover looks generated", "confidence": "HIGH"},
+			]})
+			root.update()
+			txt = app._problems_txt
+
+			class _Ev:
+				def __init__(self, x, y):
+					self.x, self.y = x, y
+
+			b = txt.bbox("code_0.first")
+			assert b
+			# a drag (selection present) must NOT open the popup
+			txt.tag_add("sel", "1.0", "1.3")
+			app._on_problems_click(_Ev(b[0] + 2, b[1] + b[3] // 2))
+			assert app._help_win is None
+			# a plain click (no selection) on the code must
+			txt.tag_remove("sel", "1.0", "end")
+			app._on_problems_click(_Ev(b[0] + 2, b[1] + b[3] // 2))
+			assert app._help_win is not None and app._help_win.winfo_exists()
+		finally:
+			root.destroy()
+
+	def test_ctrl_c_writes_selection_to_clipboard(self):
+		root = _tk_root()
+		try:
+			app = self._app(root)
+			app._load_problems({"diagnoses": [
+				{"category": "C11", "reason": "cover looks generated", "confidence": "HIGH"},
+			]})
+			txt = app._problems_txt
+			txt.tag_add("sel", "1.0", "1.3")
+			app._copy_text_to_clipboard(txt)
+			assert root.clipboard_get() == "C11"
+			app._copy_text_to_clipboard(txt, all_text=True)
+			assert "cover looks generated" in root.clipboard_get()
+		finally:
+			root.destroy()
+
+	def test_click_code_opens_help_popup(self):
+		root = _tk_root()
+		try:
+			app = self._app(root)
+			app._show_category_help("C11")
+			win = app._help_win
+			assert win is not None and win.winfo_exists()
+			bodies = [w for w in win.winfo_children() if isinstance(w, gui.tk.Text)]
+			assert bodies
+			assert "C11" in bodies[0].get("1.0", "end")
+		finally:
+			root.destroy()
+
+	def test_unknown_code_gets_fallback_text(self):
+		root = _tk_root()
+		try:
+			app = self._app(root)
+			app._show_category_help("NOPE")
+			bodies = [w for w in app._help_win.winfo_children() if isinstance(w, gui.tk.Text)]
+			assert "NOPE" in bodies[0].get("1.0", "end")
+		finally:
+			root.destroy()
+
+	def test_popup_replaces_previous(self):
+		root = _tk_root()
+		try:
+			app = self._app(root)
+			app._show_category_help("C1")
+			first = app._help_win
+			app._show_category_help("C2")
+			assert not first.winfo_exists()
+			assert app._help_win.winfo_exists()
+		finally:
+			root.destroy()
+
+
+class TestContentWholeTextStreaming:
+	"""The content preview loads the WHOLE book text, progressively.
+
+	Regression context: the old first-page/broader toggle hid all but a 30k
+	window; chunks now append as stream_full_text yields them, gated by a
+	generation counter so a stale stream never paints into a new book.
+	"""
+
+	def _app(self, root):
+		app = gui.ReviewEditorApp.__new__(gui.ReviewEditorApp)
+		app.root = root
+		app._alive = True
+		app._cur = 0
+		app._field_bg = "#ffffff"
+		app._field_fg = "#000000"
+		app._format_var = gui.tk.StringVar()
+		app._content_gen = 0
+		app._content_path = None
+		app._content_pieces = []
+		app._content_raw = ""
+		app._content_repaired = None
+		app._recode_var = gui.tk.BooleanVar(value=False)
+		app._recode_from = gui.tk.StringVar(value="cp1250")
+		app._recode_to = gui.tk.StringVar(value="utf-8")
+		app._help_win = None
+		box = gui.ttk.Frame(root)
+		app._build_content_section(box)
+		return app
+
+	def test_format_radio_click_reloads_content(self, monkeypatch):
+		"""A radio click writes _format_var; the trace loads that format.
+
+		Regression: the radios historically had no command at all — clicking
+		a different format never reloaded the preview.
+		"""
+		root = _tk_root()
+		try:
+			app = self._app(root)
+			app._format_var.trace_add("write", lambda *_: app._on_format_changed())
+			loads = []
+			monkeypatch.setattr(app, "_load_content", lambda fp: loads.append(fp))
+			app._format_var.set("/lib/A/B (1)/book.epub")
+			app._format_var.set("/lib/A/B (1)/book.mobi")
+			assert loads == [str(gui.Path("/lib/A/B (1)/book.epub")),
+			                 str(gui.Path("/lib/A/B (1)/book.mobi"))]
+			# setting the SAME value again does not reload
+			app._format_var.set("/lib/A/B (1)/book.mobi")
+			assert len(loads) == 2
+		finally:
+			root.destroy()
+
+	def test_chunks_fill_view_completely(self, monkeypatch):
+		root = _tk_root()
+		try:
+			app = self._app(root)
+			chunks = iter(["prvni ", "druha ", "treti"])
+			monkeypatch.setattr(gui, "stream_full_text", lambda path: chunks)
+			result = {}
+
+			def kick():
+				app._load_content("fake.epub")  # must run INSIDE mainloop: a
+				# worker's root.after() only lands while the loop dispatches
+				root.after(30, check)
+
+			def check():
+				if app._content_raw:
+					result["raw"] = app._content_raw
+					result["view"] = app._content_txt.get("1.0", "end")
+					root.quit()
+				else:
+					root.after(30, check)
+
+			root.after(60, kick)
+			root.mainloop()
+			assert result["raw"] == "prvni druha treti"
+			assert result["view"].startswith("prvni ")
+			assert "(loading" not in result["view"]
+
+		finally:
+			root.destroy()
+
+	def test_stale_generation_chunks_dropped(self, monkeypatch):
+		root = _tk_root()
+		try:
+			app = self._app(root)
+			app._content_gen = 7
+			app._set_content_text("current book")
+			# a stale chunk (old generation) must be dropped
+			app._content_append(3, "old book text")
+			assert app._content_txt.get("1.0", "end").strip("\n") == "current book"
+			assert app._content_pieces == []
+		finally:
+			root.destroy()
+
+	def test_empty_stream_falls_back_to_extract_error(self, monkeypatch):
+		root = _tk_root()
+		try:
+			app = self._app(root)
+			monkeypatch.setattr(gui, "stream_full_text", lambda path: iter(()))
+			monkeypatch.setattr(
+				gui, "extract",
+				lambda path: type("M", (), {"broader_text": None, "first_page_text": None,
+				                            "error": "bad zip / not an epub"})())
+			result = {}
+
+			def kick():
+				app._load_content("broken.epub")
+				root.after(30, check)
+
+			def check():
+				if app._content_raw:
+					result["view"] = app._content_txt.get("1.0", "end")
+					root.quit()
+				else:
+					root.after(30, check)
+
+			root.after(60, kick)
+			root.mainloop()
+			assert "bad zip / not an epub" in result["view"]
+		finally:
+			root.destroy()
+
+	def test_no_view_toggle_left(self):
+		"""The first/broader radios are gone — Ctrl+T has no handler either."""
+		assert not hasattr(gui.ReviewEditorApp, "content_toggle_view")
+		root = _tk_root()
+		try:
+			app = self._app(root)
+			assert not hasattr(app, "_view_var")
+		finally:
+			root.destroy()
+
+
+class TestResponsiveDetailLayout:
+	"""The detail split is responsive: form + preview side by side when the
+	detail area is wide, stacked (preview at the BOTTOM) when it is narrow.
+
+	ttk's Panedwindow -orient is read-only and Tk cannot reparent, so the
+	switch destroys and recreates only the Panedwindow — the pane frames are
+	its SIBLINGS (children of the detail frame) and must survive with their
+	content intact.
+	"""
+
+	def _app(self, root):
+		app = gui.ReviewEditorApp.__new__(gui.ReviewEditorApp)
+		app._detail_frame = gui.ttk.Frame(root)
+		app._detail_frame.pack(fill="both", expand=True)
+		app._form_pane = gui.ttk.Frame(app._detail_frame)
+		app._content_pane = gui.ttk.Frame(app._detail_frame)
+		app.canvas = gui.tk.Canvas(app._form_pane, highlightthickness=0, width=720)
+		app.canvas.pack(fill="both", expand=True)
+		app._content_txt = gui.tk.Text(app._content_pane, wrap="word")
+		app._content_txt.pack(fill="both", expand=True)
+		app._form_vsb = gui.ttk.Scrollbar(app._form_pane, orient="vertical", command=app.canvas.yview)
+		app._content_vsb = gui.ttk.Scrollbar(app._content_pane, orient="vertical", command=app._content_txt.yview)
+		app._chain_vsb = gui.ttk.Scrollbar(app._detail_frame, orient="vertical", command=app._chain_scroll)
+		app._cols = None
+		app._detail_orient = None
+		return app
+
+	@staticmethod
+	def _event(width):
+		return type("E", (), {"width": width})()
+
+	def test_horizontal_places_panes_side_by_side(self):
+		root = _tk_root()
+		try:
+			app = self._app(root)
+			app._apply_detail_orient("horizontal")
+			root.update()
+			assert app._detail_orient == "horizontal"
+			# form LEFT of the preview, both mapped
+			assert app._form_pane.winfo_x() < app._content_pane.winfo_x()
+			assert app._form_pane.winfo_ismapped()
+			assert app._content_pane.winfo_ismapped()
+		finally:
+			root.destroy()
+
+	def test_switch_keeps_panes_and_restacks(self):
+		"""vertical → form on TOP, preview BELOW; pane frames stay alive."""
+		root = _tk_root()
+		try:
+			app = self._app(root)
+			form = app._form_pane
+			app._apply_detail_orient("horizontal")
+			app._apply_detail_orient("vertical")
+			root.update()
+			assert app._detail_orient == "vertical"
+			assert app._form_pane is form  # not rebuilt — state survives
+			assert app._form_pane.winfo_y() < app._content_pane.winfo_y()
+			assert app._form_pane.winfo_ismapped()
+			assert app._content_pane.winfo_ismapped()
+		finally:
+			root.destroy()
+
+	def test_configure_flips_only_across_hysteresis(self):
+		root = _tk_root()
+		try:
+			app = self._app(root)
+			app._apply_detail_orient("horizontal")
+			# narrow → stacked
+			app._on_detail_configure(self._event(gui._DETAIL_NARROW_WIDTH - 1))
+			assert app._detail_orient == "vertical"
+			# inside the hysteresis band → stays stacked (no flapping)
+			app._on_detail_configure(self._event(gui._DETAIL_NARROW_WIDTH + gui._DETAIL_HYSTERESIS - 1))
+			assert app._detail_orient == "vertical"
+			# past the band → back to side by side
+			app._on_detail_configure(self._event(gui._DETAIL_NARROW_WIDTH + gui._DETAIL_HYSTERESIS))
+			assert app._detail_orient == "horizontal"
+			# pre-map noise is ignored
+			app._on_detail_configure(self._event(1))
+			assert app._detail_orient == "horizontal"
+		finally:
+			root.destroy()
+
+	def test_real_configure_event_switches_layout(self):
+		"""The bound <Configure> on the detail frame drives the switch for
+		real: a narrow window must restack the preview below the form."""
+		root = _tk_root()
+		try:
+			app = self._app(root)
+			app._apply_detail_orient("horizontal")
+			app._detail_frame.bind("<Configure>", app._on_detail_configure, add="+")
+			result = {}
+
+			def check():
+				if app._detail_orient == "vertical":
+					result["stacked"] = (
+						app._form_pane.winfo_y() < app._content_pane.winfo_y()
+					)
+					result["mapped"] = (
+						app._form_pane.winfo_ismapped()
+						and app._content_pane.winfo_ismapped()
+					)
+					root.quit()
+				else:
+					root.after(30, check)
+
+			root.geometry("700x500")
+			root.after(60, check)
+			root.mainloop()
+			assert result.get("stacked")  # winfo_ismapped() yields ints
+			assert result.get("mapped")
+		finally:
+			root.destroy()
+
+	def test_stacked_mode_shows_one_chained_scrollbar(self):
+		"""Narrow layout: both native scrollbars hide, ONE big chained
+		scrollbar spans the detail; the side-by-side layout restores them."""
+		root = _tk_root()
+		try:
+			app = self._app(root)
+			app._apply_detail_orient("horizontal")
+			root.update()
+			assert app._form_vsb.winfo_ismapped()
+			assert app._content_vsb.winfo_ismapped()
+			assert not app._chain_vsb.winfo_ismapped()
+
+			app._apply_detail_orient("vertical")
+			root.update()
+			assert not app._form_vsb.winfo_ismapped()
+			assert not app._content_vsb.winfo_ismapped()
+			assert app._chain_vsb.winfo_ismapped()
+
+			app._apply_detail_orient("horizontal")
+			root.update()
+			assert app._form_vsb.winfo_ismapped()
+			assert app._content_vsb.winfo_ismapped()
+			assert not app._chain_vsb.winfo_ismapped()
+		finally:
+			root.destroy()
+
+	def test_chain_scrolls_form_first_then_text(self):
+		"""The chained scrollbar's virtual range runs the form canvas FIRST,
+		then the whole text: a position in the form part keeps the text at
+		its top, a position past it pins the form and drives the text."""
+		root = _tk_root()
+		try:
+			app = self._app(root)
+			app.canvas.create_rectangle(0, 0, 100, 1500)  # tall form
+			# the real GUI maintains this via _on_inner_configure
+			app.canvas.configure(scrollregion=app.canvas.bbox("all"))
+			app._content_txt.insert("1.0", ("line\n" * 400))
+			app._apply_detail_orient("vertical")
+			root.update()
+
+			# both areas must actually overflow for the mapping to exist
+			assert app.canvas.bbox("all")[3] > app.canvas.winfo_height()
+			assert app._content_txt.yview()[1] < 1.0
+
+			app._chain_scroll("moveto", 0.0)
+			root.update_idletasks()
+			assert app.canvas.yview()[0] == 0.0
+			assert app._content_txt.yview()[0] == 0.0
+			assert app._chain_vsb.get()[1] < 1.0  # thumb, not full-size
+
+			app._chain_scroll("moveto", 0.1)
+			root.update_idletasks()
+			# still inside the form part
+			assert 0.0 < app.canvas.yview()[0] < 1.0
+			assert app._content_txt.yview()[0] == 0.0
+
+			app._chain_scroll("moveto", 0.9)
+			root.update_idletasks()
+			# past the form: form pinned at its end (last fraction == 1.0;
+			# "first" stays < 1 while the view covers part of the region),
+			# text moving
+			assert app.canvas.yview()[1] >= 1.0 - 1e-6
+			assert app._content_txt.yview()[0] > 0.0
+		finally:
+			root.destroy()

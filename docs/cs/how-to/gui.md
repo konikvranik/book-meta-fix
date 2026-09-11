@@ -15,7 +15,11 @@ ve správci souborů" (dvojklik na řádek seznamu dělá totéž), náhledy ob�
 obálka vložená v každém souboru formátu — `Ctrl+M` odstraní zaškrtnuté
 vložené obálky z e-knih, které zůstávají na místě; jen EPUB) a zobrazení
 obsahu
-pro jednotlivé formáty s opravou dvojitého kódování (`Ctrl+G`; boxy na
+pro jednotlivé formáty, které načítá **celý text knihy průběžně** — kusy
+přibývají, jak jsou získávány, takže pomalé čtení přes NFS nebo render
+konvertorem zobrazí začátek okamžitě místo samotného „načítám…" (extrémně
+velké knihy se useknou na 2 000 000 znaků s viditelnou poznámkou o zkrácení)
+— s opravou dvojitého kódování (`Ctrl+G`; boxy na
 kodeky umožňují ruční experimentování — „přečteno jako" je chybný kodek,
 kterým byl text kdysi přečten, „skutečně je" ten skutečný a `⇄` je
 prohazuje; nefungující dvojici vysvětlí nápověda, která nabízí opačný směr
@@ -25,8 +29,19 @@ zůstávají označené; dvouvrstvé řetězce se opravují automaticky a nápov
 je
 jmenuje; vždy vykresleno jako UTF-8 — přepínač se nikdy nezaškrtává
 automaticky, vidět opravený text je vaše rozhodnutí: zaškrtněte jej nebo
-stiskněte `Ctrl+G`). Táhněte úchyp pod náhledem obsahu pro svislou změnu
-velikosti (dvojklik vrací výchozí). Detailní
+stiskněte `Ctrl+G`). Náhled se umísťuje responzivně: pokud je detailní
+panel široký, je vpravo od formuláře; když se zúží (malé okno nebo
+roztáhnutí seznamu knih jeho lištou), přesune se pod formulář. Dělicí
+lišta panelu mění velikost náhledu v dané ose a v tomto skládaném režimu
+scrolluje celý průběh jediná velká lišta na pravém okraji detailu —
+nejdřív formulář, pak celý text knihy (kolečko myši se řetězí stejně;
+samostatné lišty obou panelů se vrátí v režimu vedle sebe).
+Sekce **Nalezené problémy** nad poli vypisuje všechny diagnózy (řazené
+podle závažnosti): řádky jdou vybrat myší a zkopírovat (`Ctrl+C`, nebo
+pravé tlačítko nabízí *zkopírovat výběr / vše*) a každý podtržený **kód**
+(`C1`…`C20`, `MISSING_*`, …) je klikatelný — otevře malé okno s detailním
+popisem daného typu závady (z [katalogu](../corruption-catalog.md));
+text popupu jde vybrat a zkopírovat stejně, `Esc` ho zavře. Detailní
 sloupec se posouvá; každá akce má zkratku `Ctrl+písmeno` (`F1` je
 vypíše); `PgUp`/`PgDn` přecházejí mezi knihami a `Tab` prochází jen
 upravitelná

@@ -14,17 +14,33 @@ link (double-clicking a list row does the same), cover previews (current /
 `.bak` / recommended, plus the
 cover embedded in each format file — `Ctrl+M` removes the checked embedded
 covers out of the e-book files, which stay put; EPUB only), and a
-per-format content view with
-double-encoding repair (`Ctrl+G`; the codec boxes let you experiment
+per-format content view that loads the **whole book text, progressively** —
+chunks appear as they are extracted, so a slow NFS read or a converter
+render shows its head immediately instead of a bare "loading…" (extremely
+large books are capped at 2,000,000 characters, with a visible truncation
+note) — with double-encoding
+repair (`Ctrl+G`; the codec boxes let you experiment
 manually — "přečteno jako" is the wrong codec the text was once read
 through, "skutečně je" the real one, and `⇄` swaps them; a failing pair is
 explained in the hint, which offers the reversed direction as a click;
 bytes lost to an earlier replace-decode (`�`) don't block the repair and
 stay marked; two-layer chains are repaired automatically and named in the
 hint; always rendered as UTF-8 — the toggle is never auto-checked, seeing
-the repaired text is your decision: tick it or press `Ctrl+G`). Drag the
-grip under the content preview to resize it vertically (double-click
-resets). The
+the repaired text is your decision: tick it or press `Ctrl+G`). The preview is
+placed responsively: while the detail pane is wide it sits to the right of
+the form, and when the pane gets narrow (a small window, or the book list
+widened with its sash) it moves below the form; the pane's sash resizes the
+preview along its axis, and in that stacked layout one big scrollbar on the
+detail's right edge scrolls the whole flow — the form first, then the whole
+book text (the mouse wheel chains the same way; the per-widget scrollbars
+return in the side-by-side layout). The
+**Found problems** section above the fields lists every diagnosis
+(severity-sorted): the lines are mouse-selectable and copyable (`Ctrl+C`,
+or right-click for *copy selection / copy all*), and each underlined
+**code** (`C1`…`C20`, `MISSING_*`, …) is clickable — it opens a small
+window with the detailed description of that corruption type (from
+[the catalog](../corruption-catalog.md)); the popup's text is selectable
+and copyable the same way, `Esc` closes it. The
 detail column scrolls; every action has a `Ctrl+letter` shortcut (`F1` lists
 them); `PgUp`/`PgDn` move between books and `Tab` cycles only the editable
 fields — author, title, ISBN, year, publisher, language, série, pořadí v

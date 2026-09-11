@@ -58,6 +58,32 @@ záznam, jehož `proposed.merge_into` jmenuje složku přeživšího.
 `analyze --merge` napojuje tentýž sweep na konec běhu, nad knihami, které
 analyze už prošel — bez druhého (na NFS pomalého) průchodu knihovnou.
 
+## Kontrola sloučení v GUI
+
+Výběr merge záznamu v `bmf gui` přinese dvě věci, které obyčejný záznam
+nemá:
+
+- **Nalezené problémy** — všechny diagnózy knihy v jedné sekci, seřazené
+  dle závažnosti (nejdřív návrhy čekající na rozhodnutí, pak poškození,
+  pak chybějící pole), místo staré hlavičky „první + (+X dalších)", kde se
+  důležitá položka mohla ztratit za počítadlem.
+- **Merge panel** (jen u merge záznamů) — přeživší s důvodem volby (platné
+  ISBN / nejnižší id), zbytek clusteru a per-field srovnání obou složek:
+  hodnota přeživšího, hodnota této knihy a VÝSLEDEK — počítaný přes tentýž
+  projekci, kterou provádí `bmf apply`, takže co vidíte, to se zapíše.
+
+Ve výchozím stavu rozhoduje automatické pravidlo (přeživší vyhrává, tato
+kniha doplňuje mezery). Kde nesouhlasíte, přepněte zdroj přepínačem
+**⬅ přeživší / ➡ tato kniha** — volba se zapíše do `proposed[field]` a
+apply ji zapíše přes automatický výsledek. **Obálka** má vlastní volbu
+s náhledy obou stran: automatická / přeživšího / `cover.jpg` této knihy /
+vložená obálka z EPUB této knihy (extrahovaná s pastí na generované
+placeholdery). Řádky osudu souborů předem ukazují každý přesun a kolizi
+jmen a **Vrátit na automatický** zahodí všechny volby.
+
+Samotnou akci schválite radiem `merge` nebo **Ctrl+R**; `keep` je veto.
+Nerozhodnuté (pending) merge záznamy `bmf apply` přeskočí.
+
 ## Audiobookshelf
 
 Sloučení změní složky přeživších na disku (přibyly soubory) a odstraní
