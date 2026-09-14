@@ -41,8 +41,10 @@ import shutil
 import subprocess
 import sys
 import threading
+import webbrowser
 from pathlib import Path
 from typing import NamedTuple
+from urllib.parse import quote_plus
 from uuid import uuid4
 
 from .covers import (
@@ -929,6 +931,18 @@ def open_folder_in_manager(folder: Path | str) -> str | None:
 		return None
 	except OSError as exc:
 		return _("opening failed: {exc}").format(exc=exc)
+
+
+def dbk_search_url(author: str, title: str) -> str | None:
+	"""databazeknih.cz search URL for *author*/*title*; None when both blank.
+
+	Same URL shape the enricher searches (`enrichers._search_databazeknih`),
+	so the browser and the pipeline hit the same index.
+	"""
+	query = " ".join(p.strip() for p in (title or "", author or "") if p and p.strip())
+	if not query:
+		return None
+	return f"https://www.databazeknih.cz/search?q={quote_plus(query)}&in=books"
 
 
 def embedded_cover_thumb(book_path: Path | str, max_w: int = 240, max_h: int = 320):
@@ -2475,6 +2489,18 @@ class ReviewEditorApp:
 			self._path_link.configure(font=self._link_font)
 		except Exception:  # noqa: BLE001
 			pass
+		# The path link's web twin: search this book on databazeknih.cz.
+		# Reads the LIVE form fields (edits included), so a reviewed C1 swap
+		# is searched as fixed, not as broken.
+		self._dbk_link = ttk.Label(
+			self._scroll_inner, text=_("Find on databazeknih.cz"), anchor="w",
+			cursor="hand2", foreground="#1a5fb4",
+		)
+		self._dbk_link.pack(fill="x", padx=8, pady=(0, 2))
+		self._dbk_link.bind("<Button-1>", lambda _e: (self._open_dbk_search(), "break")[1])
+		_Tooltip(self._dbk_link, _("Open a databazeknih.cz search for this book in the browser (Ctrl+H)"))
+		if getattr(self, "_link_font", None):
+			self._dbk_link.configure(font=self._link_font)
 		self._build_problems_section()
 		self._build_fields_section()
 		self._build_merge_section()
@@ -3211,7 +3237,7 @@ class ReviewEditorApp:
 			"r": self.act_merge,
 			"n": self.cover_new,
 			"b": self.cover_restore_bak, "p": self.cover_keep, "m": self.cover_delete_checked,
-			"g": self.content_recode_toggle,
+			"g": self.content_recode_toggle, "h": self._open_dbk_search,
 		}
 		handler = dispatch.get(k)
 		if handler is not None:
@@ -3502,6 +3528,26 @@ class ReviewEditorApp:
 		folder = (self.library / path) if path else self.library
 		err = open_folder_in_manager(folder)
 		self._flash(err or _("opened: {folder}").format(folder=folder))
+
+	def _open_dbk_search(self) -> None:
+		"""Open a databazeknih.cz search for the focused book (Ctrl+H)."""
+		def live(role: str) -> str:
+			f = self._fields.get(role)
+			return f["value"].get().strip() if f else ""
+
+		e = self.entries[self._cur] if self.entries else {}
+		cur = (e or {}).get("current") or {}
+		author = live("author") or str(cur.get("author") or "").strip()
+		title = live("title") or str(cur.get("title") or "").strip()
+		url = dbk_search_url(author, title)
+		if url is None:
+			self._flash(_("nothing to search: title and author are empty"))
+			return
+		if not webbrowser.open(url, new=2):
+			self._flash(_("opening the browser failed"))
+			return
+		query = " ".join(p for p in (title, author) if p)
+		self._flash(_("search opened: {query}").format(query=query))
 
 	def _on_tree_double(self, event) -> str:
 		"""Double-click a list row = open that book's folder."""
@@ -5695,6 +5741,7 @@ class ReviewEditorApp:
 			("Ctrl+S", _("save")),
 			("Ctrl+Q", _("quit")),
 			("Ctrl+F", _("RO column → target (focused field)")),
+			("Ctrl+H", _("Find on databazeknih.cz")),
 			("Ctrl+N", _("cover: apply new")),
 			("Ctrl+B", _("cover: restore .bak")),
 			("Ctrl+P", _("cover: keep")),

@@ -27,6 +27,7 @@ from book_meta_fix.gui import (
 	collect_vocab_values,
 	compose_overlay,
 	cover_paths,
+	dbk_search_url,
 	delete_covers,
 	embedded_cover_thumb,
 	entries_to_write,
@@ -387,6 +388,13 @@ class TestCtrlKeyDispatch:
 		res = app._on_ctrl_key(type("E", (), {"keysym": "J", "state": 0x0001})())
 		assert res == "break"
 		assert app.calls == ["split_book"]
+
+	def test_h_dispatches_dbk_search(self):
+		app = self._bare_app()
+		app._open_dbk_search = lambda: app.calls.append("dbk")
+		res = app._on_ctrl_key(type("E", (), {"keysym": "h", "state": 0})())
+		assert res == "break"
+		assert app.calls == ["dbk"]
 
 
 class TestExecuteBulkCoverDelete:
@@ -1238,6 +1246,75 @@ class TestOpenFolderInManager:
 		err = open_folder_in_manager(tmp_path)
 		assert err is not None
 		assert "failed" in err
+
+
+class TestDbkSearch:
+	"""The databazeknih.cz search link (Ctrl+H): URL shape + handler wiring."""
+
+	def test_url_joins_title_and_author(self):
+		from urllib.parse import quote_plus
+
+		expect = "https://www.databazeknih.cz/search?q=" + quote_plus(
+			"Babička Božena Němcová") + "&in=books"
+		assert dbk_search_url("Božena Němcová", "Babička") == expect
+
+	def test_url_single_part(self):
+		from urllib.parse import quote_plus
+
+		assert dbk_search_url("", "R.U.R.") == (
+			"https://www.databazeknih.cz/search?q=R.U.R.&in=books")
+		assert dbk_search_url("Karel Čapek", "") == (
+			"https://www.databazeknih.cz/search?q=" + quote_plus("Karel Čapek") + "&in=books")
+
+	def test_url_blank_returns_none(self):
+		assert dbk_search_url("", "") is None
+		assert dbk_search_url("  ", " ") is None
+
+	def _bare_app(self, monkeypatch, opened, result=True, fields=None, current=None):
+		import types
+
+		app = gui.ReviewEditorApp.__new__(gui.ReviewEditorApp)
+		app.entries = [{"current": current or {}}]
+		app._cur = 0
+		app._fields = fields or {}
+		app.flashes = []
+		app._flash = lambda msg, seconds=None: app.flashes.append(msg)
+		monkeypatch.setattr(gui, "webbrowser", types.SimpleNamespace(
+			open=lambda url, new=2: opened.append(url) or result))
+		return app
+
+	def test_opens_search_with_live_fields(self, monkeypatch):
+		import types
+
+		opened = []
+		app = self._bare_app(monkeypatch, opened, fields={
+			"title": {"value": types.SimpleNamespace(get=lambda: "Enderova hra")},
+			"author": {"value": types.SimpleNamespace(get=lambda: "Orson Scott Card")},
+		}, current={"title": "broken", "author": "worse"})
+		app._open_dbk_search()
+		assert opened == [dbk_search_url("Orson Scott Card", "Enderova hra")]
+		assert app.flashes == ["search opened: Enderova hra Orson Scott Card"]
+
+	def test_falls_back_to_current_when_fields_empty(self, monkeypatch):
+		opened = []
+		app = self._bare_app(monkeypatch, opened, current={
+			"title": "Babička", "author": "Božena Němcová"})
+		app._open_dbk_search()
+		assert opened == [dbk_search_url("Božena Němcová", "Babička")]
+
+	def test_nothing_to_search_flashes(self, monkeypatch):
+		opened = []
+		app = self._bare_app(monkeypatch, opened)
+		app._open_dbk_search()
+		assert opened == []
+		assert app.flashes == ["nothing to search: title and author are empty"]
+
+	def test_browser_failure_flashes(self, monkeypatch):
+		opened = []
+		app = self._bare_app(monkeypatch, opened, result=False, current={"title": "Babička"})
+		app._open_dbk_search()
+		assert len(opened) == 1
+		assert app.flashes == ["opening the browser failed"]
 
 
 class TestCollectVocabValues:

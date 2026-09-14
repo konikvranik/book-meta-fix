@@ -9,7 +9,7 @@ bmf analyze --skip-enrich -o review.yaml --limit 1000
 # Add CZ/SK genres + metadata from databazeknih.cz (opt-in scraping)
 bmf analyze --databazeknih -o review.yaml --limit 1000
 
-# Add the LLM fallback for the hardest cases (needs ZAI_API_KEY)
+# Add the LLM fallback for the hardest cases (off by default; needs ZAI_API_KEY)
 bmf analyze --databazeknih --llm -o review.yaml --limit 1000
 ```
 

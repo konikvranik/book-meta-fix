@@ -568,6 +568,12 @@ src/book_meta_fix/
                   name collision, and Reset to automatic drops all picks; Tab-trap bindtag,
                   per-format embedded covers, Ctrl+G double-decode recode,
                   clickable path link / list double-click = open folder via open_folder_in_manager;
+                  beside it the databazeknih.cz search link (Ctrl+H,
+                  _open_dbk_search): webbrowser.open of dbk_search_url built
+                  from the LIVE form fields (edits included, current-dict
+                  fallback) — same URL shape the enricher searches, plain
+                  browser open, no tab-reuse machinery (the owner declined
+                  the localhost-hub design);
                   Verified checkbox (Ctrl+O) = the persistent user-OK mark; "+ library" search
                   matches the whole library via a fulltext index built by ONE background sweep at
                   startup (build_library_index: parallel NFS-aware walk; folders are served from
@@ -698,7 +704,10 @@ src/book_meta_fix/
                   path — the default EMPTY_BOOK fate stays quarantine in
                   needfix/empty/. Run AFTER analyze: a later analyze rebuilds
                   pending EMPTY_BOOK entries back to accept; analyze
-                  takes --llm-provider/--antigravity-cmd/--antigravity-model and closes
+                  takes --llm-provider/--antigravity-cmd/--antigravity-model
+                  (the LLM stage is OPT-IN: --llm/--no-llm defaults OFF — a
+                  bare analyze runs the online enrichers only, no provider is
+                  even constructed) and closes
                   the provider in its finally block — only the ACP provider actually
                   holds subprocesses — and --normalize, which chains the normalize
                   pass onto the END of the run via _run_normalize_pass (the shared
@@ -943,7 +952,9 @@ src/book_meta_fix/
   misplaced genuine anonym must not be masked by its whitelisted C9-OK).
   `_apply_fields` ignores the `location` key — it is not a metadata field.
 - **`report`/`analyze` flags** (`--accept-missing` default on,
-  `--verify-ok` default off, `--no-strict-verify`) are unchanged; analyze
+  `--verify-ok` default off, `--no-strict-verify`) are unchanged; analyze's
+  `--llm/--no-llm` defaults OFF (LLM is opt-in — online enrichers only
+  unless `--llm` is passed); analyze
   additionally takes `--pattern`/`--no-check-location`/`--recheck-ok`,
   apply takes `--pattern`/`--needfix-dir`/`--no-place`
   (env: `BMF_PATTERN`, `BMF_NEEDFIX_DIR`).

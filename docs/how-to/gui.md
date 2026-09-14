@@ -10,7 +10,9 @@ bmf gui --review review.yaml
 
 It shows read-only current fields next to editable targets, a one-key
 author↔title swap, the book's folder as a clickable "open in file manager"
-link (double-clicking a list row does the same), cover previews (current /
+link (double-clicking a list row does the same), a databazeknih.cz search
+link (`Ctrl+H`) that opens the browser search for the title/author as
+currently typed in the form, cover previews (current /
 `.bak` / recommended, plus the
 cover embedded in each format file — `Ctrl+M` removes the checked embedded
 covers out of the e-book files, which stay put; EPUB only), and a

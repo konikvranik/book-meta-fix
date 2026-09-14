@@ -134,7 +134,8 @@ zůstane zachován, abyste mohli obnovit stav před během.
 
 Společné volby: `--library PATH`, `--limit N`, `--no-cache`, `-o FILE`,
 `--skip-enrich`, `--skip-verify`, `--databazeknih`, `--legie`,
-`--abs-czech URL`, `--accept-missing/--no-accept-missing` (výchozí zapnuto).
+`--abs-czech URL`, `--accept-missing/--no-accept-missing` (výchozí zapnuto),
+`--llm/--no-llm` (výchozí vypnuto — LLM fáze se zapíná explicitně).
 
 `--accept-missing` (výchozí): kniha s `MISSING_ISBN`/`MISSING_YEAR`/
 `MISSING_COVER`, jejíž autor+titul byly potvrzeny proti obsahu knihy, dostane
@@ -165,10 +166,12 @@ bmf apply review.yaml                 # commit the decisions (dry-run first)
 miniatury obálek řeší Pillow (už je závislostí).
 
 **Co u knihy zobrazuje:** pole *current* jen ke čtení vedle editovatelných
-polí *target* (jakékoli jednotlivé pole přenesete `Ctrl+L`), záměna
+polí *target* (jakékoli jednotlivé pole přenesete `Ctrl+F`), záměna
 autor↔title jednou klávesou (`Ctrl+W`), zobrazení bloku *proposed* jen ke
 čtení, cesta ke složce knihy jako klikatelný odkaz, který ji otevře ve
-správci souborů (dvojklik na řádku seznamu udělá totéž), náhledy obálek —
+správci souborů (dvojklik na řádku seznamu udělá totéž), odkaz na
+vyhledávání na databazeknih.cz (`Ctrl+H`), který v prohlížeči otevře hledání
+titulu/autora tak, jak je právě vyplněný ve formuláři, náhledy obálek —
 aktuální / `.bak` / doporučená, plus obálka VLOŽENÁ v každém souboru formátu —
 každá se svým zaškrtávacím políčkem na obálce a kliknutí na samotnou obálku
 jej zaškrtne (`Ctrl+M` poté ze souborů e-knih odstraní zaškrtnuté vložené
@@ -198,8 +201,8 @@ levém sloupci).
 polí): `PgUp`/`PgDn` přesun mezi knihami, `Tab` cyklí jen editovatelná pole
 (nikdy tlačítka ani popisky jen ke čtení), `Ctrl+A` vybere v poli vše, fokus
 při změně knihy zůstává na témž poli. Akce: `Ctrl+Enter` accept, `Ctrl+D`
-delete, `Ctrl+K` keep, `Ctrl+G` překódovat obsah, `Ctrl+S` uložit. Plný
-přehled zkratek zobrazí `F1`.
+delete, `Ctrl+K` keep, `Ctrl+G` překódovat obsah, `Ctrl+H` vyhledat na
+databazeknih.cz, `Ctrl+S` uložit. Plný přehled zkratek zobrazí `F1`.
 
 **Hromadná úprava (`Ctrl+E`).** Seznam podporuje vícenásobný výběr
 (`Ctrl+klik` řádek přepíná, `Shift+klik` vybere rozsah); `Ctrl+E` otevře
@@ -340,7 +343,9 @@ východisko:
 3. **Online podle titulu + autora** (z textu > vložené > DB): právě touto
    cestou se dosáhne na **databazeknih.cz** — nejsilnější CZ/SK zdroj.
 4. **Porovnání s vloženým OPF** (nejslabší; calibre mohlo OPF přepsat).
-5. **LLM fallback** — jen když 1–4 všechno minou.
+5. **LLM fallback** — jen když 1–4 všechno minou, a jen když ho explicitně
+   zapnete: `--llm` (výchozí je vypnuto — analyze běží jen s online zdroji,
+   LLM fáze se sama nespustí nikdy).
 
 Model LLM fallback a jeho ovládání uvažování jsou konfigurovatelné; viz níže.
 

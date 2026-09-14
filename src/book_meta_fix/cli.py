@@ -312,7 +312,7 @@ def report(library: Path | None, no_cache: bool, limit: int | None, category: st
 @click.option("--normalize", "normalize_after", is_flag=True, help=_("Run the library-wide normalize pass (C15 author variants / C16 genre variants / C18 series-name variants) at the end, over the books this analyze already scanned — no second library scan. Proposals are merged into the same review file; review with `bmf gui`, write with `bmf apply`."))
 @click.option("--merge", "merge_after", is_flag=True, help=_("Also propose merging duplicate folders of the same work (C19) at the end, over the books this analyze already scanned. ISBN-confirmed duplicates arrive pre-filled action: merge, the rest pending; `bmf apply` executes them."))
 @click.option("--output", "-o", type=click.Path(path_type=Path), default=None, help=_("Output review file (default: review.yaml)"))
-@click.option("--llm/--no-llm", "use_llm", default=True, help=_("Enable/disable LLM reconciliation (default: enabled if provider configured)"))
+@click.option("--llm/--no-llm", "use_llm", default=False, help=_("Enable/disable LLM reconciliation (default: disabled — online sources only, no LLM; pass --llm to opt in)"))
 @click.option("--llm-provider", "llm_provider", default=None, type=click.Choice(["antigravity", "acp", "agy", "zai", "mock", "off"], case_sensitive=False), help=_("Force the LLM provider branch (default: auto — Antigravity ACP when an agent is configured or cached, else Z.AI when ZAI_API_KEY is set). 'antigravity' = the ACP agent is the fast tier and Z.AI (if a key exists) only the paid fallback; 'zai' never uses ACP."))
 @click.option("--antigravity-cmd", "antigravity_cmd", default=None, help=_("Command that launches an Agent Client Protocol agent process (ACP v1 over stdio) — a Google Antigravity subscription as the FAST LLM tier. The official agent is `agy_acp_server.par` from the ACP Registry (release zips need chmod +x); any ACP agent works, e.g. `gemini --acp`. 'auto' (or empty) = bmf's SELF-MANAGED agent: the run checks the registry, downloads (~700 MB / 1.9 GB unpacked, into ~/.cache/book-meta-fix/acp) and upgrades it itself; an explicit path manages it manually. Same as BMF_ANTIGRAVITY_CMD."))
 @click.option("--antigravity-model", "antigravity_model", default=None, help=_("Model the ACP agent should serve the fast tier with (matched against the agent's session config options by exact value/name or token family, so 'gemini-flash' picks 'gemini-3.8-flash-high'; empty = the agent's default pick). Default gemini-flash-low — the newest flash at low effort (the quick check wants latency, not deliberation). Same as BMF_ANTIGRAVITY_MODEL."))
@@ -573,7 +573,9 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 					# Single-call mode (--no-llm-loop): one model, no fallback.
 					is_glm5 = llm_provider.model.lower().startswith("glm-5")
 					reason = f"reasoning_effort={cfg.zai_reasoning_effort}" if is_glm5 else f"thinking={cfg.zai_thinking}"
-					console.print(f"  LLM: [cyan]{llm_provider.name}[/cyan] model={llm_provider.model} ({reason}) for categories {cats} (≤{rpm} RPM, min {cfg.llm_min_interval}s between calls, max {cfg.llm_max_inflight} in flight, adaptive{flash_via})")
+				console.print(f"  LLM: [cyan]{llm_provider.name}[/cyan] model={llm_provider.model} ({reason}) for categories {cats} (≤{rpm} RPM, min {cfg.llm_min_interval}s between calls, max {cfg.llm_max_inflight} in flight, adaptive{flash_via})")
+		else:
+			console.print("  [dim]" + _("LLM stage off (default) — online sources only; pass --llm to enable the LLM fallback") + "[/dim]")
 
 		# Streaming review writer: appends each processed book to review.yaml as it
 		# completes (Unix-pipe style). The original is moved to .bak on

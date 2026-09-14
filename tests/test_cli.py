@@ -529,6 +529,38 @@ class TestAnalyzeEndToEnd:
 		assert "Autor1/Kniha1 (1)" in text
 		assert "Autor2/Kniha2 (2)" in text
 
+	def test_llm_off_by_default_and_opt_in_via_flag(self, tmp_path: Path, monkeypatch) -> None:
+		"""The LLM stage is OPT-IN: a bare analyze must not even construct a
+		provider (online sources only); --llm builds one."""
+		from unittest.mock import patch
+
+		lib = tmp_path / "lib"
+		folder = lib / "Autor" / "Kniha (1)"
+		folder.mkdir(parents=True)
+		(folder / "metadata.json").write_text(
+			'{"title": "Kniha", "authors": ["Autor"], "isbn": "9788020403117", "publishedYear": "2001"}',
+			encoding="utf-8",
+		)
+		(folder / "book.epub").write_text("x", encoding="utf-8")
+		monkeypatch.setenv("BMF_REVIEW", str(tmp_path / "review.yaml"))
+		monkeypatch.setenv("BMF_CACHE", str(tmp_path / "cache.db"))
+		monkeypatch.setenv("BMF_LIBRARY", str(lib))
+		args = ["analyze", "--library", str(lib), "--skip-enrich", "--no-check-location"]
+
+		# Default: no provider is constructed at all.
+		with patch("book_meta_fix.llm.get_provider") as gp:
+			result = CliRunner().invoke(main, args)
+		assert result.exit_code == 0, result.output
+		gp.assert_not_called()
+		assert "LLM stage off" in result.output
+
+		# --llm opts in: the provider is constructed (None return = no key in
+		# the test env, which analyze handles as "no provider available").
+		with patch("book_meta_fix.llm.get_provider", return_value=None) as gp:
+			result = CliRunner().invoke(main, [*args, "--llm"])
+		assert result.exit_code == 0, result.output
+		gp.assert_called_once()
+
 
 class TestScanCommand:
 	"""bmf scan traverses library and prints scan summary."""

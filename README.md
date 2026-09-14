@@ -131,7 +131,8 @@ can recover the pre-run state.
 
 Common options: `--library PATH`, `--limit N`, `--no-cache`, `-o FILE`,
 `--skip-enrich`, `--skip-verify`, `--databazeknih`, `--legie`,
-`--abs-czech URL`, `--accept-missing/--no-accept-missing` (default on).
+`--abs-czech URL`, `--accept-missing/--no-accept-missing` (default on),
+`--llm/--no-llm` (default off — the LLM stage is opt-in).
 
 `--accept-missing` (default): a `MISSING_ISBN`/`MISSING_YEAR`/`MISSING_COVER`
 book whose author+title were confirmed against the book's content is
@@ -161,10 +162,12 @@ bmf apply review.yaml                 # commit the decisions (dry-run first)
 (already a dependency) drives the cover thumbnails.
 
 **What it shows per book:** read-only *current* fields next to editable
-*target* fields (copy any single field over with `Ctrl+L`), one-key
+*target* fields (copy any single field over with `Ctrl+F`), one-key
 author↔title swap (`Ctrl+W`), a read-only view of the *proposed* block, the
 book's folder path as a clickable link that opens it in your file manager
-(double-clicking a list row does the same), cover
+(double-clicking a list row does the same), a databazeknih.cz search link
+(`Ctrl+H`) that opens the browser search for the title/author as currently
+typed in the form, cover
 previews — current / `.bak` / recommended, plus the cover EMBEDDED in each
 format file — each with its own checkbox on the cover, and clicking the
 cover itself ticks it (`Ctrl+M` then removes
@@ -194,8 +197,9 @@ sits left, the cover thumbnail flush against the right edge of the row
 fields): `PgUp`/`PgDn` move between books, `Tab` cycles only the editable
 fields (never buttons or read-only labels), `Ctrl+A` selects all in a field,
 focus stays on the same field when you change book. Actions: `Ctrl+Enter`
-accept, `Ctrl+D` delete, `Ctrl+K` keep, `Ctrl+G` recode content, `Ctrl+S`
-save. Press `F1` for the full shortcut overlay.
+accept, `Ctrl+D` delete, `Ctrl+K` keep, `Ctrl+G` recode content, `Ctrl+H`
+search on databazeknih.cz, `Ctrl+S` save. Press `F1` for the full shortcut
+overlay.
 
 **Bulk edit (`Ctrl+E`).** The list supports a multi-selection (`Ctrl+click`
 toggles a row, `Shift+click` selects a range); `Ctrl+E` opens a small dialog
@@ -331,7 +335,9 @@ For each NEEDS_REVIEW book, `bmf analyze` tries to recover correct metadata in
 3. **Online by title + author** (text-mined > embedded > DB): this is the path
    that reaches **databazeknih.cz** — the strongest CZ/SK source.
 4. **Embedded-OPF compare** (weakest; calibre may have overwritten the OPF).
-5. **LLM fallback** — only when 1–4 all miss.
+5. **LLM fallback** — only when 1–4 all miss, and only when you opt in:
+   `--llm` (default off — analyze runs the online sources only; the LLM
+   stage never runs by itself).
 
 The LLM fallback model and its reasoning controls are configurable; see below.
 

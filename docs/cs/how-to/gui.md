@@ -10,7 +10,9 @@ bmf gui --review review.yaml
 
 Zobrazuje aktuální pole jen pro čtení vedle upravitelných cílů, záměnu
 autor↔název jednou klávesou, složku knihy jako klikatelný odkaz „otevřít
-ve správci souborů" (dvojklik na řádek seznamu dělá totéž), náhledy obálek
+ve správci souborů" (dvojklik na řádek seznamu dělá totéž), odkaz na
+vyhledávání na databazeknih.cz (`Ctrl+H`), který v prohlížeči otevře hledání
+titulu/autora tak, jak je právě vyplněný ve formuláři, náhledy obálek
 (aktuální / `.bak` / doporučená, plus
 obálka vložená v každém souboru formátu — `Ctrl+M` odstraní zaškrtnuté
 vložené obálky z e-knih, které zůstávají na místě; jen EPUB) a zobrazení
