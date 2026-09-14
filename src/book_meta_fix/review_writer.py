@@ -416,28 +416,27 @@ class ReviewWriter:
 		# High-confidence enriched proposal (offline extraction, databazeknih,
 		# LLM high) -> pre-fill action: accept so the user can approve it in
 		# bulk via `bmf apply`. Without a proposal there is nothing to accept.
-		# Threshold is fixed at 'high' (rank 3).
 		if action is None and enriched is not None and proposed:
 			conf = self._confidence(enriched)
-			if getattr(enriched, "identity_confirmed", False) or self._confidence_rank.get(conf, 0) >= self._confidence_rank["high"]:
-				# identity_confirmed: the book's identity was verified against its
-				# own content (ISBN agreement or title+author in the page text),
-				# independent of the online match — so the proposal is safe to
-				# auto-accept even when it changes title/author. We know the book.
+			if getattr(enriched, "identity_confirmed", False):
+				# identity_confirmed: the enrichment's title/author/isbn were
+				# verified AFTER the online match — online corroboration, the
+				# local-DB fallback (author/series known to the library), or
+				# the text check — so the proposal is safe to auto-accept even
+				# when it changes title/author. We know the book.
 				action = "accept"
-			elif self._confidence_rank.get(conf, 0) >= self._confidence_rank["medium"]:
-				# Medium-confidence (llm:flash/loop, openlibrary, google_books,
-				# content): pre-fill accept ONLY when the proposal confirms the
-				# book's identity (leaves title/author unchanged). When the match
-				# AGREES with the existing title/author, the enrichment is about
-				# the right book, so its additive fields (isbn/year/genres) are
-				# safe to bulk-apply. When the proposal CHANGES title/author the
-				# match is on an unconfirmed identity — and because the query was
-				# built on those (possibly wrong) title/author values, we cannot
-				# trust the additive fields either: they may belong to the wrong
-				# book. So the whole proposal stays action=None for review.
-				if self._proposal_preserves_identity(proposed, meta):
-					action = "accept"
+			elif self._confidence_rank.get(conf, 0) >= self._confidence_rank["medium"] and self._proposal_preserves_identity(proposed, meta):
+				# High/medium confidence WITHOUT content confirmation (a
+				# databazeknih hit on a title-only or series key, llm:high,
+				# embedded): the match rides on the (possibly wrong) record
+				# values the query was built from. Pre-fill accept ONLY when
+				# the proposal confirms the book's identity (leaves
+				# title/author unchanged) — the additive fields (isbn/year/
+				# genres) of an agreeing match are safe to bulk-apply. A
+				# proposal that CHANGES title/author may belong to a different
+				# book entirely, so the whole proposal stays action=None for
+				# individual review.
+				action = "accept"
 		# Cover replacement: when the diagnosis is C11 (generated cover) or
 		# MISSING_COVER and we have a cover_url from an enricher, pre-fill
 		# accept so the user can bulk-approve. The enricher already fuzzy-

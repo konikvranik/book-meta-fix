@@ -248,6 +248,28 @@ also compare covers against each other: the higher-resolution one wins, and
 only the `cover_url` is swapped — the identity-anchored metadata stays from
 the winning lookup.
 
+### Query key and verification
+
+The lookup key is built from the **record** — a valid ISBN, else the
+record's title (with the author when it is not a broken/anonym value; an
+author-less title is a valid key, because the author is exactly what the
+lookup should recover for anonymized records), else the title+author mined
+from the page text. When the title is unusable but a series entry survived
+(`"Ocelová krysa #5"`), the series name + volume order is the fallback key:
+the source's series page lists the volumes in reading order, so the volume
+identifies the work outright. **No content verification gates the query** —
+verification runs AFTER the enrichment, on the answer, in this order:
+first ONLINE (the independent record base must corroborate the answer per
+the query axis — title/author agreement, or a near-exact title plus the
+recovered author being known), then the LOCAL-DB fallback (when online
+cannot decide, the recovered author/series must be known to the library —
+it exists on a verified book), and the TEXT check keeps its confirming
+role (`confirm_identity` — the returned title/author/ISBN against the
+book's own page text). A confirmed hit may change title/author and still
+pre-fill `accept`; an unconfirmed one lands in `review.yaml` as a pending
+proposal with the recovered fields for the human to approve (its
+title/author are only proposed when the current values look broken).
+
 ## Placement patterns
 
 `bmf apply` places each applied book: a decided entry (accept/keep) moves

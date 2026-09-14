@@ -484,6 +484,71 @@ def lookup_databazeknih(*, title: str, author: str | None = None, year: int | No
 	return _parse_databazeknih_detail(html)
 
 
+# A series page lists its volumes as schema.org microdata, in reading order:
+# <div itemprop="hasPart" itemscope itemtype="https://schema.org/Book">
+#   <meta itemprop="name" content="Ocelová krysa prezidentem">
+#   <link itemprop="url" href="/prehled-knihy/ocelova-krysa-...-28294">
+# The ORDER of the hasPart blocks IS the volume order (measured on the real
+# 'Ocelová krysa' serie page: positions 3-7 match the local series_index 3-7),
+# so volume N of the record resolves to parts[N-1] here.
+_SERIES_PART_RE = _re.compile(
+	r"""itemprop=["']hasPart["'][^>]*>.*?<meta\s+itemprop=["']name["']\s+content=["']([^"']+)["']>\s*<link\s+itemprop=["']url["']\s+href=["']([^"']+)["']""",
+	_re.DOTALL,
+)
+# First series link on the serie-search results page (/serie/<slug>).
+_SERIE_LINK_RE = _re.compile(r"""href=["'](/serie/[^'"?]+)["']""", _re.IGNORECASE)
+
+
+def lookup_databazeknih_series(*, series: str, index: float | int | str) -> EnrichedMeta | None:
+	"""Identify a book on databazeknih.cz by its series name + volume order.
+
+	For a record whose title is missing or corrupted but whose series entry
+	survived ("Ocelová krysa #5"), the series page identifies the work
+	outright: it lists the volumes in reading order, so volume N is parts[N-1].
+	Three HTTP calls: serie search → serie page → the volume's detail page
+	(parsed by the shared _parse_databazeknih_detail). The serie found by the
+	search must fuzzily agree with the queried name (>= 70) — a near-titled
+ different series would silently return wrong volumes.
+
+	Returns None when the series is unknown, the index falls outside the
+	listed volumes, or any page fetch fails.
+	"""
+	from urllib.parse import quote_plus, urljoin
+
+	from rapidfuzz import fuzz
+
+	try:
+		i = int(float(index))
+	except (TypeError, ValueError):
+		return None
+	if i < 1:
+		return None
+
+	html = _http_get_html(f"https://www.databazeknih.cz/vyhledavani/serie?q={quote_plus(series)}")
+	if html is None:
+		return None
+	m = _SERIE_LINK_RE.search(html)
+	if m is None:
+		return None
+	spage = _http_get_html(urljoin("https://www.databazeknih.cz/", m.group(1)))
+	if spage is None:
+		return None
+	# Guard the serie pick: the page's <h1> is the serie name as DBK knows it
+	# (inner markup like <em>knihy</em> is stripped before comparing).
+	h1 = _re.search(r"<h1[^>]*>(.*?)</h1>", spage, _re.DOTALL)
+	h1_name = _collapse_ws(_re.sub(r"<[^>]+>", " ", h1.group(1))) if h1 else ""
+	if not h1_name or fuzz.token_sort_ratio(series.lower(), h1_name.lower()) < 70:
+		return None
+	parts = _SERIES_PART_RE.findall(spage)
+	if not parts or i > len(parts):
+		return None
+	_name, path = parts[i - 1]
+	detail = _http_get_html(urljoin("https://www.databazeknih.cz/", path))
+	if detail is None:
+		return None
+	return _parse_databazeknih_detail(detail)
+
+
 def lookup_databazeknih_isbn(isbn: str) -> EnrichedMeta | None:
 	"""Look up a book on databazeknih.cz by ISBN (exact match, no fuzzy score).
 
@@ -1061,6 +1126,24 @@ class Enricher:
 		self._cache_put(key, None)
 		return False
 
+
+	def lookup_series(self, *, series: str, index: float | int | str) -> EnrichedMeta | None:
+		"""Identify a book by series name + volume order (databazeknih only).
+
+		The fallback key for records whose title is gone but whose series
+		entry survived. Cached under its own "series:" key (the regular
+		_cache_key has no series slot) with the same negative caching as
+		lookup(), so a re-run never re-scrapes a known miss.
+		"""
+		if not self.databazeknih_enabled or not series or not index:
+			return None
+		key = "series:" + self._cache_key(isbn=None, title=f"{series} #{index}", author=None, year=None)
+		cached = self._cache_get(key)
+		if cached is not None:
+			return None if cached == "__NOT_FOUND__" else cached
+		em = lookup_databazeknih_series(series=series, index=index)
+		self._cache_put(key, em)
+		return em
 
 	def lookup(self, *, isbn: str | None = None, title: str | None = None, author: str | None = None, year: int | None = None) -> EnrichedMeta | None:
 		"""Query all applicable sources in PARALLEL and merge same-book results.

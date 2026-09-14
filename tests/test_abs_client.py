@@ -4,6 +4,7 @@ All HTTP is monkeypatched; no network calls are made.
 """
 from __future__ import annotations
 
+import json
 import os
 import time
 from pathlib import Path
@@ -18,6 +19,7 @@ from book_meta_fix.abs_client import (
 	changed_folders,
 	match_items,
 	parse_since_duration,
+	stale_series_items,
 )
 from book_meta_fix.cli import _select_abs_library
 
@@ -70,6 +72,22 @@ class _DeleteRecorder:
 
 	def __call__(self, url, *, timeout=15.0, headers=None, session=None):
 		self.calls.append({"url": url, "timeout": timeout, "headers": headers, "session": session})
+		return self.replies.get(url, _Resp(200))
+
+	@property
+	def urls(self) -> list[str]:
+		return [c["url"] for c in self.calls]
+
+
+class _PatchRecorder:
+	"""Captures _http_patch kwargs; replies per-URL from a dict, else 200."""
+
+	def __init__(self, replies: dict[str, _Resp] | None = None) -> None:
+		self.replies = replies or {}
+		self.calls: list[dict] = []
+
+	def __call__(self, url, *, json_body=None, timeout=15.0, headers=None, session=None):
+		self.calls.append({"url": url, "json_body": json_body, "timeout": timeout, "headers": headers, "session": session})
 		return self.replies.get(url, _Resp(200))
 
 	@property
@@ -325,6 +343,47 @@ class TestClient:
 		assert rec.calls[0]["url"] == "http://abs.lan:13378/api/libraries/lib1/scan"
 		assert rec.calls[0]["params"] == {"force": 1}
 
+	def test_item_series_map_paginates_with_positive_limit(self, monkeypatch) -> None:  # noqa: ANN001
+		# The series endpoint reads limit=0 as "zero per page" (measured on
+		# ABS 2.36.0 — unlike /items where 0 = no limit), so pages must be
+		# fetched with limit>0 and stop once page*limit covers total.
+		pages = {
+			0: {"results": [{"id": "s1", "name": "Zaklínač", "books": [{"id": "i1"}, {"id": "i2"}]}], "total": 501},
+			1: {"results": [{"id": "s2", "name": "Perry Rhodan", "books": [{"id": "i3"}]}], "total": 501},
+		}
+
+		def _serve(url, *, params=None, timeout=15.0, headers=None, session=None):  # noqa: ANN001, ARG001
+			return pages[params["page"]]
+
+		monkeypatch.setattr(abs_client, "_http_get_json", _serve)
+		m = self._client().item_series_map("lib1")
+		assert m == {"i1": ["Zaklínač"], "i2": ["Zaklínač"], "i3": ["Perry Rhodan"]}
+
+	def test_item_series_map_failure_returns_none(self, monkeypatch) -> None:  # noqa: ANN001
+		monkeypatch.setattr(abs_client, "_http_get_json", _GetRecorder(None))
+		assert self._client().item_series_map("lib1") is None
+
+	def test_item_series_map_empty_library(self, monkeypatch) -> None:  # noqa: ANN001
+		rec = _GetRecorder({"results": [], "total": 0})
+		monkeypatch.setattr(abs_client, "_http_get_json", rec)
+		assert self._client().item_series_map("lib1") == {}
+		assert len(rec.calls) == 1
+
+	def test_clear_item_series_payload_shape(self, monkeypatch) -> None:  # noqa: ANN001
+		# The series list MUST sit at metadata.series — a top-level series
+		# key is silently ignored by ABS (measured: HTTP 200, no change).
+		rec = _PatchRecorder()
+		monkeypatch.setattr(abs_client, "_http_patch", rec)
+		assert self._client().clear_item_series("item-7") is True
+		assert rec.urls == ["http://abs.lan:13378/api/items/item-7/media"]
+		assert rec.calls[0]["json_body"] == {"metadata": {"series": []}}
+		assert rec.calls[0]["headers"]["Authorization"] == "Bearer s3cret"
+
+	def test_clear_item_series_rejected_token_returns_false(self, monkeypatch) -> None:  # noqa: ANN001
+		rec = _PatchRecorder({"http://abs.lan:13378/api/items/x/media": _Resp(403)})
+		monkeypatch.setattr(abs_client, "_http_patch", rec)
+		assert self._client().clear_item_series("x") is False
+
 
 # ---------------------------------------------------------------------------
 # _select_abs_library
@@ -419,3 +478,77 @@ class TestBrokenCoverItems:
 		broken = broken_cover_items(items, tmp_path, ["/data/books"], progress_callback=lambda d, t: seen.append((d, t)))
 		assert [b.item.id for b in broken] == ["a"]
 		assert seen == [(1, 3), (2, 3), (3, 3)]
+
+
+# ---------------------------------------------------------------------------
+# stale_series_items
+# ---------------------------------------------------------------------------
+
+
+def _manifest(folder: Path, series) -> Path:
+	"""Write a metadata.json with the given series value (... = key absent)."""
+	data = {"title": folder.name}
+	if series is not ...:
+		data["series"] = series
+	(folder / "metadata.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+	return folder
+
+
+class TestStaleSeriesItems:
+	"""The series-deletion sweep: ABS rows holding series the disk dropped."""
+
+	def _matched(self, root: Path, name: str, iid: str) -> tuple[Path, AbsItem]:
+		folder = root / name
+		folder.mkdir(parents=True)
+		return folder, AbsItem(id=iid, path=f"/data/books/{name}", rel_path=name, title=name)
+
+	def test_disk_dropped_series_abs_holds_it(self, tmp_path: Path) -> None:
+		# The measured ABS gap: apply wrote series: [], the per-item rescan
+		# ran, the junk series stayed in the ABS database.
+		folder, item = self._matched(tmp_path, "Autor/Kniha (1)", "i1")
+		_manifest(folder, [])
+		stale = stale_series_items([(folder, item)], {"i1": ["Neznámý"]})
+		assert [(s.item.id, s.series_names) for s in stale] == [("i1", ("Neznámý",))]
+
+	def test_series_key_absent_counts_as_dropped(self, tmp_path: Path) -> None:
+		folder, item = self._matched(tmp_path, "Autor/Kniha (1)", "i1")
+		_manifest(folder, ...)
+		assert len(stale_series_items([(folder, item)], {"i1": ["Autor"]})) == 1
+
+	def test_disk_still_has_series_not_flagged(self, tmp_path: Path) -> None:
+		# A non-empty difference (rename, sequence) is the SCAN's own job —
+		# the sweep must not PATCH it.
+		folder, item = self._matched(tmp_path, "Autor/Kniha (1)", "i1")
+		_manifest(folder, ["Zaklínač #2"])
+		assert stale_series_items([(folder, item)], {"i1": ["Povídky"]}) == []
+
+	def test_dict_and_bare_string_series_shapes(self, tmp_path: Path) -> None:
+		folder1, item1 = self._matched(tmp_path, "A/Kniha (1)", "i1")
+		_manifest(folder1, [{"name": "Zaklínač", "index": 2}])
+		folder2, item2 = self._matched(tmp_path, "A/Kniha (2)", "i2")
+		_manifest(folder2, "Zaklínač #2")
+		assert stale_series_items([(folder1, item1), (folder2, item2)], {"i1": ["Zaklínač"], "i2": ["Zaklínač"]}) == []
+
+	def test_whitespaced_entries_count_as_empty(self, tmp_path: Path) -> None:
+		folder, item = self._matched(tmp_path, "Autor/Kniha (1)", "i1")
+		_manifest(folder, [{"name": "  ", "index": 1}])
+		assert len(stale_series_items([(folder, item)], {"i1": ["Autor"]})) == 1
+
+	def test_unreadable_manifest_never_cleared(self, tmp_path: Path) -> None:
+		# No disk truth -> no verdict; clearing on a guess would be data loss.
+		folder, item = self._matched(tmp_path, "Autor/Kniha (1)", "i1")
+		(folder / "metadata.json").write_text("{not json", encoding="utf-8")
+		assert stale_series_items([(folder, item)], {"i1": ["Autor"]}) == []
+
+	def test_item_without_abs_series_skipped(self, tmp_path: Path) -> None:
+		folder, item = self._matched(tmp_path, "Autor/Kniha (1)", "i1")
+		_manifest(folder, [])
+		assert stale_series_items([(folder, item)], {}) == []
+
+	def test_progress_callback_reports_done_total(self, tmp_path: Path) -> None:
+		seen: list[tuple[int, int]] = []
+		folder, item = self._matched(tmp_path, "Autor/Kniha (1)", "i1")
+		_manifest(folder, [])
+		stale = stale_series_items([(folder, item)], {"i1": ["X"]}, progress_callback=lambda d, t: seen.append((d, t)))
+		assert len(stale) == 1
+		assert seen == [(1, 1)]

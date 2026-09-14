@@ -16,6 +16,13 @@ the API, which bypasses the mtime gate entirely:
 	                                           ABS builds without the batch
 	                                           endpoint (404 -> fall back)
 	POST /api/libraries/{id}/scan?force=1   -> the --force-all escape hatch
+	PATCH /api/items/{id}/media             -> series deletions: the scanner
+	                                           never REMOVES a series, only
+	                                           the metadata update path does
+	                                           (see clear_item_series)
+	GET  /api/libraries/{id}/series         -> the ABS-side series rows with
+	                                           their books embedded (paged;
+	                                           limit=0 means ZERO here)
 
 	Auth is `Authorization: Bearer <token>` and the scan endpoints require an
 	ADMIN token (a regular user's token gets 403). Everything here is
@@ -32,6 +39,7 @@ the API, which bypasses the mtime gate entirely:
 """
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -44,6 +52,7 @@ import requests
 
 from .covers import ABS_IMAGE_EXTS
 from .library import _stat_folder, iter_book_folders
+from .models import series_entry_pair
 
 log = logging.getLogger(__name__)
 
@@ -112,6 +121,28 @@ def _http_delete(
 		return (session or requests).delete(url, timeout=timeout, headers=headers)
 	except requests.RequestException as e:
 		log.debug("HTTP DELETE failed for %s: %s", url, e)
+		return None
+
+
+def _http_patch(
+	url: str,
+	*,
+	json_body: dict | None = None,
+	timeout: float = 15.0,
+	headers: dict[str, str] | None = None,
+	session: requests.Session | None = None,
+) -> requests.Response | None:
+	"""PATCH returning the whole response, or None on network failure.
+
+	Same whole-response shape as _http_post/_http_delete and the same
+	monkeypatch seam for the no-network tests: the media-update endpoint
+	answers with a bare status we must distinguish (200 applied / 403
+	non-admin token) and a body we do not need.
+	"""
+	try:
+		return (session or requests).patch(url, json=json_body, timeout=timeout, headers=headers)
+	except requests.RequestException as e:
+		log.debug("HTTP PATCH failed for %s: %s", url, e)
 		return None
 
 
@@ -271,6 +302,150 @@ class AudiobookshelfClient:
 		"""
 		r = _http_delete(f"{self.base_url}/api/items/{item_id}/cover", headers=self._headers, session=self._session)
 		return r is not None and r.status_code == 200
+
+	def item_series_map(self, library_id: str) -> dict[str, list[str]] | None:
+		"""item id -> ABS series names, from the paged series listing.
+
+		The listing embeds each series' books, so a few GETs yield the whole
+		item->series mapping of the library — far cheaper than one item GET
+		per book, and the only cheap source of ABS-side series (the items
+		listing minifies metadata and carries no series). Deliberately NOT
+		limit=0: unlike /items, this endpoint reads limit=0 as "zero per
+		page" (measured on 2.36.0: ``{"results": [], "total": 372}``), so
+		pages must be requested with a positive limit. Returns None when the
+		listing cannot be fetched (best-effort contract of this module).
+		"""
+		out: dict[str, list[str]] = {}
+		page = 0
+		while True:
+			data = _http_get_json(
+				f"{self.base_url}/api/libraries/{library_id}/series",
+				params={"limit": 500, "page": page},
+				headers=self._headers,
+				session=self._session,
+			)
+			if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+				return None
+			for se in data["results"]:
+				if not isinstance(se, dict):
+					continue
+				name = str(se.get("name") or "")
+				if not name:
+					continue
+				for b in se.get("books") or []:
+					if isinstance(b, dict) and b.get("id"):
+						out.setdefault(str(b["id"]), []).append(name)
+			try:
+				total = int(data.get("total") or 0)
+			except (TypeError, ValueError):
+				total = 0
+			page += 1
+			if page * 500 >= total:
+				return out
+
+	def clear_item_series(self, item_id: str) -> bool:
+		"""Remove every series from the item's ABS DB row (PATCH media metadata).
+
+		WHY a PATCH and not just the rescan: BookScanner NEVER removes a
+		series — an empty or absent series list in metadata.json is "no
+		information" to the scanner, so a series DELETION decided in bmf
+		(apply wrote ``series: []``) is invisible to every scan, per-item or
+		forced (measured 2026-09-14 on ABS 2.36.0: 46 books with the series
+		gone from disk kept their junk series in the ABS database after a
+		per-item rescan that demonstrably ran). Only the metadata UPDATE path
+		removes series (updateSeriesFromRequest in LibraryItemController),
+		and the server itself cleans up series rows left without books
+		afterwards. The list must sit at ``metadata.series`` in the payload —
+		a top-level ``series`` key is silently ignored (measured: HTTP 200,
+		nothing changes). Returns False on network/HTTP failure.
+		"""
+		r = _http_patch(
+			f"{self.base_url}/api/items/{item_id}/media",
+			json_body={"metadata": {"series": []}},
+			headers=self._headers,
+			session=self._session,
+		)
+		return r is not None and r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Engine: stale series rows (`abs-rescan` series sweep)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class StaleSeries:
+	"""A matched book whose ABS row still holds series the disk manifest dropped."""
+
+	item: AbsItem
+	series_names: tuple[str, ...]
+
+
+def stale_series_items(
+	matched: list[tuple[Path, AbsItem]], series_map: dict[str, list[str]], progress_callback: Any = None,
+) -> list[StaleSeries]:
+	"""Matched items whose ABS row holds series while the disk manifest has none.
+
+	The DELETION half of pushing series into ABS: renames and re-sequencings
+	propagate through the per-item scan itself (it re-reads metadata.json),
+	but a REMOVED series does not (see AudiobookshelfClient.clear_item_series),
+	so abs-rescan diffs every matched book's series against the ABS rows and
+	clears the leftovers via the media PATCH. Only the no-series-on-disk case
+	is actionable on purpose:
+
+	- a non-empty series difference is the scan's own job, and
+	- parse-limited shapes cannot be PATCHed durably: an index containing a
+	  space ("John Sinclair #Speciál 07") is kept WHOLE as the series name
+	  by the ABS parser (its sequence regex ``/ #([^#\\s]+)$/`` wants a
+	  single word), so a PATCH splitting it into name+sequence would be
+	  re-glued by the next scan — the durable fix is renaming the series or
+	  its index in bmf.
+
+	A book whose metadata.json cannot be read is skipped: without the disk
+	truth there is no verdict, and clearing must never happen on a guess.
+	*series_map* is AudiobookshelfClient.item_series_map's output; an item
+	missing from it simply holds no ABS series. *progress_callback*
+	(done, total) mirrors broken_cover_items — one metadata.json read per
+	matched book over NFS wants a bar.
+	"""
+	out: list[StaleSeries] = []
+	total = len(matched)
+	done = 0
+	for folder, item in matched:
+		names = series_map.get(item.id) or []
+		if names and _disk_series_empty(folder):
+			out.append(StaleSeries(item=item, series_names=tuple(names)))
+		done += 1
+		if progress_callback is not None:
+			progress_callback(done, total)
+	return out
+
+
+def _disk_series_empty(folder: Path) -> bool:
+	"""True when the folder's metadata.json lists no series entry.
+
+	False means "has a series" OR "cannot be read" — deliberately the same
+	safe answer, the caller must never clear on an unreadable manifest.
+	A plain json read on purpose: the question is only whether the source of
+	truth still lists a series, and readers.read_book_folder would drag in
+	the OPF fallback and the rest of the stack. The wild manifest shapes
+	(plain "Name #N" strings, {name, index} dicts, the legacy `sequence`
+	key, a bare string) are normalised by models.series_entry_pair.
+	"""
+	try:
+		data = json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
+	except (OSError, ValueError):
+		return False
+	series = data.get("series") if isinstance(data, dict) else None
+	if series is None:
+		return True
+	if isinstance(series, dict):
+		series = [series]
+	if isinstance(series, str):
+		series = [series]
+	if not isinstance(series, list):
+		return False
+	return not any(name.strip() for name, _idx in (series_entry_pair(s) for s in series))
 
 
 # ---------------------------------------------------------------------------

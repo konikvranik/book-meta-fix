@@ -242,7 +242,13 @@ src/book_meta_fix/
                    but NO isbn/genres/series, and the storefront scrapers return empty
                    under the provider's 8 s budget unless it is a warm query)
                    / OpenLibrary / Google Books → EnrichedMeta. Enricher.lookup runs
-                   ALL applicable sources in PARALLEL and MERGES same-book results:
+                   ALL applicable sources in PARALLEL and MERGES same-book results;
+                   Enricher.lookup_series is the SERIES+VOLUME key (databazeknih
+                   only — the serie page lists the volumes as schema.org hasPart
+                   microdata in reading order, so volume N is parts[N-1]; three
+                   calls: serie search → serie page → the shared detail parse;
+                   cached under its own "series:" key), the fallback for records
+                   whose title is gone but whose series entry survived:
                    the first hit in priority order (dbk-isbn > abs_czech > dbk-title >
                    legie > OL/GB-isbn > OL-title) is the ANCHOR whose fields win;
                    every other result may only FILL empty fields (_merge_fill —
@@ -311,8 +317,34 @@ src/book_meta_fix/
                    swap with review's raw-swap hint (which fires ONLY for
                    HIGH classic-swap C1, never the MEDIUM heuristics or the
                    variant pair — see _build_proposed), the variant pair
-                   with no proposal at all; counted in stats[swap_fixed]. Runs after
-                   _try_deterministic_fix and only when that returned nothing
+                   with no proposal at all; counted in stats[swap_fixed]. (_try_deterministic_fix
+                   itself now QUERIES FIRST, VERIFIES AFTER: the lookup key
+                   comes from the record — valid ISBN > record title (+author
+                   when not a broken/anonym value; an author-less title is a
+                   valid key, the C9 shape where the author is what the lookup
+                   recovers) > the text-mined pair, with the series entry
+                   (name + volume index, _series_lookup_key) as the fallback
+                   key when the title query can't be built or finds nothing;
+                   the ANSWER is verified ONLINE first
+                   (_verify_enrichment_online — the record base corroborates
+                   per the query axis: title/author agreement on ISBN/title+
+                   author keys, near-exact title >= 90 + the recovered author
+                   KNOWN on author-less title keys, series-box agreement +
+                   known author on series keys), then the LOCAL-DB fallback
+                   (_verify_enrichment_local_db — the recovered author/series
+                   exists on a verified book, Cache.is_verified_author/
+                   is_verified_series; _author_known itself prefers
+                   enricher.author_exists and falls back to the same cache),
+                   and confirm_identity against the text keeps its confirming
+                   role — confirmed hits may change title/author and pre-fill
+                   accept, unconfirmed ones stay pending proposals whose
+                   title/author only ride the _looks_better gate (review._build_proposed's
+                   trust_blindly now keys on identity_confirmed, not the bare
+                   source; review_writer's high-rank accept pre-fill requires
+                   identity_confirmed OR an identity-preserving proposal). The
+                   offline _content_proposal fallback keeps the old
+                   acquire_identity binding contract for its stamp.) Runs after
+                   that tier and only when it returned nothing
                    — _content_proposal's _is_better gate refuses exactly the
                    stuck clean-looking-but-wrong titles, so the two tiers
                    complement each other)
@@ -506,7 +538,24 @@ src/book_meta_fix/
                   get the ext check only); clear_item_cover nulls the row via
                   DELETE /api/items/{id}/cover and the cleared ids join the rescan set
                   (--since must NOT filter them). Run strip-covers --invalid FIRST — a folder
-                  still holding an unreadable cover.jpg would get it re-picked
+                  still holding an unreadable cover.jpg would get it re-picked). Also the
+                  SERIES sweep of the plain abs-rescan run (no flag): item_series_map (paged
+                  GET /api/libraries/{id}/series, books embedded — the only cheap source of
+                  ABS-side series; limit=0 means ZERO per page there, unlike /items) +
+                  stale_series_items (matched books whose ABS row still holds series while
+                  the disk manifest lists none — one plain-json metadata.json read per book,
+                  shapes normalised via models.series_entry_pair, unreadable manifest = no
+                  verdict, never clear on a guess) + clear_item_series (PATCH
+                  /api/items/{id}/media with metadata.series: [] — the ONLY code path that
+                  removes a series: BookScanner treats an empty series list as no-information,
+                  measured 2026-09-14 on ABS 2.36.0, 46 books kept junk series after a
+                  per-item rescan that demonstrably ran; the series key must sit UNDER
+                  metadata — a top-level series key is ignored with HTTP 200; the server
+                  itself removes series rows left without books). Only the DELETION case is
+                  swept: non-empty series changes are the scan's own job, and an index with a
+                  space ("John Sinclair #Speciál 07") is unpatchable — ABS keeps it glued as
+                  the series NAME (its sequence regex wants one word after #) and the next
+                  scan re-glues any manual split; rename the series/index in bmf
   gui.py           bmf gui — keyboard-first Tkinter review.yaml editor (no new writer: loads raw
                   entry dicts, writes via review._header + review._render_entry; detail split is
                   RESPONSIVE: WIDE detail pane = the scrollable review form LEFT (header,
@@ -882,8 +931,12 @@ src/book_meta_fix/
   entry whose FINAL identity is confirmed against the content AND an
   independent record: `enriched.identity_confirmed` with `source` in
   `_ONLINE_SOURCES` (databazeknih/legie/abs_czech/openlibrary/google_books —
-  the pipeline stamps the flag only after `acquire_identity` + an
-  author-filtered/ISBN-anchored online hit), with `source == "llm:high"` —
+  the pipeline stamps the flag only when the post-enrichment
+  verify confirmed the online ANSWER — online corroboration first, the
+  LOCAL-DB fallback (author/series known to the library) next,
+  confirm_identity against the text last; the lookup KEY itself is
+  record-built and unverified, see _try_deterministic_fix), with
+  `source == "llm:high"` —
   the cached-author tier: the pipeline only keeps llm:high when
   `confirm_identity` bound the answer to the book's own text AND the
   post-LLM author/series existence ladder passed (an unconfirmed author is

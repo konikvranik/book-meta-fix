@@ -2109,12 +2109,27 @@ def abs_rescan(library: Path | None, since: str, url: str | None, abs_library: s
 	picks a real cover again. Run `bmf strip-covers --invalid --apply`
 	FIRST — a folder still holding an unreadable cover.jpg would just get
 	it re-picked.
+
+	Series DELETIONS are pushed automatically (dry-run reports them): the
+	scanner never removes a series, so a book whose manifest carries no
+	series anymore but whose ABS row still does gets the stale series
+	cleared via PATCH /api/items/{id}/media before the rescan. Non-empty
+	series changes propagate through the scan itself; an index containing
+	a space ("Name #Speciál 7") cannot be fixed here at all — ABS keeps
+	such strings whole as the series NAME, rename the series/index in bmf.
 	"""
 	import time as _time
 
 	from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 
-	from .abs_client import AudiobookshelfClient, broken_cover_items, changed_folders, match_items, parse_since_duration
+	from .abs_client import (
+		AudiobookshelfClient,
+		broken_cover_items,
+		changed_folders,
+		match_items,
+		parse_since_duration,
+		stale_series_items,
+	)
 
 	cfg = Config.from_env()
 	if library is not None:
@@ -2270,6 +2285,49 @@ def abs_rescan(library: Path | None, since: str, url: str | None, abs_library: s
 		console.print("[green]" + _("No books changed within {window} — nothing to rescan.").format(window=since) + "[/green]")
 		return
 
+	# Series DELETIONS cannot ride the rescan: BookScanner never removes a
+	# series (an empty series list in metadata.json is "no information" to
+	# it), so a delete decided in bmf would stay invisible in ABS forever.
+	# Diff the matched books' series against the ABS rows and clear the
+	# leftovers via the media PATCH; non-empty series changes need no help —
+	# the per-item scan below re-reads metadata.json anyway.
+	if mres is not None and mres.matched:
+		series_map = client.item_series_map(lib_id)
+		if series_map is None:
+			console.print("[dim]" + _("Could not fetch the ABS series list — series deletions left unchecked.") + "[/dim]")
+		else:
+			with _new_progress() as progress:
+				task_id = progress.add_task(_("Comparing series"), total=len(mres.matched))
+
+				def _series_cb(done: int, total: int) -> None:
+					progress.update(task_id, completed=done)
+
+				stale = stale_series_items(mres.matched, series_map, progress_callback=_series_cb)
+			if not stale:
+				console.print("[green]" + _("No stale series in the ABS database among the changed books.") + "[/green]")
+			else:
+				_print_stale_series(stale, do_apply)
+				if do_apply:
+					failed_series: list[str] = []
+					cleared_series = 0
+					with _new_progress() as progress:
+						task_id = progress.add_task(_("Clearing stale series"), total=len(stale))
+						for st in stale:
+							if client.clear_item_series(st.item.id):
+								cleared_series += 1
+							else:
+								failed_series.append(st.item.title or st.item.id)
+							progress.update(task_id, advance=1)
+					if failed_series:
+						sample = ", ".join(failed_series[:3])
+						console.print(
+							"[yellow]"
+							+ _("Failed to clear the series of {count} item(s) (e.g. {sample}) — check the token (must be an ADMIN API token).").format(count=len(failed_series), sample=sample)
+							+ "[/yellow]"
+						)
+					if cleared_series:
+						console.print("[green]" + _("Cleared the stale series of {count} item(s) — the rescan below refreshes their metadata.").format(count=cleared_series) + "[/green]")
+
 	# Scan set: recently changed items + the freshly cleared ones (a cleared
 	# cover row needs a rescan to pick a new cover, changed or not).
 	scan_ids = list(mres.item_ids) if mres else []
@@ -2421,6 +2479,21 @@ def _print_broken_covers(broken, do_apply: bool) -> None:  # noqa: ANN001
 	console.print(t)
 	if not do_apply:
 		console.print("[dim]" + _("Dry-run: the stored covers stay as they are. Re-run with --apply to clear and rescan them.") + "[/dim]")
+
+
+def _print_stale_series(stale, do_apply: bool) -> None:  # noqa: ANN001
+	"""The series-sweep report: series that live only in the ABS database."""
+	console.print()
+	t = Table(title=_("Series only in the ABS database (deleted on disk)"), show_header=True, header_style="bold cyan")
+	t.add_column(_("Title"))
+	t.add_column(_("Series in ABS"), style="dim")
+	for s in stale[:25]:
+		t.add_row((s.item.title or s.item.id)[:50], "; ".join(s.series_names)[:64])
+	if len(stale) > 25:
+		t.add_row("…", f"({len(stale) - 25} more)")
+	console.print(t)
+	if not do_apply:
+		console.print("[dim]" + _("Dry-run: the ABS series stay as they are. Re-run with --apply to clear them.") + "[/dim]")
 
 
 # Required imports for the new commands

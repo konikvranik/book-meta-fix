@@ -140,6 +140,8 @@ jednou potvrdíte v `bmf gui` a je hotovo.
   tyto složky do složky kanonického autora, takže práci zakončete
   `bmf abs-rescan --apply` (ABS má vlastní databázi). Přejmenování série
   složky NEpřesouvá — ale přepisuje metadata.json, takže závěrečné
-  `bmf abs-rescan --apply` pokryje i je.
+  `bmf abs-rescan --apply` pokryje i je (a stejně tak smazání série:
+  jeho series sweep pročistí řádky ABS, které scanner sám nikdy
+  neodstraní).
 - Příkaz je idempotentní: jakmile jsou kanonické hodnoty na disku,
   další běh nenajde co navrhovat.

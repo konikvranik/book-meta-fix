@@ -65,6 +65,30 @@ hint is printed instead.
 `POST /api/libraries/{id}/scan?force=1` — ABS re-reads every item. Use it
 when you suspect the mapping missed something; it is heavier on the server.
 
+## Series deletions: pushed beyond the scan
+
+One change a rescan *cannot* deliver: a **deleted** series. BookScanner
+never removes a series — an empty `series` list in `metadata.json` is "no
+information" to it, not "remove" — so a series you dropped in bmf (apply
+wrote `series: []`) would stay in the ABS database forever, no matter how
+many rescans run (measured on ABS 2.36.0: 46 books kept their junk series
+after a per-item rescan that demonstrably ran).
+
+`abs-rescan` therefore also diffs the series of every matched book against
+the ABS rows and clears the leftovers through the metadata-update API
+(`PATCH /api/items/{id}/media` with `metadata.series: []` — the only code
+path that removes a series; ABS itself then cleans up series rows left
+without books). Dry-run lists the stale series, `--apply` clears them
+before the rescan. Scope notes:
+
+- Only the *deletion* case is patched. A rename or a changed volume number
+  is the scan's own job — it re-reads `metadata.json` right after.
+- An index containing a space (`"John Sinclair #Speciál 07"`) cannot be
+  pushed at all: the ABS parser keeps such a string whole as the series
+  NAME (its sequence pattern wants a single word after `#`), and a manual
+  PATCH splitting it would be re-glued by the next scan. Rename the series
+  or its index in bmf instead.
+
 ## `--fix-covers`: repair broken covers stored in the ABS database
 
 The other half of the cover cleanup. ABS's database stores each item's

@@ -142,6 +142,7 @@ confirm it once in `bmf gui` and it is done.
   folders to the canonical author directory, so finish with
   `bmf abs-rescan --apply` (ABS keeps its own database). Series renames
   do NOT move folders — but they rewrite metadata.json, so the final
-  `bmf abs-rescan --apply` covers them too.
+  `bmf abs-rescan --apply` covers them too (and series DELETIONS as well:
+  its series sweep clears ABS rows the scanner never removes on its own).
 - The command is idempotent: once the canonical values are on disk, a
   re-run finds nothing to propose.

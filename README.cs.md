@@ -129,7 +129,7 @@ zůstane zachován, abyste mohli obnovit stav před během.
 | `bmf strip-covers --invalid` | Místo toho odstraní NEVALIDNÍ obálky: soubory s obrázkovou příponou / `cover.*`, které žádný dekodér nepřečte (příčina chyb „Invalid data found“ u ffmpeg v ABS) |
 | `bmf strip-covers --generated embedded --apply` | Každý selektor (`--generated`, `--invalid`) přijme volitelný rozsah: `external`, `embedded`, samotný příznak = both |
 | `bmf abs-rescan` | Donutí Audiobookshelf znovu načíst metadata nedávno změněných knih (dry-run: vypíše mapování) |
-| `bmf abs-rescan --apply` | Skutečně spustí per-položkový rescan ABS (batch API); `--since 2h` zúží okno, `--force-all` přenačte celou knihovnu |
+| `bmf abs-rescan --apply` | Skutečně spustí per-položkový rescan ABS (batch API); `--since 2h` zúží okno, `--force-all` přenačte celou knihovnu; série smazané v bmf se pročistí i z databáze ABS (scanner je sám nikdy neodstraní) |
 | `bmf abs-rescan --fix-covers --apply` | Navíc vynuluje rozbité řádky obálek v databázi ABS (coverPath na neobrázkový/chybějící soubor — chyby ffmpeg „Invalid data found“) a tyto položky rescanuje |
 
 Společné volby: `--library PATH`, `--limit N`, `--no-cache`, `-o FILE`,

@@ -257,6 +257,27 @@ Kniha s cover diagnózou (C11 / MISSING_COVER) navíc porovná obálky obou CZ
 zdrojů mezi sebou: vyhrává vyšší rozlišení a vyměňuje se pouze `cover_url` —
 metadata z vítězného vyhledávání zůstávají.
 
+### Vyhledávací klíč a ověření
+
+Vyhledávací klíč se staví ze **záznamu** — platné ISBN, jinak titul ze
+záznamu (s autorem, pokud to není zjevně rozbitá/anonymní hodnota; titul
+bez autora je platný klíč, protože právě autora má vyhledávání u
+anonimizovaných záznamů doplnit), jinak titul+autor vytěžené z textu
+stránek. Není-li titul použitelný, ale série přežila (`"Ocelová krysa
+#5"`), je náhradním klíčem název série + pořadí svazku: stránka série na
+zdroji řadí díly v pořadí čtení, takže svazek identifikuje dílo samo o
+sobě. **Dotaz nepodléhá žádné kontrole proti obsahu** — ověření běží AŽ PO
+enrichmentu, na odpovědi, v tomto pořadí: nejprve ONLINE (nezávislá
+databáze musí odpověď potvrdit podle osy dotazu — souhlas titulu/autora,
+nebo téměř přesný titul plus známý dohledaný autor), pak LOKÁLNÍ DB jako
+fallback (nelze-li rozhodnout online, musí být dohledaný autor nebo série
+knihovně známá — existuje u ověřené knihy), a kontrola proti TEXTU si
+drží potvrzující roli (`confirm_identity` — vrácený titul/autor/ISBN
+proti vlastnímu textu knihy). Potvrzený zásah smí změnit titul/autora a
+přesto se předvyplní `accept`; nepotvrzený skončí v `review.yaml` jako
+čekající návrh s doplněnými údaji k lidskému schválení (jeho titul/autor
+se navrhují jen tehdy, kdy stávající hodnoty vypadají rozbitě).
+
 ## Vzory pro umísťování
 
 `bmf apply` umístí každou aplikovanou knihu: rozhodnutá položka (accept/

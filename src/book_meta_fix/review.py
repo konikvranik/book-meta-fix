@@ -247,16 +247,21 @@ def _build_proposed(
 			source_parts.append("embedded")
 
 	if enriched is not None:
-		# LLM proposals and databazeknih hits are pre-vetted: trust their
+		# LLM proposals and identity-CONFIRMED hits are pre-vetted: trust their
 		# title/author without the _looks_better gate. The LLM already reasoned
-		# about the right value; databazeknih already fuzzy-matched the book
-		# (score >= 70) before returning it, so a title it returns IS the title
-		# of the matched book — even if the DB title (a filename-as-title C2
-		# case) does not look "broken" to _looks_better.
-		# identity_confirmed (verified against the book's content) is trusted
-		# like databazeknih/llm:high: we know which book it is, so its title/
-		# author are proposed even if the current metadata doesn't look broken.
-		trust_blindly = enriched.source.startswith("llm:") or enriched.source == "databazeknih" or getattr(enriched, "identity_confirmed", False)
+		# about the right value; an online hit that passed the post-enrichment
+		# verify (identity_confirmed — online corroboration, the local-DB
+		# fallback, or the text check) means we know which book it is, so a
+		# title it returns IS the title of the matched book even when the DB
+		# title (a filename-as-title C2 case) does not look "broken" to
+		# _looks_better.
+		# An UNCONFIRMED databazeknih hit rides the _looks_better gate instead:
+		# the query may be a title-only key built on a wrong record, so its
+		# title/author are proposed only when the current values actually look
+		# broken (the anonym/filename shapes) — and the entry stays pending in
+		# review either way (review_writer gates the accept pre-fill the same
+		# way).
+		trust_blindly = enriched.source.startswith("llm:") or getattr(enriched, "identity_confirmed", False)
 		if enriched.title and "title" not in proposed and (trust_blindly or _looks_better(enriched.title, meta.title)):
 			proposed["title"] = enriched.title
 			source_parts.append(enriched.source)

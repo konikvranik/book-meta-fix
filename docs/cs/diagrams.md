@@ -39,7 +39,8 @@ sequenceDiagram
 		end
 		PB->>VER: safe_extract() — text stránek, vložená metadata, ISBN
 		PB->>VER: _try_deterministic_fix()
-		VER->>ENR: _online_fill() (ukotveno identitou: ISBN nebo autor-filtr)
+		VER->>ENR: _online_fill() (klíč ze záznamu: ISBN / titul(+autor) / série #svazek)
+		VER->>VER: ověř odpověď: online → lokální DB → text (confirm_identity)
 		alt C1 a titul je známý autor
 			PB->>POOL: _try_known_author_swap()
 			PB->>VER: confirm_identity() hlídá přestavěnou dvojici
@@ -124,7 +125,7 @@ flowchart TD
 	verify -->|"MISMATCH / strict UNCERTAIN"| extract
 	verify -->|čisté| ok
 	detect -->|"NEEDS_REVIEW / AUTO_FIXABLE"| extract["safe_extract()<br/>text stránek + vložená metadata"]
-	extract --> det["_try_deterministic_fix()<br/>text_meta + online (ukotveno identitou)"]
+	extract --> det["_try_deterministic_fix()<br/>text_meta + online (dotaz ze záznamu,<br/>PO dotazu ověřeno proti obsahu)"]
 	det --> swapq{"C1 a titul je<br/>známý autor?"}
 	swapq -->|ano| swap["_try_known_author_swap()<br/>hlídá confirm_identity()"]
 	swapq -->|ne| llmq

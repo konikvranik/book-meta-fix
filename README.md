@@ -126,7 +126,7 @@ can recover the pre-run state.
 | `bmf strip-covers --invalid` | Remove INVALID covers instead: image-extension / `cover.*` files no decoder can read (behind ABS's ffmpeg "Invalid data found" errors) |
 | `bmf strip-covers --generated embedded --apply` | Each selector (`--generated`, `--invalid`) takes an optional scope: `external`, `embedded`, or bare flag = both |
 | `bmf abs-rescan` | Tell Audiobookshelf to re-read metadata of books changed recently (dry-run: list the mapping) |
-| `bmf abs-rescan --apply` | Actually trigger the per-item ABS rescan (batch API); `--since 2h` narrows the window, `--force-all` re-scans the whole library |
+| `bmf abs-rescan --apply` | Actually trigger the per-item ABS rescan (batch API); `--since 2h` narrows the window, `--force-all` re-scans the whole library; series deleted in bmf are also cleared from the ABS database (the scanner never removes them) |
 | `bmf abs-rescan --fix-covers --apply` | Also null broken cover rows stored in the ABS database (coverPath at a non-image/missing file — the ffmpeg "Invalid data found" errors) and rescan those items |
 
 Common options: `--library PATH`, `--limit N`, `--no-cache`, `-o FILE`,

@@ -202,6 +202,64 @@ class TestMediumConfidencePrefill:
 		assert parsed[0].action is None
 
 
+class TestUnconfirmedHighRankPrefill:
+	"""The post-enrichment verify contract: an UNCONFIRMED databazeknih hit
+	(the lookup key was built from the record without a content gate — a
+	title-only or series query) no longer auto-accepts an identity-CHANGING
+	proposal; only identity_confirmed or an identity-preserving proposal does.
+	These land in review pending with the full proposal for the human."""
+
+	@staticmethod
+	def _authorless_result(calibre_id: int, enriched: EnrichedMeta):
+		"""The anonym shape: an author-less record recovering its author —
+		the proposal necessarily changes the (absent) author field."""
+		meta = BookMeta(calibre_id=calibre_id, uuid=f"u{calibre_id}", title="Ocelová krysa prezidentem",
+			authors=[], path="/lib/A/B", primary_file=None)
+		diag = Diagnosis(category="C9", reason="author lost", confidence=Confidence.HIGH, verdict=Verdict.NEEDS_REVIEW)
+		return (meta, diag, None, enriched)
+
+	def test_unconfirmed_databazeknih_identity_change_stays_none(self, tmp_path):
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		enriched = EnrichedMeta(
+			title="Ocelová krysa prezidentem", authors=["Harry Harrison"],
+			isbn="9788071911760", source="databazeknih",
+		)
+		_submit_all_and_finish(w, [self._authorless_result(1, enriched)])
+		parsed = parse_review(out)
+		entry = parsed[0]
+		assert entry.action is None
+		# The recovered data is all there for the human to review.
+		assert entry.proposed.get("author") == "Harry Harrison"
+		assert entry.proposed.get("isbn") == "9788071911760"
+
+	def test_unconfirmed_databazeknih_preserving_gets_accept(self, tmp_path):
+		"""Same-source hit that only ADDS fields (title/author agree with the
+		record) still pre-fills accept — the additive data of an agreeing
+		match is safe to bulk-apply."""
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		enriched = EnrichedMeta(
+			title="T", authors=["A"], isbn="9788071911760", source="databazeknih",
+		)
+		_submit_all_and_finish(w, [_result(1, title="T", enriched=enriched)])
+		parsed = parse_review(out)
+		assert parsed[0].action == "accept"
+
+	def test_confirmed_databazeknih_identity_change_accepts(self, tmp_path):
+		"""identity_confirmed (the answer was verified against the book's own
+		content AFTER the match) auto-accepts even an identity change."""
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		enriched = EnrichedMeta(
+			title="Ocelová krysa prezidentem", authors=["Harry Harrison"],
+			isbn="9788071911760", source="databazeknih", identity_confirmed=True,
+		)
+		_submit_all_and_finish(w, [self._authorless_result(1, enriched)])
+		parsed = parse_review(out)
+		assert parsed[0].action == "accept"
+
+
 class TestBackupLifecycle:
 	def test_moves_original_to_bak_on_construct(self, tmp_path):
 		out = tmp_path / "review.yaml"

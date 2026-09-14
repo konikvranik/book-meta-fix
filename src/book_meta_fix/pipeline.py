@@ -520,7 +520,7 @@ def _process_book(
 		# Step 2a-2c: deterministic fixes from extracted content + online lookup
 		if extracted is not None:
 			try:
-				enriched = _try_deterministic_fix(meta, diag, extracted, enricher, skip_enrich)
+				enriched = _try_deterministic_fix(meta, diag, extracted, enricher, skip_enrich, cache)
 			except Exception as e:  # noqa: BLE001
 				log.debug("deterministic fix failed for %s: %s", meta.path, e)
 				enriched = None
@@ -640,7 +640,7 @@ def _process_book(
 							ident = IdentityResult(title=enriched.title or "", author=enriched.authors[0] if enriched.authors else None, isbn=enriched.isbn)
 							want_cover = any(d.category in _COVER_CATEGORIES for d in all_diagnoses(diag))
 							# 1. Try full book lookup online:
-							online = _online_fill(ident, enricher, skip_enrich, want_cover)
+							online, _axis = _online_fill(ident, enricher, skip_enrich, want_cover)
 							if online is not None:
 								# Book exists online! Adopt the rich metadata and auto-accept.
 								online.identity_confirmed = True
@@ -748,41 +748,111 @@ def _llm_wants(category: str, llm_categories: tuple[str, ...]) -> bool:
 	return category in llm_categories
 
 
+def _lookup_key(meta: BookMeta, extracted: ExtractedMeta) -> IdentityResult | None:
+	"""Build the FULLEST online lookup key available — no content
+	verification here.
+
+	Verification moved AFTER the enrichment (it belongs to verify, and the
+	answer is what gets checked — see _try_deterministic_fix): we ask the
+	sources who the record CLAIMS to be, gather everything the record and
+	the book's own text can offer, then check the answer. The key carries
+	ISBN AND title/author together so _online_fill can chain the axes
+	(ISBN miss → title query → series fallback):
+	  - ISBN: the record's, when the check digit validates;
+	  - title/author: the record's when the title is usable (an author-less
+	    title is a valid key — the C9/anonym shape where the author is
+	    exactly what the lookup should recover; a broken/anonym author value
+	    never rides along), else the text-mined pair (the old extractor
+	    tier) for records whose title is too broken to query with.
+	"""
+	from .isbn import canonicalize
+
+	isbn = canonicalize(meta.isbn) if meta.isbn else None
+	title = meta.title if meta.title and not _looks_broken(meta.title) else None
+	author = meta.authors[0] if meta.authors and not _looks_broken(meta.authors[0]) else None
+	year = meta.year
+	if title is None:
+		mined_title = getattr(extracted, "title_from_text", None)
+		mined_authors = getattr(extracted, "authors_from_text", None) or []
+		if mined_title and mined_authors:
+			title, author = mined_title, mined_authors[0]
+			year = getattr(extracted, "year_from_text", None) or meta.year
+	if not isbn and not title:
+		return None
+	return IdentityResult(
+		isbn=isbn, title=title, authors=[author] if author else [], year=year, source="metadata",
+	)
+
+
+def _series_lookup_key(meta: BookMeta) -> tuple[str, str] | None:
+	"""(series name, volume index) from the record, when BOTH halves survive.
+
+	The fallback lookup key for a record whose title is not usable: a series
+	entry like "Ocelová krysa #5" identifies the volume outright on the
+	source's series page. Multi-series books use the first entry. The index
+	is series_entry_pair's STRING form ("" = absent).
+	"""
+	if not meta.series:
+		return None
+	entry = meta.series[0]
+	try:
+		name, index = series_entry_pair(entry) if isinstance(entry, (str, dict)) else ("", "")
+	except (TypeError, ValueError):
+		return None
+	if not name or not index:
+		return None
+	return name, index
+
+
 def _try_deterministic_fix(
 	meta: BookMeta,
 	diag: Diagnosis,  # noqa: F821
 	extracted: ExtractedMeta,
 	enricher: Enricher | None,
 	skip_enrich: bool,
+	cache: Any = None,
 ) -> EnrichedMeta | None:  # noqa: F821
-	"""Resolve a content-verified identity, then fill metadata online.
+	"""Query the online sources from the RECORD, then verify the answer.
 
-	Online sources no longer guess identity. We first acquire an identity from
-	the book itself (ISBN or title+author), confirmed against its content, then
-	anchor the online lookup to that identity. The result is identity_confirmed
-	(safe to auto-accept even if it changes title/author — we know the book).
-
-	Returns None if no identity could be verified against content (→ LLM, or
-	review when there is no content to reason over).
+	Gather what you can, fill what you can, then verify the data is valid:
+	the lookup key comes from the record/mined fields WITHOUT a content gate
+	(_lookup_key — an author-less title or a surviving series entry is
+	enough to ask; the axes chain ISBN → title → series in _online_fill).
+	The verification runs on the ANSWER, in this order:
+	  1. ONLINE (_verify_enrichment_online — the independent online record
+	     base corroborates title/author/series agreement per the query
+	     axis);
+	  2. the LOCAL DB fallback (_verify_enrichment_local_db — when online
+	     cannot decide, the recovered author/series must be known to the
+	     library: it exists on a verified book);
+	  3. the TEXT check (confirm_identity) keeps its confirming role, as it
+	     has stood — the answer's title/author/ISBN against the book's own
+	     page text.
+	identity_confirmed alone unlocks the accept pre-fill; an unverified hit
+	still returns as a proposal — it lands in review.yaml pending for the
+	human (the online match itself stays gated by the sources' own fuzzy
+	filters and _online_matches_identity).
 	"""
-	identity = acquire_identity(meta, extracted)
-	if identity is None:
-		return None
-
-	# Online fill, anchored to the verified identity (ISBN exact, or title+
-	# author with an author-match filter). want_cover: the book carries a
-	# cover diagnosis (C11/MISSING_COVER), so after the first hit the other
-	# CZ source's cover may upgrade the result's (resolution preference —
-	# only cover_url changes, never the identity-anchored fields).
+	key = _lookup_key(meta, extracted)
+	series_key = _series_lookup_key(meta)
 	want_cover = any(d.category in _COVER_CATEGORIES for d in all_diagnoses(diag))
-	online = _online_fill(identity, enricher, skip_enrich, want_cover)
+	online, axis = _online_fill(key, enricher, skip_enrich, want_cover, series=series_key, allow_title_only=True)
 	if online is not None:
-		online.identity_confirmed = True
+		online.identity_confirmed = (
+			_verify_enrichment_online(online, key, series_key, axis, enricher, cache)
+			or _verify_enrichment_local_db(online, cache)
+			or confirm_identity(online, extracted)
+		)
 		return online
 
 	# No online data — fall back to a content-grounded proposal (offline fix
 	# from text_meta + embedded OPF, only fields that improve on the meta).
-	return _content_proposal(meta, extracted)
+	# Its identity_confirmed tells the truth about the record↔content binding
+	# (the old pre-lookup acquire_identity gate) instead of riding it.
+	proposal = _content_proposal(meta, extracted)
+	if proposal is not None:
+		proposal.identity_confirmed = acquire_identity(meta, extracted) is not None
+	return proposal
 
 
 def _try_known_author_swap(
@@ -894,36 +964,157 @@ def _online_matches_identity(online: EnrichedMeta, identity: IdentityResult) -> 
 	return True  # no author to compare — trust the title search
 
 
-def _online_fill(identity: IdentityResult, enricher: Enricher | None, skip_enrich: bool, want_cover: bool = False) -> EnrichedMeta | None:  # noqa: F821
-	"""Fill metadata online, anchored to the verified identity: exact by ISBN,
-	or title+author with an author-match filter. Returns None if nothing found
-	or the result doesn't match the identity. *want_cover* (the book carries a
-	C11/MISSING_COVER diagnosis) lets the enricher compare the OTHER CZ
-	source's cover and keep the higher-resolution one — cover_url only."""
+def _author_known(author: str, enricher: Enricher | None, cache: Any) -> bool:
+	"""Does *author* exist ONLINE (enricher.author_exists — the cached
+	databazeknih/legie/abs_czech ladder), with the LOCAL DB as the fallback
+	when online cannot answer (offline run, sources disabled)? The local
+	check is Cache.is_verified_author — the author of any verified book in
+	the library. Test stubs without the method simply cannot answer."""
+	fn = getattr(enricher, "author_exists", None)
+	if fn is not None and fn(author):
+		return True
+	return cache is not None and cache.is_verified_author(author)
+
+
+def _verify_enrichment_online(
+	online: EnrichedMeta,
+	key: IdentityResult | None,
+	series: tuple[str, str] | None,
+	axis: str | None,
+	enricher: Enricher | None,
+	cache: Any = None,
+) -> bool:
+	"""The ONLINE tier of the post-enrichment verification.
+
+	The contract: gather what you can, fill what you can, then verify the
+	data is valid — ONLINE first; when online cannot decide, the fallback is
+	the LOCAL DB (the recovered author/series known to the library — see
+	_verify_enrichment_local_db; the text check keeps its confirming role,
+	see _try_deterministic_fix). Which check applies depends on the axis the
+	answer rode in on:
+
+	  - ``isbn``: the source answered the exact key — definitional for the
+	    source, but the ISBN itself may be the corrupt half of the record.
+	    Verified when the answer AGREES with the key's other identity
+	    field(s): title >= 70 or author >= 80. A key with no comparable
+	    field falls to the local tiers.
+	  - ``title`` with author: the source matched BOTH halves of the query
+	    and the author-mismatch filter already passed — the online record
+	    base confirms the record's claim.
+	  - ``title`` author-less (the C9/anonym shape): the answer title must
+	    be a NEAR-EXACT match of the query (>= 90 — the search's own floor
+	    of 70 admits similar-titled different books) and the RECOVERED
+	    author must be known (online, else the local DB).
+	  - ``series``: the answer's series box must agree with the queried
+	    series (>= 80) and the recovered author must be known (online,
+	    else the local DB).
+	"""
+	from rapidfuzz import fuzz
+
+	authors = [a for a in (online.authors or []) if a and not _looks_broken(a)]
+	if axis == "isbn":
+		if key is None:
+			return False
+		if key.title and online.title and fuzz.token_sort_ratio(online.title.lower(), key.title.lower()) >= 70:
+			return True
+		if key.authors and authors and fuzz.token_sort_ratio(authors[0].lower(), key.authors[0].lower()) >= 80:
+			return True
+		return False
+	if axis == "title":
+		if key is None or not key.title:
+			return False
+		if key.has_title_author:
+			return True
+		if not online.title or fuzz.token_sort_ratio(online.title.lower(), key.title.lower()) < 90:
+			return False
+		return bool(authors) and _author_known(authors[0], enricher, cache)
+	if axis == "series":
+		if series is None or not online.series:
+			return False
+		if fuzz.token_sort_ratio(str(online.series).lower(), series[0].lower()) < 80:
+			return False
+		return bool(authors) and _author_known(authors[0], enricher, cache)
+	return False
+
+
+def _verify_enrichment_local_db(online: EnrichedMeta, cache: Any) -> bool:
+	"""The LOCAL-DB fallback of the post-enrichment verification: when the
+	online tiers could not decide, the recovered data is still corroborated
+	when the author or the series is KNOWN to the library — it exists on a
+	verified book (Cache.is_verified_author / is_verified_series)."""
+	if cache is None:
+		return False
+	authors = [a for a in (online.authors or []) if a and not _looks_broken(a)]
+	if authors and cache.is_verified_author(authors[0]):
+		return True
+	if online.series and cache.is_verified_series(str(online.series)):
+		return True
+	return False
+
+
+def _online_fill(
+	identity: IdentityResult | None,
+	enricher: Enricher | None,
+	skip_enrich: bool,
+	want_cover: bool = False,
+	*,
+	series: tuple[str, str] | None = None,
+	allow_title_only: bool = False,
+) -> tuple[EnrichedMeta | None, str | None]:  # noqa: F821
+	"""Fill metadata online from a lookup key (no content gate here — the
+	content check runs on the ANSWER, see _try_deterministic_fix).
+
+	The axes are CHAINED (gather what you can): exact ISBN first, then the
+	title query (+author when the key carries one, with an author-match
+	filter), then the series fallback. *allow_title_only* also permits an
+	author-less title key (the C9/anonym shape — the author is what the
+	lookup recovers; the LLM path keeps the old title+author requirement).
+	*series* = (name, volume index as series_entry_pair's string form):
+	a surviving series entry identifies the volume outright on the source's
+	series page.
+
+	Returns ``(result, axis)`` — axis is ``'isbn'`` / ``'title'`` /
+	``'series'`` (which query the answer rode on, for the post-enrichment
+	verification) or ``(None, None)`` when nothing was found. *want_cover*
+	(the book carries a C11/MISSING_COVER diagnosis) lets the enricher
+	compare the OTHER CZ source's cover and keep the higher-resolution one —
+	cover_url only."""
 	if enricher is None or skip_enrich:
-		return None
-	if identity.has_isbn:
+		return None, None
+	online: EnrichedMeta | None = None
+	axis: str | None = None
+	if identity is not None and identity.has_isbn:
 		online = enricher.lookup(isbn=identity.isbn)
-	elif identity.has_title_author:
-		# Pass the identity's year so the databazeknih title search can
-		# disambiguate editions (prefer the matching publication year).
-		online = enricher.lookup(title=identity.title, author=identity.authors[0], year=identity.year)
-	else:
-		return None
+		if online is not None:
+			axis = "isbn"
+	if online is None and identity is not None and (identity.has_title_author or (allow_title_only and identity.title)):
+		online = enricher.lookup(
+			title=identity.title, author=identity.authors[0] if identity.authors else None, year=identity.year,
+		)
+		if online is not None:
+			# ISBN lookups are exact; title lookups need an author-match
+			# filter (only when the key itself carries an author).
+			if identity.has_title_author and not _online_matches_identity(online, identity):
+				log.debug("online result rejected (author mismatch) for identity %r", identity.title)
+				online = None
+			else:
+				axis = "title"
+	if online is None and series is not None:
+		lookup_series = getattr(enricher, "lookup_series", None)
+		if lookup_series is not None:
+			online = lookup_series(series=series[0], index=series[1])
+			if online is not None:
+				axis = "series"
 	if online is None:
-		return None
-	# ISBN lookups are exact; title lookups need an author-match filter.
-	if identity.has_title_author and not _online_matches_identity(online, identity):
-		log.debug("online result rejected (author mismatch) for identity %r", identity.title)
-		return None
+		return None, None
 	if want_cover:
 		online = enricher.upgrade_cover(
 			online,
-			title=identity.title or "",
-			author=identity.authors[0] if identity.authors else None,
-			year=identity.year,
+			title=(identity.title if identity is not None else None) or online.title or "",
+			author=identity.authors[0] if identity is not None and identity.authors else None,
+			year=identity.year if identity is not None else None,
 		)
-	return online
+	return online, axis
 
 
 def _content_proposal(meta: BookMeta, extracted: ExtractedMeta) -> EnrichedMeta | None:  # noqa: F821

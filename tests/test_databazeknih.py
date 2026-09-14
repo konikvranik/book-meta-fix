@@ -373,3 +373,99 @@ class TestEnricherLookupOrder:
 		assert e2.lookup(isbn="9788073099992") is None  # still cached
 		assert call_count[0] == 1  # never re-queried
 		e2.close()
+
+
+class TestLookupDatabazeknihSeries:
+	"""lookup_databazeknih_series: identify a volume by series name + order.
+	The serie page lists the volumes as schema.org hasPart microdata in
+	reading order — volume N is parts[N-1]. No network: _http_get_html is
+	routed to inline fixture HTML by URL."""
+
+	@staticmethod
+	def _serie_page(names: list[str], h1: str = "Ocelová krysa") -> str:
+		parts = "".join(
+			f'<div itemprop="hasPart" itemscope itemtype="https://schema.org/Book">'
+			f'<meta itemprop="name" content="{name}">'
+			f'<link itemprop="url" href="/prehled-knihy/{slug}-{100 + i}">'
+			f"</div>"
+			for i, (name, slug) in enumerate(names)
+		)
+		return f"<html><body><h1>{h1}<em>knihy</em></h1>{parts}</body></html>"
+
+	_RAT_NAMES = [
+		("Ocelová krysa", "ocelova-krysa"),
+		("Ocelová krysa se mstí", "se-msti"),
+		("Krysa z nerez oceli", "krysa-z-nerez"),
+		("Ocelová krysa jde po tobě!", "jde-po-tobe"),
+		("Ocelová krysa prezidentem", "prezidentem"),
+		("Zrození ocelové krysy", "zrozeni"),
+		("Ocelová krysa rukuje", "rukuje"),
+	]
+
+	def _route(self, monkeypatch, serie_page: str, search_html: str | None = None, detail: str | None = None):
+		search_html = search_html or '<html><body><a href="/serie/ocelova-krysa-503">Ocelová krysa</a></body></html>'
+		detail = detail or _load("detail_1984.html")
+		state = {"calls": []}
+
+		def fake_get(url, **kw):
+			state["calls"].append(url)
+			if "/vyhledavani/serie" in url:
+				return search_html
+			if "/serie/" in url:
+				return serie_page
+			if "/prehled-knihy/" in url:
+				return detail
+			return None
+
+		monkeypatch.setattr(enrichers, "_http_get_html", fake_get)
+		return state
+
+	def test_volume_five_resolves_to_fifth_part(self, monkeypatch):
+		from book_meta_fix.enrichers import lookup_databazeknih_series
+
+		self._route(monkeypatch, self._serie_page(self._RAT_NAMES))
+		em = lookup_databazeknih_series(series="Ocelová krysa", index=5)
+		# The detail fixture (1984) proves the THIRD call hit the right path.
+		assert em is not None and em.title == "1984"
+		em2 = lookup_databazeknih_series(series="Ocelová krysa", index="5")
+		assert em2 is not None  # string index (series_entry_pair's form) works
+
+	def test_index_out_of_range_returns_none(self, monkeypatch):
+		from book_meta_fix.enrichers import lookup_databazeknih_series
+
+		self._route(monkeypatch, self._serie_page(self._RAT_NAMES))
+		assert lookup_databazeknih_series(series="Ocelová krysa", index=9) is None
+		assert lookup_databazeknih_series(series="Ocelová krysa", index=0) is None
+
+	def test_serie_name_mismatch_rejected(self, monkeypatch):
+		"""The serie search's first hit fuzzily disagrees with the queried
+		name — a near-titled different series would silently serve wrong
+		volumes."""
+		from book_meta_fix.enrichers import lookup_databazeknih_series
+
+		self._route(monkeypatch, self._serie_page(self._RAT_NAMES, h1="Agent JFK"))
+		assert lookup_databazeknih_series(series="Ocelová krysa", index=1) is None
+
+	def test_no_serie_link_returns_none(self, monkeypatch):
+		from book_meta_fix.enrichers import lookup_databazeknih_series
+
+		self._route(monkeypatch, self._serie_page(self._RAT_NAMES), search_html="<html><body>nic</body></html>")
+		assert lookup_databazeknih_series(series="Ocelová krysa", index=1) is None
+
+	def test_enricher_lookup_series_cached(self, tmp_path, monkeypatch):
+		"""Enricher.lookup_series caches under its own series: key — a second
+		call is served from the cache, the scraper runs once."""
+		state = self._route(monkeypatch, self._serie_page(self._RAT_NAMES))
+		cache = tmp_path / "cache.db"
+		e = Enricher(cache_db=cache, databazeknih_enabled=True, openlibrary_enabled=False, google_books_enabled=False)
+		em1 = e.lookup_series(series="Ocelová krysa", index=5)
+		assert em1 is not None
+		n_calls = len(state["calls"])
+		assert n_calls == 3  # serie search + serie page + detail
+		em2 = e.lookup_series(series="Ocelová krysa", index=5)
+		assert em2 is not None and em2.title == em1.title
+		assert len(state["calls"]) == n_calls  # cache hit, no re-scrape
+		# Disabled source never queries.
+		e.close()
+		e_off = Enricher(cache_db=None, databazeknih_enabled=False)
+		assert e_off.lookup_series(series="Ocelová krysa", index=5) is None

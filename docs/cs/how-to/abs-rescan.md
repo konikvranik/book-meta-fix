@@ -68,6 +68,29 @@ hint.
 Použij, když máš podezření, že mapování něco přehlédlo; je to pro server
 těžší.
 
+## Smazané série: protlačené i mimo scan
+
+Jednu změnu rescan *doručit neumí*: **smazanou** sérii. BookScanner
+nikdy sérii neodstraňuje — prázdný seznam `series` v `metadata.json` pro
+něj znamená „žádná informace", ne „smaž" — takže série zahodená v bmf
+(apply zapsal `series: []`) by v databázi ABS visela navěky, ať pustíš
+kolik chceš rescanů (měřeno na ABS 2.36.0: 46 knih si po per-položkovém
+rescanu, který prokazatelně proběhl, nechalo své chybné série).
+
+`abs-rescan` proto navíc porovná série každé namapované knihy se stavem
+v ABS a přebytky smaže přes aktualizační API metadat
+(`PATCH /api/items/{id}/media` s `metadata.series: []` — jediná cesta,
+která série odstraňuje; ABS sám pak uklidí řádky sérií, které zůstaly bez
+knih). Dry-run vypíše přebytečné série, `--apply` je smaže před rescanem.
+Rozsah:
+
+- Patchuje se *pouze mazání*. Přejmenování nebo změna čísla svazku je
+  práce samotného scanu — hned poté čte `metadata.json` znovu.
+- Index s mezerou (`"John Sinclair #Speciál 07"`) protlačit nejde vůbec:
+  parser ABS drží takový řetězec celý jako NÁZEV série (jeho vzor pro
+  pořadí chce za `#` jediné slovo) a ruční PATCH by ho příští scan zase
+  slepil dohromady. Přejmenuj sérii nebo její index v bmf.
+
 ## `--fix-covers`: oprava rozbitých obálek v databázi ABS
 
 Druhá půlka čištění obálek. Databáze ABS si u každé položky ukládá cestu

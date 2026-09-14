@@ -535,7 +535,7 @@ class TestOnlineFillWantCover:
 				return result
 
 		enr = _Enricher()
-		out = _online_fill(self._identity(), enr, skip_enrich=False, want_cover=True)
+		out, _axis = _online_fill(self._identity(), enr, skip_enrich=False, want_cover=True)
 		assert out.cover_url == "https://x/b.jpg"
 		assert enr.upgraded is True
 
@@ -549,7 +549,7 @@ class TestOnlineFillWantCover:
 			def upgrade_cover(self, result, **kw):
 				raise AssertionError("upgrade_cover called without a cover diagnosis")
 
-		out = _online_fill(self._identity(), _Enricher(), skip_enrich=False, want_cover=False)
+		out, _axis = _online_fill(self._identity(), _Enricher(), skip_enrich=False, want_cover=False)
 		assert out.cover_url == "https://x/a.jpg"
 
 

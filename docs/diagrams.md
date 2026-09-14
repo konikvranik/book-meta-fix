@@ -40,7 +40,8 @@ sequenceDiagram
 		end
 		PB->>VER: safe_extract() — page text, embedded meta, ISBN
 		PB->>VER: _try_deterministic_fix()
-		VER->>ENR: _online_fill() (identity-anchored: ISBN or author-filtered)
+		VER->>ENR: _online_fill() (record key: ISBN / title(+author) / series #vol)
+		VER->>VER: verify the ANSWER: online → local DB → text (confirm_identity)
 		alt C1 and title is a known author
 			PB->>POOL: _try_known_author_swap()
 			PB->>VER: confirm_identity() gates the rebuilt pair
@@ -125,7 +126,7 @@ flowchart TD
 	verify -->|"MISMATCH / strict UNCERTAIN"| extract
 	verify -->|clean| ok
 	detect -->|"NEEDS_REVIEW / AUTO_FIXABLE"| extract["safe_extract()<br/>page text + embedded meta"]
-	extract --> det["_try_deterministic_fix()<br/>text_meta + online (identity-anchored)"]
+	extract --> det["_try_deterministic_fix()<br/>text_meta + online (record-key query,<br/>verified AFTER against content)"]
 	det --> swapq{"C1 and title is<br/>a known author?"}
 	swapq -->|yes| swap["_try_known_author_swap()<br/>gated by confirm_identity()"]
 	swapq -->|no| llmq

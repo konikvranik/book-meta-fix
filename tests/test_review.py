@@ -427,13 +427,37 @@ class TestC1SwapProposal:
 		assert "swap" in proposed["source"]
 
 	def test_better_source_beats_the_swap(self):
-		# A trusted enrichment (databazeknih) wins for the fields it knows;
-		# the swap only fills the gaps.
+		# A trusted enrichment (databazeknih verified against the content)
+		# wins for the fields it knows; the swap only fills the gaps.
 		meta = _meta(1, title="Jan Drda", author="NŘm Barik da")
-		enriched = EnrichedMeta(title="NŘm barikáda", source="databazeknih")
+		enriched = EnrichedMeta(title="NŘm barikáda", source="databazeknih", identity_confirmed=True)
 		proposed = _build_proposed(meta, None, enriched, _diag("C1"))
 		assert proposed["title"] == "NŘm barikáda"  # enrichment, not the swap
 		assert proposed["author"] == "Jan Drda"     # swap filled the gap
+
+	def test_unconfirmed_databazeknih_not_trusted_blindly(self):
+		"""An UNCONFIRMED databazeknih hit (the post-enrichment verify could
+		not bind the answer to the book's content) rides the _looks_better
+		gate: its title is proposed only when the current one looks broken,
+		not merely because the source is authoritative."""
+		from book_meta_fix.pipeline import _looks_broken
+
+		meta = _meta(1, title="Jan Drda", author="NŘm Barik da")
+		enriched = EnrichedMeta(title="NŘm barikáda", source="databazeknih")
+		proposed = _build_proposed(meta, None, enriched, _diag("C1"))
+		# "Jan Drda" is wrong but not BROKEN — no blind title override; the
+		# C1 swap fallback still proposes the mechanical swap.
+		assert proposed["title"] != "NŘm barikáda"
+		# A genuinely broken current title lets the unconfirmed hit through.
+		meta2 = _meta(1, title="NŘm_barik_da", author="Neznamy")
+		assert _looks_broken("NŘm_barik_da")
+		proposed2 = _build_proposed(meta2, None, enriched, _diag("C2"))
+		assert proposed2["title"] == "NŘm barikáda"
+		# An author-less record accepts the recovered author (empty current).
+		meta3 = _meta(1, title="NŘm barikáda", author="")
+		enriched3 = EnrichedMeta(title="NŘm barikáda", authors=["Jan Drda"], source="databazeknih")
+		proposed3 = _build_proposed(meta3, None, enriched3, _diag("C9"))
+		assert proposed3.get("author") == "Jan Drda"
 
 	def test_non_c1_never_proposes_swap(self):
 		meta = _meta(1, title="Jan Drda", author="NŘm Barikáda")
