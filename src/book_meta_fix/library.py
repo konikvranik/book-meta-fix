@@ -230,6 +230,18 @@ class Cache:
 			);
 			"""
 		)
+		# Vendor no-cover placeholder hashes learned at runtime (covers.py
+		# refresh_placeholder_registry — the seed set lives in the code, this
+		# table captures the CURRENT bytes behind the placeholder URL so a
+		# swapped branding image is recognized without a code change).
+		self.conn.executescript(
+			"""
+			CREATE TABLE IF NOT EXISTS placeholder_md5 (
+				md5 TEXT PRIMARY KEY,
+				learned_at REAL NOT NULL
+			);
+			"""
+		)
 		# Migrate on version mismatch (including a fresh db): the cache is
 		# disposable, so we drop+recreate — the next scan rebuilds it and, via
 		# ensure_uuid, backfills the uuid for every book. v3 changed the books
@@ -469,6 +481,21 @@ class Cache:
 			self.conn.execute(
 				"INSERT OR REPLACE INTO covers(path, mtime_ns, size, payload) VALUES (?,?,?,?)",
 				(str(Path(path)), mtime_ns, size, json.dumps(payload, ensure_ascii=False)),
+			)
+			self.conn.commit()
+
+	def get_placeholder_md5s(self) -> set[str]:
+		"""Hashes of vendor no-cover placeholder images learned at runtime."""
+		with self._lock:
+			cur = self.conn.execute("SELECT md5 FROM placeholder_md5")
+			return {row[0] for row in cur.fetchall()}
+
+	def add_placeholder_md5(self, md5: str) -> None:
+		"""Record a learned placeholder hash (idempotent)."""
+		with self._lock:
+			self.conn.execute(
+				"INSERT OR IGNORE INTO placeholder_md5(md5, learned_at) VALUES (?,?)",
+				(md5, time.time()),
 			)
 			self.conn.commit()
 

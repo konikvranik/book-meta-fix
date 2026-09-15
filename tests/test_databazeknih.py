@@ -113,6 +113,52 @@ class TestSearchDatabazeknih:
 		assert path in ("/prehled-knihy/1984-v1-1", "/prehled-knihy/1984-v2-2")
 
 
+class TestPlaceholderCoverFilter:
+	"""databazeknih serves its shared no-cover branding image (light-gray "D"
+	sheet, /img/books/empty_bmid.jpg) as the JSON-LD `image` of coverless
+	books. A cover in URL only — never a proposal, and stale cache payloads
+	lose it on the way out."""
+
+	def test_placeholder_image_url_not_taken_as_cover(self):
+		from book_meta_fix.enrichers import _parse_databazeknih_detail
+
+		html = _load("detail_1984.html").replace(
+			"https://www.databazeknih.cz/img/books/28_/283/bmid_1984.png",
+			"https://www.databazeknih.cz/img/books/empty_bmid.jpg",
+		)
+		em = _parse_databazeknih_detail(html)
+		assert em is not None
+		assert em.cover_url is None
+		# The rest of the detail payload survives untouched.
+		assert em.title == "1984"
+
+	def test_real_cover_url_still_taken(self):
+		from book_meta_fix.enrichers import _parse_databazeknih_detail
+
+		em = _parse_databazeknih_detail(_load("detail_1984.html"))
+		assert em is not None
+		assert em.cover_url == "https://www.databazeknih.cz/img/books/28_/283/bmid_1984.png"
+
+	def test_cached_placeholder_cover_url_healed(self, tmp_path):
+		"""Positive cache entries never expire — payloads written before the
+		filter still carry the branding URL (measured: 22 such rows) and must
+		lose it on reconstitution, without any migration."""
+		cache = tmp_path / "cache.db"
+		e = Enricher(cache_db=cache, databazeknih_enabled=False,
+					 openlibrary_enabled=False, google_books_enabled=False)
+		try:
+			e._cache_put("dbk-title:1984|george-orwell|", EnrichedMeta(
+				source="databazeknih", title="1984",
+				cover_url="https://www.databazeknih.cz/img/books/empty_bmid.jpg",
+			))
+			em = e._cache_get("dbk-title:1984|george-orwell|")
+			assert em is not None
+			assert em.cover_url is None
+			assert em.title == "1984"
+		finally:
+			e.close()
+
+
 class TestLookupDatabazeknih:
 	def test_full_lookup_returns_enriched_meta(self, monkeypatch):
 		"""search returns the path, detail returns metadata + tags."""

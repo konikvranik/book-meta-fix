@@ -1182,6 +1182,181 @@ class TestAnalyzeCoverBytes:
 		assert any(s.startswith("text_page") for s in info.signals)
 
 
+class TestVendorPlaceholder:
+	"""databazeknih's no-cover branding image (light-gray "D" sheet): refused
+	by URL at every entry point, and byte-identified by the hash registry
+	(seeds + hashes learned from the live URL, see TestPlaceholderRegistry-
+	Refresh) so already-downloaded copies flag as generated. The hash tier is
+	load-bearing: the former 38050 B generation is INVISIBLE to the pixel
+	math (JPEG noise spreads it over 6+ quantized buckets)."""
+
+	def setup_method(self) -> None:
+		from book_meta_fix import covers as covers_mod
+
+		covers_mod.clear_cover_cache()
+		covers_mod.set_cover_cache(None)
+
+	def teardown_method(self) -> None:
+		from book_meta_fix import covers as covers_mod
+
+		covers_mod.clear_cover_cache()
+		covers_mod.set_cover_cache(None)
+
+	def test_url_filter(self) -> None:
+		from book_meta_fix.covers import is_placeholder_cover_url
+
+		assert is_placeholder_cover_url("https://www.databazeknih.cz/img/books/empty_bmid.jpg")
+		assert is_placeholder_cover_url("HTTP://WWW.DATABAZEKNIH.CZ/IMG/BOOKS/EMPTY_BMID.JPG")
+		assert not is_placeholder_cover_url("https://www.databazeknih.cz/img/books/28_/283/bmid_1984.png")
+
+	def test_seed_hashes_flag_without_store(self) -> None:
+		"""Both measured generations are known offline — no store attached."""
+		from book_meta_fix import covers as covers_mod
+
+		known = covers_mod._known_placeholder_md5s()
+		assert "bbc424ed9a848cd409f5294c45000d9e" in known  # current, 3625 B
+		assert "a5b62142ebda74fa3f96e9064ff072d5" in known  # former, 38050 B
+
+	def test_learned_hash_flags_bytes_and_file(self, tmp_path: Path) -> None:
+		"""A colour-rich gradient (pixel math says NOT generated) whose md5 was
+		learned into the persistent store flags via the hash alone — both the
+		bytes gate and the path-based analyzer."""
+		import hashlib
+
+		from book_meta_fix import covers as covers_mod
+		from book_meta_fix.covers import analyze_cover, analyze_cover_bytes
+		from book_meta_fix.library import Cache
+
+		data = _gradient_jpeg_bytes(size=(300, 460))
+		md5 = hashlib.md5(data).hexdigest()
+		assert analyze_cover_bytes(data).is_generated is False  # baseline: pixel-clean
+		cache = Cache(tmp_path / "cache.db")
+		try:
+			covers_mod.set_cover_cache(cache)
+			cache.add_placeholder_md5(md5)
+			covers_mod.clear_cover_cache()  # drop the memo, reload from the store
+			info = analyze_cover_bytes(data)
+			assert info.is_generated is True
+			assert info.confidence == 1.0
+			assert any(s.startswith("vendor_placeholder") for s in info.signals)
+			cover = tmp_path / "cover.jpg"
+			cover.write_bytes(data)
+			assert analyze_cover(cover).is_generated is True
+		finally:
+			covers_mod.set_cover_cache(None)
+			cache.close()
+
+	def test_download_refuses_placeholder_url_without_network(self, tmp_path: Path) -> None:
+		dest = tmp_path / "cover.jpg"
+
+		def _must_not_fetch(url, *args, **kwargs):
+			raise AssertionError(f"network must not be touched for a placeholder URL: {url}")
+
+		with patch("requests.get", _must_not_fetch):
+			ok = download_cover("https://www.databazeknih.cz/img/books/empty_bmid.jpg", dest)
+		assert ok is False
+		assert not dest.exists()
+
+	def test_download_refuses_learned_placeholder_bytes(self, tmp_path: Path) -> None:
+		"""Byte-level gate: the placeholder arriving under an UNrecognized URL
+		(a mirror/proxy path) is discarded by its learned hash."""
+		import hashlib
+
+		from book_meta_fix import covers as covers_mod
+		from book_meta_fix.library import Cache
+
+		data = _gradient_jpeg_bytes(size=(300, 460))
+		md5 = hashlib.md5(data).hexdigest()
+		cache = Cache(tmp_path / "cache.db")
+		try:
+			covers_mod.set_cover_cache(cache)
+			cache.add_placeholder_md5(md5)
+			mock_response = type("R", (), {"status_code": 200, "content": data})
+			dest = tmp_path / "cover.jpg"
+			with patch("requests.get", return_value=mock_response):
+				ok = download_cover("https://mirror.example.com/img/empty.jpg", dest)
+			assert ok is False
+			assert not dest.exists()
+		finally:
+			covers_mod.set_cover_cache(None)
+			cache.close()
+
+
+class TestPlaceholderRegistryRefresh:
+	"""refresh_placeholder_registry re-learns the CURRENT bytes behind the
+	known placeholder URLs once per process — databazeknih swaps its branding
+	image from time to time, and a stale hash registry would miss on-disk
+	copies of the new generation."""
+
+	def setup_method(self) -> None:
+		from book_meta_fix import covers as covers_mod
+
+		covers_mod.clear_cover_cache()
+		covers_mod.set_cover_cache(None)
+
+	def teardown_method(self) -> None:
+		from book_meta_fix import covers as covers_mod
+
+		covers_mod.clear_cover_cache()
+		covers_mod.set_cover_cache(None)
+
+	def test_learns_new_generation_once_per_process(self, tmp_path: Path) -> None:
+		import hashlib
+
+		from book_meta_fix import covers as covers_mod
+		from book_meta_fix.covers import analyze_cover_bytes, refresh_placeholder_registry
+		from book_meta_fix.library import Cache
+
+		new_gen = _gradient_jpeg_bytes(size=(250, 360))
+		md5 = hashlib.md5(new_gen).hexdigest()
+		mock_response = type("R", (), {"status_code": 200, "content": new_gen})
+		calls: list[str] = []
+		cache = Cache(tmp_path / "cache.db")
+		try:
+			covers_mod.set_cover_cache(cache)
+			with patch("requests.get", side_effect=lambda url, *a, **k: (calls.append(url), mock_response)[1]):
+				refresh_placeholder_registry()
+				refresh_placeholder_registry()  # second call is a no-op
+			assert len(calls) == len(covers_mod._PLACEHOLDER_COVER_URLS)
+			# Persisted for later runs AND live in this run's registry.
+			assert md5 in cache.get_placeholder_md5s()
+			assert analyze_cover_bytes(new_gen).is_generated is True
+		finally:
+			covers_mod.set_cover_cache(None)
+			cache.close()
+
+	def test_non_image_content_not_learned(self, tmp_path: Path) -> None:
+		"""An error page or redirect body under the placeholder URL must not
+		enter the registry (it would flag whatever book shares its hash)."""
+		from book_meta_fix import covers as covers_mod
+		from book_meta_fix.covers import refresh_placeholder_registry
+		from book_meta_fix.library import Cache
+
+		mock_response = type("R", (), {"status_code": 200, "content": b"<html>error page</html>"})
+		cache = Cache(tmp_path / "cache.db")
+		try:
+			covers_mod.set_cover_cache(cache)
+			with patch("requests.get", return_value=mock_response):
+				refresh_placeholder_registry()
+			assert cache.get_placeholder_md5s() == set()
+		finally:
+			covers_mod.set_cover_cache(None)
+			cache.close()
+
+	def test_offline_refresh_keeps_seeds(self) -> None:
+		import requests as requests_mod
+
+		from book_meta_fix import covers as covers_mod
+		from book_meta_fix.covers import refresh_placeholder_registry
+
+		def _offline(*args, **kwargs):
+			raise requests_mod.RequestException("offline")
+
+		with patch("requests.get", _offline):
+			refresh_placeholder_registry()  # must not raise
+		assert covers_mod._PLACEHOLDER_COVER_MD5 <= covers_mod._known_placeholder_md5s()
+
+
 class TestCoverCacheVersion:
 	"""A stored verdict from an OLDER heuristic version is a cache miss.
 

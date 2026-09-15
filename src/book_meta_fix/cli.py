@@ -498,6 +498,16 @@ def analyze(library: Path | None, no_cache: bool, limit: int | None, skip_enrich
 				google_books_enabled=cfg.google_books_enabled,
 				negative_ttl_sec=cfg.enrich_negative_ttl_sec,
 			)
+			# Once per run: re-learn the CURRENT bytes behind the known
+			# vendor no-cover placeholder URLs (databazeknih swaps its
+			# branding image from time to time; the URL filter is stable but
+			# the hash registry must follow, so on-disk copies of a NEW
+			# generation still flag as C11-generated). Best-effort — offline
+			# keeps the seeds.
+			if cfg.databazeknih_enabled:
+				from .covers import refresh_placeholder_registry
+
+				refresh_placeholder_registry()
 
 		# LLM provider
 		if use_llm:

@@ -14,6 +14,11 @@ Detection signals (any one reaching the 0.5 threshold classifies as generated):
     coverless book — white background + black text lines; the colour
     signals above miss it because antialiased ink spreads over 6+ grey
     buckets)                                                        +0.5
+  - Vendor no-cover placeholder: the bytes are identical to a registry
+    entry (databazeknih serves its light-gray "D"-logo branding image as
+    the JSON-LD ``image`` of coverless books — deterministic hash, not
+    pixel math; the registry self-refreshes from the live URL, see
+    refresh_placeholder_registry)                       generated, conf 1.0
 
 The "few significant colours" signal is the workhorse and is noise-tolerant:
 JPEG artefacts fragment a solid background into many near-identical colours,
@@ -100,6 +105,35 @@ _TEXT_INK_ROW_PIXELS = 3  # an "ink row" carries at least this many dark px
 # lowest observed false positive.
 _TEXT_MIN_INK_BANDS = 11
 
+# Vendor no-cover placeholders: databazeknih serves a shared branding image
+# (a light-gray sheet with its "D" logo) as the JSON-LD `image` of coverless
+# books. The URL name is stable; the BYTES are not — two generations measured
+# in the library (2026-09-15): the current 3625-byte JPEG (3 copies, pixel
+# math catches it anyway) and a former 38050-byte one (7 copies, INVISIBLE to
+# the pixel math — JPEG noise spreads it over 6+ quantized buckets), each
+# byte-identical across books. So the defence is layered:
+#   1. is_placeholder_cover_url() refuses the URL where it enters (detail
+#      parse, stale cache payloads, download_cover) — catches every NEW
+#      download whatever the bytes.
+#   2. The md5 registry flags already-downloaded copies (C11 + clean
+#      --covers). It is NOT just the seeds below: refresh_placeholder_
+#      registry() re-fetches the placeholder URL once per run and learns the
+#      CURRENT bytes into the persistent store, so a future generation is
+#      captured the first run that sees it. The seeds exist for generations
+#      the site no longer serves (unfetchable, but copies sit in the
+#      library) and for an offline first run.
+_PLACEHOLDER_COVER_URLS = (
+	"https://www.databazeknih.cz/img/books/empty_bmid.jpg",
+)
+# Substring form of the URLs above for matching (case-insensitive) — keep in
+# sync with _PLACEHOLDER_COVER_URLS; the scheme is trimmed so http/https
+# mirrors match too.
+_PLACEHOLDER_COVER_URL_PARTS = ("databazeknih.cz/img/books/empty_bmid",)
+_PLACEHOLDER_COVER_MD5 = {
+	"bbc424ed9a848cd409f5294c45000d9e",  # current generation, 3625 B
+	"a5b62142ebda74fa3f96e9064ff072d5",  # former generation, 38050 B
+}
+
 # Version of the cover-analysis heuristics, stored in every persisted verdict.
 # Bumping it invalidates ALL cached verdicts in one step: the persistent
 # `covers` table is keyed (path, mtime_ns, size) with no heuristic identity,
@@ -107,7 +141,7 @@ _TEXT_MIN_INK_BANDS = 11
 # verdict frozen forever (an unchanged file never re-analyzes). A stored
 # payload with a different/missing version is treated as a cache miss and
 # recomputed — old rows self-heal lazily as they are read.
-_COVER_ANALYSIS_VERSION = 2
+_COVER_ANALYSIS_VERSION = 3
 
 
 @dataclass
@@ -159,6 +193,126 @@ def clear_cover_cache() -> None:
 	"""Drop the in-run memo (test isolation)."""
 	with _cover_memo_lock:
 		_cover_memo.clear()
+	global _placeholder_md5s, _placeholder_registry_refreshed
+	_placeholder_md5s = None
+	_placeholder_registry_refreshed = False
+
+
+# ---------------------------------------------------------------------------
+# Vendor no-cover placeholder registry (see _PLACEHOLDER_COVER_URLS above)
+# ---------------------------------------------------------------------------
+
+# Lazily built seeds ∪ learned set; None = not loaded yet this run.
+_placeholder_md5s: set[str] | None = None
+_placeholder_registry_refreshed = False
+
+
+def is_placeholder_cover_url(url: str) -> bool:
+	"""True for known vendor no-cover placeholder URLs.
+
+	Checked where a cover URL enters the system (the databazeknih detail
+	parse, stale enrich-cache payloads) and again in download_cover before
+	any network I/O.
+	"""
+	lowered = url.lower()
+	return any(part in lowered for part in _PLACEHOLDER_COVER_URL_PARTS)
+
+
+def _known_placeholder_md5s() -> set[str]:
+	"""Seed hashes ∪ hashes learned into the persistent cover store."""
+	global _placeholder_md5s
+	if _placeholder_md5s is None:
+		learned: set[str] = set()
+		with _cover_store_lock:
+			store = _cover_store
+		if store is not None and hasattr(store, "get_placeholder_md5s"):
+			try:
+				learned = {str(h) for h in store.get_placeholder_md5s()}
+			except Exception:  # noqa: BLE001 - the registry must never break analysis
+				log.debug("placeholder registry load failed", exc_info=True)
+		_placeholder_md5s = set(_PLACEHOLDER_COVER_MD5) | learned
+	return _placeholder_md5s
+
+
+# Never learn an image larger than this under the placeholder URL — the two
+# real generations are ~4-38 KB; something orders of magnitude bigger is not
+# the branding sheet (guard against a future redirect to a full page).
+_PLACEHOLDER_FETCH_LIMIT = 512 * 1024
+
+
+def refresh_placeholder_registry(*, timeout: float = 6.0) -> None:
+	"""Re-learn the CURRENT bytes behind the known placeholder URLs.
+
+	databazeknih swaps its no-cover branding image from time to time while
+	the URL stays; a stale hash registry would then miss copies of the new
+	generation already sitting in the library. Once per process (before any
+	detection work) fetch each placeholder URL, hash the bytes and persist
+	anything new into the attached cover store. Best-effort by design:
+	offline or HTTP failure keeps the seeds — the URL guard still refuses
+	new downloads either way. Never raises.
+	"""
+	global _placeholder_registry_refreshed
+	if _placeholder_registry_refreshed:
+		return
+	_placeholder_registry_refreshed = True
+	import hashlib
+
+	import requests
+
+	with _cover_store_lock:
+		store = _cover_store
+	known = _known_placeholder_md5s()
+	for url in _PLACEHOLDER_COVER_URLS:
+		try:
+			resp = requests.get(
+				url,
+				timeout=timeout,
+				headers={
+					"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0",
+					"Accept": "image/*,*/*;q=0.8",
+				},
+			)
+			if resp.status_code != 200 or not resp.content:
+				continue
+			if len(resp.content) > _PLACEHOLDER_FETCH_LIMIT:
+				log.debug("placeholder URL %s serves %d bytes; not the branding sheet", url, len(resp.content))
+				continue
+			content = resp.content
+			md5 = hashlib.md5(content).hexdigest()
+		except requests.RequestException as e:
+			log.debug("placeholder registry refresh failed for %s: %s", url, e)
+			continue
+		if md5 in known:
+			continue
+		# Only a decodable image may enter the registry — an error page or a
+		# redirect body under the placeholder URL must not flag real covers.
+		try:
+			from PIL import Image
+
+			import io
+
+			with Image.open(io.BytesIO(content)) as img:
+				img.load()
+		except Exception:  # noqa: BLE001
+			log.debug("placeholder bytes from %s are not an image; not learned", url)
+			continue
+		known.add(md5)
+		if store is not None and hasattr(store, "add_placeholder_md5"):
+			try:
+				store.add_placeholder_md5(md5)
+			except Exception:  # noqa: BLE001
+				log.debug("placeholder registry persist failed", exc_info=True)
+		log.info("learned vendor placeholder hash %s from %s", md5, url)
+
+
+def _vendor_placeholder_signal(data: bytes) -> str | None:
+	"""Signal name when *data* is byte-identical to a known vendor no-cover
+	placeholder, else None."""
+	import hashlib
+
+	if hashlib.md5(data).hexdigest() in _known_placeholder_md5s():
+		return "vendor_placeholder (databazeknih)"
+	return None
 
 
 def _cover_key(path: Path) -> tuple[str, int, int] | None:
@@ -353,8 +507,13 @@ def _analyze_cover_uncached(path: Path) -> CoverInfo:
 		log.debug("Pillow not available; skipping cover analysis")
 		return CoverInfo()
 
+	import io
+
 	try:
-		with Image.open(path) as img:
+		# Read the bytes once: the vendor-placeholder hash check needs them
+		# and Pillow decodes a BytesIO exactly like a path.
+		data = path.read_bytes()
+		with Image.open(io.BytesIO(data)) as img:
 			width, height = img.size
 			# Downscale for colour analysis (the full-res image is overkill
 			# for counting dominant colours and is slow on 1200x1600).
@@ -362,7 +521,13 @@ def _analyze_cover_uncached(path: Path) -> CoverInfo:
 	except Exception as e:  # noqa: BLE001
 		log.debug("cover analysis failed for %s: %s", path, e)
 		return CoverInfo()
-	return _classify_pixels(small, width, height)
+	info = _classify_pixels(small, width, height)
+	sig = _vendor_placeholder_signal(data)
+	if sig:
+		info.signals.append(sig)
+		info.is_generated = True
+		info.confidence = 1.0
+	return info
 
 
 def analyze_cover_bytes(data: bytes) -> CoverInfo:
@@ -387,7 +552,13 @@ def analyze_cover_bytes(data: bytes) -> CoverInfo:
 	except Exception as e:  # noqa: BLE001
 		log.debug("cover byte analysis failed: %s", e)
 		return CoverInfo()
-	return _classify_pixels(small, width, height)
+	info = _classify_pixels(small, width, height)
+	sig = _vendor_placeholder_signal(data)
+	if sig:
+		info.signals.append(sig)
+		info.is_generated = True
+		info.confidence = 1.0
+	return info
 
 
 def sidecar_cover_usable(path: str | Path) -> bool:
@@ -1011,6 +1182,10 @@ def download_cover(url: str, dest_path: str | Path, *, timeout: float = 15.0) ->
 	"""
 	import requests
 
+	if is_placeholder_cover_url(url):
+		log.warning("refusing known vendor placeholder cover: %s", url)
+		return False
+
 	dest_path = Path(dest_path)
 	try:
 		resp = requests.get(
@@ -1051,9 +1226,14 @@ def download_cover(url: str, dest_path: str | Path, *, timeout: float = 15.0) ->
 			return False
 		# Pixel gate: the URL came from a book-matching source, so a minimalist
 		# real cover (few colours) is accepted — the book's own cover beats
-		# none. Refused is only the TEXT-PAGE RENDER junk (screenshot of page
-		# 1): "only real covers". The same math as the C11 detector's signal.
+		# none. Refused is only the junk: the TEXT-PAGE RENDER (screenshot of
+		# page 1) and a KNOWN VENDOR PLACEHOLDER arriving under an URL the
+		# registry did not recognize (a mirror/proxy path). "Only real
+		# covers." The same math as the C11 detector's signals.
 		info = analyze_cover_bytes(content)
+		if info.is_generated and any(s.startswith("vendor_placeholder") for s in info.signals):
+			log.warning("downloaded cover from %s is a known vendor placeholder; discarding", url)
+			return False
 		if info.is_generated and any(s.startswith("text_page") for s in info.signals):
 			log.warning("downloaded cover from %s looks like a text-page render; discarding", url)
 			return False

@@ -34,6 +34,7 @@ from pathlib import Path
 
 import requests
 
+from .covers import is_placeholder_cover_url
 from .isbn import canonicalize
 
 log = logging.getLogger(__name__)
@@ -434,7 +435,11 @@ def _parse_databazeknih_detail(html: str) -> EnrichedMeta | None:
 	if desc:
 		em.description = desc
 	img = ld.get("image")
-	if img:
+	# Coverless books carry the site's shared branding placeholder in the
+	# JSON-LD image slot (databazeknih's light-gray "D" sheet) — a cover in
+	# URL only. Refuse it here (fresh lookups) AND in _cache_get (stale
+	# payloads from before the filter); download_cover guards a third time.
+	if img and not is_placeholder_cover_url(img):
 		em.cover_url = img
 
 	# --- Genres: JSON-LD genre (broad) + user tags (rich) ---
@@ -1356,6 +1361,12 @@ class Enricher:
 			return "__NOT_FOUND__"
 		try:
 			d = json.loads(payload)
+			# Positive entries never expire, so payloads cached before the
+			# vendor-placeholder filter still carry the branding image URL
+			# (measured: 22 such rows). Strip it on the way out — the rest of
+			# the payload stays valid; no migration needed.
+			if d.get("cover_url") and is_placeholder_cover_url(d["cover_url"]):
+				d["cover_url"] = None
 			return EnrichedMeta(**d)
 		except Exception:  # noqa: BLE001
 			return None
