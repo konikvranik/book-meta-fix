@@ -560,14 +560,6 @@ src/book_meta_fix/
                   is built) re-fetches the placeholder URL and learns the
                   CURRENT md5 into Cache.placeholder_md5, so a swapped
                   branding image self-registers without a code change
-                  the OPF-WIRED bytes first (no render fallback at all — an
-                  EPUB without a wired cover has no cover) and the ebook-meta
-                  path rejects empty/undecodable extracts (calibre exits 0
-                  writing NOTHING; mkstemp pre-created the file and 746
-                  zero-byte cover.jpg files landed in the library, masked
-                  forever by rule_missing_cover's bare is_file — the rule and
-                  the apply guards now require a decodable sidecar,
-                  sidecar_cover_usable / width > 0)
   abs_client.py    Audiobookshelf API client + the engine of `bmf abs-rescan`: changed_folders
                   (stat-only walk over iter_book_folders, max file mtime ≥ since), match_items
                   (folder → ABS item: exact path → relPath → unique folder-name match — covers
