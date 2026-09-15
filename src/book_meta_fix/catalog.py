@@ -93,10 +93,13 @@ CATEGORY_HELP: dict[str, tuple[str, str]] = {
 	),
 	"C11": (
 		_("Generated placeholder cover"),
-		_("The cover.jpg is a Calibre-generated placeholder (a flat gradient "
-		  "from title text), detected by pixel analysis. A real cover is "
-		  "proposed from the enrichers when one is available; the GUI can also "
-		  "recover an embedded cover from inside the book file."),
+		_("The cover.jpg is a generated placeholder, detected by pixel "
+		  "analysis: a Calibre template (flat gradient from title text) OR a "
+		  "rendered text page (calibre's ebook-meta draws page 1 as a "
+		  "'default cover' for a coverless book — a white sheet of black "
+		  "text lines). A real cover is proposed from the enrichers when one "
+		  "is available; the GUI can also recover an embedded cover from "
+		  "inside the book file (page renders are rejected)."),
 	),
 	"C12": (
 		_("Author field pollution (slug/artefact)"),
@@ -158,6 +161,21 @@ CATEGORY_HELP: dict[str, tuple[str, str]] = {
 		_("The language field holds a variant spelling of a code the library "
 		  "already canonicalizes ('cs' vs 'cze' vs 'Czech'). Emitted only by "
 		  "'bmf normalize'; the replacement is deterministic and pre-filled."),
+	),
+	"C21": (
+		_("Author name in the series field"),
+		_("The series field holds the book's own AUTHOR — an un-numbered "
+		  "'series' that is not a series at all (LLM/enrichment pollution "
+		  "shape). The proposal clears the series (null). A NUMBERED series "
+		  "matching a person is the pulp protagonist convention and stays; "
+		  "a multi-book author-branded series only reports, pending."),
+	),
+	"C22": (
+		_("Series name among the authors"),
+		_("The series/protagonist name sits in the AUTHORS list ('Jason Dark, "
+		  "John Sinclair' with series 'John Sinclair #111') — the protagonist "
+		  "is not an author. The proposal removes it while a real author "
+		  "remains first; a sole house-name credit stays untouched."),
 	),
 	"EMPTY_BOOK": (
 		_("Dead record (the book file is gone)"),

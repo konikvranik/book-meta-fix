@@ -673,7 +673,9 @@ class TestMergeNormalizations:
 		# EMPTY_BOOK fire and the projection is never clean.
 		book_dir = tmp_path / "A" / "Stin hmly"
 		book_dir.mkdir(parents=True)
-		(book_dir / "cover.jpg").write_bytes(b"x")
+		from test_covers import _real_cover
+
+		_real_cover(book_dir / "cover.jpg")
 		(book_dir / "book.epub").write_bytes(b"x")
 
 		p = self._review_file(tmp_path, "# empty\n")
@@ -696,7 +698,9 @@ class TestMergeNormalizations:
 
 		book_dir = tmp_path / "A" / "Stin hmly"
 		book_dir.mkdir(parents=True)
-		(book_dir / "cover.jpg").write_bytes(b"x")
+		from test_covers import _real_cover
+
+		_real_cover(book_dir / "cover.jpg")
 		(book_dir / "book.epub").write_bytes(b"x")
 
 		p = self._review_file(tmp_path, "# empty\n")

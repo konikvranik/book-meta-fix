@@ -18,7 +18,7 @@ Audiobookshelf and Kavita pick up the fixes on rescan.
 | [docs/diagrams.md](docs/diagrams.md) | UML diagrams — analyze/apply sequence, per-book decision flow, review-entry lifecycle (Mermaid) |
 | [docs/concepts.md](docs/concepts.md) | Verdict buckets, verification philosophy, fix cascade, LLM loop, review.yaml format |
 | [docs/how-to/](docs/how-to/index.md) | Step-by-step recipes (run a batch, tune the rate limit, debug, …) |
-| [docs/corruption-catalog.md](docs/corruption-catalog.md) | The C1–C19 categories with real examples |
+| [docs/corruption-catalog.md](docs/corruption-catalog.md) | The C1–C22 categories with real examples |
 | [AGENTS.md](AGENTS.md) | Guide for AI agents editing this codebase (conventions, layout, gotchas) |
 
 ## Status
@@ -637,7 +637,7 @@ confidence; a cover is classified as generated at confidence ≥ 0.5:
 
 **Categories:**
 - `C11` — generated cover detected (NEEDS_REVIEW). Replacement proposed when a `cover_url` is available.
-- `MISSING_COVER` — no `cover.jpg` sidecar at all (AUTO_FIXABLE).
+- `MISSING_COVER` — no `cover.jpg` sidecar at all, or one no decoder can read (0-byte/corrupt) (AUTO_FIXABLE).
 
 **Flow** (same as metadata proposals — no separate command):
 
@@ -720,7 +720,7 @@ $EDITOR src/book_meta_fix/locales/cs/LC_MESSAGES/bmf.po
 make i18n-compile   # .po -> .mo
 ```
 
-## Corruption categories (C1–C19)
+## Corruption categories (C1–C22)
 
 See [`docs/corruption-catalog.md`](docs/corruption-catalog.md) for the full
 catalog with real examples. Summary:
@@ -746,9 +746,11 @@ catalog with real examples. Summary:
 | C17 | invalid ebook file (content matches no book format) — emitted by `bmf clean --files` only | NEEDS_REVIEW (delete proposal) |
 | C18 | series-name variants (fold, alias table, numbering/online-evidenced suspects) — library-level, emitted by `bmf normalize` only; the volume index is never proposed | AUTO_FIXABLE / NEEDS_REVIEW |
 | C19 | duplicate folders of the same work (folded author+title, or equal valid ISBN; year-differing pairs stay apart unless the ISBNs match) — library-level, emitted by `bmf merge` only; merged by `bmf apply` via `action: merge` | AUTO_FIXABLE (ISBN-confirmed) / NEEDS_REVIEW |
+| C21 | the series field holds the book's own author (an un-numbered "series" that is not a series); numbered protagonist series and multi-book author-branded series stay/report-only | AUTO_FIXABLE (HIGH) / NEEDS_REVIEW |
+| C22 | the series/protagonist name sits among the authors ("Jason Dark, John Sinclair"); removed while a real author remains first — a sole house-name credit stays | AUTO_FIXABLE |
 | — | EMPTY_BOOK (only metadata/backups/cover — the book file is gone) | AUTO_FIXABLE (`needfix/empty/`) |
 | — | MISSING_ISBN / MISSING_YEAR | AUTO_FIXABLE (enrich) |
-| — | MISSING_COVER (no `cover.jpg` sidecar) | AUTO_FIXABLE (download) |
+| — | MISSING_COVER (no `cover.jpg` sidecar, or one no decoder reads — 0-byte/corrupt) | AUTO_FIXABLE (download) |
 
 ## YAML review format
 

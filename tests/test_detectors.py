@@ -784,3 +784,120 @@ class TestC1KnownAuthor:
 		# heuristic reason — the pool refinement must not leak in.
 		assert d.category == "C1"
 		assert "variant pair" not in d.reason
+
+
+class TestC21AuthorAsSeries:
+	"""The author's name sitting in the series field of a non-series book —
+	the LLM-pollution shape measured in the wild (an un-numbered "series"
+	that IS the book's own author)."""
+
+	def test_own_author_series_proposes_clear(self):
+		from book_meta_fix.detectors import rule_c21_author_as_series
+
+		m = _meta(authors=["Jiří Kosek ml."], series=[{"name": "Jiri Kosek", "index": ""}])
+		d = rule_c21_author_as_series(m)
+		assert d is not None and d.category == "C21"
+		assert d.confidence.value == "HIGH"
+		assert d.verdict.value == "AUTO_FIXABLE"
+		assert d.proposed == {"series": None}  # null clears the series at apply
+
+	def test_exact_fold_match_fires(self):
+		from book_meta_fix.detectors import rule_c21_author_as_series
+
+		m = _meta(authors=["Jan Novák"], series=[{"name": "Jan Novák", "index": ""}])
+		d = rule_c21_author_as_series(m)
+		assert d is not None and d.proposed == {"series": None}
+
+	def test_indexed_series_named_like_author_does_not_clear(self):
+		"""A NUMBERED series matching an author is the pulp protagonist
+		convention ("John Sinclair #163") — the series is real; C22 owns the
+		author-entry side."""
+		from book_meta_fix.detectors import rule_c21_author_as_series
+
+		m = _meta(authors=["John Sinclair"], series=["John Sinclair #092"])
+		assert rule_c21_author_as_series(m) is None
+
+	def test_series_equal_title_does_not_fire(self):
+		"""A series named like the TITLE is a legitimate edition convention
+		("Ocelová krysa #5" by Harry Harrison) — only AUTHOR matches count."""
+		from book_meta_fix.detectors import rule_c21_author_as_series
+
+		m = _meta(authors=["Harry Harrison"], title="Ocelová krysa", series=["Ocelová krysa #5"])
+		assert rule_c21_author_as_series(m) is None
+
+	def test_multibook_series_downgrades_to_medium(self):
+		"""With library context, a name carried by >= 2 books may be a real
+		author-branded series ("IBM Redbooks" by IBM Redbooks) — pending."""
+		from collections import Counter
+
+		from book_meta_fix.detectors import rule_c21_author_as_series
+		from book_meta_fix.verifier import _normalize
+
+		m = _meta(authors=["IBM Redbooks"], series=[{"name": "IBM Redbooks", "index": ""}])
+		known = Counter({_normalize("IBM Redbooks"): 6})
+		d = rule_c21_author_as_series(m, known_series=known)
+		assert d is not None and d.category == "C21"
+		assert d.confidence.value == "MEDIUM"
+		assert d.proposed is None  # never auto-cleared
+
+	def test_multi_series_book_reported_not_cleared(self):
+		"""A null proposal would wipe the OTHER series too (C18 policy)."""
+		from book_meta_fix.detectors import rule_c21_author_as_series
+
+		m = _meta(
+			authors=["Jan Novák"],
+			series=[{"name": "Jan Novák", "index": ""}, {"name": "Legit", "index": "2"}],
+		)
+		d = rule_c21_author_as_series(m)
+		assert d is not None and d.confidence.value == "MEDIUM"
+		assert d.proposed is None
+
+	def test_pool_variant_matching(self):
+		"""The KnownAuthorPool's same_person resolves spelling variants the
+		fold compare misses."""
+		from book_meta_fix.detectors import rule_c21_author_as_series
+		from book_meta_fix.normalize import build_known_author_pool
+
+		books = [
+			_meta(authors=["Jiří Kulhánek"], title=f"Kniha {i}", series=[]) for i in range(4)
+		]
+		pool = build_known_author_pool(books)
+		m = _meta(authors=["J. Kulhánek"], series=[{"name": "Jiří Kulhánek", "index": ""}])
+		d = rule_c21_author_as_series(m, known_authors=pool)
+		assert d is not None and d.proposed == {"series": None}
+
+
+class TestC22SeriesNameInAuthors:
+	"""The series/protagonist name among the book's AUTHORS (measured: pulp
+	series leak "John Sinclair" into Jason Dark's author lists)."""
+
+	def test_protagonist_removed_from_authors(self):
+		from book_meta_fix.detectors import rule_c22_series_name_in_authors
+
+		m = _meta(authors=["Jason Dark", "John Sinclair"], series=["John Sinclair #111"])
+		d = rule_c22_series_name_in_authors(m)
+		assert d is not None and d.category == "C22"
+		assert d.confidence.value == "HIGH"
+		assert d.verdict.value == "AUTO_FIXABLE"
+		assert d.proposed == {"authors": ["Jason Dark"]}
+
+	def test_sole_house_name_author_untouched(self):
+		"""authors ["Mark Stone"] + series "Mark Stone #35" is the edition's
+		own credit — removing it would empty the author list."""
+		from book_meta_fix.detectors import rule_c22_series_name_in_authors
+
+		m = _meta(authors=["Mark Stone"], series=["Mark Stone #35"])
+		assert rule_c22_series_name_in_authors(m) is None
+
+	def test_unrelated_author_kept(self):
+		from book_meta_fix.detectors import rule_c22_series_name_in_authors
+
+		m = _meta(authors=["Kurt Brand", "Ren Dhark"], series=["Ren Dhark #40"])
+		d = rule_c22_series_name_in_authors(m)
+		assert d is not None and d.proposed == {"authors": ["Kurt Brand"]}
+
+	def test_detect_integration_primary_c22(self):
+		m = _meta(authors=["Jason Dark", "John Sinclair"], series=["John Sinclair #111"])
+		d = detect(m)
+		assert d.category == "C22"
+		assert "C21" not in [x.category for x in all_diagnoses(d)]

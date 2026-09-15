@@ -497,6 +497,21 @@ _SERIES_PART_RE = _re.compile(
 )
 # First series link on the serie-search results page (/serie/<slug>).
 _SERIE_LINK_RE = _re.compile(r"""href=["'](/serie/[^'"?]+)["']""", _re.IGNORECASE)
+# A serie RESULT ROW on the DBK serie-search page (measured 2026-09-15):
+#   <a class="bigger" href="/serie/heechee-786">Heechee
+# The anchor text is the serie name as DBK knows it — series_exists fuzzy-
+# matches it instead of the old bare "serie/" substring, which any filler
+# link could satisfy.
+_DBK_SERIE_RESULT_RE = _re.compile(
+	r"""<a[^>]*href=["']/serie/[^"']+["'][^>]*>\s*([^<]{1,120})""", _re.IGNORECASE,
+)
+# A serie result row on a legie.info search page (measured 2026-09-15):
+#   <a href="serie/188-heechee"><span class="b">Heechee</span></a>
+# (relative href, no leading slash; the name sits inside a <span>). The same
+# fuzzy-match contract as the DBK branch.
+_LEGIE_SERIE_RESULT_RE = _re.compile(
+	r"""<a[^>]*href=["']serie/[^"']+["'][^>]*>\s*(?:<[^>]+>\s*)*([^<]{1,120})""", _re.IGNORECASE,
+)
 
 
 def lookup_databazeknih_series(*, series: str, index: float | int | str) -> EnrichedMeta | None:
@@ -1080,7 +1095,18 @@ class Enricher:
 		return False
 
 	def series_exists(self, name: str) -> bool:
-		"""Check if the series exists online (databazeknih, legie, abs_czech)."""
+		"""Check if the series exists online (databazeknih, legie, abs_czech).
+
+		Both scrape branches require an actual serie RESULT ROW whose name
+		fuzzy-matches (>= 70) — a bare "serie/" substring anywhere on the page
+		(the old test) was satisfiable by navigation/filler links, and a search
+		for an AUTHOR name routinely returns their works, series-adjacent
+		links included. "Nothing but real series" starts with this gate: the
+		series hygiene in pipeline drops unverified series from LLM answers,
+		so a false True here would re-admit the pollution.
+		"""
+		from rapidfuzz import fuzz
+
 		key = f"series_exists:{name.lower()}"
 		cached = self._cache_get(key)
 		if cached is not None:
@@ -1091,7 +1117,10 @@ class Enricher:
 			from urllib.parse import quote_plus
 			url = f"https://www.databazeknih.cz/vyhledavani/serie?q={quote_plus(name)}"
 			html = _http_get_html(url)
-			if html and "serie/" in html.lower():
+			if html and any(
+				fuzz.token_sort_ratio(name.lower(), _collapse_ws(anchor).lower()) >= 70
+				for anchor in _DBK_SERIE_RESULT_RE.findall(html)
+			):
 				self._cache_put(key, EnrichedMeta(source="series_exists"))
 				return True
 
@@ -1100,7 +1129,10 @@ class Enricher:
 			from urllib.parse import quote_plus
 			url = f"https://www.legie.info/index.php?search_text={quote_plus(name)}"
 			html = _http_get_html(url)
-			if html and "Nevyhledán žádný výsledek" not in html and ("serie/" in html.lower()):
+			if html and "Nevyhledán žádný výsledek" not in html and any(
+				fuzz.token_sort_ratio(name.lower(), _collapse_ws(anchor).lower()) >= 70
+				for anchor in _LEGIE_SERIE_RESULT_RE.findall(html)
+			):
 				self._cache_put(key, EnrichedMeta(source="series_exists"))
 				return True
 

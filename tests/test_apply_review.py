@@ -161,10 +161,12 @@ class TestCoverDownloadGate:
 		replaced, skip the download (idempotent re-run)."""
 		library = tmp_path / "lib"
 		book = self._seed_book(library)
-		(book / "cover.jpg").write_bytes(b"real-cover-bytes")
+		from test_covers import _real_cover
+
+		_real_cover(book / "cover.jpg")
 		review = tmp_path / "review.yaml"
 		_write_review(review, [self._entry(1, "C11")])
-		with patch("book_meta_fix.covers.analyze_cover", return_value=CoverInfo(is_generated=False)) as ac, \
+		with patch("book_meta_fix.covers.analyze_cover", return_value=CoverInfo(width=458, height=500, is_generated=False)) as ac, \
 			patch("book_meta_fix.covers.download_cover") as dl:
 			apply_review(review, library, dry_run=False, place=False)
 		ac.assert_called_once()
@@ -186,7 +188,9 @@ class TestCoverDownloadGate:
 		"""MISSING_COVER + cover.jpg now exists → already filled, skip."""
 		library = tmp_path / "lib"
 		book = self._seed_book(library)
-		(book / "cover.jpg").write_bytes(b"filled")
+		from test_covers import _real_cover
+
+		_real_cover(book / "cover.jpg")
 		review = tmp_path / "review.yaml"
 		_write_review(review, [self._entry(1, "MISSING_COVER")])
 		with patch("book_meta_fix.covers.download_cover") as dl:
@@ -290,7 +294,9 @@ class TestCoverDownloadGate:
 		(already fixed on a previous run)."""
 		library = tmp_path / "lib"
 		book = self._seed_book(library)
-		(book / "cover.jpg").write_bytes(b"filled")
+		from test_covers import _real_cover
+
+		_real_cover(book / "cover.jpg")
 		review = tmp_path / "review.yaml"
 		_write_review(review, [self._entry(1, "MISSING_COVER")])
 		with patch("book_meta_fix.covers.recover_cover_from_book") as rec, \
@@ -978,7 +984,9 @@ class TestEmptyBookPlacement:
 		(folder / "metadata.json").write_text(_json.dumps(
 			{"title": "Kniha", "authors": ["Jan Novak"], "isbn": "9788020403117", "publishedYear": "2001"}), encoding="utf-8")
 		(folder / "metadata.opf").write_text("<package/>", encoding="utf-8")
-		(folder / "cover.jpg").write_bytes(b"cover")
+		from test_covers import _real_cover
+
+		_real_cover(folder / "cover.jpg")
 		return folder
 
 	def _entry(self, rel, **kw):

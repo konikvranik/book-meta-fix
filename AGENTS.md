@@ -119,7 +119,17 @@ src/book_meta_fix/
                    territory). Pattern 2 skips author folders carrying
                    nobility/origin particles (_NAME_PARTICLES — "de
                    Saint-Exupéry" is a 4-token NAME, not a title). Other
-                   callers stay library-blind, same as C13)
+                   callers stay library-blind, same as C13). C21 (author
+                   name IN the series field — un-numbered "series" == own
+                   author via fold/pool/fuzzy-85, proposed series:null; a
+                   NUMBERED series matching a person is the pulp protagonist
+                   convention and stays, multi-book author-branded series and
+                   multi-series books report MEDIUM) and C22 (series/
+                   protagonist name among the AUTHORS — removed while a real
+                   author stays first; sole house-name credits untouched) run
+                   after C3, threaded known_authors=/known_series= like C1 —
+                   known_series is a Counter now so C21 can tell a single-book
+                   author "series" from a real multi-book one
   normalize.py     LIBRARY-WIDE pass (`bmf normalize`, the only emitter of C15
                    author-name variants — initials vs full names, diakritika,
                    titles, anonym family, swapped/comma order — and C16 genre/
@@ -155,7 +165,11 @@ src/book_meta_fix/
                    NUMBERING (sets interleaving into one contiguous row ⇒
                    merge; both claiming volume 1 ⇒ distinct, never merged)
                    and optionally by an injected online_check callable
-                   (Enricher.series_exists, persistent cache) — the engine
+                   (Enricher.series_exists,
+                   persistent cache — now requiring an actual serie RESULT ROW
+                   whose name fuzzy-matches >= 70 on both DBK and legie,
+                   not a bare "serie/" substring an author's result page can
+                   satisfy; the engine
                    stays I/O-free. A prefix pair whose extension carries
                    CONTENT tokens ("Star Wars" → "Star Wars - Akademie
                    Jedi") is a named SUB-SERIES: verdict distinct up front,
@@ -281,7 +295,21 @@ src/book_meta_fix/
                    (filecheck.file_is_invalid; a file that became valid or vanished
                    since the proposal is skipped and recorded in
                    summary[skipped_files]), everything lands in the same
-                   deletion_snapshot tar.gz). Progress contract: progress_callback fires (0, total) once the
+                   deletion_snapshot tar.gz). Series
+                   hygiene — "nothing but real series in the series field":
+                   the LLM ladder drops an answer's series/series_index when
+                   the series does not independently exist OR
+                   _series_is_author matches it (own authors via the SHARED
+                   detectors._series_matches_author ladder, else the
+                   verified-author cache; online author_exists deliberately
+                   NOT consulted — too loose for a name that is a real
+                   series); the series-axis verification rejects author-named
+                   series and the local-DB tier refuses a name that is BOTH a
+                   verified series and a verified author (the pollution echo);
+                   the LLM coaching list filters series names that are
+                   verified authors; decided review entries get fresh C21/C22
+                   proposals OVERLAID onto their carried proposed (decision
+                   untouched). Progress contract: progress_callback fires (0, total) once the
                    processing set is known — BEFORE the first book, so a bar shows
                    its total/ETA immediately instead of pulsing at 0/None until
                    the first LLM-bound completion — then (done, total) per book;
@@ -498,7 +526,25 @@ src/book_meta_fix/
                   the item cover and ffmpeg fails "Invalid data found"); checked by image_is_readable
                   (Pillow full decode, no Pillow = delete nothing) → <name>.bak like the generated path;
                   ABS_IMAGE_EXTS (the png/jpg/jpeg/webp whitelist) is the single definition shared
-                  with abs_client's stored-cover audit)
+                  with abs_client's stored-cover audit). C11's math
+                  has a fourth signal, text_page (near-white + colourless +
+                  >= 11 separated ink BANDS — calibre's ebook-meta renders
+                  page 1 as a "default cover" for a coverless book; BANDS not
+                  rows: a minimalist title block is 1-3 bands; calibrated on
+                  the real library — the Susanna Clarke cream cover = 9 bands,
+                  text scans start at 11), persisted verdicts carry
+                  _COVER_ANALYSIS_VERSION (mismatch = cache miss, so a
+                  heuristic change self-heals old rows), analyze_cover_bytes
+                  is the cache-less gate behind download_cover (text-page
+                  downloads refused) and recover_cover_from_book: EPUBs read
+                  the OPF-WIRED bytes first (no render fallback at all — an
+                  EPUB without a wired cover has no cover) and the ebook-meta
+                  path rejects empty/undecodable extracts (calibre exits 0
+                  writing NOTHING; mkstemp pre-created the file and 746
+                  zero-byte cover.jpg files landed in the library, masked
+                  forever by rule_missing_cover's bare is_file — the rule and
+                  the apply guards now require a decodable sidecar,
+                  sidecar_cover_usable / width > 0)
   abs_client.py    Audiobookshelf API client + the engine of `bmf abs-rescan`: changed_folders
                   (stat-only walk over iter_book_folders, max file mtime ≥ since), match_items
                   (folder → ABS item: exact path → relPath → unique folder-name match — covers
@@ -535,7 +581,9 @@ src/book_meta_fix/
                   "Invalid data found" rows no current ABS build writes or heals) or when it
                   maps under an ABS library folder onto library_root and the file is gone
                   (paths outside the folders, e.g. ABS's uploaded /metadata/items covers,
-                  get the ext check only); clear_item_cover nulls the row via
+                  get the ext check only); an existing mapped file no decoder
+                  reads (0-byte leftover) is also broken — reason "unreadable"
+                  (746 such rows passed the old exists()-only audit); clear_item_cover nulls the row via
                   DELETE /api/items/{id}/cover and the cleared ids join the rescan set
                   (--since must NOT filter them). Run strip-covers --invalid FIRST — a folder
                   still holding an unreadable cover.jpg would get it re-picked). Also the
@@ -743,7 +791,18 @@ src/book_meta_fix/
                   engine's min_size selector, and the touched books ALSO get their
                   `verified` flag cleared (else analyze's skip-verified default would
                   never re-fire MISSING_COVER, so the bigger cover would never be
-                  fetched), and a FIFTH --empty (default OFF, plain boolean): dead
+                  fetched), a
+                  library-wide invalid-cover WALK (one os.walk over the whole
+                  root — the per-book pass sees only top-level files of
+                  sidecar-carrying folders, so covers in subdirectories and
+                  sidecar-less leftover folders survived every cleanup), the
+                  --unverified audit's deterministic tier (a series entry
+                  naming an author — own or verified — re-opens the book even
+                  with an ISBN, so C21/C22 reach already-closed pollution),
+                  verified clearing for books whose covers were bakked
+                  (generated/invalid, not only small), and the deprecated
+                  strip-covers alias now defaulting invalid="both" on a bare
+                  call; and a FIFTH --empty (default OFF, plain boolean): dead
                   records (EMPTY_BOOK folders — no ebook file, only metadata
                   sidecars) get `action: delete` proposals written into review_file
                   via review.merge_empty_deletions (same three-way contract as

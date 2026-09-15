@@ -18,6 +18,7 @@ Subcommands:
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from collections import Counter
 from pathlib import Path
@@ -1246,9 +1247,13 @@ def strip_covers(ctx: click.Context, library: Path | None, no_cache: bool, limit
 		do_apply: bool, generated: str | None, invalid: str | None) -> None:
 	"""Deprecated alias for `bmf clean --covers`. Use `bmf clean` instead."""
 	console.print("[yellow]" + _("strip-covers is deprecated — use `bmf clean --covers` (with optional --generated/--invalid) instead.") + "[/yellow]")
-	# Bare call keeps the old default: generated=both, no invalid stripping.
+	# Bare call keeps the old "clean everything" default — including the
+	# invalid selector, which this alias historically left OFF (measured
+	# fallout: undecodable cover.jpg files survived "the cleanup" because the
+	# bare alias never touched them).
 	if generated is None and invalid is None:
 		generated = "both"
+		invalid = "both"
 	ctx.invoke(
 		clean,
 		library=library,
@@ -1417,7 +1422,7 @@ def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: boo
 
 		cover_results: list = []
 		unverified_cleared: list[str] = []
-		small_refetch_reopened: list[str] = []
+		covers_reopened: list[str] = []
 		file_findings: list = []
 		file_notes: list[str] = []
 		empty_books: list = []
@@ -1437,12 +1442,14 @@ def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: boo
 							min_size=min_size,
 						)
 						cover_results.append(res)
-						# A book whose SMALL cover was removed must re-enter review,
-						# else analyze (skip-verified default) would never re-fire
-						# MISSING_COVER and the bigger cover would never be fetched.
-						if do_apply and res.small_baks and meta.verified:
+						# A book whose cover was removed (SMALL as before, but also
+						# generated/invalid — the .bak left the folder without a
+						# usable cover) must re-enter review, else analyze
+						# (skip-verified default) would never re-fire
+						# MISSING_COVER and a real cover would never be fetched.
+						if do_apply and res.touched and meta.verified:
 							clear_verified(Path(meta.path))
-							small_refetch_reopened.append(meta.path)
+							covers_reopened.append(meta.path)
 					except Exception as e:  # noqa: BLE001
 						log.warning("cover strip failed for %s: %s", meta.path, e)
 
@@ -1462,7 +1469,34 @@ def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: boo
 
 				# 4. Audit unverified books
 				if need_audit and meta.verified:
+					# Deterministic series hygiene FIRST: a series entry whose
+					# name IS an author (the book's own, or a verified library
+					# author) is the C21/C22 corruption shape — the book must
+					# re-enter review so the new rules can propose the fix, and
+					# an ISBN must NOT preempt that (the series field is wrong
+					# even on an otherwise identified book). Measured shapes:
+					# un-numbered "series" == own author (LLM pollution), pulp
+					# protagonist sitting among the authors.
+					series_author_hit = False
+					if meta.series:
+						from .detectors import _series_matches_author
+						from .models import series_entry_pair
+
+						for ent in meta.series:
+							try:
+								name, _idx = series_entry_pair(ent) if isinstance(ent, (str, dict)) else ("", "")
+							except (TypeError, ValueError):
+								continue
+							if name and (
+								_series_matches_author(name, meta.authors, None) is not None
+								or (cache is not None and cache.is_verified_author(name))
+							):
+								series_author_hit = True
+								break
+
 					if clear_all_verified:
+						is_safe = False
+					elif series_author_hit:
 						is_safe = False
 					else:
 						# First, if it has an ISBN, it's generally safe
@@ -1491,6 +1525,45 @@ def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: boo
 
 				progress.update(task_id, advance=1)
 
+		# Library-wide invalid-cover sweep: the per-book pass only sees
+		# TOP-LEVEL files of BOOK folders (a metadata sidecar present);
+		# undecodable covers hiding in subdirectories or in sidecar-less
+		# folders (measured: leftover calibre temp trees) survived every
+		# cleanup. One plain walk over the whole library catches them — the
+		# .bak rename is reversible and the candidate set is the same
+		# scanner-visible one (image extension or cover.* name).
+		orphan_invalid: list[str] = []
+		if clean_covers and eff_invalid in ("external", "both"):
+			from .covers import _invalid_cover_candidate, image_is_readable
+
+			book_roots = {Path(b.path).resolve() for b in books}
+			walked = 0
+			for root, _dirs, files in os.walk(cfg.library):
+				rp = Path(root)
+				walked += 1
+				try:
+					if rp.resolve() in book_roots:
+						continue  # the per-book pass owns book folders
+				except OSError:
+					continue
+				for fn in sorted(files):
+					p = rp / fn
+					try:
+						if not _invalid_cover_candidate(p) or image_is_readable(p):
+							continue
+					except OSError:
+						continue
+					if do_apply:
+						try:
+							os.replace(p, p.with_suffix(p.suffix + ".bak"))
+							orphan_invalid.append(str(p))
+						except OSError as e:
+							log.warning("invalid cover sweep failed for %s: %s", p, e)
+					else:
+						orphan_invalid.append(str(p))
+			if orphan_invalid:
+				log.info("invalid-cover sweep: %d file(s) across %d folders", len(orphan_invalid), walked)
+
 		if do_apply:
 			touched = [r.path for r in cover_results if getattr(r, "touched", False)] + unverified_cleared
 			if touched and cache is not None:
@@ -1502,7 +1575,18 @@ def clean(library: Path | None, no_cache: bool, limit: int | None, do_apply: boo
 			cache.close()
 
 	if clean_covers:
-		_print_strip_covers_summary(cover_results, do_apply, reopened=len(small_refetch_reopened))
+		_print_strip_covers_summary(cover_results, do_apply, reopened=len(covers_reopened))
+		if orphan_invalid:
+			console.print()
+			t = Table(title=_("Invalid covers outside book folders"), show_header=True, header_style="bold cyan")
+			t.add_column(_("File"))
+			for p in orphan_invalid[:25]:
+				t.add_row(str(Path(p).relative_to(cfg.library))[:100])
+			if len(orphan_invalid) > 25:
+				t.add_row("…", f"({len(orphan_invalid) - 25} more)")
+			console.print(t)
+			if not do_apply:
+				console.print("[dim]" + _("Dry-run for these too — re-run with --apply to rename them to .bak.") + "[/dim]")
 
 	if clean_files:
 		files_merge = None
@@ -2104,9 +2188,10 @@ def abs_rescan(library: Path | None, since: str, url: str | None, abs_library: s
 
 	--fix-covers adds a pass over ALL items: a stored coverPath row that
 	points at a non-image file (metadata.json — a leftover no current ABS
-	build writes or heals) or at a missing file is nulled via
+	build writes or heals), at a missing file, or at a file no image decoder
+	reads (a 0-byte leftover) is nulled via
 	DELETE /api/items/{id}/cover and the item joins the rescan, so ABS
-	picks a real cover again. Run `bmf strip-covers --invalid --apply`
+	picks a real cover again. Run `bmf clean --covers --apply`
 	FIRST — a folder still holding an unreadable cover.jpg would just get
 	it re-picked.
 
@@ -2472,7 +2557,11 @@ def _print_broken_covers(broken, do_apply: bool) -> None:  # noqa: ANN001
 	t.add_column(_("Stored cover path"), style="dim")
 	t.add_column(_("Reason"))
 	for b in broken[:25]:
-		reason = _("not an image file") if b.reason == "ext" else _("file missing")
+		reason = {
+			"ext": _("not an image file"),
+			"missing": _("file missing"),
+			"unreadable": _("file not decodable"),
+		}.get(b.reason, b.reason)
 		t.add_row((b.item.title or b.item.id)[:50], b.cover_path[-64:], reason)
 	if len(broken) > 25:
 		t.add_row("…", f"({len(broken) - 25} more)")

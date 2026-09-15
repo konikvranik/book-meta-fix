@@ -54,6 +54,54 @@ def _gradient_cover(path: Path, size: tuple[int, int] = (458, 500)) -> None:
 	img.save(path)
 
 
+def _text_page_cover(path: Path, size: tuple[int, int] = (1240, 1752)) -> None:
+	"""A rendered text page — white sheet with many black text lines.
+
+	Mimics calibre's page-1 "default cover" (ebook-meta --get-cover on a
+	coverless book): white background, rows of dark text with white gaps,
+	no colour anywhere.
+	"""
+	img = Image.new("RGB", size, color=(250, 250, 250))
+	px = img.load()
+	import random
+
+	random.seed(7)
+	margin_x, line_h, gap = 90, 10, 18
+	y = 120
+	while y + line_h < size[1] - 100:
+		for dy in range(line_h):
+			for x in range(margin_x, size[0] - margin_x):
+				# ragged ink: ~60% coverage with grey-level jitter
+				if random.random() < 0.6:
+					v = random.randint(0, 90)
+					px[x, y + dy] = (v, v, v)
+		y += line_h + gap
+	img.save(path)
+
+
+def _minimalist_white_cover(path: Path, size: tuple[int, int] = (600, 900)) -> None:
+	"""A white cover with a short title block — a REAL minimalist cover that
+	must NOT be classified as a text-page render (few ink rows)."""
+	img = Image.new("RGB", size, color=(255, 255, 255))
+	px = img.load()
+	for y in range(400, 460):
+		for x in range(200, 400):
+			px[x, y] = (20, 20, 20)
+	img.save(path)
+
+
+def _real_cover(path: Path) -> None:
+	"""A small decodable, NON-generated image — the fixture stand-in for
+	"a cover exists" shared across test modules.
+
+	Synthetic bytes (b"cover", fake JPEG magic) stopped counting as a cover
+	once rule_missing_cover began requiring a decodable file; a SOLID colour
+	would trip C11's few-colours signal and make the cover look generated.
+	The gradient is colour-rich on purpose: no C11 signal, decodes fine.
+	"""
+	_gradient_cover(path, size=(60, 90))
+
+
 def _extractor_writing(image_fn):
 	"""A fake extract_cover_from_book that writes image_fn(dest) and returns dest.
 
@@ -275,7 +323,7 @@ class TestRecoverCoverFromBook:
 	def test_valid_extract_is_written(self, tmp_path: Path) -> None:
 		dest = tmp_path / "cover.jpg"
 		with patch("book_meta_fix.covers.extract_cover_from_book", side_effect=_extractor_writing(_gradient_cover)):
-			ok = recover_cover_from_book(tmp_path / "book.epub", dest)
+			ok = recover_cover_from_book(tmp_path / "book.mobi", dest)
 		assert ok is True
 		assert dest.is_file()
 
@@ -283,7 +331,7 @@ class TestRecoverCoverFromBook:
 		"""A solid-color (generated) extract never becomes cover.jpg."""
 		dest = tmp_path / "cover.jpg"
 		with patch("book_meta_fix.covers.extract_cover_from_book", side_effect=_extractor_writing(_solid_cover)):
-			ok = recover_cover_from_book(tmp_path / "book.epub", dest)
+			ok = recover_cover_from_book(tmp_path / "book.mobi", dest)
 		assert ok is False
 		assert not dest.exists()
 
@@ -294,7 +342,7 @@ class TestRecoverCoverFromBook:
 		_gradient_cover(dest)
 		original = dest.read_bytes()
 		with patch("book_meta_fix.covers.extract_cover_from_book", side_effect=_extractor_writing(_solid_cover)):
-			ok = recover_cover_from_book(tmp_path / "book.epub", dest)
+			ok = recover_cover_from_book(tmp_path / "book.mobi", dest)
 		assert ok is False
 		assert dest.read_bytes() == original  # untouched
 
@@ -302,7 +350,7 @@ class TestRecoverCoverFromBook:
 		"""calibre absent / no embedded cover (extract returns None) -> False."""
 		dest = tmp_path / "cover.jpg"
 		with patch("book_meta_fix.covers.extract_cover_from_book", return_value=None):
-			ok = recover_cover_from_book(tmp_path / "book.epub", dest)
+			ok = recover_cover_from_book(tmp_path / "book.mobi", dest)
 		assert ok is False
 		assert not dest.exists()
 
@@ -312,7 +360,7 @@ class TestRecoverCoverFromBook:
 		_solid_cover(dest)  # existing cover (will be replaced by the gradient)
 		old = dest.read_bytes()
 		with patch("book_meta_fix.covers.extract_cover_from_book", side_effect=_extractor_writing(_gradient_cover)):
-			ok = recover_cover_from_book(tmp_path / "book.epub", dest)
+			ok = recover_cover_from_book(tmp_path / "book.mobi", dest)
 		assert ok is True
 		bak = dest.with_suffix(".jpg.bak")
 		assert bak.is_file()
@@ -336,7 +384,7 @@ class TestRecoverCoverFromBook:
 
 		with patch("book_meta_fix.covers.extract_cover_from_book", side_effect=_extractor_writing(_gradient_cover)), \
 				patch("os.rename", side_effect=_cross_device):
-			ok = recover_cover_from_book(tmp_path / "book.epub", dest)
+			ok = recover_cover_from_book(tmp_path / "book.mobi", dest)
 		assert ok is True
 		assert dest.is_file()
 
@@ -1067,3 +1115,264 @@ class TestCoverAnalysisCache:
 		assert analyze_cover(cover).width == 0
 		assert analyze_cover(cover).width == 0
 		assert calls["n"] == 2
+
+
+class TestTextPageSignal:
+	"""Signal 4: calibre's page-1 render (white sheet of text lines).
+
+	The colour signals are blind to it — antialiased ink smears over 6+ grey
+	buckets — so the page SHAPE is measured: near-white, colourless, many
+	separated ink BANDS. Calibrated against the real library: minimalist real
+	covers sit at 1-9 bands (Susanna Clarke's cream cover = 9), text scans
+	start at 11.
+	"""
+
+	def test_text_page_render_is_generated(self, tmp_path: Path) -> None:
+		cover = tmp_path / "cover.jpg"
+		_text_page_cover(cover)
+		info = analyze_cover(cover)
+		assert info.is_generated is True
+		assert any(s.startswith("text_page") for s in info.signals)
+
+	def test_minimalist_white_cover_gets_no_text_page_signal(self, tmp_path: Path) -> None:
+		cover = tmp_path / "cover.jpg"
+		_minimalist_white_cover(cover)
+		info = analyze_cover(cover)
+		assert not any(s.startswith("text_page") for s in info.signals)
+
+	def test_real_artwork_untouched(self, tmp_path: Path) -> None:
+		cover = tmp_path / "cover.jpg"
+		_gradient_cover(cover)
+		info = analyze_cover(cover)
+		assert info.is_generated is False
+		assert info.signals == []
+
+
+class TestAnalyzeCoverBytes:
+	def test_gradient_bytes_classified_not_generated(self) -> None:
+		from book_meta_fix.covers import analyze_cover_bytes
+
+		info = analyze_cover_bytes(_gradient_jpeg_bytes(size=(300, 400)))
+		assert info.width == 300 and info.height == 400
+		assert info.is_generated is False
+
+	def test_garbage_bytes_yield_empty_info(self) -> None:
+		from book_meta_fix.covers import analyze_cover_bytes
+
+		info = analyze_cover_bytes(b"not an image at all")
+		assert info.width == 0
+		assert info.is_generated is False
+
+	def test_text_page_bytes_rejected(self) -> None:
+		"""The bytes gate used by download_cover and the EPUB recovery path."""
+		from book_meta_fix.covers import analyze_cover_bytes
+
+		buf = io.BytesIO()
+		img = Image.new("RGB", (600, 900), color=(250, 250, 250))
+		px = img.load()
+		y = 60
+		while y + 8 < 860:
+			for dy in range(8):
+				for x in range(60, 540):
+					px[x, y + dy] = (40, 40, 40)
+			y += 26
+		img.save(buf, format="JPEG")
+		info = analyze_cover_bytes(buf.getvalue())
+		assert info.is_generated is True
+		assert any(s.startswith("text_page") for s in info.signals)
+
+
+class TestCoverCacheVersion:
+	"""A stored verdict from an OLDER heuristic version is a cache miss.
+
+	Without the version stamp, a detector change would leave every pre-change
+	"not generated" verdict frozen forever — unchanged files never re-analyze.
+	"""
+
+	def test_old_version_payload_recomputed(self, tmp_path: Path, monkeypatch) -> None:
+		from book_meta_fix import covers as covers_mod
+		from book_meta_fix.library import Cache
+
+		cover = tmp_path / "cover.jpg"
+		_text_page_cover(cover)
+		calls = self._counting_decode(monkeypatch)
+		cache = Cache(tmp_path / "cache.db")
+		try:
+			covers_mod.set_cover_cache(cache)
+			assert analyze_cover(cover).is_generated is True
+			assert calls["n"] == 1
+			# Forge a stale row WITHOUT the heuristic version key, as every
+			# pre-change row in the wild looks, then force a fresh-process read.
+			st = cover.stat()
+			cache.put_cover(str(cover), st.st_mtime_ns, st.st_size, {
+				"width": 600, "height": 900, "is_generated": False,
+				"confidence": 0.0, "signals": [],
+			})
+			covers_mod.clear_cover_cache()
+			second = analyze_cover(cover)
+			assert calls["n"] == 2  # the stale row did NOT serve
+			assert second.is_generated is True
+		finally:
+			covers_mod.set_cover_cache(None)
+			cache.close()
+
+	def _counting_decode(self, monkeypatch) -> dict:  # noqa: ANN001
+		from book_meta_fix import covers as covers_mod
+
+		calls = {"n": 0}
+		orig = covers_mod._analyze_cover_uncached
+
+		def counted(path):
+			calls["n"] += 1
+			return orig(path)
+
+		monkeypatch.setattr(covers_mod, "_analyze_cover_uncached", counted)
+		return calls
+
+
+class TestRecoverEpubFirst:
+	"""The EPUB recovery path reads OPF-wired bytes and never renders page 1.
+
+	ebook-meta --get-cover fabricates a "default cover" (a 1240x1752 page
+	render) for a coverless EPUB — the measured producer of the library's
+	screenshot covers. A wired cover is the truth; an EPUB without one has
+	nothing to extract.
+	"""
+
+	def test_epub_with_real_wired_cover_written(self, tmp_path: Path) -> None:
+		epub = _make_epub(tmp_path / "b.epub", cover_bytes=_gradient_jpeg_bytes())
+		dest = tmp_path / "cover.jpg"
+		with patch("book_meta_fix.covers.extract_cover_from_book") as ex:
+			assert recover_cover_from_book(epub, dest) is True
+		ex.assert_not_called()  # wired bytes, no calibre subprocess
+		assert dest.is_file()
+		assert analyze_cover(dest).is_generated is False
+
+	def test_epub_without_wired_cover_returns_false(self, tmp_path: Path) -> None:
+		"""No wired cover → nothing to extract — ebook-meta's page render must
+		NOT be produced as a 'cover'."""
+		epub = _make_epub(tmp_path / "b.epub", opf_tmpl=_OPF_NO_COVER)
+		dest = tmp_path / "cover.jpg"
+		with patch("book_meta_fix.covers.extract_cover_from_book") as ex:
+			assert recover_cover_from_book(epub, dest) is False
+		ex.assert_not_called()
+		assert not dest.exists()
+
+	def test_non_epub_still_uses_calibre_gate(self, tmp_path: Path) -> None:
+		"""Non-EPUB formats keep the ebook-meta path, gated by the pixel math."""
+		dest = tmp_path / "cover.jpg"
+		with patch("book_meta_fix.covers.extract_cover_from_book", side_effect=_extractor_writing(_gradient_cover)):
+			assert recover_cover_from_book(tmp_path / "book.mobi", dest) is True
+		assert dest.is_file()
+
+
+class TestZeroByteExtractRejected:
+	"""calibre may exit 0 writing NOTHING; mkstemp pre-created the empty file,
+	so the old is_file() check passed it and 746 zero-byte cover.jpg files
+	landed in the library (masking MISSING_COVER forever)."""
+
+	def test_empty_extract_is_rejected(self, tmp_path: Path) -> None:
+		dest = tmp_path / "cover.jpg"
+
+		def _empty_extractor(book_path, dest=None):  # noqa: ANN001
+			Path(dest).write_bytes(b"")
+			return Path(dest)
+
+		with patch("book_meta_fix.covers.extract_cover_from_book", side_effect=_empty_extractor):
+			assert recover_cover_from_book(tmp_path / "book.mobi", dest) is False
+		assert not dest.exists()
+
+	def test_extract_cover_from_book_rejects_empty_output(self, tmp_path: Path) -> None:
+		"""The primitive itself: exit 0 + empty pre-created dest → None."""
+		from book_meta_fix.covers import extract_cover_from_book
+
+		out = tmp_path / "out.jpg"
+		out.write_bytes(b"")  # pre-created by the caller's mkstemp
+
+		class _Proc:
+			returncode = 0
+
+		with patch("book_meta_fix.covers.subprocess.run", return_value=_Proc()), \
+				patch("book_meta_fix.covers.shutil.which", return_value="/usr/bin/ebook-meta"):
+			assert extract_cover_from_book(tmp_path / "b.mobi", dest=out) is None
+
+
+class TestDownloadCoverTextPageGate:
+	def test_text_page_download_rejected(self, tmp_path: Path) -> None:
+		"""Only real covers: a downloaded page-1 render is refused."""
+		buf = io.BytesIO()
+		img = Image.new("RGB", (600, 900), color=(250, 250, 250))
+		px = img.load()
+		y = 60
+		while y + 8 < 860:
+			for dy in range(8):
+				for x in range(60, 540):
+					px[x, y + dy] = (40, 40, 40)
+			y += 26
+		img.save(buf, format="JPEG")
+
+		mock_response = type("R", (), {"status_code": 200, "content": buf.getvalue()})
+		dest = tmp_path / "cover.jpg"
+		with patch("requests.get", return_value=mock_response):
+			assert download_cover("https://example.com/cover.jpg", dest) is False
+		assert not dest.exists()
+
+	def test_minimalist_solid_download_accepted(self, tmp_path: Path) -> None:
+		"""A minimalist (few-colours) real cover from the source is ACCEPTED —
+		the download gate refuses only text-page renders, not sparse artwork
+		(the book's own cover beats none)."""
+		buf = io.BytesIO()
+		Image.new("RGB", (300, 450), color=(240, 238, 230)).save(buf, format="JPEG")
+		mock_response = type("R", (), {"status_code": 200, "content": buf.getvalue()})
+		dest = tmp_path / "cover.jpg"
+		with patch("requests.get", return_value=mock_response):
+			assert download_cover("https://example.com/cover.jpg", dest) is True
+		assert dest.is_file()
+
+
+class TestSidecarCoverUsable:
+	def test_zero_byte_cover_is_not_usable(self, tmp_path: Path) -> None:
+		from book_meta_fix.covers import sidecar_cover_usable
+
+		cover = tmp_path / "cover.jpg"
+		cover.write_bytes(b"")
+		assert sidecar_cover_usable(cover) is False
+
+	def test_undecodable_cover_is_not_usable(self, tmp_path: Path) -> None:
+		from book_meta_fix.covers import sidecar_cover_usable
+
+		cover = tmp_path / "cover.jpg"
+		cover.write_bytes(b"not an image")
+		assert sidecar_cover_usable(cover) is False
+
+	def test_real_cover_is_usable(self, tmp_path: Path) -> None:
+		from book_meta_fix.covers import sidecar_cover_usable
+
+		cover = tmp_path / "cover.jpg"
+		_real_cover(cover)
+		assert sidecar_cover_usable(cover) is True
+
+	def test_missing_file_is_not_usable(self, tmp_path: Path) -> None:
+		from book_meta_fix.covers import sidecar_cover_usable
+
+		assert sidecar_cover_usable(tmp_path / "nope.jpg") is False
+
+
+class TestRuleMissingCoverUsable:
+	"""MISSING_COVER fires for a 0-byte/corrupt cover.jpg too — the file is
+	not a cover, and treating it as one froze the book with no recovery."""
+
+	def test_zero_byte_cover_fires_missing_cover(self, tmp_path: Path) -> None:
+		from book_meta_fix.detectors import rule_missing_cover
+
+		(tmp_path / "cover.jpg").write_bytes(b"")
+		meta = BookMeta(authors=["A"], title="T", path=str(tmp_path))
+		diag = rule_missing_cover(meta)
+		assert diag is not None and diag.category == "MISSING_COVER"
+
+	def test_real_cover_does_not_fire(self, tmp_path: Path) -> None:
+		from book_meta_fix.detectors import rule_missing_cover
+
+		_real_cover(tmp_path / "cover.jpg")
+		meta = BookMeta(authors=["A"], title="T", path=str(tmp_path))
+		assert rule_missing_cover(meta) is None

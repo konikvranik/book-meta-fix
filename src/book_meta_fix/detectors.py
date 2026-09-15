@@ -566,6 +566,174 @@ def rule_c3_series_as_author(meta: BookMeta) -> Diagnosis | None:
 	return None
 
 
+def _person_key(s: str) -> str:
+	"""Comparison key for person/series names: accents stripped, lowercased,
+	punctuation dropped, whitespace collapsed. "Jiří Kosek ml." and
+	"Jiri Kosek" are NOT equal under it (the suffix differs) — the fuzzy tier
+	in _series_matches_author covers that."""
+	return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", "", _strip_accents(s or "").lower())).strip()
+
+
+def _series_matches_author(
+	series_name: str, authors: list[str], known_authors: Any | None,
+) -> str | None:
+	"""The author entry *series_name* matches, if any (else None).
+
+	Comparison ladder: exact folded equality, then the KnownAuthorPool's
+	same_person (clustering variants — "ml." suffixes, initials), then a
+	conservative fuzzy tier (token_sort >= 85, both sides >= 8 chars — short
+	names collide too easily: "Conan" the series vs any 5-letter surname;
+	measured on the library's own series↔author pairs, 85 keeps every real
+	protagonist match in and every unrelated pair out). Shared with
+	pipeline._series_is_author (the enrichment-side guard) so detector and
+	gates can never disagree about what counts as an author name.
+	"""
+	key = _person_key(series_name)
+	if not key:
+		return None
+	for a in authors:
+		ak = _person_key(a)
+		if ak and ak == key:
+			return a
+	if known_authors is not None:
+		for a in authors:
+			if known_authors.same_person(series_name, a):
+				return a
+	if len(key) >= 8:
+		from rapidfuzz import fuzz
+
+		for a in authors:
+			ak = _person_key(a)
+			if len(ak) >= 8 and fuzz.token_sort_ratio(key, ak) >= 85:
+				return a
+	return None
+
+
+def rule_c21_author_as_series(
+	meta: BookMeta, *, known_authors: Any | None = None, known_series: Any = None,
+) -> Diagnosis | None:
+	"""C21: the author's name sits in the series field of a non-series book.
+
+	The LLM/enrichment pollution shape measured in the wild: an un-numbered
+	"series" whose name IS the book's own author ("Jiří Kosek ml." with series
+	"Jiri Kosek") — nothing about the book is a series, the field was simply
+	filled with the nearest name at hand.
+
+	Deliberately does NOT fire for:
+	  - a NUMBERED series matching an author — that is the pulp protagonist
+	    convention ("John Sinclair #163" by Jason Dark; "Ren Dhark #19"):
+	    the series is real, and if the protagonist ALSO sits among the authors
+	    that is C22's cleanup, not a reason to delete the series;
+	  - a multi-series book — a null proposal would wipe the other series too
+	    (same policy as C18); reported only;
+	  - a name shared by >= 2 library books when the series counts are known
+	    (known_series Counter) — an author-branded real series ("IBM
+	    Redbooks" by IBM Redbooks) is legitimate; only a single-book
+	    "series" that happens to equal the author is pollution.
+	"""
+	from .models import series_entry_pair
+
+	if not meta.series:
+		return None
+	entries: list[tuple[str, str]] = []
+	for ent in meta.series:
+		try:
+			name, index = series_entry_pair(ent) if isinstance(ent, (str, dict)) else ("", "")
+		except (TypeError, ValueError):
+			continue
+		if name:
+			entries.append((name, index))
+	for name, index in entries:
+		author = _series_matches_author(name, meta.authors, known_authors)
+		if author is None:
+			continue
+		if index:
+			continue  # numbered series named after a person — real; C22 owns the author side
+		if len(entries) > 1:
+			return Diagnosis(
+				category="C21",
+				reason=(
+					f"series {name!r} matches the book's own author {author!r} "
+					f"(multi-series book — series not auto-cleared)"
+				),
+				confidence=Confidence.MEDIUM,
+				verdict=Verdict.NEEDS_REVIEW,
+			)
+		if known_series is not None:
+			# known_series keys are folded with verifier._normalize — the same
+			# fold run_pipeline builds the set with; a Counter carries counts,
+			# a bare set/frozenset answers membership only (treated as unknown).
+			from .verifier import _normalize
+
+			try:
+				if known_series.get(_normalize(name), 0) >= 2:
+					return Diagnosis(
+						category="C21",
+						reason=(
+							f"series {name!r} matches the book's own author {author!r} "
+							f"but names a multi-book series — possibly a real author-branded series"
+						),
+						confidence=Confidence.MEDIUM,
+						verdict=Verdict.NEEDS_REVIEW,
+					)
+			except AttributeError:
+				pass
+		return Diagnosis(
+			category="C21",
+			reason=f"series {name!r} is the book's own author {author!r} — not a series",
+			confidence=Confidence.HIGH,
+			verdict=Verdict.AUTO_FIXABLE,
+			proposed={"series": None},
+		)
+	return None
+
+
+def rule_c22_series_name_in_authors(
+	meta: BookMeta, *, known_authors: Any | None = None,
+) -> Diagnosis | None:
+	"""C22: the series/protagonist name sits among the book's AUTHORS.
+
+	Measured on the real library (2026-09-15): pulp series leak their
+	protagonist into the author list — authors ["Jason Dark", "John Sinclair"]
+	with series "John Sinclair #163", ["Kurt Brand", "Ren Dhark"] with series
+	"Ren Dhark #40". The protagonist is not an author; the real writer stays
+	first in the list. The fix is lossless: the name remains as the series,
+	it only leaves the authors list.
+
+	Only fires when at least one real author would remain — a SOLE house-name
+	credit (authors ["Mark Stone"], series "Mark Stone #35") is the edition's
+	own authorship convention and stays untouched.
+	"""
+	if not meta.series or len(meta.authors) < 2:
+		return None
+	from .models import series_entry_pair
+
+	names: list[str] = []
+	for ent in meta.series:
+		try:
+			name, _index = series_entry_pair(ent) if isinstance(ent, (str, dict)) else ("", "")
+		except (TypeError, ValueError):
+			continue
+		if name:
+			names.append(name)
+	if not names:
+		return None
+	remove: list[str] = []
+	for a in meta.authors:
+		if any(_series_matches_author(n, meta.authors, known_authors) == a for n in names):
+			remove.append(a)
+	if not remove or len(meta.authors) - len(remove) < 1:
+		return None
+	remaining = [a for a in meta.authors if a not in remove]
+	return Diagnosis(
+		category="C22",
+		reason=f"series name(s) {remove!r} among the book's authors — not authors",
+		confidence=Confidence.HIGH,
+		verdict=Verdict.AUTO_FIXABLE,
+		proposed={"authors": remaining},
+	)
+
+
 def rule_c8_translator(meta: BookMeta) -> Diagnosis | None:
 	"""C8: a translator credit sits in the author's place.
 
@@ -779,21 +947,25 @@ def rule_generated_cover(meta: BookMeta) -> Diagnosis | None:
 
 
 def rule_missing_cover(meta: BookMeta) -> Diagnosis | None:
-	"""MISSING_COVER: no cover.jpg sidecar at all.
+	"""MISSING_COVER: no usable cover.jpg sidecar.
 
 	Auto-fixable: if an enricher has a cover_url, `bmf apply` will download it;
 	if not, the book's own embedded cover is extracted as a fallback
-	(covers.recover_cover_from_book). Fires only when cover.jpg is entirely
-	absent.
+	(covers.recover_cover_from_book). Fires when cover.jpg is absent OR
+	undecodable — a 0-byte or corrupt file is not a cover, and treating it
+	as one would mask the problem forever (measured: silent calibre extract
+	failures left 746 zero-byte cover.jpg files that kept firing nothing).
 	"""
 	from pathlib import Path
 
+	from .covers import sidecar_cover_usable
+
 	cover_path = Path(meta.path) / "cover.jpg"
-	if cover_path.is_file():
+	if sidecar_cover_usable(cover_path):
 		return None
 	return Diagnosis(
 		category="MISSING_COVER",
-		reason="no cover.jpg sidecar",
+		reason="no usable cover.jpg sidecar",
 		confidence=Confidence.LOW,
 		verdict=Verdict.AUTO_FIXABLE,
 	)
@@ -855,6 +1027,8 @@ RULES: list[Rule] = [
 	rule_c7_glued_authors,
 	rule_c1_swap,
 	rule_c3_series_as_author,
+	rule_c21_author_as_series,  # author↔series confusion family, next to its C3 mirror
+	rule_c22_series_name_in_authors,
 	rule_c8_translator,
 	rule_c9_anonym,
 	rule_c14_series_index_in_name,  # last: the least severe structural problem
@@ -879,6 +1053,7 @@ def detect_all(
 	library_root: Path | None = None,
 	pattern: str | None = None,
 	known_authors: Any = None,
+	known_series: Any = None,
 ) -> list[Diagnosis]:
 	"""Apply ALL rules and return every match, in priority order (structural
 	rules first, then the location rule, then enrichment rules).
@@ -893,9 +1068,11 @@ def detect_all(
 	location-blind behaviour every pre-existing caller relies on.
 
 	``known_authors`` (a normalize.KnownAuthorPool) opts C1 into its
-	library-wide pattern (title == known library author); like library_root it
-	is threaded by run_pipeline only — every other caller keeps the
-	library-blind C1.
+	library-wide pattern (title == known library author) and C21/C22 into
+	author-variant matching; ``known_series`` (folded name → book count) lets
+	C21 tell a single-book author "series" from a real multi-book series. Like
+	library_root both are threaded by run_pipeline only — every other caller
+	keeps the library-blind rules.
 
 	C13 sits BEFORE the enrichment rules (and after the structural ones): a
 	misplaced-but-otherwise-fine book must get C13 as its PRIMARY diagnosis,
@@ -906,10 +1083,15 @@ def detect_all(
 	"""
 	matches: list[Diagnosis] = []
 	for rule in RULES:
-		if known_authors is not None and rule is rule_c1_swap:
-			d = rule(meta, known_authors=known_authors)
-		else:
-			d = rule(meta)
+		kwargs: dict[str, Any] = {}
+		if rule is rule_c1_swap and known_authors is not None:
+			kwargs["known_authors"] = known_authors
+		elif rule in (rule_c21_author_as_series, rule_c22_series_name_in_authors):
+			if known_authors is not None:
+				kwargs["known_authors"] = known_authors
+			if rule is rule_c21_author_as_series and known_series is not None:
+				kwargs["known_series"] = known_series
+		d = rule(meta, **kwargs) if kwargs else rule(meta)
 		if d is not None:
 			matches.append(d)
 	if library_root is not None:
@@ -954,6 +1136,7 @@ def detect(
 	library_root: Path | None = None,
 	pattern: str | None = None,
 	known_authors: Any = None,
+	known_series: Any = None,
 ) -> Diagnosis:
 	"""Apply rules in priority order; return the first matching Diagnosis as
 	the primary, with every other match attached as ``.additional``.
@@ -966,10 +1149,13 @@ def detect(
 	rule (MISSING_*) also matched, exactly as before.
 
 	``library_root``/``pattern`` opt into the C13 location check and
-	``known_authors`` into C1's library-wide pattern (see detect_all); the
-	defaults keep the historic library-blind behaviour.
+	``known_authors``/``known_series`` into the library-wide patterns (see
+	detect_all); the defaults keep the historic library-blind behaviour.
 	"""
-	matches = detect_all(meta, library_root=library_root, pattern=pattern, known_authors=known_authors)
+	matches = detect_all(
+		meta, library_root=library_root, pattern=pattern,
+		known_authors=known_authors, known_series=known_series,
+	)
 	primary = matches[0]
 	if primary.verdict == Verdict.OK:
 		for m in matches[1:]:

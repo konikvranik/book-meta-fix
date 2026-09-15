@@ -437,9 +437,27 @@ class TestBrokenCoverItems:
 
 	def test_valid_existing_cover_not_flagged(self, tmp_path: Path) -> None:
 		(tmp_path / "Autor/Kniha (1)").mkdir(parents=True)
-		(tmp_path / "Autor/Kniha (1)/cover.jpg").write_bytes(b"\xff\xd8jpg")
+		# A REAL decodable image — the audit decodes stored rows since the
+		# 0-byte-cover finding (fake magic bytes are now "unreadable", below).
+		from PIL import Image
+
+		Image.new("RGB", (40, 60), color=(10, 120, 200)).save(tmp_path / "Autor/Kniha (1)/cover.jpg")
 		items = [self._item("a", "/data/books/Autor/Kniha (1)/cover.jpg")]
 		assert broken_cover_items(items, tmp_path, ["/data/books"]) == []
+
+	def test_undecodable_existing_cover_is_broken(self, tmp_path: Path) -> None:
+		# Exists, image-named, but no decoder reads it — a 0-byte leftover or
+		# fake magic bytes feed ffmpeg the same "Invalid data found" as the
+		# extension/missing shapes (746 zero-byte rows measured in the wild).
+		(tmp_path / "Autor/Kniha (1)").mkdir(parents=True)
+		for name, blob in (("cover.jpg", b""), ("fake.jpg", b"\xff\xd8jpg")):
+			(tmp_path / "Autor/Kniha (1)").joinpath(name).write_bytes(blob)
+		items = [
+			self._item("a", "/data/books/Autor/Kniha (1)/cover.jpg"),
+			self._item("b", "/data/books/Autor/Kniha (1)/fake.jpg"),
+		]
+		broken = broken_cover_items(items, tmp_path, ["/data/books"])
+		assert [(b.item.id, b.reason) for b in broken] == [("a", "unreadable"), ("b", "unreadable")]
 
 	def test_missing_cover_file_is_broken(self, tmp_path: Path) -> None:
 		# Image extension but nothing at the mapped path — e.g. the file was
@@ -473,7 +491,9 @@ class TestBrokenCoverItems:
 			self._item("c", ""),
 		]
 		(tmp_path / "Autor/Kniha (1)").mkdir(parents=True)
-		(tmp_path / "Autor/Kniha (1)/cover.jpg").write_bytes(b"\xff\xd8jpg")
+		from test_covers import _real_cover
+
+		_real_cover(tmp_path / "Autor/Kniha (1)/cover.jpg")
 		seen: list[tuple[int, int]] = []
 		broken = broken_cover_items(items, tmp_path, ["/data/books"], progress_callback=lambda d, t: seen.append((d, t)))
 		assert [b.item.id for b in broken] == ["a"]

@@ -579,8 +579,19 @@ def _broken_cover_row(item: AbsItem, library_root: Path, folders: list[str]) -> 
 		if cover.startswith(folder + "/"):
 			rel = cover[len(folder) + 1:]
 			break
-	if rel and not (library_root / rel).exists():
-		return BrokenCover(item=item, cover_path=cover, reason="missing")
+	if rel:
+		mapped = library_root / rel
+		if not mapped.exists():
+			return BrokenCover(item=item, cover_path=cover, reason="missing")
+		# The file is there and image-named — but a cover that no decoder can
+		# READ (a 0-byte leftover, a truncated download) feeds ffmpeg the same
+		# "Invalid data found" as the missing/extension cases above. Measured
+		# on the real library: 746 zero-byte cover.jpg rows passed the old
+		# exists()-only audit as healthy.
+		from .covers import image_is_readable
+
+		if not image_is_readable(mapped):
+			return BrokenCover(item=item, cover_path=cover, reason="unreadable")
 	return None
 
 

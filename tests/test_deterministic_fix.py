@@ -1039,3 +1039,62 @@ class TestVerifyEnrichmentLocalDb:
 		assert em is not None
 		# Online could not decide (no ladder) -> local DB knows Harrison.
 		assert em.identity_confirmed is True
+
+
+class TestSeriesIsAuthor:
+	"""pipeline._series_is_author: the series-name-is-an-author guard behind
+	the series hygiene ("nothing but real series in the series field").
+	OFFLINE tiers only — the online author_exists ladder is deliberately not
+	consulted (too loose: a real series name can pass it)."""
+
+	def test_own_author_match(self):
+		from book_meta_fix.pipeline import _series_is_author
+
+		assert _series_is_author("Jiří Kulhánek", ["Jiří Kulhánek"]) is True
+		assert _series_is_author("jiri kulhanek", ["Jiří Kulhánek"]) is True  # fold
+
+	def test_unrelated_series_not_author(self):
+		from book_meta_fix.pipeline import _series_is_author
+
+		assert _series_is_author("Ocelová krysa", ["Harry Harrison"]) is False
+		assert _series_is_author("Nadace", ["Isaac Asimov"]) is False
+
+	def test_verified_author_cache_tier(self):
+		class _Cache:
+			def is_verified_author(self, name):
+				return name == "Josef Nesvadba"
+
+		from book_meta_fix.pipeline import _series_is_author
+
+		assert _series_is_author("Josef Nesvadba", ["Někdo Jiný"], cache=_Cache()) is True
+		assert _series_is_author("Nadace", ["Někdo Jiný"], cache=_Cache()) is False
+
+	def test_series_axis_rejects_author_named_series(self):
+		"""A series-axis answer whose "series" is the queried author name must
+		not confirm — the trivially-satisfied series-box agreement is exactly
+		how an already-polluted series launders itself a volume index."""
+		from book_meta_fix.enrichers import EnrichedMeta
+		from book_meta_fix.pipeline import _verify_enrichment_online
+		from book_meta_fix.verifier import IdentityResult
+
+		key = IdentityResult(title=None, authors=["Jiří Kulhánek"], source="metadata")
+		online = EnrichedMeta(
+			title="Kniha", authors=["Jiří Kulhánek"], series="Jiří Kulhánek", source="databazeknih",
+		)
+		assert _verify_enrichment_online(online, key, ("Jiří Kulhánek", "3"), "series", None) is False
+
+	def test_local_db_series_evidence_rejected_when_name_is_author(self):
+		"""A name that is BOTH a verified series and a verified author is not
+		series evidence — that overlap is the C21 pollution echo."""
+		from book_meta_fix.enrichers import EnrichedMeta
+		from book_meta_fix.pipeline import _verify_enrichment_local_db
+
+		class _Cache:
+			def is_verified_series(self, name):
+				return name == "John Sinclair"
+
+			def is_verified_author(self, name):
+				return name == "John Sinclair"
+
+		online = EnrichedMeta(authors=[], series="John Sinclair", source="databazeknih")
+		assert _verify_enrichment_local_db(online, _Cache()) is False

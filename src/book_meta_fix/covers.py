@@ -9,6 +9,11 @@ Detection signals (any one reaching the 0.5 threshold classifies as generated):
   - Few significant colours (<= 5 colour buckets each > 2% of pixels,
     after 16-colour quantization)                                        +0.5
   - Dominant colour covers > 60% of pixels (solid background)            +0.2
+  - Text-page render: a near-white, colourless sheet with many separated
+    ink bands (calibre's ``ebook-meta --get-cover`` RENDERS page 1 for a
+    coverless book — white background + black text lines; the colour
+    signals above miss it because antialiased ink spreads over 6+ grey
+    buckets)                                                        +0.5
 
 The "few significant colours" signal is the workhorse and is noise-tolerant:
 JPEG artefacts fragment a solid background into many near-identical colours,
@@ -72,6 +77,37 @@ _QUANTIZE_COLOURS = 16
 # always >= 6 (0 false positives across 2773 photo-like covers).
 _SIGNIFICANT_FRAC = 0.02
 _FEW_SIGNIFICANT_COLOURS = 5
+
+# Text-page render thresholds (signal 4). A page-1 render is a white sheet of
+# black text: near-white dominates, there is essentially no colour anywhere
+# (the render is greyscale), and the text shows up as many distinct ink BANDS
+# — maximal runs of consecutive ink rows separated by white gaps. Bands, not
+# raw ink-row count: a white MINIMALIST cover's title block is 1-3 bands even
+# when it is tall, while a page of text has dozens of separated lines.
+# Artwork fails the colourlessness gate; a title-only cover fails the band
+# count.
+_TEXT_WHITE_LUM = 230  # luminance above this counts as "white paper"
+_TEXT_MIN_WHITE_FRAC = 0.45
+_TEXT_COLOUR_SPREAD = 12  # max-min RGB channel spread still counts as grey
+_TEXT_MAX_COLOUR_FRAC = 0.02
+_TEXT_INK_LUM = 128  # a pixel darker than this is ink
+_TEXT_INK_ROW_PIXELS = 3  # an "ink row" carries at least this many dark px
+# Calibrated on the real library (2026-09-15, 4136 covers): real white
+# minimalist covers sit at 1-9 bands (a title block + author line; measured
+# FP: the Susanna Clarke "Jonathan Strange" cream cover = 9), text-page
+# scans start at 11 (Xenograffiti 128x204) and run to 27+. 11 keeps every
+# junk scan out of the near misses while leaving a 2-band margin below the
+# lowest observed false positive.
+_TEXT_MIN_INK_BANDS = 11
+
+# Version of the cover-analysis heuristics, stored in every persisted verdict.
+# Bumping it invalidates ALL cached verdicts in one step: the persistent
+# `covers` table is keyed (path, mtime_ns, size) with no heuristic identity,
+# so a detector change would otherwise leave every pre-change "not generated"
+# verdict frozen forever (an unchanged file never re-analyzes). A stored
+# payload with a different/missing version is treated as a cache miss and
+# recomputed — old rows self-heal lazily as they are read.
+_COVER_ANALYSIS_VERSION = 2
 
 
 @dataclass
@@ -175,11 +211,14 @@ def analyze_cover(path: str | Path) -> CoverInfo:
 				payload = store.get_cover(key[0], key[1], key[2])
 			except Exception:  # noqa: BLE001 - cache must never break analysis
 				payload = None
-			if payload is not None:
+			if payload is not None and payload.get("v") == _COVER_ANALYSIS_VERSION:
 				info = _cover_from_payload(payload)
 				with _cover_memo_lock:
 					_cover_memo[key] = info
 				return _copy_info(info)
+			# A stored payload with a different heuristic version predates the
+			# current pixel math — fall through and recompute (the fresh verdict
+			# overwrites the stale row below).
 	info = _analyze_cover_uncached(path)
 	# width == 0 means the decode failed — never cache (see module comment).
 	if key is not None and info.width:
@@ -190,6 +229,7 @@ def analyze_cover(path: str | Path) -> CoverInfo:
 		if store is not None:
 			try:
 				store.put_cover(key[0], key[1], key[2], {
+					"v": _COVER_ANALYSIS_VERSION,
 					"width": info.width, "height": info.height,
 					"is_generated": info.is_generated,
 					"confidence": info.confidence, "signals": info.signals,
@@ -199,24 +239,50 @@ def analyze_cover(path: str | Path) -> CoverInfo:
 	return _copy_info(info)
 
 
-def _analyze_cover_uncached(path: Path) -> CoverInfo:
-	"""Pixel analysis of *path* — the pre-cache body of analyze_cover."""
-	try:
-		from PIL import Image
-	except ImportError:
-		log.debug("Pillow not available; skipping cover analysis")
-		return CoverInfo()
+def _text_page_stats(small) -> tuple[float, float, int]:
+	"""(near-white fraction, coloured fraction, ink-band count) of the 150x200
+	RGB downscale — the raw material of the text-page signal.
 
-	info = CoverInfo()
-	try:
-		with Image.open(path) as img:
-			info.width, info.height = img.size
-			# Downscale for colour analysis (the full-res image is overkill
-			# for counting dominant colours and is slow on 1200x1600).
-			small = img.convert("RGB").resize((150, 200))
-	except Exception as e:  # noqa: BLE001
-		log.debug("cover analysis failed for %s: %s", path, e)
-		return info
+	Near-white = luminance >= _TEXT_WHITE_LUM; coloured = any pixel whose
+	max-min RGB channel spread exceeds _TEXT_COLOUR_SPREAD (a page render is a
+	greyscale render — any real artwork has colour), computed channel-wise via
+	ImageChops (no per-pixel Python loop). An ink row carries at least
+	_TEXT_INK_ROW_PIXELS pixels darker than _TEXT_INK_LUM; an ink BAND is a
+	maximal run of consecutive ink rows (one line of text at this resolution).
+	"""
+	from PIL import ImageChops
+
+	grey = small.convert("L")
+	hist = grey.histogram()
+	total = sum(hist) or 1
+	white_frac = sum(hist[_TEXT_WHITE_LUM:]) / total
+	r, g, b = small.split()
+	spread = ImageChops.subtract(
+		ImageChops.lighter(ImageChops.lighter(r, g), b),
+		ImageChops.darker(ImageChops.darker(r, g), b),
+	)
+	spread_hist = spread.histogram()
+	colour_frac = sum(spread_hist[_TEXT_COLOUR_SPREAD + 1:]) / total
+	w, h = small.size
+	gp = grey.load()
+	bands = 0
+	in_band = False
+	for y in range(h):
+		is_ink = sum(1 for x in range(w) if gp[x, y] < _TEXT_INK_LUM) >= _TEXT_INK_ROW_PIXELS
+		if is_ink and not in_band:
+			bands += 1
+		in_band = is_ink
+	return white_frac, colour_frac, bands
+
+
+def _classify_pixels(small, width: int, height: int) -> CoverInfo:
+	"""Pixel math shared by the path-based and bytes-based analyzers.
+
+	*small* is the 150x200 RGB downscale of the cover; *width*/*height* are
+	the FULL-RESOLUTION dimensions (the Calibre-default size signal compares
+	against those).
+	"""
+	info = CoverInfo(width=width, height=height)
 
 	# Noise-tolerant colour concentration. JPEG artefacts fragment a solid
 	# background into many near-identical colours, so counting exact unique
@@ -240,9 +306,9 @@ def _analyze_cover_uncached(path: Path) -> CoverInfo:
 	# size. Gating on few_colours drops those false positives. (When the gate
 	# passes, few_colours below fires too, so this mainly annotates "calibre
 	# default template" and lifts confidence for that case.)
-	if (info.width, info.height) == _CALIBRE_DEFAULT_SIZE and significant <= _FEW_SIGNIFICANT_COLOURS:
+	if (width, height) == _CALIBRE_DEFAULT_SIZE and significant <= _FEW_SIGNIFICANT_COLOURS:
 		info.confidence += 0.5
-		info.signals.append(f"{info.width}x{info.height} (calibre default)")
+		info.signals.append(f"{width}x{height} (calibre default)")
 
 	# Signal 2: very few significant colours. The workhorse — fires on generated
 	# placeholders at ANY size (not just 1200x1600) and never on photos.
@@ -257,10 +323,87 @@ def _analyze_cover_uncached(path: Path) -> CoverInfo:
 		info.confidence += 0.2
 		info.signals.append(f"dominant_bg ({dominant_frac:.0%})")
 
+	# Signal 4: text-page render (calibre's page-1 "default cover"). The colour
+	# signals above are blind to it — antialiased ink smears over 6+ grey
+	# buckets after quantization — so the page SHAPE is measured directly:
+	# mostly white, essentially colourless, many separated ink bands (lines).
+	try:
+		white_frac, colour_frac, bands = _text_page_stats(small)
+	except Exception:  # noqa: BLE001
+		white_frac, colour_frac, bands = 0.0, 1.0, 0
+	if (
+		white_frac >= _TEXT_MIN_WHITE_FRAC
+		and colour_frac <= _TEXT_MAX_COLOUR_FRAC
+		and bands >= _TEXT_MIN_INK_BANDS
+	):
+		info.confidence += 0.5
+		info.signals.append(f"text_page ({bands} ink bands, {white_frac:.0%} white)")
+
 	info.is_generated = info.confidence >= _GENERATED_THRESHOLD
 	# Clamp confidence to [0, 1] for display.
 	info.confidence = min(1.0, info.confidence)
 	return info
+
+
+def _analyze_cover_uncached(path: Path) -> CoverInfo:
+	"""Pixel analysis of *path* — the pre-cache body of analyze_cover."""
+	try:
+		from PIL import Image
+	except ImportError:
+		log.debug("Pillow not available; skipping cover analysis")
+		return CoverInfo()
+
+	try:
+		with Image.open(path) as img:
+			width, height = img.size
+			# Downscale for colour analysis (the full-res image is overkill
+			# for counting dominant colours and is slow on 1200x1600).
+			small = img.convert("RGB").resize((150, 200))
+	except Exception as e:  # noqa: BLE001
+		log.debug("cover analysis failed for %s: %s", path, e)
+		return CoverInfo()
+	return _classify_pixels(small, width, height)
+
+
+def analyze_cover_bytes(data: bytes) -> CoverInfo:
+	"""Classify in-memory image bytes with the same math as analyze_cover.
+
+	No caching (there is no path/mtime identity) — used for one-shot gates:
+	the download-cover validity check and the EPUB-wired recovery path. Never
+	raises; an undecodable blob returns CoverInfo(width=0).
+	"""
+	try:
+		from PIL import Image
+	except ImportError:
+		log.debug("Pillow not available; skipping cover analysis")
+		return CoverInfo()
+
+	import io
+
+	try:
+		with Image.open(io.BytesIO(data)) as img:
+			width, height = img.size
+			small = img.convert("RGB").resize((150, 200))
+	except Exception as e:  # noqa: BLE001
+		log.debug("cover byte analysis failed: %s", e)
+		return CoverInfo()
+	return _classify_pixels(small, width, height)
+
+
+def sidecar_cover_usable(path: str | Path) -> bool:
+	"""True when the sidecar cover exists AND decodes (width > 0).
+
+	The guard behind "cover already replaced/filled — skip": a 0-byte or
+	corrupt cover.jpg must not count as a cover. Measured on the real
+	library: 746 zero-byte cover.jpg files (a silent calibre extract
+	failure moved into place) masked MISSING_COVER forever, because a bare
+	``is_file()`` says yes. Rides the analyze_cover cache, so the decode
+	is usually free (the C11 rule has just asked for the same file).
+	"""
+	try:
+		return analyze_cover(Path(path)).width > 0
+	except Exception:  # noqa: BLE001
+		return False
 
 
 def extract_cover_from_book(book_path: str | Path, dest: Path | None = None) -> Path | None:
@@ -269,6 +412,12 @@ def extract_cover_from_book(book_path: str | Path, dest: Path | None = None) -> 
 	For books without a sidecar cover.jpg but with a cover embedded in the
 	EPUB/MOBI/PDB. Returns the path to the extracted image (a temp file unless
 	*dest* is given), or None if extraction failed or calibre is unavailable.
+
+	Caveat the caller must know about: for a COVERLESS book calibre may exit 0
+	while writing NOTHING — and when *dest* was pre-created (tempfile.mkstemp
+	always does), the "file exists" check alone cannot tell a real extract
+	from that silent failure. The size > 0 check below closes that hole; the
+	recovery gate additionally refuses undecodable output.
 	"""
 	ebook_meta = shutil.which("ebook-meta")
 	if not ebook_meta:
@@ -284,38 +433,85 @@ def extract_cover_from_book(book_path: str | Path, dest: Path | None = None) -> 
 			[ebook_meta, str(book_path), f"--get-cover={dest}"],
 			capture_output=True, text=True, timeout=15,
 		)
-		if proc.returncode != 0 or not dest.is_file():
+		if proc.returncode != 0 or not dest.is_file() or dest.stat().st_size == 0:
 			return None
 		return dest
 	except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
 		return None
 
 
+def _install_cover_bytes(dest_path: Path, content: bytes) -> bool:
+	"""Backup any existing cover, then atomically write *content* to *dest_path*.
+
+	Shared by the download and the EPUB-bytes recovery paths (both arrive with
+	already-validated bytes). The .tmp sibling keeps os.replace on one
+	filesystem — see recover_cover_from_book for why that matters on NFS.
+	"""
+	if dest_path.is_file():  # backup existing, mirroring download_cover
+		bak = dest_path.with_suffix(dest_path.suffix + ".bak")
+		shutil.copy2(dest_path, bak)
+	tmp = dest_path.with_suffix(dest_path.suffix + ".tmp")
+	try:
+		tmp.write_bytes(content)
+		os.replace(tmp, dest_path)
+	except OSError as e:
+		log.warning("failed to write cover to %s: %s", dest_path, e)
+		if tmp.exists():
+			tmp.unlink(missing_ok=True)
+		return False
+	return True
+
+
 def recover_cover_from_book(book_path: str | Path, dest_path: str | Path) -> bool:
 	"""Extract the book's embedded cover into *dest_path*, validating it first.
 
 	The fallback when ``cover.jpg`` is missing or a Calibre placeholder and no
-	web cover was found. Extracts via :func:`extract_cover_from_book` (calibre
-	``ebook-meta --get-cover``) into a temp file, REJECTS the result if it is
-	itself a generated placeholder, then atomically moves it into place with a
-	``.bak`` backup — mirroring :func:`download_cover`. Never raises; returns
-	True only when a real cover landed at *dest_path*.
+	web cover was found. Two extraction paths, strictest first:
 
-	The generated-placeholder gate is mandatory and uses the SAME pixel math as
-	the C11 detector (:func:`analyze_cover`): anything we would flag as a
-	generated sidecar is rejected here too. Calibre embeds the covers it
-	generates, so without this gate a C11 book would simply extract its own
-	placeholder back out — and a generated extract can never become ``cover.jpg``
-	(the book would just re-fire C11 on the next scan).
+	- EPUB: the OPF-wired cover BYTES (:func:`epub_cover_image`) — no calibre
+	  subprocess, and crucially no page-render fallback: ``ebook-meta
+	  --get-cover`` RENDERS page 1 for a coverless book and hands the render
+	  out as a "default cover", which is exactly the junk this recovery exists
+	  to avoid (white sheet of text — measured in the library as screenshot
+	  covers). A wired cover is the truth; an EPUB without one has no cover.
+	- other formats: :func:`extract_cover_from_book` (calibre), whose render
+	  output is caught by the pixel gate below.
+
+	Validation (both paths): the result must DECODE (a 0-byte or corrupt
+	extract must never become cover.jpg — a size-less file then masks
+	MISSING_COVER forever, measured: 746 zero-byte cover.jpg files in the
+	library from calibre exiting 0 without writing anything) and must not be
+	classified generated by the SAME pixel math as the C11 detector — anything
+	we would flag as a generated sidecar is rejected here too, or a C11 book
+	would simply extract its own placeholder back out.
+
+	Never raises; returns True only when a real cover landed at *dest_path*.
 	"""
 	dest_path = Path(dest_path)
-	# Extract into a temp file in the DESTINATION's own directory, not the
-	# system /tmp, so the final move stays on one filesystem. os.replace uses
-	# rename(2), which fails with EXDEV ("Invalid cross-device link", Errno 18)
-	# across mounts — e.g. /tmp on the local disk vs the library on an NFS
-	# share. download_cover sidesteps the same trap by writing its .tmp beside
-	# the cover. If the dest dir is unusable we fall back to /tmp and rely on
-	# shutil.move's cross-device copy+unlink path below.
+	book_path = Path(book_path)
+
+	if book_path.suffix.lower() == ".epub":
+		data = epub_cover_image(book_path)
+		if data:
+			if not image_is_readable(data) or analyze_cover_bytes(data).is_generated:
+				log.info("wired cover for %s is unusable; discarding", book_path.name)
+				return False
+			if _install_cover_bytes(dest_path, data):
+				log.info("cover extracted from EPUB: %s -> %s", book_path.name, dest_path.name)
+				return True
+			return False
+		# No wired cover: an EPUB has nothing to extract — do NOT fall through
+		# to ebook-meta, whose page-1 render is the screenshot-cover producer.
+		return False
+
+	# Non-EPUB: calibre extraction, temp file in the DESTINATION's own
+	# directory, not the system /tmp, so the final move stays on one
+	# filesystem. os.replace uses rename(2), which fails with EXDEV ("Invalid
+	# cross-device link", Errno 18) across mounts — e.g. /tmp on the local
+	# disk vs the library on an NFS share. download_cover sidesteps the same
+	# trap by writing its .tmp beside the cover. If the dest dir is unusable
+	# we fall back to /tmp and rely on shutil.move's cross-device copy+unlink
+	# path below.
 	try:
 		fd, name = tempfile.mkstemp(suffix=".jpg", prefix="bmf-cover-", dir=str(dest_path.parent))
 		os.close(fd)
@@ -326,8 +522,12 @@ def recover_cover_from_book(book_path: str | Path, dest_path: str | Path) -> boo
 		tmp_path = Path(tmp.name)
 	try:
 		if extract_cover_from_book(book_path, dest=tmp_path) is None:
-			return False  # calibre absent, or the file has no embedded cover
-		# Generated-placeholder gate — see docstring.
+			return False  # calibre absent, wrote nothing, or the file has no embedded cover
+		# Decode + generated gates — see docstring. A 0-byte or corrupt output
+		# decodes to width 0 and is rejected with the placeholders.
+		if not image_is_readable(tmp_path):
+			log.info("extracted cover for %s does not decode; discarding", book_path)
+			return False
 		if analyze_cover(tmp_path).is_generated:
 			log.info("extracted cover for %s looks generated; discarding", book_path)
 			return False
@@ -337,7 +537,7 @@ def recover_cover_from_book(book_path: str | Path, dest_path: str | Path) -> boo
 		# Atomic rename within one filesystem; on the /tmp fallback (or an odd
 		# overlay mount) shutil.move transparently falls back to copy + unlink.
 		shutil.move(str(tmp_path), str(dest_path))
-		log.info("cover extracted from book: %s -> %s", Path(book_path).name, dest_path.name)
+		log.info("cover extracted from book: %s -> %s", book_path.name, dest_path.name)
 		return True
 	finally:
 		if tmp_path.exists():
@@ -849,19 +1049,17 @@ def download_cover(url: str, dest_path: str | Path, *, timeout: float = 15.0) ->
 		except Exception as e:  # noqa: BLE001
 			log.warning("downloaded cover from %s is not a valid image: %s", url, e)
 			return False
+		# Pixel gate: the URL came from a book-matching source, so a minimalist
+		# real cover (few colours) is accepted — the book's own cover beats
+		# none. Refused is only the TEXT-PAGE RENDER junk (screenshot of page
+		# 1): "only real covers". The same math as the C11 detector's signal.
+		info = analyze_cover_bytes(content)
+		if info.is_generated and any(s.startswith("text_page") for s in info.signals):
+			log.warning("downloaded cover from %s looks like a text-page render; discarding", url)
+			return False
 
 	# Backup existing cover, then atomic write.
-	if dest_path.is_file():
-		bak = dest_path.with_suffix(dest_path.suffix + ".bak")
-		shutil.copy2(dest_path, bak)
-	tmp = dest_path.with_suffix(dest_path.suffix + ".tmp")
-	try:
-		tmp.write_bytes(content)
-		os.replace(tmp, dest_path)
-	except OSError as e:
-		log.warning("failed to write cover to %s: %s", dest_path, e)
-		if tmp.exists():
-			tmp.unlink(missing_ok=True)
+	if not _install_cover_bytes(dest_path, content):
 		return False
 	log.info("cover downloaded: %s -> %s", url, dest_path.name)
 	return True

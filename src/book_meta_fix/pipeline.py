@@ -202,13 +202,23 @@ def run_pipeline(
 		known_authors = build_known_author_pool(all_books)
 	except Exception:  # noqa: BLE001
 		log.debug("known-author pool build failed; C1 stays library-blind", exc_info=True)
-	# Library-wide series-name set (folded) — the pool-tier title guard in
-	# _pool_confirms_author: a title that equals a known series name is
-	# pollution (the real title lost), not a book title. Read-only after
-	# build, same sharing model as the author pool.
-	known_series: frozenset[str] = frozenset(
-		_normalize(series_entry_pair(b.series)[0]) for b in all_books
-	) - {""}
+	# Library-wide series-name index (folded name → book count) — the
+	# pool-tier title guard in _pool_confirms_author: a title that equals a
+	# known series name is pollution (the real title lost), not a book title.
+	# The counts also arm C21's single-book-vs-real-series discrimination.
+	# Read-only after build, same sharing model as the author pool.
+	known_series: Any = {}
+	try:
+		from collections import Counter
+
+		series_counter: Counter[str] = Counter()
+		for b in all_books:
+			name = series_entry_pair(b.series)[0]
+			if name:
+				series_counter[_normalize(name)] += 1
+		known_series = series_counter
+	except Exception:  # noqa: BLE001
+		log.debug("known-series index build failed; C21 loses its counts", exc_info=True)
 	if skip_verified:
 		before = len(all_books)
 		all_books = [b for b in all_books if not b.verified]
@@ -216,13 +226,14 @@ def run_pipeline(
 			log.info("pipeline: skipping %d verified book(s)", before - len(all_books))
 			if stats is not None:
 				stats.setdefault("skipped_verified", before - len(all_books))
-	# Location-aware detect (C13) when the caller opted in; pool-armed C1 when
-	# the pool was built; plain detect_fn otherwise so classify-critical
-	# behaviour is unchanged for other callers.
+	# Location-aware detect (C13) when the caller opted in; pool-armed C1 and
+	# C21/C22 when the pool was built; plain detect_fn otherwise so
+	# classify-critical behaviour is unchanged for other callers.
 	if location_root is not None or known_authors is not None:
 		def _detect(b: BookMeta):
 			return detect_fn(
 				b, library_root=location_root, pattern=location_pattern, known_authors=known_authors,
+				known_series=known_series,
 			)
 	else:
 		_detect = detect_fn
@@ -671,6 +682,26 @@ def _process_book(
 								elif not author and series and not series_ok:
 									enriched.source = "llm:low"
 									llm_src = "llm:low"
+								# Series hygiene — "nothing but real series in the
+								# series field": an LLM series rides along only when it
+								# independently exists AND is not an author name. The old
+								# ladder checked series ONLY when the answer had no
+								# author, so {"authors": ["J. Kulhánek"], "series":
+								# "J. Kulhánek"} sailed through untouched. A failed check
+								# DROPS the series fields instead of downgrading the whole
+								# answer — the verified title/author are exactly what the
+								# LLM was asked for, and a dropped series simply stays
+								# missing (recoverable) instead of wrong.
+								if series and (
+									not series_ok
+									or _series_is_author(series, meta.authors, cache, known_authors)
+								):
+									log.info(
+										"dropping unverified/author-shaped LLM series %r for %s",
+										series, meta.path,
+									)
+									enriched.series = None
+									enriched.series_index = None
 
 						_bucket(llm_src)
 					else:
@@ -976,6 +1007,31 @@ def _author_known(author: str, enricher: Enricher | None, cache: Any) -> bool:
 	return cache is not None and cache.is_verified_author(author)
 
 
+def _series_is_author(
+	series: str,
+	own_authors: list[str] | None,
+	cache: Any = None,
+	known_authors: Any = None,
+) -> bool:
+	"""True when a series name is actually an AUTHOR name — the enrichment
+	pollution shape C21 cleans ("nothing but real series in the series field").
+
+	OFFLINE tiers only, deliberately: the record's own authors (folded/pool
+	compare via the SHARED detectors._series_matches_author ladder, so the
+	gates and the detector can never disagree) and the verified-author cache.
+	The online author_exists ladder is intentionally NOT consulted — it
+	answers "some author resembles this string" loosely enough that a real
+	series name can pass it (measured on the Ocelová krysa series), and a
+	false True here would strip a legitimate series out of a good answer."""
+	from .detectors import _series_matches_author
+
+	if not series:
+		return False
+	if _series_matches_author(series, own_authors or [], known_authors) is not None:
+		return True
+	return cache is not None and cache.is_verified_author(series)
+
+
 def _verify_enrichment_online(
 	online: EnrichedMeta,
 	key: IdentityResult | None,
@@ -1033,6 +1089,14 @@ def _verify_enrichment_online(
 			return False
 		if fuzz.token_sort_ratio(str(online.series).lower(), series[0].lower()) < 80:
 			return False
+		# A series name that IS an author name cannot confirm anything: the
+		# series-box agreement is trivially satisfied by the polluted query
+		# itself, and the author check below would then "confirm" the book via
+		# the very name the series was mistaken for.
+		if _series_is_author(
+			str(online.series), key.authors if key else None, cache,
+		):
+			return False
 		return bool(authors) and _author_known(authors[0], enricher, cache)
 	return False
 
@@ -1048,6 +1112,13 @@ def _verify_enrichment_local_db(online: EnrichedMeta, cache: Any) -> bool:
 	if authors and cache.is_verified_author(authors[0]):
 		return True
 	if online.series and cache.is_verified_series(str(online.series)):
+		# A name that is BOTH a verified series and a verified author is not
+		# series evidence — that overlap is exactly the C21 pollution echo
+		# (once one book carries the author-named series, every later lookup
+		# would be "confirmed" by it). Books whose real author verified above
+		# never reach this branch.
+		if cache.is_verified_author(str(online.series)):
+			return False
 		return True
 	return False
 
@@ -1306,6 +1377,12 @@ def _build_llm_evidence(
 		seen_series: set[str] = set()
 		for q in series_queries:
 			for s in cache.find_similar_verified_series(q, limit=3, cutoff=75):
+				# Never coach the LLM toward a series name that is also a
+				# verified AUTHOR — the prompt explicitly says "use this exact
+				# series name", and a polluted/author-named entry here seeds the
+				# very confusion the series hygiene drops on the answer side.
+				if cache.is_verified_author(s):
+					continue
 				if s not in seen_series:
 					seen_series.add(s)
 					known_series.append(s)
@@ -2219,11 +2296,17 @@ def _apply_action(meta: BookMeta, item) -> None:  # noqa: ANN001
 			from .covers import analyze_cover, download_cover, recover_cover_from_book
 
 			cover_path = Path(meta.path) / "cover.jpg"
-			if "C11" in cats and cover_path.is_file() and not analyze_cover(cover_path).is_generated:
+			# One analysis serves both guards (the verdict is memoized, but
+			# tests patch analyze_cover wholesale). width == 0 means the
+			# file does not decode — a 0-byte/corrupt leftover is NOT a
+			# cover and must not count as "already fixed" (measured: 746
+			# zero-byte cover.jpg files masked MISSING_COVER forever).
+			info = analyze_cover(cover_path) if cover_path.is_file() else None
+			if "C11" in cats and info is not None and info.width and not info.is_generated:
 				# Placeholder already replaced with a real cover.
 				log.info("cover already replaced, skipping id=%s", item.id)
-			elif "MISSING_COVER" in cats and cover_path.is_file():
-				# Missing cover already filled.
+			elif "MISSING_COVER" in cats and info is not None and info.width:
+				# Missing cover already filled (decodable = a real cover).
 				log.info("cover already present, skipping id=%s", item.id)
 			else:
 				ok = False

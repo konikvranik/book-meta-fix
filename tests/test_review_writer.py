@@ -725,7 +725,9 @@ class TestProjectedVerified:
 			manifest["publishedYear"] = "2001"
 		(folder / "metadata.json").write_text(_json.dumps(manifest), encoding="utf-8")
 		(folder / "book.epub").write_text("x", encoding="utf-8")
-		(folder / "cover.jpg").write_bytes(b"cover")
+		from test_covers import _real_cover
+
+		_real_cover(folder / "cover.jpg")
 		return read_book_folder(folder)
 
 	def test_completing_proposal_prefills_verified(self, tmp_path):
@@ -793,7 +795,9 @@ class TestIdentityVerified:
 		(folder / "metadata.json").write_text(_json.dumps(manifest), encoding="utf-8")
 		(folder / file_name).write_text("x", encoding="utf-8")
 		if with_cover:
-			(folder / "cover.jpg").write_bytes(b"cover")
+			from test_covers import _real_cover
+
+			_real_cover(folder / "cover.jpg")
 		return read_book_folder(folder)
 
 	def test_online_identity_confirmed_verifies_despite_missing_isbn(self, tmp_path):
@@ -1068,7 +1072,9 @@ class TestDecidedPriorCarry:
 			manifest["publishedYear"] = "2001"
 		(folder / "metadata.json").write_text(_json.dumps(manifest), encoding="utf-8")
 		(folder / "book.epub").write_text("x", encoding="utf-8")
-		(folder / "cover.jpg").write_bytes(b"cover")
+		from test_covers import _real_cover
+
+		_real_cover(folder / "cover.jpg")
 		return read_book_folder(folder)
 
 	def _seed_prior(self, tmp_path, body: str) -> None:
@@ -1232,3 +1238,92 @@ class TestFsyncBatching:
 		writer.finish()
 		entries = [e for e in parse_review(out) if e is not None]
 		assert len(entries) == 3
+
+
+class TestC21C22Prefill:
+	"""The author↔series confusion rules pre-fill accept like C13/C14: the
+	fix is deterministic and identity-preserving, so one `bmf apply` clears
+	the pollution in bulk. MEDIUM shapes stay pending."""
+
+	def _book(self, tmp_path, *, authors, series):
+		import json as _json
+
+		from book_meta_fix.readers import read_book_folder
+
+		folder = tmp_path / "lib" / "A" / "Kniha (1)"
+		folder.mkdir(parents=True)
+		(folder / "metadata.json").write_text(_json.dumps({
+			"title": "Kniha", "authors": authors, "isbn": "9788020403117",
+			"publishedYear": "2001", "series": series,
+		}), encoding="utf-8")
+		(folder / "book.epub").write_text("x", encoding="utf-8")
+		from test_covers import _real_cover
+
+		_real_cover(folder / "cover.jpg")
+		return read_book_folder(folder)
+
+	def test_c21_high_accept_prefilled(self, tmp_path):
+		from book_meta_fix.detectors import detect
+
+		meta = self._book(tmp_path, authors=["Jiří Kosek ml."], series=[{"name": "Jiri Kosek", "index": ""}])
+		diag = detect(meta)
+		assert diag.category == "C21"
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		_submit_all_and_finish(w, [(meta, diag, None, None)])
+		parsed = parse_review(out)
+		assert parsed[0].action == "accept"
+		assert parsed[0].proposed["series"] is None
+
+	def test_c22_high_accept_prefilled(self, tmp_path):
+		from book_meta_fix.detectors import detect
+
+		meta = self._book(tmp_path, authors=["Jason Dark", "John Sinclair"], series=["John Sinclair #111"])
+		diag = detect(meta)
+		assert diag.category == "C22"
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		_submit_all_and_finish(w, [(meta, diag, None, None)])
+		parsed = parse_review(out)
+		assert parsed[0].action == "accept"
+		assert parsed[0].proposed["authors"] == ["Jason Dark"]
+
+	def test_c21_medium_stays_pending(self, tmp_path):
+		"""Multi-series book → report only, no auto-accept."""
+		from book_meta_fix.detectors import detect
+
+		meta = self._book(
+			tmp_path, authors=["Jan Novák"],
+			series=[{"name": "Jan Novák", "index": ""}, {"name": "Legit", "index": "2"}],
+		)
+		diag = detect(meta)
+		assert diag.category == "C21" and diag.confidence == Confidence.MEDIUM
+		out = tmp_path / "review.yaml"
+		w = ReviewWriter(out)
+		_submit_all_and_finish(w, [(meta, diag, None, None)])
+		parsed = parse_review(out)
+		assert parsed[0].action is None
+
+	def test_decided_prior_gets_c21_proposal_overlaid(self, tmp_path):
+		"""A book decided BEFORE C21 existed carries its decision — the new
+		rule's fix overlays onto the carried proposal, never clobbering the
+		decision itself. Without this every pre-C21 decision would freeze its
+		pollution through every future apply."""
+		from book_meta_fix.detectors import detect
+
+		meta = self._book(tmp_path, authors=["Jiří Kosek ml."], series=[{"name": "Jiri Kosek", "index": ""}])
+		diag = detect(meta)
+		assert diag.category == "C21"
+		self._seed_prior(tmp_path, (
+			f"---\nid: 1\nuuid: {meta.uuid}\npath: A/Kniha (1)\n"
+			"current: {title: Kniha}\nproposed: null\naction: accept\n"
+		))
+		w = ReviewWriter(tmp_path / "review.yaml")
+		_submit_all_and_finish(w, [(meta, diag, None, None)])
+		parsed = parse_review(tmp_path / "review.yaml")
+		assert parsed[0].action == "accept"  # decision preserved
+		assert parsed[0].proposed["series"] is None  # the new fix rode along
+		assert parsed[0].verified is True  # projection clean → closed in one apply
+
+	def _seed_prior(self, tmp_path, body: str) -> None:
+		(tmp_path / "review.yaml").write_text(body, encoding="utf-8")

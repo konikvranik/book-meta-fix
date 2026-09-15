@@ -1,4 +1,4 @@
-# Corruption Catalog (C1–C18)
+# Corruption Catalog (C1–C22)
 
 **English** | [Čeština](cs/corruption-catalog.md)
 
@@ -412,6 +412,58 @@ alone (a conflict of decisions). Both folders' cache rows are invalidated.
 
 **Verdict:** AUTO_FIXABLE (ISBN-confirmed) / NEEDS_REVIEW (exact match
 without ISBN proof)
+
+## C21 — Author name in the series field
+
+The series field holds the book's own AUTHOR — an un-numbered "series" that
+is not a series at all. Measured shape in the wild: `authors: ["Jiří Kosek
+ml."]` with `series: "Jiri Kosek"` (the LLM/enrichment pollution family; the
+field was filled with the nearest name at hand). The rule runs on every
+`bmf analyze`:
+
+* **HIGH + `proposed: {series: null}`** (accept pre-filled, the series is
+  cleared at apply) when the folded series name matches one of the book's
+  own authors — exact fold, the KnownAuthorPool's variant matching, or a
+  conservative fuzzy tier (token_sort ≥ 85, both sides ≥ 8 chars).
+* Deliberately does NOT fire for a **numbered** series matching a person —
+  that is the pulp protagonist convention ("John Sinclair #163" by Jason
+  Dark): the series is real, and a protagonist sitting among the AUTHORS is
+  C22's cleanup.
+* A **multi-book** author-branded series ("IBM Redbooks" by IBM Redbooks,
+  decided by the library-wide series counts analyze threads into the rule)
+  and **multi-series** books are reported MEDIUM/pending — a null proposal
+  would wipe the other series (the C18 policy).
+* A series equal to the TITLE never fires ("Ocelová krysa #5" is a
+  legitimate edition convention).
+
+Enrichment-side twin: `pipeline._series_is_author` drops an author-shaped
+or unverified series from every LLM answer ("nothing but real series in the
+series field"), and `Enricher.series_exists` now requires an actual serie
+result row whose name fuzzy-matches (≥ 70) instead of a bare `serie/`
+substring. `bmf clean --unverified` re-opens verified books whose series
+names an author (even with an ISBN — an ISBN does not make a wrong series
+field right), so the rule can reach pollution that was already closed.
+
+**Verdict:** AUTO_FIXABLE (HIGH, own-author match) / NEEDS_REVIEW (MEDIUM
+shapes)
+
+## C22 — Series name among the authors
+
+The series/protagonist name sits in the AUTHORS list — measured on the real
+library: `authors: ["Jason Dark", "John Sinclair"]` with series
+`"John Sinclair #111"`, `["Kurt Brand", "Ren Dhark"]` with `"Ren Dhark #40"`.
+The protagonist is not an author; the real writer stays first. The fix is
+lossless: the name remains as the series, it only leaves the authors list
+(`proposed: {authors: [...]}` minus the series-named entries, accept
+pre-filled).
+
+Only fires when at least one real author would REMAIN — a sole house-name
+credit (`authors: ["Mark Stone"]`, series `"Mark Stone #35"`) is the
+edition's own authorship convention and stays untouched. Books decided
+before the rule existed get the proposal OVERLAID onto their carried review
+entry (the decision itself is never clobbered).
+
+**Verdict:** AUTO_FIXABLE (HIGH)
 
 ## EMPTY_BOOK — Dead record (the book file is gone)
 

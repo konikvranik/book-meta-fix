@@ -220,3 +220,55 @@ def test_dbk_series_absent_leaves_series_none():
 	em = enrichers._parse_databazeknih_detail(html)
 	assert em is not None
 	assert em.series is None
+
+
+class TestSeriesExists:
+	"""series_exists must find an actual serie RESULT ROW whose name matches —
+	the old bare "serie/" substring was satisfiable by navigation/filler links,
+	and a search for an AUTHOR name routinely returns their works with
+	series-adjacent links included (the guard behind the series hygiene)."""
+
+	DBK_HIT = (
+		'<html><body><a class="bigger" href="/serie/heechee-786">Heechee</a>'
+		'<a class="bigger" href="/serie/hellboy-11299">Hellboy</a></body></html>'
+	)
+	DBK_EMPTY = (
+		"<html><body>Na hledaný výraz jsme bohužel nenašeli žádný výsledek "
+		'v kategorii Série. <a href="/prehled-knihy/x-1">Nějaká kniha</a></body></html>'
+	)
+	LEGIE_HIT = (
+		'<html><body><a href="serie/188-heechee"><span class="b">Heechee</span></a>'
+		'<a href="kniha/1120-x">A zrodí se</a></body></html>'
+	)
+	LEGIE_AUTHOR_PAGE = (
+		# A work list with NO serie row at all — the old substring test could
+		# still trip on navigation "serie" links.
+		'<html><body><a href="kniha/1321-y">Druhá nadace</a>'
+		'<a href="index.php?cast=serie&amp;search_text=x">série</a></body></html>'
+	)
+
+	def test_dbk_real_serie_row_passes(self, monkeypatch):
+		e = _enricher(databazeknih_enabled=True)
+		monkeypatch.setattr(enrichers, "_http_get_html", lambda url, **kw: self.DBK_HIT)
+		assert e.series_exists("Heechee") is True
+
+	def test_dbk_no_results_page_fails(self, monkeypatch):
+		e = _enricher(databazeknih_enabled=True)
+		monkeypatch.setattr(enrichers, "_http_get_html", lambda url, **kw: self.DBK_EMPTY)
+		assert e.series_exists("Kulhánek") is False
+
+	def test_dbk_result_row_of_other_serie_fails(self, monkeypatch):
+		"""A serie link exists but names a DIFFERENT series — not evidence."""
+		e = _enricher(databazeknih_enabled=True)
+		monkeypatch.setattr(enrichers, "_http_get_html", lambda url, **kw: self.DBK_HIT)
+		assert e.series_exists("Komisař Maigret") is False
+
+	def test_legie_serie_row_passes(self, monkeypatch):
+		e = _enricher(legie_enabled=True)
+		monkeypatch.setattr(enrichers, "_http_get_html", lambda url, **kw: self.LEGIE_HIT)
+		assert e.series_exists("Heechee") is True
+
+	def test_legie_author_results_without_serie_row_fail(self, monkeypatch):
+		e = _enricher(legie_enabled=True)
+		monkeypatch.setattr(enrichers, "_http_get_html", lambda url, **kw: self.LEGIE_AUTHOR_PAGE)
+		assert e.series_exists("Isaac Asimov") is False

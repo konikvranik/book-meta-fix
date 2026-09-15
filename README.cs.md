@@ -19,7 +19,7 @@ při opětovném prohledání.
 | [docs/cs/diagrams.md](docs/cs/diagrams.md) | UML diagramy — sekvice analyze/apply, rozhodovací tok jedné knihy, lifecycle review záznamu (Mermaid) |
 | [docs/cs/concepts.md](docs/cs/concepts.md) | Skupiny verdiktů, filozofie verifikace, kaskáda oprav, smyčka LLM, formát review.yaml |
 | [docs/cs/how-to/](docs/cs/how-to/index.md) | Návody krok za krokem (spustit dávku, vyladit rate limit, ladit, …) |
-| [docs/cs/corruption-catalog.md](docs/cs/corruption-catalog.md) | Kategorie C1–C19 s reálnými příklady |
+| [docs/cs/corruption-catalog.md](docs/cs/corruption-catalog.md) | Kategorie C1–C22 s reálnými příklady |
 | [AGENTS.md](AGENTS.md) | Průvodce pro AI agenty upravující tento kód (konvence, rozložení, zádrhele) |
 
 ## Stav
@@ -643,7 +643,7 @@ spolehlivost; obálka je klasifikována jako generovaná při spolehlivosti ≥ 
 **Kategorie:**
 - `C11` — detekována generovaná obálka (NEEDS_REVIEW). Náhrada se navrhne,
   pokud je k dispozici `cover_url`.
-- `MISSING_COVER` — chybí úplně přiložený `cover.jpg` (AUTO_FIXABLE).
+- `MISSING_COVER` — chybí přiložený `cover.jpg`, nebo ho žádný dekodér nepřečte (0 bajtů / poškozený) (AUTO_FIXABLE).
 
 **Průběh** (stejné jako u návrhů metadat — žádný samostatný příkaz):
 
@@ -728,7 +728,7 @@ $EDITOR src/book_meta_fix/locales/cs/LC_MESSAGES/bmf.po
 make i18n-compile   # .po -> .mo
 ```
 
-## Kategorie poškození (C1–C19)
+## Kategorie poškození (C1–C22)
 
 Úplný katalog s reálnými příklady najdete v
 [`docs/cs/corruption-catalog.md`](docs/cs/corruption-catalog.md). Souhrn:
@@ -754,6 +754,8 @@ make i18n-compile   # .po -> .mo
 | C17 | neplatný soubor e-knihy (obsah neodpovídá žádnému formátu knihy) — emituje jen `bmf clean --files` | NEEDS_REVIEW (návrh smazání) |
 | C18 | varianty názvů sérií (fold, alias tabulka, podezření doložená číslováním/online) — úroveň knihovny, emituje jen `bmf normalize`; pořadové číslo dílu se nikdy nenavrhuje | AUTO_FIXABLE / NEEDS_REVIEW |
 | C19 | duplicitní složky téhož díla (zfoldovaný autor+název, nebo shodné platné ISBN; páry s rozdílnými roky zůstávají stranou, pokud si ISBN neodpovídají) — úroveň knihovny, emituje jen `bmf merge`; sloučuje `bmf apply` přes `action: merge` | AUTO_FIXABLE (ISBN-potvrzené) / NEEDS_REVIEW |
+| C21 | v poli série je jméno autora knihy (neočíslovaná „série“, která sérií není); očíslované protagonistické série a vícesvazkové autorové série zůstávají/jen reportují | AUTO_FIXABLE (HIGH) / NEEDS_REVIEW |
+| C22 | jméno série/protagonisty se vyskytuje mezi autory („Jason Dark, John Sinclair“); odebere se, pokud první zůstává skutečný autor — samostatné house-name autorství zůstává | AUTO_FIXABLE |
 | — | EMPTY_BOOK (jen metadata/zálohy/obálka — knižní soubor chybí) | AUTO_FIXABLE (`needfix/empty/`) |
 | — | MISSING_ISBN / MISSING_YEAR | AUTO_FIXABLE (obohacení) |
 | — | MISSING_COVER (chybí přiložený `cover.jpg`) | AUTO_FIXABLE (stažení) |

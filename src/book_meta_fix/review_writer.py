@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from .detectors import all_diagnoses
-from .models import Verdict
+from .models import Confidence, Verdict
 from .review import (
 	_COVER_CATEGORIES,
 	_build_current,
@@ -241,6 +241,28 @@ class ReviewWriter:
 			entry = dict(prior_entry)
 			entry["current"] = _build_current(meta)
 			entry["path"] = _relative_path(meta, self.library_root)
+			# New deterministic detector proposals (C21/C22 author↔series
+			# confusion) OVERLAY onto a carried decision: the user's decision is
+			# untouchable, but a rule that did not exist when they decided may
+			# add its mechanical fix to the proposal — without this, every book
+			# decided before C21/C22 existed would carry its pollution through
+			# every future apply untouched. Narrow on purpose: only the
+			# series-hygiene keys ("series": null, "authors" list), never
+			# title/author/identity, and only from the HIGH-confidence shapes.
+			for d in all_diagnoses(diag):
+				if (
+					d.category in ("C21", "C22")
+					and d.confidence == Confidence.HIGH
+					and getattr(d, "proposed", None)
+				):
+					proposed = dict(entry.get("proposed") or {})
+					changed = False
+					for k, v in d.proposed.items():
+						if k not in proposed:
+							proposed[k] = v
+							changed = True
+					if changed:
+						entry["proposed"] = proposed
 			# Close-the-loop pre-fill, the carried twin of the fresh-entry one
 			# (see _build_entry): an ACCEPTED entry whose proposal projects to
 			# a detector-clean state is finished the moment apply writes it —
@@ -502,13 +524,24 @@ class ReviewWriter:
 		# other rule fires on the leftover sidecar metadata and none of those
 		# verdicts matters — the accept only parks the dead record in
 		# needfix/empty/ (nothing is deleted).
-		if action is None and diag.category in ("C13", "EMPTY_BOOK") and (
+		#
+		# C21/C22 (author↔series confusion) join the deterministic family the
+		# same way, HIGH only: clearing a series that IS the book's own author
+		# or dropping a series-name entry from the authors list is mechanical
+		# and identity-preserving (the FIRST author never changes; the identity
+		# gate below does not read the "authors" list key, so the C22 shape is
+		# admitted here on the rule's own guarantee). The MEDIUM shapes
+		# (multi-series book, possible real author-branded series) stay pending.
+		if action is None and diag.category in ("C13", "EMPTY_BOOK", "C21", "C22") and (
 			diag.category == "EMPTY_BOOK"
-			or all(
-				d.category in ("C13", "C14", *_COVER_CATEGORIES)
-				or d.verdict == Verdict.OK
-				or d.category in ("MISSING_ISBN", "MISSING_YEAR", "MISSING_COVER")
-				for d in all_diagnoses(diag)
+			or (
+				(diag.category not in ("C21", "C22") or diag.confidence == Confidence.HIGH)
+				and all(
+					d.category in ("C13", "C14", "C21", "C22", *_COVER_CATEGORIES)
+					or d.verdict == Verdict.OK
+					or d.category in ("MISSING_ISBN", "MISSING_YEAR", "MISSING_COVER")
+					for d in all_diagnoses(diag)
+				)
 			)
 		) and (not proposed or self._proposal_preserves_identity(proposed, meta)):
 			action = "accept"

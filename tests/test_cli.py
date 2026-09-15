@@ -377,7 +377,9 @@ class TestAbsRescan:
 		self._age_library(tmp_path)
 		# Item 0 stores metadata.json as its cover — the ffmpeg "Invalid
 		# data found" row; item 1 has a real, existing cover.jpg.
-		(books[1] / "cover.jpg").write_bytes(b"\xff\xd8jpg")
+		from test_covers import _real_cover
+
+		_real_cover(books[1] / "cover.jpg")
 		self._fake_abs(monkeypatch, list(books), covers={
 			0: self._abs_cover(books[0], "metadata.json"),
 			1: self._abs_cover(books[1], "cover.jpg"),
@@ -416,7 +418,9 @@ class TestAbsRescan:
 		books = self._make_library(tmp_path)
 		self._age_library(tmp_path)
 		for book in books:
-			(book / "cover.jpg").write_bytes(b"\xff\xd8jpg")
+			from test_covers import _real_cover
+
+			_real_cover(book / "cover.jpg")
 		self._fake_abs(monkeypatch, list(books), covers={
 			0: self._abs_cover(books[0], "cover.jpg"),
 			1: self._abs_cover(books[1], "cover.jpg"),
@@ -1078,3 +1082,128 @@ class TestNormalizeSeriesAndOverview:
 		assert proposed == {"Zaklinac": "Zaklínač", "Mark Stone (edice)": "Mark Stone"}
 		# The book's own volume index is never part of the proposal.
 		assert all("series_index" not in e["proposed"] for e in c18)
+
+
+class TestCleanCoversHardening:
+	"""The 2026-09 cover-cleanup fixes: bare strip-covers also strips invalid
+	covers, the invalid sweep walks the WHOLE tree (not just book folders),
+	and a book whose cover was bakked re-enters review (verified cleared)."""
+
+	def test_bare_strip_covers_now_also_invalid(self, tmp_path: Path) -> None:
+		"""The deprecated alias historically left --invalid OFF — undecodable
+		covers survived "the cleanup" (measured: 746 zero-byte cover.jpg)."""
+		folder = tmp_path / "Autor - Kniha"
+		folder.mkdir()
+		(folder / "metadata.opf").write_text(TestStripCovers._MINI_OPF)
+		(folder / "cover.jpg").write_bytes(b"")  # the 0-byte shape
+		result = CliRunner().invoke(main, ["strip-covers", "--library", str(tmp_path), "--no-cache", "--apply"])
+		assert result.exit_code == 0
+		assert (folder / "cover.jpg.bak").is_file()
+		assert not (folder / "cover.jpg").exists()
+
+	def test_invalid_sweep_reaches_nonbook_folders_and_subdirs(self, tmp_path: Path) -> None:
+		"""The per-book pass only sees top-level files of sidecar-carrying
+		folders; the library-wide walk also catches leftover calibre temp
+		trees and covers in book SUBDIRECTORIES."""
+		book = tmp_path / "Autor" / "Kniha (1)"
+		book.mkdir(parents=True)
+		(book / "metadata.json").write_text('{"title": "Kniha"}', encoding="utf-8")
+		(book / "sub").mkdir()
+		(book / "sub" / "cover.html").write_bytes(b"<html>not an image</html>")
+		orphan = tmp_path / "temp_calibre" / "x_epub_meta"
+		orphan.mkdir(parents=True)
+		(orphan / "cover.xhtml").write_bytes(b"<html/>")
+
+		result = CliRunner().invoke(main, ["clean", "--library", str(tmp_path), "--no-cache", "--covers", "--apply"])
+		assert result.exit_code == 0
+		assert "Invalid covers outside book folders" in result.output
+		assert (book / "sub" / "cover.html.bak").is_file()
+		assert (orphan / "cover.xhtml.bak").is_file()
+
+	def test_invalid_sweep_dry_run_touches_nothing(self, tmp_path: Path) -> None:
+		orphan = tmp_path / "loose"
+		orphan.mkdir()
+		(orphan / "cover.jpg").write_bytes(b"junk")
+		result = CliRunner().invoke(main, ["clean", "--library", str(tmp_path), "--no-covers", "--invalid", "external"])
+		assert result.exit_code == 0
+		assert (orphan / "cover.jpg").is_file()
+		assert (orphan / "cover.jpg.bak").exists() is False
+		assert "Dry-run" in result.output
+
+	def _verified_book_with_generated_cover(self, tmp_path: Path) -> Path:
+		import json as _json
+
+		folder = tmp_path / "Autor" / "Kniha (1)"
+		folder.mkdir(parents=True)
+		(folder / "metadata.json").write_text(_json.dumps({
+			"title": "Kniha", "authors": ["Autor"], "verified": True,
+		}), encoding="utf-8")
+		_solid_cover(folder / "cover.jpg")
+		return folder
+
+	def test_generated_cover_bak_reopens_verified_book(self, tmp_path: Path) -> None:
+		"""A verified book whose (generated) cover was removed must re-enter
+		review, else analyze (skip-verified default) never re-fetches one."""
+		import json as _json
+
+		folder = self._verified_book_with_generated_cover(tmp_path)
+		result = CliRunner().invoke(main, [
+			"clean", "--library", str(tmp_path), "--no-cache", "--covers", "--apply", "--no-unverified",
+		])
+		assert result.exit_code == 0
+		assert (folder / "cover.jpg.bak").is_file()
+		data = _json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
+		assert data.get("verified") is not True
+
+
+class TestCleanUnverifiedSeriesAudit:
+	"""The deterministic series-vs-author audit: a verified book whose series
+	entry names an author (own or library-known) is re-opened so C21/C22 can
+	fix it — an ISBN must NOT preempt the re-open."""
+
+	def _verified_book(self, tmp_path: Path, *, authors, series, isbn=None) -> Path:
+		import json as _json
+
+		folder = tmp_path / "Autor" / "Kniha (1)"
+		folder.mkdir(parents=True)
+		manifest = {"title": "Kniha", "authors": authors, "verified": True, "series": series}
+		if isbn:
+			manifest["isbn"] = isbn
+		(folder / "metadata.json").write_text(_json.dumps(manifest), encoding="utf-8")
+		return folder
+
+	def test_protagonist_series_reopens_despite_isbn(self, tmp_path: Path, monkeypatch) -> None:
+		import json as _json
+
+		b = self._verified_book(
+			tmp_path,
+			authors=["Jason Dark", "John Sinclair"], series=["John Sinclair #111"],
+			isbn="9788072440928",
+		)
+		monkeypatch.setenv("BMF_CACHE", str(tmp_path / "cache.db"))
+		result = CliRunner().invoke(main, ["clean", "--library", str(tmp_path), "--no-covers", "--apply"])
+		assert result.exit_code == 0
+		data = _json.loads((b / "metadata.json").read_text(encoding="utf-8"))
+		assert data.get("verified") is not True
+
+	def test_author_named_series_reopens(self, tmp_path: Path, monkeypatch) -> None:
+		import json as _json
+
+		b = self._verified_book(tmp_path, authors=["Jiří Kosek ml."], series=[{"name": "Jiri Kosek", "index": ""}])
+		monkeypatch.setenv("BMF_CACHE", str(tmp_path / "cache.db"))
+		result = CliRunner().invoke(main, ["clean", "--library", str(tmp_path), "--no-covers", "--apply"])
+		assert result.exit_code == 0
+		data = _json.loads((b / "metadata.json").read_text(encoding="utf-8"))
+		assert data.get("verified") is not True
+
+	def test_legit_series_keeps_verified(self, tmp_path: Path, monkeypatch) -> None:
+		import json as _json
+
+		b = self._verified_book(
+			tmp_path, authors=["Jason Dark"], series=["John Sinclair #111"], isbn="9788072440928",
+		)
+		monkeypatch.setenv("BMF_CACHE", str(tmp_path / "cache.db"))
+		result = CliRunner().invoke(main, ["clean", "--library", str(tmp_path), "--no-covers", "--apply"])
+		assert result.exit_code == 0
+		data = _json.loads((b / "metadata.json").read_text(encoding="utf-8"))
+		assert data.get("verified") is True

@@ -1,6 +1,6 @@
 [English](../corruption-catalog.md) | **Čeština**
 
-# Katalog poškození (C1–C18)
+# Katalog poškození (C1–C22)
 
 Odvozeno empiricky z CZ/SK calibre knihovny s ~5 440 knihami. Každá kategorie
 má reálné příklady (calibre_id, author_folder, title) nalezené během
@@ -415,6 +415,56 @@ Cache řádky obou složek se invalidují.
 
 **Verdikt:** AUTO_FIXABLE (ISBN-potvrzené) / NEEDS_REVIEW (přesná shoda bez
 ISBN důkazu)
+
+## C21 — Jméno autora v poli série
+
+Pole série obsahuje autora dané knihy — neočíslovaná „série“, která sérií
+vůbec není. Nameraný tvar z knihovny: `authors: ["Jiří Kosek ml."]`
+s `series: "Jiri Kosek"` (rodina LLM/enrichment pollution; pole bylo
+vyplněno nejbližším jménem po ruce). Pravidlo běží při každém
+`bmf analyze`:
+
+* **HIGH + `proposed: {series: null}`** (accept předvyplněné, série se při
+  apply smaže), když zfoldované jméno série odpovídá jednomu z vlastních
+  autorů knihy — přesná fold shoda, varianty přes KnownAuthorPool, nebo
+  konzervativní fuzzy vrstva (token_sort ≥ 85, obě strany ≥ 8 znaků).
+* Záměrně NEvypaluje u **očíslované** série odpovídající osobě — to je
+  konvence pulp protagonistů („John Sinclair #163“ od Jasona Darka): série
+  je skutečná a protagonistu mezi AUTORY řeší C22.
+* **Vícesvazková** autorova edice („IBM Redbooks“ od IBM Redbooks — rozhodují
+  součty knih v knihovně, které analyze pravidlu předává) a **multi-series**
+  knihy se reportují MEDIUM/pending — null návrh by smazal i druhou sérii
+  (politiky C18).
+* Série rovnající se NÁZVU nikdy nevypaluje („Ocelová krysa #5“ je legitimní
+  edice).
+
+Dvojče na straně obohacování: `pipeline._series_is_author` zahazuje
+autorsky tvarovanou nebo neověřenou sérii z každé LLM odpovědi („do série
+nic než skutečná série“) a `Enricher.series_exists` už vyžaduje skutečný
+řádek výsledku série, jehož jméno fuzzy odpovídá (≥ 70), ne obyčejný
+substring `serie/`. `bmf clean --unverified` znovu otevírá verified knihy,
+jejichž série jmenuje autora (i s ISBN — ISBN z nesprávné série nedělá
+správnou), takže pravidlo dosáhne i na už zavřené znečištění.
+
+**Verdikt:** AUTO_FIXABLE (HIGH, shoda s vlastním autorem) / NEEDS_REVIEW
+(střední tvary)
+
+## C22 — Jméno série mezi autory
+
+Jméno série/protagonisty sedí v seznamu AUTORŮ — změřeno v reálné
+knihovně: `authors: ["Jason Dark", "John Sinclair"]` se sérií
+`"John Sinclair #111"`, `["Kurt Brand", "Ren Dhark"]` s `"Ren Dhark #40"`.
+Protagonista není autor; skutečný autor zůstává první. Oprava je
+bezztrátová: jméno zůstává jako série, pouze opouští seznam autorů
+(`proposed: {authors: [...]}` bez sériových jmen, accept předvyplněné).
+
+Vypaluje jen když zbude alespoň jeden skutečný AUTOR — samostatné
+house-name autorství (`authors: ["Mark Stone"]`, série `"Mark Stone #35"`)
+je vlastní konvence vydání a zůstává nedotčeno. Knihy rozhodnuté před
+vznikem pravidla dostanou návrh OVERLAY přes svůj přenesený review záznam
+(samo rozhodnutí se nikdy nepřepisuje).
+
+**Verdikt:** AUTO_FIXABLE (HIGH)
 
 ## EMPTY_BOOK — Mrtvý záznam (knižní soubor chybí)
 
