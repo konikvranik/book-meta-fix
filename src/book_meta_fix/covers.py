@@ -287,9 +287,9 @@ def refresh_placeholder_registry(*, timeout: float = 6.0) -> None:
 		# Only a decodable image may enter the registry — an error page or a
 		# redirect body under the placeholder URL must not flag real covers.
 		try:
-			from PIL import Image
-
 			import io
+
+			from PIL import Image
 
 			with Image.open(io.BytesIO(content)) as img:
 				img.load()

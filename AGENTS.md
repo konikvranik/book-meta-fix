@@ -544,6 +544,29 @@ src/book_meta_fix/
                   zero-byte cover.jpg files landed in the library, masked
                   forever by rule_missing_cover's bare is_file — the rule and
                   the apply guards now require a decodable sidecar,
+                  sidecar_cover_usable / width > 0). Fifth "signal",
+                  vendor_placeholder: databazeknih serves a shared branding
+                  image (light-gray "D" sheet) as the JSON-LD `image` of
+                  coverless books — refused by URL at every entry
+                  (is_placeholder_cover_url: the detail parse, stale
+                  enrich-cache payloads in _cache_get, download_cover BEFORE
+                  any network I/O) and flagged by md5 when its BYTES are on
+                  disk (two generations measured: current 3625 B is caught
+                  by pixel math anyway, the former 38050 B is INVISIBLE to
+                  it — JPEG noise spreads it over 6+ quantized buckets).
+                  The hash registry is NOT frozen: seed constants cover the
+                  unfetchable former generation, refresh_placeholder_
+                  registry (called once per analyze run after the Enricher
+                  is built) re-fetches the placeholder URL and learns the
+                  CURRENT md5 into Cache.placeholder_md5, so a swapped
+                  branding image self-registers without a code change
+                  the OPF-WIRED bytes first (no render fallback at all — an
+                  EPUB without a wired cover has no cover) and the ebook-meta
+                  path rejects empty/undecodable extracts (calibre exits 0
+                  writing NOTHING; mkstemp pre-created the file and 746
+                  zero-byte cover.jpg files landed in the library, masked
+                  forever by rule_missing_cover's bare is_file — the rule and
+                  the apply guards now require a decodable sidecar,
                   sidecar_cover_usable / width > 0)
   abs_client.py    Audiobookshelf API client + the engine of `bmf abs-rescan`: changed_folders
                   (stat-only walk over iter_book_folders, max file mtime ≥ since), match_items
