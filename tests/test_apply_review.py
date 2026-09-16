@@ -197,6 +197,21 @@ class TestCoverDownloadGate:
 			apply_review(review, library, dry_run=False, place=False)
 		dl.assert_not_called()
 
+	def test_download_missing_cover_when_existing_cover_is_generated(self, tmp_path):
+		"""MISSING_COVER + cover.jpg exists but is GENERATED (e.g. a merge
+		gap-filled a duplicate's placeholder back in) → NOT "already filled";
+		the recovery must run instead of freezing the junk in place."""
+		library = tmp_path / "lib"
+		book = self._seed_book(library)
+		from test_covers import _solid_jpeg_bytes
+
+		(book / "cover.jpg").write_bytes(_solid_jpeg_bytes())
+		review = tmp_path / "review.yaml"
+		_write_review(review, [self._entry(1, "MISSING_COVER")])
+		with patch("book_meta_fix.covers.download_cover") as dl:
+			apply_review(review, library, dry_run=False, place=False)
+		dl.assert_called_once()
+
 	def test_download_when_c11_is_secondary_diagnosis(self, tmp_path):
 		"""A book whose primary diagnosis is C2 but that also has C11 (in the
 		`diagnoses` list) gets its cover downloaded — multi-problem, one apply."""

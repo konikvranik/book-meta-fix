@@ -90,6 +90,50 @@ def _minimalist_white_cover(path: Path, size: tuple[int, int] = (600, 900)) -> N
 	img.save(path)
 
 
+def _beige_text_page(
+	path: Path, size: tuple[int, int] = (600, 900), *, lines: int = 18,
+	paper=(212, 198, 168), ink=(72, 62, 48),
+) -> None:
+	"""A scanned page of text on AGED paper — signal 4's absolute gates reject
+	it (beige is under the near-white luminance and over the colourless
+	spread); only the paper-relative doc_scan signal can see the lines."""
+	img = Image.new("RGB", size, color=paper)
+	px = img.load()
+	import random
+
+	random.seed(5)
+	line_h, gap = 8, 13
+	y = 70
+	drawn = 0
+	while y + line_h < size[1] - 70 and drawn < lines:
+		for dy in range(line_h):
+			for x in range(80, size[0] - 80):
+				if random.random() < 0.62:
+					px[x, y + dy] = ink
+		y += line_h + gap
+		drawn += 1
+	img.save(path)
+
+
+def _faint_text_page(path: Path, size: tuple[int, int] = (600, 900)) -> None:
+	"""White paper with LIGHT-GREY text (lum ~170 — above signal 4's absolute
+	ink threshold 128, so the absolute band count sees nothing). The doc_scan
+	signal's RELATIVE ink (paper minus 25) catches every line."""
+	_beige_text_page(path, size=size, paper=(250, 250, 250), ink=(170, 170, 170))
+
+
+def _line_art_cover(path: Path, size: tuple[int, int] = (600, 900)) -> None:
+	"""Beige paper with TALL dark illustration blocks — dark runs taller than
+	a text line must NOT count as lines, keeping line-art covers real."""
+	img = Image.new("RGB", size, color=(212, 198, 168))
+	px = img.load()
+	for x0 in range(60, size[0] - 110, 110):
+		for y in range(120, size[1] - 120):
+			for x in range(x0, x0 + 70):
+				px[x, y] = (60, 52, 40)
+	img.save(path)
+
+
 def _real_cover(path: Path) -> None:
 	"""A small decodable, NON-generated image — the fixture stand-in for
 	"a cover exists" shared across test modules.
@@ -777,10 +821,44 @@ class TestStripGeneratedCovers:
 		result = strip_generated_covers(tmp_path, dry_run=True)
 		assert result.touched is True
 		assert result.cover_bak is True
+		assert result.cover_baks == ["cover.jpg"]
 		assert result.stripped_epubs == ["b.epub"]
 		assert cover.is_file()
 		assert not (tmp_path / "cover.jpg.bak").exists()
 		assert epub_cover_image(epub) is not None  # still embedded
+
+	def test_generated_cover_png_sibling_bakked(self, tmp_path: Path) -> None:
+		"""A generated cover named cover.png — the classic calibre name is
+		absent but ABS picks cover.* by EXTENSION, so the pass must bak every
+		candidate, not just cover.jpg (measured 2026-09-16: 66 such siblings
+		survived a clean+abs-rescan loop, re-picked after every row clear)."""
+		cover = tmp_path / "cover.png"
+		_solid_cover(cover)
+		dry = strip_generated_covers(tmp_path, dry_run=True)
+		assert dry.cover_baks == ["cover.png"]
+		assert cover.is_file()  # dry-run renames nothing
+		result = strip_generated_covers(tmp_path, dry_run=False)
+		assert result.cover_baks == ["cover.png"]
+		assert result.cover_bak is True
+		assert (tmp_path / "cover.png.bak").is_file()
+		assert not cover.exists()
+
+	def test_generated_cover_gif_bakked(self, tmp_path: Path) -> None:
+		# A generated cover.gif — not even an ABS image EXTENSION, but the
+		# cover.* NAME makes it pickable by the same candidate set.
+		cover = tmp_path / "cover.gif"
+		_solid_cover(cover)
+		result = strip_generated_covers(tmp_path, dry_run=False)
+		assert result.cover_baks == ["cover.gif"]
+		assert (tmp_path / "cover.gif.bak").is_file()
+
+	def test_real_image_candidates_untouched(self, tmp_path: Path) -> None:
+		cover = tmp_path / "cover.png"
+		_gradient_cover(cover, size=(300, 450))
+		result = strip_generated_covers(tmp_path, dry_run=False)
+		assert result.cover_baks == []
+		assert result.cover_bak is False
+		assert cover.is_file()
 
 	def test_apply_baks_sidecar_and_strips_epub(self, tmp_path: Path) -> None:
 		cover = tmp_path / "cover.jpg"
@@ -1219,6 +1297,45 @@ class TestCoverAnalysisCache:
 		finally:
 			covers_mod.set_cover_cache(None)
 			cache.close()
+
+
+class TestDocScanSignal:
+	"""Signal 6: a scanned page of text whose PAPER defeats signal 4's absolute
+	gates — aged beige paper (under the near-white gate, over the colourless
+	gate) or faint grey ink (above the lum-128 threshold). Ink is measured
+	RELATIVE to the paper median; only short line-height bands count (tall
+	dark runs are illustration blocks). Both shapes measured in the wild
+	2026-09-16 on covers surviving clean+abs-rescan as "real"."""
+
+	def test_aged_paper_text_scan_is_generated(self, tmp_path: Path) -> None:
+		cover = tmp_path / "cover.jpg"
+		_beige_text_page(cover)
+		info = analyze_cover(cover)
+		assert info.is_generated is True
+		assert any(s.startswith("doc_scan") for s in info.signals)
+
+	def test_faint_ink_text_scan_is_generated(self, tmp_path: Path) -> None:
+		cover = tmp_path / "cover.jpg"
+		_faint_text_page(cover)
+		info = analyze_cover(cover)
+		assert info.is_generated is True
+		assert any(s.startswith("doc_scan") for s in info.signals)
+
+	def test_minimalist_title_block_gets_no_doc_scan(self, tmp_path: Path) -> None:
+		# A short title block (few lines) on tinted paper — a real minimalist
+		# cover shape; the line COUNT is the separator, not the paper tone.
+		cover = tmp_path / "cover.jpg"
+		_beige_text_page(cover, lines=3)
+		info = analyze_cover(cover)
+		assert not any(s.startswith("doc_scan") for s in info.signals)
+
+	def test_line_art_blocks_get_no_doc_scan(self, tmp_path: Path) -> None:
+		# Tall dark illustration runs are not text LINES — only short bands
+		# count, so line-art covers stay real however dark their paper.
+		cover = tmp_path / "cover.jpg"
+		_line_art_cover(cover)
+		info = analyze_cover(cover)
+		assert not any(s.startswith("doc_scan") for s in info.signals)
 
 
 class TestTextPageSignal:

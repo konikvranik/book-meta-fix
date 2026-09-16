@@ -1284,7 +1284,7 @@ def _print_strip_covers_summary(results, do_apply: bool, reopened: int = 0) -> N
 	t.add_column(_("Metric"), style="bold")
 	t.add_column(_("Count"), justify="right")
 	t.add_row(_("books scanned"), str(len(results)), style="dim")
-	t.add_row(_("cover.jpg renamed to .bak"), str(sum(1 for r in results if r.cover_bak)))
+	t.add_row(_("generated cover files renamed to .bak"), str(sum(len(r.cover_baks) for r in results)))
 	t.add_row(_("invalid cover files renamed to .bak"), str(sum(len(r.invalid_baks) for r in results)))
 	t.add_row(_("small cover files renamed to .bak"), str(sum(len(r.small_baks) for r in results)))
 	t.add_row(_("embedded EPUB covers stripped"), str(sum(len(r.stripped_epubs) for r in results)))
@@ -1302,8 +1302,8 @@ def _print_strip_covers_summary(results, do_apply: bool, reopened: int = 0) -> N
 		t.add_column(_("Actions"), style="dim")
 		for r in touched[:25]:
 			parts = []
-			if r.cover_bak:
-				parts.append("cover.jpg -> .bak")
+			if r.cover_baks:
+				parts.append(_("generated -> .bak: {files}").format(files=", ".join(r.cover_baks)))
 			if r.stripped_epubs:
 				parts.append(_("stripped: {files}").format(files=", ".join(r.stripped_epubs)))
 			if r.invalid_baks:

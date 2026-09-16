@@ -501,6 +501,40 @@ class TestOrganizeCollisions:
 		assert (f2 / "T - A.epub").is_file()
 		assert not (tmp_path / "A" / "T").is_dir()
 
+	def test_merge_does_not_carry_generated_loser_cover(self, tmp_path):
+		"""A loser cover.jpg the C11 math classifies generated never gap-fills
+		the winner — a merge must not resurrect a placeholder a clean run had
+		just bakked (measured 2026-09-16: a duplicate's identical generated
+		cover moved back in as cover.jpg minutes after the bak)."""
+		from book_meta_fix.mover import _merge_format_files
+		from test_covers import _solid_cover
+
+		winner = tmp_path / "A" / "T"
+		winner.mkdir(parents=True)
+		loser = tmp_path / "loser"
+		loser.mkdir()
+		_solid_cover(loser / "cover.jpg")
+		(loser / "T - A.epub").write_text("x", encoding="utf-8")
+		moves = _merge_format_files(loser, winner, 200, dry_run=False)
+		assert ("cover.jpg", "<skipped:generated-cover>") in moves
+		assert not (winner / "cover.jpg").exists()
+		assert (winner / "T - A.epub").is_file()
+
+	def test_merge_carries_real_loser_cover(self, tmp_path):
+		# A REAL loser cover still gap-fills the winner — only the generated
+		# shape is refused.
+		from book_meta_fix.mover import _merge_format_files
+		from test_covers import _real_cover
+
+		winner = tmp_path / "A" / "T"
+		winner.mkdir(parents=True)
+		loser = tmp_path / "loser"
+		loser.mkdir()
+		_real_cover(loser / "cover.jpg")
+		moves = _merge_format_files(loser, winner, 200, dry_run=False)
+		assert ("cover.jpg", "cover.jpg") in moves
+		assert (winner / "cover.jpg").is_file()
+
 	def test_same_title_author_year_no_isbn_merges(self, tmp_path):
 		_make_book(tmp_path, "A", "T", 100, year=1999, fmt_files=(".epub",))
 		_, m2 = _make_book(tmp_path, "A", "T", 200, year=1999, fmt_files=(".pdb",))

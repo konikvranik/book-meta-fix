@@ -111,6 +111,21 @@ _TEXT_INK_ROW_PIXELS = 3  # an "ink row" carries at least this many dark px
 # lowest observed false positive.
 _TEXT_MIN_INK_BANDS = 11
 
+# Document-scan signal (signal 6): the SAME page-of-text shape as signal 4,
+# but measured RELATIVE to the page's own paper tone. Two junk shapes the
+# absolute gates cannot see (both measured in the wild 2026-09-16 on covers
+# surviving clean+abs-rescan): a FAINT photocopy (light-grey text above the
+# absolute ink threshold, white paper) and text on AGED paper (beige tone:
+# under the near-white gate, over the colourless gate). Ink = darker than
+# the paper MEDIAN by this much; a text LINE at the 150x200 downscale is a
+# short band (<= _DOC_SCAN_MAX_LINE_HEIGHT rows) — tall dark runs are
+# illustration blocks, not lines, and keep line-art covers real.
+_DOC_SCAN_MIN_PAPER_LUM = 150  # paper must be light (a dark poster's light text never counts)
+_DOC_SCAN_PAPER_TOL = 18  # |lum - median| within this = paper pixel
+_DOC_SCAN_INK_DROP = 25  # darker than the paper median by this = ink
+_DOC_SCAN_MIN_PAPER_FRAC = 0.55
+_DOC_SCAN_MAX_LINE_HEIGHT = 3
+
 # Vendor no-cover placeholders: databazeknih serves a shared branding image
 # (a light-gray sheet with its "D" logo) as the JSON-LD `image` of coverless
 # books. The URL name is stable; the BYTES are not — two generations measured
@@ -148,8 +163,10 @@ _PLACEHOLDER_COVER_MD5 = {
 # payload with a different/missing version is treated as a cache miss and
 # recomputed — old rows self-heal lazily as they are read. v4 added the
 # calibre JPEG-COM marker: parchment-template covers measured as "real"
-# under v3 carry the marker and must recompute.
-_COVER_ANALYSIS_VERSION = 4
+# under v3 carry the marker and must recompute. v5 added the doc_scan
+# signal (paper-relative text lines): faint photocopies and aged-paper
+# text scans measured as "real" under v4 and must recompute.
+_COVER_ANALYSIS_VERSION = 5
 
 
 @dataclass
@@ -492,6 +509,49 @@ def _text_page_stats(small) -> tuple[float, float, int]:
 	return white_frac, colour_frac, bands
 
 
+def _doc_scan_stats(small) -> tuple[int, float, int]:
+	"""(paper median luminance, paper fraction, text-line count) of the
+	150x200 RGB downscale — the raw material of the document-scan signal.
+
+	The paper tone is the MEDIAN luminance (a text page is mostly paper, so
+	the median IS the paper; artwork has no single dominant tone). Paper
+	pixels sit within _DOC_SCAN_PAPER_TOL of the median; ink is RELATIVE —
+	darker than the paper by _DOC_SCAN_INK_DROP — which catches the two
+	shapes the absolute signal-4 gates cannot see: faint photocopies (ink
+	above lum 128) and aged-paper scans (beige tone under the near-white
+	gate, over the colourless gate). A text LINE at this resolution is a
+	short band (<= _DOC_SCAN_MAX_LINE_HEIGHT rows tall) — tall dark runs are
+	illustration blocks and are not counted, keeping line-art covers real.
+	"""
+	grey = small.convert("L")
+	hist = grey.histogram()
+	total = sum(hist) or 1
+	cum = 0
+	med_lum = 255
+	for lum, count in enumerate(hist):
+		cum += count
+		if cum * 2 >= total:
+			med_lum = lum
+			break
+	paper_frac = sum(hist[max(0, med_lum - _DOC_SCAN_PAPER_TOL):med_lum + _DOC_SCAN_PAPER_TOL + 1]) / total
+	ink_threshold = max(0, med_lum - _DOC_SCAN_INK_DROP)
+	w, h = small.size
+	gp = grey.load()
+	lines = 0
+	band_top: int | None = None
+	for y in range(h):
+		is_ink = sum(1 for x in range(w) if gp[x, y] <= ink_threshold) >= _TEXT_INK_ROW_PIXELS
+		if is_ink and band_top is None:
+			band_top = y
+		elif not is_ink and band_top is not None:
+			if y - band_top <= _DOC_SCAN_MAX_LINE_HEIGHT:
+				lines += 1
+			band_top = None
+	if band_top is not None and h - band_top <= _DOC_SCAN_MAX_LINE_HEIGHT:
+		lines += 1
+	return med_lum, paper_frac, lines
+
+
 def _classify_pixels(small, width: int, height: int) -> CoverInfo:
 	"""Pixel math shared by the path-based and bytes-based analyzers.
 
@@ -555,6 +615,23 @@ def _classify_pixels(small, width: int, height: int) -> CoverInfo:
 	):
 		info.confidence += 0.5
 		info.signals.append(f"text_page ({bands} ink bands, {white_frac:.0%} white)")
+
+	# Signal 6: document scan — the same page-of-text shape, measured
+	# RELATIVE to the page's own paper tone. Catches the two shapes signal 4
+	# is blind to (see _doc_scan_stats): light paper (not near-white enough)
+	# or light ink (above the absolute threshold). Short line bands only —
+	# tall dark runs are illustrations.
+	try:
+		doc_med, paper_frac, lines = _doc_scan_stats(small)
+	except Exception:  # noqa: BLE001
+		doc_med, paper_frac, lines = 0, 0.0, 0
+	if (
+		doc_med >= _DOC_SCAN_MIN_PAPER_LUM
+		and paper_frac >= _DOC_SCAN_MIN_PAPER_FRAC
+		and lines >= _TEXT_MIN_INK_BANDS
+	):
+		info.confidence += 0.5
+		info.signals.append(f"doc_scan ({lines} lines, {paper_frac:.0%} paper)")
 
 	info.is_generated = info.confidence >= _GENERATED_THRESHOLD
 	# Clamp confidence to [0, 1] for display.
@@ -1019,8 +1096,12 @@ class CoverStripResult:
 	"""Outcome of one book folder's pass of :func:`strip_generated_covers`."""
 
 	path: str
-	# cover.jpg was (or would be, under dry-run) renamed to cover.jpg.bak.
+	# ANY generated cover candidate (cover.* or image-extension file — the
+	# set ABS picks from) was (or would be, under dry-run) renamed to .bak.
 	cover_bak: bool = False
+	# The FILE NAMES of those generated sidecars (cover.jpg, cover.png, …);
+	# cover_bak is just bool(cover_baks) kept for the summary counters.
+	cover_baks: list[str] = field(default_factory=list)
 	# EPUB file names whose embedded cover was (or would be) stripped.
 	stripped_epubs: list[str] = field(default_factory=list)
 	# EPUBs whose cover probed as generated but the strip failed — surfaced in
@@ -1133,12 +1214,14 @@ def strip_generated_covers(
 	(each ``"external"`` = loose files in the folder, ``"embedded"`` =
 	covers inside EPUBs, ``"both"``) plus one external-only threshold:
 
-	- *generated* (default ``"both"``; ``None`` disables) — the C11 pixel
-	  math: ``cover.jpg`` classified generated → renamed ``cover.jpg.bak``
+	- *generated* (default ``"both"``; ``None`` disables) — the C11
+	  classification: every cover candidate a scanner may pick (an
+	  image-extension file or a ``cover.*`` name — the same set ABS chooses
+	  item covers from) classified generated → renamed ``<name>.bak``
 	  (reversible; overwrites any existing .bak), an EPUB whose embedded
 	  cover probes generated → :func:`strip_cover_from_book` surgery. Bulk
-	  cleanup before the pipeline refetches real covers: once cover.jpg is
-	  gone the book re-fires MISSING_COVER, whose recovery path exists.
+	  cleanup before the pipeline refetches real covers: once the sidecars
+	  are gone the book re-fires MISSING_COVER, whose recovery path exists.
 	- *invalid* (default ``None`` = off) — covers no image decoder can read
 	  (:func:`image_is_readable`): an HTML page saved as .jpg, a truncated
 	  download, ``cover.html``. Externals (any image-extension file or
@@ -1184,20 +1267,27 @@ def strip_generated_covers(
 			log.warning("cover strip failed for %s: %s", path, exc)
 			return False
 
-	cover_path = folder / "cover.jpg"
-	if _ext(generated) and cover_path.is_file() and analyze_cover(cover_path).is_generated:
-		if dry_run:
-			result.cover_bak = True
-		else:
-			try:
-				os.replace(cover_path, cover_path.with_suffix(cover_path.suffix + ".bak"))
-				result.cover_bak = True
-			except OSError as exc:
-				log.warning("sidecar cover strip failed for %s: %s", folder, exc)
+	# GENERATED sidecars: EVERY candidate a scanner may pick as the item
+	# cover — an image-extension file or a cover.* name
+	# (_invalid_cover_candidate, the same set ABS chooses from) — not just
+	# cover.jpg. Measured 2026-09-16: 66 of 68 covers still shown as
+	# screenshots in ABS after clean+abs-rescan were generated cover.png /
+	# cover.gif siblings the cover.jpg-only pass never saw, re-picked by
+	# every rescan after the ABS row clear.
+	claimed: set[str] = set()
+	if _ext(generated):
+		for p in sorted(folder.iterdir()):
+			if not _invalid_cover_candidate(p):
+				continue
+			if not analyze_cover(p).is_generated:
+				continue
+			if _bak_away(p, result.cover_baks):
+				claimed.add(p.name)
+	result.cover_bak = bool(result.cover_baks)
 
 	if _ext(invalid):
 		for p in sorted(folder.iterdir()):
-			# A generated cover.jpg cannot also be invalid (it decoded into
+			# A generated cover cannot also be invalid (it decoded into
 			# pixels for the C11 math) — the two passes never collide.
 			if _invalid_cover_candidate(p) and not image_is_readable(p):
 				_bak_away(p, result.invalid_baks)
@@ -1209,9 +1299,9 @@ def strip_generated_covers(
 		for p in sorted(folder.iterdir()):
 			if not _invalid_cover_candidate(p):
 				continue
-			# The generated pass already claimed cover.jpg — under dry-run the
-			# file is still there and must not be reported a second time.
-			if p.name == "cover.jpg" and result.cover_bak:
+			# The generated pass already claimed this file — under dry-run it
+			# is still on disk and must not be reported a second time.
+			if p.name in claimed:
 				continue
 			info = analyze_cover(p)
 			# width == 0: undecodable or no Pillow — the invalid pass owns

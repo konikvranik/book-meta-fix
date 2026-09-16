@@ -2305,8 +2305,11 @@ def _apply_action(meta: BookMeta, item) -> None:  # noqa: ANN001
 			if "C11" in cats and info is not None and info.width and not info.is_generated:
 				# Placeholder already replaced with a real cover.
 				log.info("cover already replaced, skipping id=%s", item.id)
-			elif "MISSING_COVER" in cats and info is not None and info.width:
-				# Missing cover already filled (decodable = a real cover).
+			elif "MISSING_COVER" in cats and info is not None and info.width and not info.is_generated:
+				# Missing cover already filled — but a GENERATED cover does
+				# not count as filled: a merge can gap-fill a duplicate's
+				# placeholder back in (measured 2026-09-16), and honouring it
+				# here would freeze the junk in place instead of recovering.
 				log.info("cover already present, skipping id=%s", item.id)
 			else:
 				ok = False
