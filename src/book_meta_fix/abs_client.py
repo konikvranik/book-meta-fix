@@ -83,6 +83,30 @@ def _http_get_json(
 		return None
 
 
+def _http_get_bytes(
+	url: str, *, timeout: float = 15.0, headers: dict[str, str] | None = None,
+	session: requests.Session | None = None,
+) -> bytes | None:
+	"""GET returning the raw response body, or None on any failure.
+
+	Same monkeypatch seam shape as _http_get_json/_http_delete (the
+	no-network tests stub this too): used to fetch an item's stored cover
+	image bytes for the generated-marker check of the --fix-covers audit —
+	coverPath targets outside the library folders (ABS's own /metadata
+	cache) are not on our mount, so the only way to see their bytes is the
+	server's own /api/items/{id}/cover endpoint.
+	"""
+	try:
+		r = (session or requests).get(url, timeout=timeout, headers=headers)
+	except requests.RequestException as e:
+		log.debug("HTTP GET failed for %s: %s", url, e)
+		return None
+	if r.status_code != 200:
+		log.debug("HTTP GET %s -> %s", url, r.status_code)
+		return None
+	return r.content
+
+
 def _http_post(
 	url: str,
 	*,
@@ -302,6 +326,21 @@ class AudiobookshelfClient:
 		"""
 		r = _http_delete(f"{self.base_url}/api/items/{item_id}/cover", headers=self._headers, session=self._session)
 		return r is not None and r.status_code == 200
+
+	def get_item_cover(self, item_id: str) -> bytes | None:
+		"""Fetch the item's currently stored cover image bytes (GET cover).
+
+		The read-side companion of clear_item_cover, feeding the
+		--fix-covers audit for coverPath targets OUTSIDE the library folders
+		(ABS's own /metadata cache): those files are not on our mount, so
+		their content — the only witness of a calibre-generated placeholder
+		hiding in a cached row — is only reachable through the API. Returns
+		None on any failure (the audit then leaves the row alone).
+		"""
+		return _http_get_bytes(
+			f"{self.base_url}/api/items/{item_id}/cover",
+			headers=self._headers, session=self._session,
+		)
 
 	def item_series_map(self, library_id: str) -> dict[str, list[str]] | None:
 		"""item id -> ABS series names, from the paged series listing.
@@ -526,12 +565,16 @@ class BrokenCover:
 
 	item: AbsItem
 	cover_path: str
-	reason: str  # "ext" (target is not an image file) | "missing" (target gone)
+	# "ext" (target is not an image file) | "missing" (target gone)
+	# | "unreadable" (target exists but no decoder reads it)
+	# | "generated" (outside-library target carrying calibre's generated
+	#   marker — e.g. ABS's own cached copy of a stripped placeholder)
+	reason: str
 
 
 def broken_cover_items(
 	items: list[AbsItem], library_root: Path, abs_folder_paths: list[str],
-	progress_callback: Any = None,
+	progress_callback: Any = None, fetch_cover: Any = None,
 ) -> list[BrokenCover]:
 	"""Pick the items whose ABS-DB coverPath row is junk, not a real cover.
 
@@ -542,10 +585,15 @@ def broken_cover_items(
 	("Invalid data found when processing input" on metadata.json or
 	cover.html). A row is broken when its target's extension is not an
 	image type, or — when the target maps under an ABS library folder onto
-	*library_root* — the mapped file no longer exists. Targets outside the
-	library folders (ABS's own uploaded covers under its /metadata dir) get
-	the extension check only: their storage belongs to the ABS server, not
-	to our mount.
+	*library_root* — the mapped file no longer exists or no decoder reads
+	it. Targets outside the library folders (ABS's own uploaded/cached
+	covers under its /metadata dir) are not on our mount: with
+	*fetch_cover* (AudiobookshelfClient.get_item_cover) the audit fetches
+	their bytes through the API and breaks the row when the image carries
+	calibre's "Generated cover" marker — the cached screenshot of a
+	strip-covers cleanup. Marker-only on purpose (no pixel math): a false
+	positive here deletes a cover a user uploaded through the ABS UI.
+	Without *fetch_cover* those rows keep the extension check only.
 
 	*progress_callback* (called as ``callback(done, total)`` after every
 	item audited, same contract as scan_items) lets the CLI drive a progress
@@ -558,7 +606,7 @@ def broken_cover_items(
 	out: list[BrokenCover] = []
 	done = 0
 	for item in items:
-		broken = _broken_cover_row(item, library_root, folders)
+		broken = _broken_cover_row(item, library_root, folders, fetch_cover)
 		if broken is not None:
 			out.append(broken)
 		done += 1
@@ -567,7 +615,9 @@ def broken_cover_items(
 	return out
 
 
-def _broken_cover_row(item: AbsItem, library_root: Path, folders: list[str]) -> BrokenCover | None:
+def _broken_cover_row(
+	item: AbsItem, library_root: Path, folders: list[str], fetch_cover: Any = None,
+) -> BrokenCover | None:
 	"""The broken-cover verdict for one item (None = the row is fine)."""
 	cover = _norm_posix(item.cover_path or "")
 	if not cover or "/" not in cover:
@@ -592,6 +642,20 @@ def _broken_cover_row(item: AbsItem, library_root: Path, folders: list[str]) -> 
 
 		if not image_is_readable(mapped):
 			return BrokenCover(item=item, cover_path=cover, reason="unreadable")
+		return None
+	# Outside every library folder: the target is not on our mount (ABS's own
+	# /metadata cache or an uploaded cover). Existence cannot be judged — but
+	# when the caller can fetch the bytes, calibre's generated marker is
+	# decisive and unfalsifiable; a fetch failure or a marker-free image
+	# leaves the row alone (never clear a possibly-user-uploaded cover on a
+	# guess).
+	if fetch_cover is not None:
+		data = fetch_cover(item.id)
+		if data:
+			from .covers import is_calibre_generated_cover
+
+			if is_calibre_generated_cover(data):
+				return BrokenCover(item=item, cover_path=cover, reason="generated")
 	return None
 
 

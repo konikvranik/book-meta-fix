@@ -2201,7 +2201,11 @@ def abs_rescan(library: Path | None, since: str, url: str | None, abs_library: s
 	build writes or heals), at a missing file, or at a file no image decoder
 	reads (a 0-byte leftover) is nulled via
 	DELETE /api/items/{id}/cover and the item joins the rescan, so ABS
-	picks a real cover again. Run `bmf clean --covers --apply`
+	picks a real cover again. Rows pointing OUTSIDE the library folders
+	(ABS's own /metadata cache — not on our mount) are fetched through the
+	API and cleared when the image carries calibre's "Generated cover"
+	marker (a cached screenshot placeholder; marker-only, a user-uploaded
+	cover is never touched). Run `bmf clean --covers --apply`
 	FIRST — a folder still holding an unreadable cover.jpg would just get
 	it re-picked.
 
@@ -2323,7 +2327,10 @@ def abs_rescan(library: Path | None, since: str, url: str | None, abs_library: s
 			def _audit_cb(done: int, total: int) -> None:
 				progress.update(task_id, completed=done)
 
-			broken = broken_cover_items(items, cfg.library, abs_folders, progress_callback=_audit_cb)
+			broken = broken_cover_items(
+				items, cfg.library, abs_folders, progress_callback=_audit_cb,
+				fetch_cover=client.get_item_cover,
+			)
 		if not broken:
 			console.print("[green]" + _("No broken item covers found in the ABS database.") + "[/green]")
 		else:
@@ -2571,6 +2578,7 @@ def _print_broken_covers(broken, do_apply: bool) -> None:  # noqa: ANN001
 			"ext": _("not an image file"),
 			"missing": _("file missing"),
 			"unreadable": _("file not decodable"),
+			"generated": _("calibre-generated placeholder"),
 		}.get(b.reason, b.reason)
 		t.add_row((b.item.title or b.item.id)[:50], b.cover_path[-64:], reason)
 	if len(broken) > 25:

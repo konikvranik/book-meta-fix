@@ -559,7 +559,24 @@ src/book_meta_fix/
                   registry (called once per analyze run after the Enricher
                   is built) re-fetches the placeholder URL and learns the
                   CURRENT md5 into Cache.placeholder_md5, so a swapped
-                  branding image self-registers without a code change
+                  branding image self-registers without a code change.
+                  Sixth signal, calibre_comment: calibre's cover GENERATOR
+                  writes "Generated cover: calibre <version>" into the JPEG
+                  COM comment of every cover it produces (_calibre_comment_
+                  signal reads img.info["comment"]/applist in both
+                  _analyze_cover_uncached and analyze_cover_bytes → generated,
+                  conf 1.0; is_calibre_generated_cover is the marker-only
+                  predicate for the ABS audit). Measured 2026-09-16: the
+                  parchment default template (beige vignette + ornamental
+                  border, exactly 1200x1600) survives EVERY pixel signal —
+                  the gradient spreads over 6+ quantized buckets and it is
+                  neither near-white nor colourless — and three such covers
+                  rode through `clean --covers --generated --apply`
+                  untouched (which is also why C11 never flagged those
+                  books); the marker is deterministic and cannot
+                  false-positive. _COVER_ANALYSIS_VERSION bumped to 4 with
+                  it — the v3 "real" verdicts frozen in the covers table
+                  recompute lazily
   abs_client.py    Audiobookshelf API client + the engine of `bmf abs-rescan`: changed_folders
                   (stat-only walk over iter_book_folders, max file mtime ≥ since), match_items
                   (folder → ABS item: exact path → relPath → unique folder-name match — covers
@@ -569,7 +586,7 @@ src/book_meta_fix/
                   plain scans skip "unchanged" folders, so apply's disk writes are only pushed
                   into ABS through this per-item rescan; scan endpoints need an ADMIN token
                   (BMF_ABS_URL/BMF_ABS_TOKEN/BMF_ABS_LIBRARY/BMF_ABS_WORKERS; module-level
-                  _http_get_json/_http_post/_http_delete are the monkeypatch seams for the
+                  _http_get_json/_http_get_bytes/_http_post/_http_delete are the monkeypatch seams for the
                   no-network tests and take an optional session= kwarg — the client shares ONE
                   requests.Session across all calls so the per-item loop keeps TCP+TLS
                   connections alive instead of handshaking per call). scan_items fans the items
@@ -596,7 +613,14 @@ src/book_meta_fix/
                   "Invalid data found" rows no current ABS build writes or heals) or when it
                   maps under an ABS library folder onto library_root and the file is gone
                   (paths outside the folders, e.g. ABS's uploaded /metadata/items covers,
-                  get the ext check only); an existing mapped file no decoder
+                  get the ext check only — PLUS, when the CLI passes fetch_cover=
+                  client.get_item_cover, a one-shot GET of the stored cover bytes through
+                  the API and a clear when the image carries calibre's generated marker,
+                  reason "generated": a cached screenshot placeholder hiding in ABS's own
+                  /metadata cache where the disk cleanup cannot reach; MARKER-ONLY on
+                  purpose — pixel math there could delete a cover the user uploaded via
+                  the ABS UI, and a fetch failure is "no verdict", never "clear");
+                  an existing mapped file no decoder
                   reads (0-byte leftover) is also broken — reason "unreadable"
                   (746 such rows passed the old exists()-only audit); clear_item_cover nulls the row via
                   DELETE /api/items/{id}/cover and the cleared ids join the rescan set

@@ -29,6 +29,15 @@ dělá příkaz to, co dřív — vygenerované obálky, oba rozsahy.
 - **ostatní formáty (MOBI/AZW3/PRC, PDF)** — záměrně se netknou: jejich
   obálky žijí v binárních EXTH hlavičkách bez bezpečné cesty ven.
 
+Detekce je klasifikace C11: pixelové signály (plochá default šablona,
+málo kvantovaných barev, vyrenderovaná textová stránka) PLUS calibrův
+vlastní marker — JPEG komentář `Generated cover: calibre <verze>`, který
+calibrův generátor obálek zapíše do každého svého výstupu. Marker je
+deterministický a nemůže dát falešný poplach (skener ani vydavatel ho
+nikdy nezapíše); chytá pergamenovou default šablonu (béžový vignette +
+ozdobný rámeček + text titulu), jejíž gradient přechytí každý pixelový
+signál.
+
 Po zápisovém běhu další `bmf analyze` uvidí `MISSING_COVER` (chybí
 `cover.jpg`) a doplní skutečnou obálku — z URL enricheru, nebo extrakcí
 skutečné embedded obálky z e-knihy. To je zamýšlený follow-up workflow:

@@ -107,15 +107,21 @@ cover path per item — another slow NFS sweep on a big library, tracked by
 its own progress bar:
 
 - **dry-run** (default): lists the broken rows — item title, stored cover
-  path, reason (not an image file / file missing).
+  path, reason (not an image file / file missing / file not decodable /
+  calibre-generated placeholder).
 - **`--apply`**: nulls each broken row via `DELETE /api/items/{id}/cover`
   (which also purges ABS's cover cache) and adds the items to the rescan,
   so ABS picks a real cover again — an image file in the folder (cover.*
   preferred) or the e-book's embedded cover. A row is "broken" when its
-  target has a non-image extension, or when it maps into your library and
-  the file no longer exists (e.g. it was renamed to `.bak` by
-  `bmf strip-covers`). Uploaded covers stored under ABS's own
-  `/metadata/items/…` directory are left alone.
+  target has a non-image extension, when it maps into your library and the
+  file no longer exists (e.g. it was renamed to `.bak` by
+  `bmf strip-covers`), or when no decoder reads it (a 0-byte leftover).
+  Targets outside the library folders — ABS's own uploaded/cached covers
+  under `/metadata/items/…` — are not on your mount: the audit fetches
+  their bytes through the API and clears the row only when the image
+  carries calibre's `Generated cover` marker (a cached screenshot
+  placeholder). Marker-only on purpose — a cover you uploaded through the
+  ABS UI is never touched.
 
 Run the file-side cleanup FIRST: `bmf strip-covers --invalid --apply`,
 then `bmf abs-rescan --fix-covers --apply`. A folder that still holds an

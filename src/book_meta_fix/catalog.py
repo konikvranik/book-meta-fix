@@ -97,7 +97,10 @@ CATEGORY_HELP: dict[str, tuple[str, str]] = {
 		  "analysis: a Calibre template (flat gradient from title text) OR a "
 		  "rendered text page (calibre's ebook-meta draws page 1 as a "
 		  "'default cover' for a coverless book — a white sheet of black "
-		  "text lines). A real cover is proposed from the enrichers when one "
+		  "text lines), OR by calibre's own marker — the JPEG comment "
+		  "'Generated cover: calibre <version>' its generator writes into "
+		  "every cover (the parchment default template defeats every pixel "
+		  "signal). A real cover is proposed from the enrichers when one "
 		  "is available; the GUI can also recover an embedded cover from "
 		  "inside the book file (page renders are rejected)."),
 	),

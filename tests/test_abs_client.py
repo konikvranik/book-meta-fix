@@ -499,6 +499,84 @@ class TestBrokenCoverItems:
 		assert [b.item.id for b in broken] == ["a"]
 		assert seen == [(1, 3), (2, 3), (3, 3)]
 
+	def test_outside_library_calibre_marker_is_broken(self, tmp_path: Path) -> None:
+		# A coverPath under ABS's own /metadata cache cannot be judged from
+		# the mount — but the bytes fetched through the API carry calibre's
+		# "Generated cover" marker (the cached screenshot of a placeholder
+		# the disk cleanup already bakked), and that is decisive.
+		from test_covers import _calibre_marked_jpeg_bytes
+
+		marked = _calibre_marked_jpeg_bytes(size=(60, 90))
+		fetched: list[str] = []
+		items = [self._item("a", "/metadata/items/item-a/cover.jpg")]
+		broken = broken_cover_items(
+			items, tmp_path, ["/data/books"],
+			fetch_cover=lambda iid: (fetched.append(iid) or marked),
+		)
+		assert fetched == ["a"]
+		assert [(b.item.id, b.reason) for b in broken] == [("a", "generated")]
+
+	def test_outside_library_clean_bytes_stay(self, tmp_path: Path) -> None:
+		# Marker-only on purpose: an uploaded real cover (no marker) is never
+		# cleared even though we can fetch its bytes.
+		from test_covers import _gradient_jpeg_bytes
+
+		clean = _gradient_jpeg_bytes()
+		items = [self._item("a", "/metadata/items/item-a/cover.jpg")]
+		assert broken_cover_items(
+			items, tmp_path, ["/data/books"], fetch_cover=lambda iid: clean,
+		) == []
+
+	def test_outside_library_fetch_failure_skips(self, tmp_path: Path) -> None:
+		# A fetch error is "no verdict", never "clear" — rows outside the
+		# mount must not be cleared on a guess.
+		items = [self._item("a", "/metadata/items/item-a/cover.jpg")]
+		assert broken_cover_items(
+			items, tmp_path, ["/data/books"], fetch_cover=lambda iid: None,
+		) == []
+
+	def test_outside_library_row_untouched_without_fetcher(self, tmp_path: Path) -> None:
+		# Without a fetcher (old callers/tests) the audit degrades to the
+		# historical extension-only behaviour for outside-library rows.
+		items = [self._item("a", "/metadata/items/item-a/cover.jpg")]
+		assert broken_cover_items(items, tmp_path, ["/data/books"]) == []
+
+	def test_marker_never_fetched_for_library_rows(self, tmp_path: Path) -> None:
+		# Rows mapping INTO the library are judged from disk (missing/
+		# unreadable) — the byte fetch is the outside-library tool only.
+		(tmp_path / "Autor/Kniha (1)").mkdir(parents=True)
+		from test_covers import _real_cover
+
+		_real_cover(tmp_path / "Autor/Kniha (1)/cover.jpg")
+		calls: list[str] = []
+		items = [self._item("a", "/data/books/Autor/Kniha (1)/cover.jpg")]
+		assert broken_cover_items(
+			items, tmp_path, ["/data/books"], fetch_cover=lambda iid: calls.append(iid),
+		) == []
+		assert calls == []
+
+
+class TestGetItemCover:
+	"""AudiobookshelfClient.get_item_cover — the audit's byte fetch."""
+
+	def test_returns_body_bytes(self, monkeypatch) -> None:
+		def _fake(url, *, timeout=15.0, headers=None, session=None):
+			# The seam's contract: parsed body bytes on 200, None on failure
+			# (the _http_get_bytes body, not the response object).
+			return b"\xff\xd8jpeg-bytes"
+
+		monkeypatch.setattr(abs_client, "_http_get_bytes", _fake)
+		client = AudiobookshelfClient("http://abs.lan:13378", "s3cret")
+		assert client.get_item_cover("abc") == b"\xff\xd8jpeg-bytes"
+
+	def test_none_on_http_failure(self, monkeypatch) -> None:
+		def _fake(url, *, timeout=15.0, headers=None, session=None):
+			return None
+
+		monkeypatch.setattr(abs_client, "_http_get_bytes", _fake)
+		client = AudiobookshelfClient("http://abs.lan:13378", "s3cret")
+		assert client.get_item_cover("abc") is None
+
 
 # ---------------------------------------------------------------------------
 # stale_series_items

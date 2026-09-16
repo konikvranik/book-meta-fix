@@ -28,6 +28,14 @@ command does what it always did — generated covers, both scopes.
 - **Non-EPUB formats (MOBI/AZW3/PRC, PDF)** — deliberately untouched: their
   covers live in binary EXTH headers with no safe removal path.
 
+Detection is C11's classification: the pixel signals (solid default
+template, few quantized colours, a rendered text page) PLUS calibre's own
+marker — the JPEG comment `Generated cover: calibre <version>` that
+calibre's cover generator writes into every image it produces. The marker
+is deterministic and cannot false-positive (a scanner or publisher never
+writes it); it catches the parchment default template (beige vignette +
+ornamental border + title text) whose gradient defeats every pixel signal.
+
 After a write run the next `bmf analyze` sees `MISSING_COVER` (no `cover.jpg`)
 and refetches a real cover — from an enricher URL or by extracting a genuine
 embedded cover from the book file. That is the intended follow-up workflow:

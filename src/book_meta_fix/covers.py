@@ -19,6 +19,12 @@ Detection signals (any one reaching the 0.5 threshold classifies as generated):
     the JSON-LD ``image`` of coverless books — deterministic hash, not
     pixel math; the registry self-refreshes from the live URL, see
     refresh_placeholder_registry)                       generated, conf 1.0
+  - Calibre's own marker: the JPEG COM comment ``Generated cover: calibre
+    <version>`` written by calibre's cover generator. The parchment
+    default template (beige vignette + ornamental border + title text)
+    survives every pixel signal — its gradient spreads over 6+ quantized
+    buckets and it is neither near-white nor colourless — yet the comment
+    is unforgeable self-confession                        generated, conf 1.0
 
 The "few significant colours" signal is the workhorse and is noise-tolerant:
 JPEG artefacts fragment a solid background into many near-identical colours,
@@ -140,8 +146,10 @@ _PLACEHOLDER_COVER_MD5 = {
 # so a detector change would otherwise leave every pre-change "not generated"
 # verdict frozen forever (an unchanged file never re-analyzes). A stored
 # payload with a different/missing version is treated as a cache miss and
-# recomputed — old rows self-heal lazily as they are read.
-_COVER_ANALYSIS_VERSION = 3
+# recomputed — old rows self-heal lazily as they are read. v4 added the
+# calibre JPEG-COM marker: parchment-template covers measured as "real"
+# under v3 carry the marker and must recompute.
+_COVER_ANALYSIS_VERSION = 4
 
 
 @dataclass
@@ -307,12 +315,67 @@ def refresh_placeholder_registry(*, timeout: float = 6.0) -> None:
 
 def _vendor_placeholder_signal(data: bytes) -> str | None:
 	"""Signal name when *data* is byte-identical to a known vendor no-cover
-	placeholder, else None."""
+    placeholder, else None."""
 	import hashlib
 
 	if hashlib.md5(data).hexdigest() in _known_placeholder_md5s():
 		return "vendor_placeholder (databazeknih)"
 	return None
+
+
+def _calibre_comment_signal(img) -> str | None:
+	"""Signal name when the image carries calibre's cover-generator marker.
+
+	Calibre writes ``Generated cover: calibre <version>`` into the JPEG COM
+	comment of every cover its generator produces — a deterministic
+	self-confession the pixel math cannot replace: the parchment default
+	template (beige vignette, ornamental border, title text) spreads over
+	6+ quantized colour buckets and is neither near-white nor colourless, so
+	every colour/text signal misses it (measured 2026-09-16 on three covers
+	surviving `clean --covers --generated --apply` in the real library).
+	A false positive is impossible by construction — the comment is written
+	by the generator only, never by a scanner or a publisher. Pillow exposes
+	JPEG COM segments in ``img.info["comment"]`` (>= 9.4) and in
+	``img.applist`` ("Comment" entries); both are checked, only the header
+	is read (no pixel decode needed).
+	"""
+	candidates: list[bytes] = []
+	comment = img.info.get("comment")
+	if isinstance(comment, bytes):
+		candidates.append(comment)
+	elif isinstance(comment, str):
+		candidates.append(comment.encode("utf-8", "replace"))
+	for _marker, payload in getattr(img, "applist", ()) or ():
+		if isinstance(payload, bytes):
+			candidates.append(payload)
+	for raw in candidates:
+		text = raw.decode("utf-8", "replace").strip()
+		if "generated cover" in text.lower():
+			shown = text if len(text) <= 60 else text[:57] + "..."
+			return f"calibre_comment ({shown})"
+	return None
+
+
+def is_calibre_generated_cover(data: bytes) -> bool:
+	"""True when the image bytes carry calibre's "Generated cover" marker.
+
+	Marker-only by design — no pixel math. The ABS-database cover audit
+	(abs_client.broken_cover_items) runs this on cover bytes fetched from
+	the server's own cache, where a false positive would delete a cover a
+	user uploaded through the ABS UI; the deterministic marker keeps that
+	impossible. Header read only; never raises.
+	"""
+	try:
+		import io
+
+		from PIL import Image
+	except ImportError:
+		return False
+	try:
+		with Image.open(io.BytesIO(data)) as img:
+			return _calibre_comment_signal(img) is not None
+	except Exception:  # noqa: BLE001
+		return False
 
 
 def _cover_key(path: Path) -> tuple[str, int, int] | None:
@@ -515,6 +578,9 @@ def _analyze_cover_uncached(path: Path) -> CoverInfo:
 		data = path.read_bytes()
 		with Image.open(io.BytesIO(data)) as img:
 			width, height = img.size
+			# The COM comment rides in the header — grab it while the image
+			# is open (info/applist are gone after close).
+			calibre_sig = _calibre_comment_signal(img)
 			# Downscale for colour analysis (the full-res image is overkill
 			# for counting dominant colours and is slow on 1200x1600).
 			small = img.convert("RGB").resize((150, 200))
@@ -522,11 +588,11 @@ def _analyze_cover_uncached(path: Path) -> CoverInfo:
 		log.debug("cover analysis failed for %s: %s", path, e)
 		return CoverInfo()
 	info = _classify_pixels(small, width, height)
-	sig = _vendor_placeholder_signal(data)
-	if sig:
-		info.signals.append(sig)
-		info.is_generated = True
-		info.confidence = 1.0
+	for sig in (_vendor_placeholder_signal(data), calibre_sig):
+		if sig:
+			info.signals.append(sig)
+			info.is_generated = True
+			info.confidence = 1.0
 	return info
 
 
@@ -548,16 +614,17 @@ def analyze_cover_bytes(data: bytes) -> CoverInfo:
 	try:
 		with Image.open(io.BytesIO(data)) as img:
 			width, height = img.size
+			calibre_sig = _calibre_comment_signal(img)
 			small = img.convert("RGB").resize((150, 200))
 	except Exception as e:  # noqa: BLE001
 		log.debug("cover byte analysis failed: %s", e)
 		return CoverInfo()
 	info = _classify_pixels(small, width, height)
-	sig = _vendor_placeholder_signal(data)
-	if sig:
-		info.signals.append(sig)
-		info.is_generated = True
-		info.confidence = 1.0
+	for sig in (_vendor_placeholder_signal(data), calibre_sig):
+		if sig:
+			info.signals.append(sig)
+			info.is_generated = True
+			info.confidence = 1.0
 	return info
 
 

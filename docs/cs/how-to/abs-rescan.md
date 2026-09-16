@@ -109,15 +109,21 @@ uloženou cestu obálky na položku — na velké knihovně další pomalé NFS
 sweepování, se svým progressbarem:
 
 - **dry-run** (výchozí): vypíše rozbité řádky — název položky, uloženou
-  cestu obálky, důvod (není obrázkový soubor / soubor chybí).
+  cestu obálky, důvod (není obrázkový soubor / soubor chybí / soubor
+  nejde dekódovat / generovaná calibre obálka).
 - **`--apply`**: každý rozbitý řádek vynuluje přes
   `DELETE /api/items/{id}/cover` (to zároveň pročistí cover cache ABS) a
   přidá položky do rescanu, takže ABS zvolí skutečnou obálku znovu —
   obrázkový soubor ve složce (preferuje cover.*) nebo embedded obálku
-  e-knihy. Řádek je „rozbitý“, když cíl nemá obrázkovou příponu, nebo když
+  e-knihy. Řádek je „rozbitý“, když cíl nemá obrázkovou příponu, když
   se mapuje do knihovny a soubor už neexistuje (třeba ho
-  `bmf strip-covers` přejmenoval na `.bak`). Nahrané obálky uložené ve
-  vlastním adresáři ABS (`/metadata/items/…`) se nechávají být.
+  `bmf strip-covers` přejmenoval na `.bak`), nebo když ho žádný dekodér
+  nepřečte (nulový zbytek). Cíle mimo složky knihovny — vlastní
+  nahrané/cacheované obálky ABS pod `/metadata/items/…` — na mountu
+  nejsou: audit stáhne jejich byty přes API a řádek vynuluje jen tehdy,
+  když obrázek nese calibrův marker `Generated cover` (screenshot
+  placeholder schovaný v cache). Záměrně jen marker — obálku nahranou
+  přes UI ABS audit nikdy nesmaže.
 
 Nejdřív vyčisti stranu souborů: `bmf strip-covers --invalid --apply` a
 pak až `bmf abs-rescan --fix-covers --apply`. Složka, ve které pořád leží

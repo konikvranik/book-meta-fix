@@ -143,6 +143,30 @@ def _gradient_jpeg_bytes(size: tuple[int, int] = (458, 500)) -> bytes:
 	return buf.getvalue()
 
 
+def _calibre_marked_jpeg_bytes(size: tuple[int, int] = (1200, 1600)) -> bytes:
+	"""Colour-rich JPEG carrying calibre's generator COM comment.
+
+	The parchment-template shape measured in the real library (2026-09-16):
+	a beige vignette + ornamental border is colour-rich enough to dodge every
+	pixel signal, yet calibre signs its generator output with
+	``Generated cover: calibre <version>`` in the JPEG COM comment.
+	"""
+	buf = io.BytesIO()
+	img = Image.new("RGB", size)
+	px = img.load()
+	import random
+
+	random.seed(11)
+	for y in range(size[1]):
+		for x in range(size[0]):
+			r = (x + y) % 256
+			g = (x * 2 + random.randint(0, 50)) % 256
+			b = (y * 2 + random.randint(0, 50)) % 256
+			px[x, y] = (r, g, b)
+	img.save(buf, format="JPEG", comment=b"Generated cover: calibre 5.42.0")
+	return buf.getvalue()
+
+
 # Not-an-image bytes: an HTML page saved where a cover image belongs — the
 # exact thing ABS feeds ffmpeg when it picks a cover by file extension.
 _HTML_BYTES = b"<html><head><title>Cover</title></head><body>Not an image.</body></html>"
@@ -213,6 +237,60 @@ class TestAnalyzeCover:
 	def test_nonexistent_file_returns_not_generated(self) -> None:
 		info = analyze_cover("/nonexistent/cover.jpg")
 		assert info.is_generated is False
+
+
+class TestCalibreCommentMarker:
+	"""Signal 5: calibre signs every generated cover with the JPEG COM comment
+	``Generated cover: calibre <version>``.
+
+	The parchment default template (beige vignette + ornamental border + title
+	text) is colour-rich enough to dodge every PIXEL signal yet is pure
+	placeholder — measured 2026-09-16 on three covers surviving
+	``clean --covers --generated --apply`` in the real library. The marker
+	cannot false-positive: scanners and publishers never write it.
+	"""
+
+	def test_marked_gradient_is_generated_despite_pixel_math(self, tmp_path: Path) -> None:
+		cover = tmp_path / "cover.jpg"
+		cover.write_bytes(_calibre_marked_jpeg_bytes())
+		info = analyze_cover(cover)
+		assert info.is_generated is True
+		assert info.confidence == 1.0
+		assert any(s.startswith("calibre_comment") for s in info.signals)
+
+	def test_same_gradient_without_marker_stays_real(self, tmp_path: Path) -> None:
+		# Byte-identical construction minus the comment — the pixel math alone
+		# must keep classifying this shape as real artwork.
+		cover = tmp_path / "cover.jpg"
+		cover.write_bytes(_gradient_jpeg_bytes(size=(1200, 1600)))
+		assert analyze_cover(cover).is_generated is False
+
+	def test_marker_match_is_case_insensitive(self, tmp_path: Path) -> None:
+		buf = io.BytesIO()
+		Image.new("RGB", (60, 90), color=(120, 30, 200)).save(
+			buf, format="JPEG", comment=b"generated COVER: calibre 3.21.0",
+		)
+		cover = tmp_path / "cover.jpg"
+		cover.write_bytes(buf.getvalue())
+		assert analyze_cover(cover).is_generated is True
+
+	def test_analyze_cover_bytes_honours_marker(self) -> None:
+		from book_meta_fix.covers import analyze_cover_bytes
+
+		info = analyze_cover_bytes(_calibre_marked_jpeg_bytes(size=(458, 500)))
+		assert info.is_generated is True
+		assert any(s.startswith("calibre_comment") for s in info.signals)
+
+	def test_is_calibre_generated_cover_marker_only(self) -> None:
+		# The ABS-audit helper: marker ONLY, never pixel math — a false
+		# positive there deletes a cover the user uploaded via the ABS UI.
+		from book_meta_fix.covers import is_calibre_generated_cover
+
+		assert is_calibre_generated_cover(_calibre_marked_jpeg_bytes(size=(60, 90))) is True
+		# A solid-colour placeholder WITHOUT the marker: pixel math would flag
+		# it, the marker-only helper must not.
+		assert is_calibre_generated_cover(_solid_jpeg_bytes()) is False
+		assert is_calibre_generated_cover(b"not an image at all") is False
 
 
 # ---------------------------------------------------------------------------
@@ -1115,6 +1193,32 @@ class TestCoverAnalysisCache:
 		assert analyze_cover(cover).width == 0
 		assert analyze_cover(cover).width == 0
 		assert calls["n"] == 2
+
+	def test_stale_version_verdict_recomputes(self, tmp_path: Path, monkeypatch) -> None:
+		"""A "real" verdict persisted under an older heuristic version must not
+		stay frozen — the v4 bump exists exactly for the calibre-marked covers
+		measured as "real" under v3 (their marker went unread)."""
+		from book_meta_fix import covers as covers_mod
+		from book_meta_fix.library import Cache
+
+		cover = tmp_path / "cover.jpg"
+		cover.write_bytes(_calibre_marked_jpeg_bytes())
+		st = cover.stat()
+		calls = self._counting_decode(monkeypatch)
+		cache = Cache(tmp_path / "cache.db")
+		try:
+			covers_mod.set_cover_cache(cache)
+			cache.put_cover(str(cover), st.st_mtime_ns, st.st_size, {
+				"v": 3, "width": 1200, "height": 1600,
+				"is_generated": False, "confidence": 0.2, "signals": ["dominant_bg (63%)"],
+			})
+			info = analyze_cover(cover)
+			assert calls["n"] == 1  # the v3 row was a miss, not a hit
+			assert info.is_generated is True
+			assert any(s.startswith("calibre_comment") for s in info.signals)
+		finally:
+			covers_mod.set_cover_cache(None)
+			cache.close()
 
 
 class TestTextPageSignal:
