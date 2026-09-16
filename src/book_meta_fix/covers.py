@@ -115,16 +115,31 @@ _TEXT_MIN_INK_BANDS = 11
 # but measured RELATIVE to the page's own paper tone. Two junk shapes the
 # absolute gates cannot see (both measured in the wild 2026-09-16 on covers
 # surviving clean+abs-rescan): a FAINT photocopy (light-grey text above the
-# absolute ink threshold, white paper) and text on AGED paper (beige tone:
-# under the near-white gate, over the colourless gate). Ink = darker than
-# the paper MEDIAN by this much; a text LINE at the 150x200 downscale is a
-# short band (<= _DOC_SCAN_MAX_LINE_HEIGHT rows) — tall dark runs are
-# illustration blocks, not lines, and keep line-art covers real.
-_DOC_SCAN_MIN_PAPER_LUM = 150  # paper must be light (a dark poster's light text never counts)
+# absolute ink threshold, white paper) and text on AGED or DARK paper (beige
+# tone: under the near-white gate, over the colourless gate). Ink = darker
+# than the paper MEDIAN by this much. Two alternative shapes fire:
+#   A) light paper with many SEPARATED short line bands (the classic page);
+#   B) a FULL-PAGE dense scan (any paper tone): ink rows cover most of the
+#      height AND the per-row ink comes in WORD-SIZED runs (longest
+#      contiguous run <= _DOC_SCAN_MAX_RUN_SHARE of the width) — solid
+#      illustration blocks have far longer runs and stay real.
+_DOC_SCAN_MIN_PAPER_LUM = 150  # branch A paper must be light
 _DOC_SCAN_PAPER_TOL = 18  # |lum - median| within this = paper pixel
 _DOC_SCAN_INK_DROP = 25  # darker than the paper median by this = ink
 _DOC_SCAN_MIN_PAPER_FRAC = 0.55
 _DOC_SCAN_MAX_LINE_HEIGHT = 3
+# Branch B (full-page dense scan) — calibrated on the two wild samples:
+# ink rows 64 % / 95 % of height, spans 96 % / 98 %, median word-run 9 % /
+# 19 % of width; the line-art control sits at a 47 % run.
+_DOC_SCAN_MIN_DARK_MED = 128  # even a dark scan's median must be lighter than deep black
+_DOC_SCAN_MIN_INK_ROWS_FRAC = 0.55
+_DOC_SCAN_MIN_SPAN = 0.80
+_DOC_SCAN_MAX_RUN_SHARE = 0.30
+# Median per-row ink coverage: a text line fills roughly half the row (words
+# + gaps), a noisy gradient's below-median smear stays around a third — the
+# measured 0.30 (gradient control) vs 0.42-0.47 (the two wild scans) puts
+# the gate between them with margin on the real-cover side.
+_DOC_SCAN_MIN_ROW_COVERAGE = 0.38
 
 # Vendor no-cover placeholders: databazeknih serves a shared branding image
 # (a light-gray sheet with its "D" logo) as the JSON-LD `image` of coverless
@@ -509,19 +524,23 @@ def _text_page_stats(small) -> tuple[float, float, int]:
 	return white_frac, colour_frac, bands
 
 
-def _doc_scan_stats(small) -> tuple[int, float, int]:
-	"""(paper median luminance, paper fraction, text-line count) of the
-	150x200 RGB downscale — the raw material of the document-scan signal.
+def _doc_scan_stats(small) -> tuple[int, float, int, float, float, float, float]:
+	"""(paper median luminance, paper fraction, short-line count, ink-row
+	span, median word-run share, ink-row density, median per-row ink
+	coverage) of the 150x200 downscale — the document-scan signal material.
 
 	The paper tone is the MEDIAN luminance (a text page is mostly paper, so
 	the median IS the paper; artwork has no single dominant tone). Paper
 	pixels sit within _DOC_SCAN_PAPER_TOL of the median; ink is RELATIVE —
-	darker than the paper by _DOC_SCAN_INK_DROP — which catches the two
-	shapes the absolute signal-4 gates cannot see: faint photocopies (ink
-	above lum 128) and aged-paper scans (beige tone under the near-white
-	gate, over the colourless gate). A text LINE at this resolution is a
-	short band (<= _DOC_SCAN_MAX_LINE_HEIGHT rows tall) — tall dark runs are
-	illustration blocks and are not counted, keeping line-art covers real.
+	darker than the paper by _DOC_SCAN_INK_DROP — which catches the shapes
+	the absolute signal-4 gates cannot see: faint photocopies (ink above
+	lum 128) and aged/dark-paper scans. A text LINE at this resolution is a
+	short band (<= _DOC_SCAN_MAX_LINE_HEIGHT rows); dense pages merge their
+	lines at the downscale, so the signal's second branch instead profiles
+	the WHOLE page: how much of the height carries ink (density), how far it
+	reaches (span), and whether the per-row ink comes in word-sized runs
+	(the longest contiguous run share) — solid illustration blocks have far
+	longer runs and stay real.
 	"""
 	grey = small.convert("L")
 	hist = grey.histogram()
@@ -539,17 +558,39 @@ def _doc_scan_stats(small) -> tuple[int, float, int]:
 	gp = grey.load()
 	lines = 0
 	band_top: int | None = None
+	ink_rows: list[int] = []
+	longest_runs: list[int] = []
+	coverages: list[float] = []
 	for y in range(h):
-		is_ink = sum(1 for x in range(w) if gp[x, y] <= ink_threshold) >= _TEXT_INK_ROW_PIXELS
+		run = best = 0
+		ink_px = 0
+		for x in range(w):
+			if gp[x, y] <= ink_threshold:
+				ink_px += 1
+				run += 1
+				best = max(best, run)
+			else:
+				run = 0
+		is_ink = ink_px >= _TEXT_INK_ROW_PIXELS
 		if is_ink and band_top is None:
 			band_top = y
 		elif not is_ink and band_top is not None:
 			if y - band_top <= _DOC_SCAN_MAX_LINE_HEIGHT:
 				lines += 1
 			band_top = None
+		if is_ink:
+			ink_rows.append(y)
+			longest_runs.append(best)
+			coverages.append(ink_px / w)
 	if band_top is not None and h - band_top <= _DOC_SCAN_MAX_LINE_HEIGHT:
 		lines += 1
-	return med_lum, paper_frac, lines
+	span = (ink_rows[-1] - ink_rows[0] + 1) / h if ink_rows else 0.0
+	density = len(ink_rows) / h if h else 0.0
+	longest_runs.sort()
+	run_share = (longest_runs[len(longest_runs) // 2] / w) if longest_runs else 1.0
+	coverages.sort()
+	coverage = coverages[len(coverages) // 2] if coverages else 1.0
+	return med_lum, paper_frac, lines, span, run_share, density, coverage
 
 
 def _classify_pixels(small, width: int, height: int) -> CoverInfo:
@@ -617,21 +658,31 @@ def _classify_pixels(small, width: int, height: int) -> CoverInfo:
 		info.signals.append(f"text_page ({bands} ink bands, {white_frac:.0%} white)")
 
 	# Signal 6: document scan — the same page-of-text shape, measured
-	# RELATIVE to the page's own paper tone. Catches the two shapes signal 4
-	# is blind to (see _doc_scan_stats): light paper (not near-white enough)
-	# or light ink (above the absolute threshold). Short line bands only —
-	# tall dark runs are illustrations.
+	# RELATIVE to the page's own paper tone. Branch A: light paper with
+	# many separated lines (the classic page the absolute signal-4 gates
+	# miss through faint ink or tinted paper). Branch B: a FULL-PAGE dense
+	# scan on ANY paper tone — ink covers most of the height in word-sized
+	# runs; solid illustration blocks have far longer runs and stay real.
 	try:
-		doc_med, paper_frac, lines = _doc_scan_stats(small)
+		doc_med, paper_frac, lines, span, run_share, density, coverage = _doc_scan_stats(small)
 	except Exception:  # noqa: BLE001
-		doc_med, paper_frac, lines = 0, 0.0, 0
-	if (
+		doc_med, paper_frac, lines, span, run_share, density, coverage = 0, 0.0, 0, 0.0, 1.0, 0.0, 1.0
+	doc_lines = (
 		doc_med >= _DOC_SCAN_MIN_PAPER_LUM
 		and paper_frac >= _DOC_SCAN_MIN_PAPER_FRAC
 		and lines >= _TEXT_MIN_INK_BANDS
-	):
+	)
+	doc_dense = (
+		doc_med >= _DOC_SCAN_MIN_DARK_MED
+		and density >= _DOC_SCAN_MIN_INK_ROWS_FRAC
+		and span >= _DOC_SCAN_MIN_SPAN
+		and run_share <= _DOC_SCAN_MAX_RUN_SHARE
+		and coverage >= _DOC_SCAN_MIN_ROW_COVERAGE
+	)
+	if doc_lines or doc_dense:
 		info.confidence += 0.5
-		info.signals.append(f"doc_scan ({lines} lines, {paper_frac:.0%} paper)")
+		shape = f"{lines} lines, {paper_frac:.0%} paper" if doc_lines else f"dense page, {density:.0%} ink rows"
+		info.signals.append(f"doc_scan ({shape})")
 
 	info.is_generated = info.confidence >= _GENERATED_THRESHOLD
 	# Clamp confidence to [0, 1] for display.
