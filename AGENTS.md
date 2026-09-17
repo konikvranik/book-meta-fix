@@ -574,9 +574,40 @@ src/book_meta_fix/
                   rode through `clean --covers --generated --apply`
                   untouched (which is also why C11 never flagged those
                   books); the marker is deterministic and cannot
-                  false-positive. _COVER_ANALYSIS_VERSION bumped to 4 with
-                  it — the v3 "real" verdicts frozen in the covers table
-                  recompute lazily
+                  false-positive. Seventh signal, doc_scan (v6, measured
+                  2026-09-17): databazeknih serves a scan of the book's
+                  own printed page (body text or the title page) as the
+                  cover image, so the enricher downloads it in good faith.
+                  Two branches, both COLOUR-GATED: every wild scan is
+                  grayscale end-to-end (colour fraction 0.0 %) while every
+                  real cover matching the page shape is colourful (artwork
+                  46-100 % — Děti Duny/Harry Potter covers measured;
+                  coloured typography 98 %) — WITHOUT the gate the v5
+                  dense branch flagged real artwork as "dense page" scans.
+                  Branch A: light paper + >= 16 separated text lines
+                  counted at 600x800 (_doc_scan_lines — the 150x200 grid
+                  MERGES scan row gaps, a 40-line page reads as 5-10
+                  bands; scans count 29-46 there, colourless real
+                  typography 1-3). Branch B: full-page DENSE colourless
+                  page (ink rows >= 55 % of height in word-sized runs —
+                  catches b/w scans with no resolvable lines). The line
+                  count is LAZY: only colourless light-paper covers pay
+                  the 600x800 pass. download_cover's pixel gate refuses
+                  the doc_scan class too (v5 refused only text_page — a
+                  parallel apply re-downloaded the just-bakked scan within
+                  minutes, measured). The EMBEDDED strip understands the
+                  ABS scanner fallback: an EPUB whose OPF declares no
+                  cover still gets served one — ABS picks the FIRST image
+                  of the package (epub_abs_pick_image: wired > cover-named
+                  > first member), so the DBK scan rides as index-1_1.png
+                  invisible to the OPF-only probe; strip_generated_covers
+                  probes that pick as well and strip_cover_from_book's
+                  unwired_image mode removes the image TOGETHER with every
+                  page embedding it (no dangling img src — same invariant
+                  as the wired surgery). _COVER_ANALYSIS_VERSION is 6 —
+                  v4 added the calibre marker, v5 the doc_scan signal,
+                  v6 its colour gate + high-res line count; a mismatch
+                  makes persisted verdicts recompute lazily
   abs_client.py    Audiobookshelf API client + the engine of `bmf abs-rescan`: changed_folders
                   (stat-only walk over iter_book_folders, max file mtime ≥ since), match_items
                   (folder → ABS item: exact path → relPath → unique folder-name match — covers
@@ -586,10 +617,12 @@ src/book_meta_fix/
                   plain scans skip "unchanged" folders, so apply's disk writes are only pushed
                   into ABS through this per-item rescan; scan endpoints need an ADMIN token
                   (BMF_ABS_URL/BMF_ABS_TOKEN/BMF_ABS_LIBRARY/BMF_ABS_WORKERS; module-level
-                  _http_get_json/_http_get_bytes/_http_post/_http_delete are the monkeypatch seams for the
+                  _http_get_json/_http_get_bytes/_http_post/_http_post_file/_http_delete
+                  are the monkeypatch seams for the
                   no-network tests and take an optional session= kwarg — the client shares ONE
                   requests.Session across all calls so the per-item loop keeps TCP+TLS
-                  connections alive instead of handshaking per call). scan_items fans the items
+                  connections alive instead of handshaking per call). get_item fetches one
+                  item's raw JSON (the purge dance's stub-path lookup). scan_items fans the items
                   over a ThreadPoolExecutor (workers knob: --abs-workers/BMF_ABS_WORKERS,
                   default 4, 1 = serial; per-thread SCAN_CALL_PAUSE keeps each connection's
                   burst gentle) and drives a progress_callback(done, total) under the counter
@@ -622,8 +655,24 @@ src/book_meta_fix/
                   the ABS UI, and a fetch failure is "no verdict", never "clear");
                   an existing mapped file no decoder
                   reads (0-byte leftover) is also broken — reason "unreadable"
-                  (746 such rows passed the old exists()-only audit); clear_item_cover nulls the row via
-                  DELETE /api/items/{id}/cover and the cleared ids join the rescan set
+                  (746 such rows passed the old exists()-only audit); and the STALE-CACHE
+                  shape (measured 2026-09-17): a HEALTHY row whose disk cover is a small
+                  but real thumbnail (< 400 px shorter side) while ABS keeps serving the
+                  OLD cached junk — only the fetched bytes can see it, so exactly that
+                  thumbnail class pays one extra GET and the junk PAGE shapes
+                  (marker/vendor/text_page/doc_scan) break the row, reason "generated"
+                  (a few-colours minimalist cache stays — an accepted real cover);
+                  clear_item_cover nulls the row via
+                  DELETE /api/items/{id}/cover AND evicts the server-side cover CACHE
+                  when it survives the delete (measured on ABS 2.36.0: a null row's
+                  delete never reaches the purge branch, so a book with every disk cover
+                  source cleaned keeps serving the cached junk through rescans — the
+                  only way out is the upload+delete DANCE: uploading a fixed 2x3 stub
+                  (cls._PURGE_STUB_JPEG) sets coverPath again, the FOLLOWING delete runs
+                  the "has cover" path that purges row AND cache, and the stub file the
+                  upload dropped into the book folder on store-cover-with-item libraries
+                  is mapped via get_item + library_root/abs_folders and unlinked); the
+                  cleared ids join the rescan set
                   (--since must NOT filter them). Run strip-covers --invalid FIRST — a folder
                   still holding an unreadable cover.jpg would get it re-picked). Also the
                   SERIES sweep of the plain abs-rescan run (no flag): item_series_map (paged

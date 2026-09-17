@@ -23,11 +23,6 @@ command does what it always did — generated covers, both scopes.
 
 - **`cover.jpg` sidecar** — renamed to `cover.jpg.bak` (reversible; overwrites
   an existing `.bak`), never hard-deleted.
-- **Embedded EPUB cover** — probed via the OPF wiring and, when generated,
-  stripped surgically (zip + OPF rewrite; the e-book file itself is kept).
-- **Non-EPUB formats (MOBI/AZW3/PRC, PDF)** — deliberately untouched: their
-  covers live in binary EXTH headers with no safe removal path.
-
 Detection is C11's classification: the pixel signals (solid default
 template, few quantized colours, a rendered text page) PLUS calibre's own
 marker — the JPEG comment `Generated cover: calibre <version>` that
@@ -35,6 +30,25 @@ calibre's cover generator writes into every image it produces. The marker
 is deterministic and cannot false-positive (a scanner or publisher never
 writes it); it catches the parchment default template (beige vignette +
 ornamental border + title text) whose gradient defeats every pixel signal.
+
+A second junk family measured in the wild: databazeknih serves a **scan of
+the book's own printed page** (body text or the title page) as the cover
+image, so the enricher downloads it in good faith. The `doc_scan` signal
+catches it — colour-gated (every such scan is grayscale end-to-end; real
+artwork covers that match the page shape are colourful and stay) and
+line-based (≥ 16 separated text lines at 600×800, where scan row gaps
+survive the downscale). The download gate refuses this class too, so the
+next `bmf apply` cannot re-download the scan you just removed.
+
+- **Embedded EPUB cover** — probed via the OPF wiring **and via the ABS
+  scanner fallback**: an EPUB whose OPF declares no cover still gets served
+  one, because Audiobookshelf picks the first image of the package. The
+  probe sees that image too (OPF-wired cover first, else a cover-named
+  image, else the first image member) and strips it surgically together
+  with every page that embeds it (zip + OPF rewrite; no dangling `<img>`
+  references; the e-book file itself is kept).
+- **Non-EPUB formats (MOBI/AZW3/PRC, PDF)** — deliberately untouched: their
+  covers live in binary EXTH headers with no safe removal path.
 
 After a write run the next `bmf analyze` sees `MISSING_COVER` (no `cover.jpg`)
 and refetches a real cover — from an enricher URL or by extracting a genuine

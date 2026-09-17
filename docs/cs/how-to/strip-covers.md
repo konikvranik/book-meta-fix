@@ -23,9 +23,13 @@ dělá příkaz to, co dřív — vygenerované obálky, oba rozsahy.
 
 - **soubor `cover.jpg`** — přejmenuje se na `cover.jpg.bak` (vratné;
   existující `.bak` se přepíše), nikdy se natvrdo nemaže.
-- **embedded obálka EPUB** — najde se přes OPF wiring a když je
-  vygenerovaná, chirurgicky se vysoupne (přepis zipu + OPF; e-kniha sama
-  zůstává).
+- **embedded obálka EPUB** — najde se přes OPF wiring A přes fallback
+  ABS scanneru: EPUB, jehož OPF žádnou obálku nedeklaruje, přesto obálku
+  servuje, protože Audiobookshelf vezme první obrázek v balíčku. Sonda
+  vidí i ten (nejdřív přes OPF navěšená obálka, pak obrázek pojmenovaný
+  `cover*`, pak první obrázek v zipu) a chirurgicky ho vysoupne SPOLU se
+  všemi stránkami, které ho vloženě používají (přepis zipu + OPF; žádné
+  visící `<img>` odkazy; e-kniha sama zůstává).
 - **ostatní formáty (MOBI/AZW3/PRC, PDF)** — záměrně se netknou: jejich
   obálky žijí v binárních EXTH hlavičkách bez bezpečné cesty ven.
 
@@ -37,6 +41,15 @@ deterministický a nemůže dát falešný poplach (skener ani vydavatel ho
 nikdy nezapíše); chytá pergamenovou default šablonu (béžový vignette +
 ozdobný rámeček + text titulu), jejíž gradient přechytí každý pixelový
 signál.
+
+Druhá rodina smetí změřená v knihovně: databazeknih servuje jako obálku
+**scan tištěné stránky samotné knihy** (text, nebo titulní list), takže si
+ho enricher v dobré víře stáhne. Signál `doc_scan` ho chytá — je
+barevně braněný (každý takový scan je celý ve stupních šedi; skutečné
+obálky s podobným tvarem jsou barevné a zůstávají) a linkový (≥ 16
+oddělených textových řádků při 600×800, kde mezery řádků skenu přežijí
+zmenšení). Brána downloadu tuto třídu také odmítá, takže další
+`bmf apply` nemůže stáhnout zpět scan, který jste právě odstranili.
 
 Po zápisovém běhu další `bmf analyze` uvidí `MISSING_COVER` (chybí
 `cover.jpg`) a doplní skutečnou obálku — z URL enricheru, nebo extrakcí

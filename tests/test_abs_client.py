@@ -262,6 +262,7 @@ class TestClient:
 	def test_clear_item_cover_deletes_and_reports(self, monkeypatch) -> None:  # noqa: ANN001
 		rec = _DeleteRecorder()
 		monkeypatch.setattr(abs_client, "_http_delete", rec)
+		monkeypatch.setattr(abs_client, "_http_get_bytes", lambda *a, **k: None)
 		assert self._client().clear_item_cover("item-7") is True
 		assert rec.urls == ["http://abs.lan:13378/api/items/item-7/cover"]
 		assert rec.calls[0]["headers"]["Authorization"] == "Bearer s3cret"
@@ -269,7 +270,61 @@ class TestClient:
 	def test_clear_item_cover_rejected_token_returns_false(self, monkeypatch) -> None:  # noqa: ANN001
 		rec = _DeleteRecorder({"http://abs.lan:13378/api/items/x/cover": _Resp(403)})
 		monkeypatch.setattr(abs_client, "_http_delete", rec)
+		monkeypatch.setattr(abs_client, "_http_get_bytes", lambda *a, **k: None)
 		assert self._client().clear_item_cover("x") is False
+
+	def test_clear_item_cover_purges_surviving_cache(self, monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+		"""The cache outlives the row: still-serving bytes after DELETE trigger
+		the upload+delete dance, and the stub file the upload dropped into the
+		book folder is removed again (measured on ABS 2.36.0)."""
+		delete = _DeleteRecorder()
+		monkeypatch.setattr(abs_client, "_http_delete", delete)
+		served = {"count": 0}
+
+		def fake_get_bytes(url, **kwargs):
+			# serves cached bytes until the SECOND delete purges the cache
+			served["count"] += 1
+			return b"cached-junk" if served["count"] == 1 else None
+
+		monkeypatch.setattr(abs_client, "_http_get_bytes", fake_get_bytes)
+
+		uploads: list[dict] = []
+
+		def fake_post_file(url, *, files, timeout=15.0, headers=None, session=None):
+			uploads.append({"url": url, "files": files})
+			return _Resp(200)
+
+		monkeypatch.setattr(abs_client, "_http_post_file", fake_post_file)
+		stub = tmp_path / "Kniha (1)" / "cover.jpg"
+		stub.parent.mkdir()
+		stub.write_bytes(b"stub")
+
+		def fake_get_item(item_id):
+			return {"media": {"coverPath": "/share/lib/Kniha (1)/cover.jpg"}}
+
+		client = self._client()
+		monkeypatch.setattr(client, "get_item", fake_get_item)
+		assert client.clear_item_cover(
+			"item-9", library_root=tmp_path, abs_folders=["/share/lib"],
+		) is True
+		# delete ran twice (row, then row+cache), the stub uploaded once
+		assert delete.urls == [
+			"http://abs.lan:13378/api/items/item-9/cover",
+			"http://abs.lan:13378/api/items/item-9/cover",
+		]
+		assert len(uploads) == 1
+		assert uploads[0]["files"]["cover"][0] == "bmf-purge.jpg"
+		# the stub file the upload wrote into the library folder is gone
+		assert not stub.exists()
+
+	def test_clear_item_cover_purge_upload_failure_returns_false(self, monkeypatch) -> None:  # noqa: ANN001
+		monkeypatch.setattr(abs_client, "_http_delete", _DeleteRecorder())
+		monkeypatch.setattr(abs_client, "_http_get_bytes", lambda *a, **k: b"cached-junk")
+		monkeypatch.setattr(
+			abs_client, "_http_post_file",
+			lambda url, *, files, timeout=15.0, headers=None, session=None: _Resp(403),
+		)
+		assert self._client().clear_item_cover("item-9") is False
 
 	def test_scan_items_posts_per_item(self, monkeypatch) -> None:  # noqa: ANN001
 		# Per-item on purpose: the batch endpoint was measured answering 200
@@ -316,6 +371,7 @@ class TestClient:
 		monkeypatch.setattr(abs_client, "_http_get_json", get)
 		monkeypatch.setattr(abs_client, "_http_post", post)
 		monkeypatch.setattr(abs_client, "_http_delete", delete)
+		monkeypatch.setattr(abs_client, "_http_get_bytes", lambda *a, **k: None)
 		client = self._client()
 		client.libraries()
 		client.scan_items(["a"])
@@ -541,19 +597,49 @@ class TestBrokenCoverItems:
 		items = [self._item("a", "/metadata/items/item-a/cover.jpg")]
 		assert broken_cover_items(items, tmp_path, ["/data/books"]) == []
 
-	def test_marker_never_fetched_for_library_rows(self, tmp_path: Path) -> None:
+	def test_big_real_library_row_never_fetched(self, tmp_path: Path) -> None:
 		# Rows mapping INTO the library are judged from disk (missing/
-		# unreadable) — the byte fetch is the outside-library tool only.
+		# unreadable); the stale-cache byte fetch is paid only by the
+		# thumbnail class (< 400 px shorter side) — a big real cover row
+		# costs zero API calls.
 		(tmp_path / "Autor/Kniha (1)").mkdir(parents=True)
-		from test_covers import _real_cover
+		from test_covers import _gradient_cover
 
-		_real_cover(tmp_path / "Autor/Kniha (1)/cover.jpg")
+		_gradient_cover(tmp_path / "Autor/Kniha (1)/cover.jpg", size=(1240, 1752))
 		calls: list[str] = []
 		items = [self._item("a", "/data/books/Autor/Kniha (1)/cover.jpg")]
 		assert broken_cover_items(
 			items, tmp_path, ["/data/books"], fetch_cover=lambda iid: calls.append(iid),
 		) == []
 		assert calls == []
+
+	def test_small_disk_cover_with_stale_junk_cache_is_broken(self, tmp_path: Path) -> None:
+		# The stale-cache shape measured 2026-09-17: the disk cover is a small
+		# but REAL thumbnail (100x169), the row is healthy, yet ABS keeps
+		# serving the old cached DBK page-scan. Only the fetched bytes can
+		# see it — the junk page shapes are decisive, a few-colour minimalist
+		# cache is not (an accepted real cover).
+		from test_covers import _real_cover, _wild_scan_cover_bytes
+
+		(tmp_path / "Autor/Kniha (1)").mkdir(parents=True)
+		_real_cover(tmp_path / "Autor/Kniha (1)/cover.jpg")  # 60x90 gradient
+		items = [self._item("a", "/data/books/Autor/Kniha (1)/cover.jpg")]
+		broken = broken_cover_items(
+			items, tmp_path, ["/data/books"],
+			fetch_cover=lambda iid: _wild_scan_cover_bytes(size=(400, 565)),
+		)
+		assert [(b.item.id, b.reason) for b in broken] == [("a", "generated")]
+
+	def test_small_disk_cover_with_real_cache_stays(self, tmp_path: Path) -> None:
+		from test_covers import _gradient_jpeg_bytes, _real_cover
+
+		(tmp_path / "Autor/Kniha (1)").mkdir(parents=True)
+		_real_cover(tmp_path / "Autor/Kniha (1)/cover.jpg")
+		items = [self._item("a", "/data/books/Autor/Kniha (1)/cover.jpg")]
+		assert broken_cover_items(
+			items, tmp_path, ["/data/books"],
+			fetch_cover=lambda iid: _gradient_jpeg_bytes(size=(400, 565)),
+		) == []
 
 
 class TestGetItemCover:

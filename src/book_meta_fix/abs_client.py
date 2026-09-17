@@ -129,6 +129,24 @@ def _http_post(
 		return None
 
 
+def _http_post_file(
+	url: str,
+	*,
+	files: dict,
+	timeout: float = 15.0,
+	headers: dict[str, str] | None = None,
+	session: requests.Session | None = None,
+) -> requests.Response | None:
+	"""Multipart file-upload POST (requests' ``files=`` shape) — the monkeypatch
+	seam twin of _http_post, used solely by the cover-cache purge dance in
+	AudiobookshelfClient.clear_item_cover."""
+	try:
+		return (session or requests).post(url, files=files, timeout=timeout, headers=headers)
+	except requests.RequestException as e:
+		log.debug("HTTP POST (file) failed for %s: %s", url, e)
+		return None
+
+
 def _http_delete(
 	url: str,
 	*,
@@ -210,6 +228,19 @@ class AudiobookshelfClient:
 			return None
 		libs = data.get("libraries")
 		return libs if isinstance(libs, list) else None
+
+	def get_item(self, item_id: str) -> dict | None:
+		"""One library item as raw JSON (GET /api/items/{id}).
+
+		Feeds clear_item_cover's purge dance: after the eviction stub upload,
+		the item's fresh coverPath tells where the stub FILE landed (libraries
+		that store covers with items) so it can be removed again.
+		"""
+		data = _http_get_json(
+			f"{self.base_url}/api/items/{item_id}",
+			headers=self._headers, session=self._session,
+		)
+		return data if isinstance(data, dict) else None
 
 	def items(self, library_id: str) -> list[AbsItem] | None:
 		"""All items of a library (limit=0 = server-side no-limit)."""
@@ -313,19 +344,104 @@ class AudiobookshelfClient:
 		)
 		return r is not None and r.status_code == 200
 
-	def clear_item_cover(self, item_id: str) -> bool:
-		"""Null an item's stored cover row (DELETE /api/items/{id}/cover).
+	# A 2x3 near-white JPEG — the eviction stub for the cover-cache purge
+	# dance below. Deliberately NOT generated on the fly: fixed bytes make the
+	# dance testable and the stub recognisable in logs.
+	_PURGE_STUB_JPEG = (
+		b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xdb\x00C\x00"
+		b"\r\t\n\x0b\n\x08\r\x0b\n\x0b\x0e\x0e\r\x0f\x13 \x15\x13\x12\x12\x13'\x1c\x1e\x17 .)"
+		b"10.)-,3:J>36F7,-@WAFLNRSR2>ZaZP`JQRO\xff\xdb\x00C\x01\x0e\x0e\x0e\x13\x11\x13&\x15"
+		b"\x15&O5-5OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO\xff\xc0\x00\x11\x08\x00"
+		b"\x03\x00\x02\x03\x01\"\x00\x02\x11\x01\x03\x11\x01\xff\xc4\x00\x1f\x00\x00\x01\x05"
+		b"\x01\x01\x01\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x01\x02\x03\x04\x05\x06\x07"
+		b"\x08\t\n\x0b\xff\xc4\x00\xb5\x10\x00\x02\x01\x03\x03\x02\x04\x03\x05\x05\x04\x04\x00"
+		b"\x00\x01}\x01\x02\x03\x00\x04\x11\x05\x12!1A\x06\x13Qa\x07\"q\x142\x81\x91\xa1\x08#B"
+		b"\xb1\xc1\x15R\xd1\xf0$3br\x82\t\n\x16\x17\x18\x19\x1a%&'()*456789:CDEFGHIJSTUVWXYZ"
+		b"cdefghijstuvwxyz\x83\x84\x85\x86\x87\x88\x89\x8a\x92\x93\x94\x95\x96\x97\x98\x99"
+		b"\x9a\xa2\xa3\xa4\xa5\xa6\xa7\xa8\xa9\xaa\xb2\xb3\xb4\xb5\xb6\xb7\xb8\xb9\xba\xc2\xc3"
+		b"\xc4\xc5\xc6\xc7\xc8\xc9\xca\xd2\xd3\xd4\xd5\xd6\xd7\xd8\xd9\xda\xe1\xe2\xe3\xe4\xe5"
+		b"\xe6\xe7\xe8\xe9\xea\xf1\xf2\xf3\xf4\xf5\xf6\xf7\xf8\xf9\xfa\xff\xc4\x00\x1f\x01\x00"
+		b"\x03\x01\x01\x01\x01\x01\x01\x01\x01\x01\x00\x00\x00\x00\x00\x00\x01\x02\x03\x04\x05"
+		b"\x06\x07\x08\t\n\x0b\xff\xc4\x00\xb5\x11\x00\x02\x01\x02\x04\x04\x03\x04\x07\x05\x04"
+		b"\x04\x00\x01\x02w\x00\x01\x02\x03\x11\x04\x05!1\x06\x12AQ\x07aq\x13\"2\x81\x08\x14B"
+		b"\x91\xa1\xb1\xc1\t#3R\xf0\x15br\xd1\n\x16$4\xe1%\xf1\x17\x18\x19\x1a&'()*56789:CDEF"
+		b"GHIJSTUVWXYZcdefghijstuvwxyz\x82\x83\x84\x85\x86\x87\x88\x89\x8a\x92\x93\x94\x95\x96"
+		b"\x97\x98\x99\x9a\xa2\xa3\xa4\xa5\xa6\xa7\xa8\xa9\xaa\xb2\xb3\xb4\xb5\xb6\xb7\xb8\xb9"
+		b"\xba\xc2\xc3\xc4\xc5\xc6\xc7\xc8\xc9\xca\xd2\xd3\xd4\xd5\xd6\xd7\xd8\xd9\xda\xe2\xe3"
+		b"\xe4\xe5\xe6\xe7\xe8\xe9\xea\xf2\xf3\xf4\xf5\xf6\xf7\xf8\xf9\xfa\xff\xda\x00\x0c\x03"
+		b"\x01\x00\x02\x11\x03\x11\x00?\x00\xf4Z(\xa2\x80?\xff\xd9"
+	)
+
+	def clear_item_cover(
+		self, item_id: str, *,
+		library_root: Path | None = None, abs_folders: list[str] | None = None,
+	) -> bool:
+		"""Null an item's stored cover row (DELETE /api/items/{id}/cover) and
+		evict the server-side cover CACHE when it survives the delete.
 
 		The ABS-database counterpart of the strip-covers file cleanup: a stale
 		``media.coverPath`` (ffmpeg fed metadata.json as the cover) never
 		self-heals, because the scanner only re-picks a cover when the row is
 		NULL or its file vanished — and a metadata.json neither vanishes nor
-		counts as an image file. The DELETE nulls the row and purges ABS's
-		cover cache; the caller follows up with a rescan so ABS picks a real
-		cover from the folder again. Returns False on network/HTTP failure.
+		counts as an image file. The DELETE nulls the row; the caller follows
+		up with a rescan so ABS picks a real cover from the folder again.
+
+		Measured 2026-09-17 (ABS 2.36.0): the row is only HALF the story. The
+		cover cache under ABS's /metadata keeps serving bytes after the row is
+		null — through a per-item rescan and through any number of further
+		DELETEs (a delete on an already-null row is a no-op that never reaches
+		the cache-purge branch). A book whose every disk cover source was
+		cleaned up kept showing its old generated cover forever. The only way
+		out is the upload+delete dance: uploading any cover sets coverPath
+		again, and the FOLLOWING delete then runs the "has cover" path that
+		purges row AND cache. The upload drops a stub file into the book
+		folder on libraries that store covers with items — when
+		*library_root*/*abs_folders* are given, the stub is mapped and
+		unlinked after the dance so the next scan cannot re-pick it. Returns
+		False on network/HTTP failure.
 		"""
 		r = _http_delete(f"{self.base_url}/api/items/{item_id}/cover", headers=self._headers, session=self._session)
-		return r is not None and r.status_code == 200
+		if r is None or r.status_code != 200:
+			return False
+		# Still serving bytes → the cache survived; dance.
+		if _http_get_bytes(
+			f"{self.base_url}/api/items/{item_id}/cover",
+			headers=self._headers, session=self._session,
+		) is None:
+			return True
+		up = _http_post_file(
+			f"{self.base_url}/api/items/{item_id}/cover",
+			files={"cover": ("bmf-purge.jpg", self._PURGE_STUB_JPEG, "image/jpeg")},
+			headers=self._headers, session=self._session,
+		)
+		if up is None or up.status_code not in (200, 201):
+			log.warning("cover-cache purge: upload failed for item %s", item_id)
+			return False
+		# Where did the upload land? On store-cover-with-item libraries it is a
+		# stub file inside the book folder — remember it so it can be removed.
+		stub_local: Path | None = None
+		if library_root is not None and abs_folders:
+			item = self.get_item(item_id)
+			cover = _norm_posix(str((item or {}).get("media", {}).get("coverPath") or ""))
+			if cover:
+				rel = ""
+				for folder in abs_folders:
+					f = _norm_posix(str(folder))
+					if f and cover.startswith(f + "/"):
+						rel = cover[len(f) + 1:]
+						break
+				if rel:
+					stub_local = library_root / rel
+		r2 = _http_delete(f"{self.base_url}/api/items/{item_id}/cover", headers=self._headers, session=self._session)
+		if r2 is None or r2.status_code != 200:
+			log.warning("cover-cache purge: second delete failed for item %s", item_id)
+			return False
+		if stub_local is not None:
+			try:
+				stub_local.unlink(missing_ok=True)
+			except OSError as exc:
+				log.warning("cover-cache purge: stub removal failed for %s: %s", stub_local, exc)
+		return True
 
 	def get_item_cover(self, item_id: str) -> bytes | None:
 		"""Fetch the item's currently stored cover image bytes (GET cover).
@@ -642,6 +758,35 @@ def _broken_cover_row(
 
 		if not image_is_readable(mapped):
 			return BrokenCover(item=item, cover_path=cover, reason="unreadable")
+		# STALE-CACHE check. The API serves ABS's CACHED cover, and that cache
+		# survives every row-level healing (a null row's delete no longer
+		# reaches the purge branch; a rescan re-caches only what it re-picks).
+		# Measured 2026-09-17: a book whose disk cover had become a small but
+		# REAL thumbnail (100x169) kept serving the old cached 400x565 DBK
+		# page-scan — the row looked healthy, the disk was healthy, only the
+		# served image was junk. Stale caches concentrate in exactly that
+		# thumbnail class (the big real covers were re-picked and re-cached by
+		# earlier rescans), so ONLY a disk cover under 400 px on its shorter
+		# side pays the extra GET. Junk verdicts are the unambiguous page
+		# shapes only (marker / vendor / text_page / doc_scan) — a minimalist
+		# few-colour cache entry is an accepted real cover, not a break.
+		if fetch_cover is not None:
+			from .covers import analyze_cover
+
+			info = analyze_cover(mapped)
+			if info.width and min(info.width, info.height) < 400:
+				data = fetch_cover(item.id)
+				if data:
+					from .covers import analyze_cover_bytes, is_calibre_generated_cover
+
+					if is_calibre_generated_cover(data):
+						return BrokenCover(item=item, cover_path=cover, reason="generated")
+					served = analyze_cover_bytes(data)
+					if served.is_generated and any(
+						s.startswith(("text_page", "doc_scan", "vendor_placeholder"))
+						for s in served.signals
+					):
+						return BrokenCover(item=item, cover_path=cover, reason="generated")
 		return None
 	# Outside every library folder: the target is not on our mount (ABS's own
 	# /metadata cache or an uploaded cover). Existence cannot be judged — but

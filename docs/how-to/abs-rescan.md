@@ -110,7 +110,7 @@ its own progress bar:
   path, reason (not an image file / file missing / file not decodable /
   calibre-generated placeholder).
 - **`--apply`**: nulls each broken row via `DELETE /api/items/{id}/cover`
-  (which also purges ABS's cover cache) and adds the items to the rescan,
+  and adds the items to the rescan,
   so ABS picks a real cover again — an image file in the folder (cover.*
   preferred) or the e-book's embedded cover. A row is "broken" when its
   target has a non-image extension, when it maps into your library and the
@@ -122,6 +122,21 @@ its own progress bar:
   carries calibre's `Generated cover` marker (a cached screenshot
   placeholder). Marker-only on purpose — a cover you uploaded through the
   ABS UI is never touched.
+- **stale cache**: the server-side cover *cache* can outlive the row.
+  Measured on ABS 2.36.0: a `DELETE` on an already-empty row is a no-op
+  that never reaches the cache-purge branch, and a per-item rescan does
+  not drop a cached cover either — a book whose every disk cover source
+  was cleaned up kept serving the old generated cover forever. When the
+  cached bytes are still served after the delete, `--apply` runs the
+  upload+delete dance (a fixed 2×3 stub upload sets the row again so the
+  following delete takes the purge branch; the stub file the upload drops
+  into the book folder on store-cover-with-item libraries is removed right
+  after). The audit also catches the *healthy row, junk cache* shape:
+  when a mapped disk cover is a small but real thumbnail (< 400 px on the
+  shorter side — where stale caches concentrate), it fetches the served
+  bytes once and breaks the row when they show an unambiguous junk page
+  shape (calibre marker / vendor placeholder / text page / document scan).
+  A minimalist few-colour cover is an accepted real cover and stays.
 
 Run the file-side cleanup FIRST: `bmf strip-covers --invalid --apply`,
 then `bmf abs-rescan --fix-covers --apply`. A folder that still holds an

@@ -112,33 +112,50 @@ _TEXT_INK_ROW_PIXELS = 3  # an "ink row" carries at least this many dark px
 _TEXT_MIN_INK_BANDS = 11
 
 # Document-scan signal (signal 6): the SAME page-of-text shape as signal 4,
-# but measured RELATIVE to the page's own paper tone. Two junk shapes the
-# absolute gates cannot see (both measured in the wild 2026-09-16 on covers
-# surviving clean+abs-rescan): a FAINT photocopy (light-grey text above the
-# absolute ink threshold, white paper) and text on AGED or DARK paper (beige
-# tone: under the near-white gate, over the colourless gate). Ink = darker
-# than the paper MEDIAN by this much. Two alternative shapes fire:
-#   A) light paper with many SEPARATED short line bands (the classic page);
-#   B) a FULL-PAGE dense scan (any paper tone): ink rows cover most of the
-#      height AND the per-row ink comes in WORD-SIZED runs (longest
-#      contiguous run <= _DOC_SCAN_MAX_RUN_SHARE of the width) — solid
-#      illustration blocks have far longer runs and stay real.
+# but measured RELATIVE to the page's own paper tone. Junk shape (measured in
+# the wild 2026-09-16 on covers surviving clean+abs-rescan): databazeknih
+# serves a scan of the book's own printed page — body text or the title page
+# — as the cover image, so the enricher downloads it in good faith. The page
+# may be faint (light-grey ink above the absolute threshold) or tinted
+# (aged paper under the near-white gate); ink is therefore darker than the
+# paper MEDIAN by _DOC_SCAN_INK_DROP. The signal is COLOUR-GATED: every wild
+# scan is grayscale end-to-end (measured colour fraction 0.0 %), while every
+# real cover that otherwise matches the page shape is colourful (artwork
+# 46-100 % — Děti Duny, Harry Potter, pen-and-ink Amber; coloured
+# typographic covers 98-100 %). Without the gate the shape profile alone
+# cannot tell a busy illustration from a dense scan. Two shapes fire:
+#   A) light paper + many SEPARATED short text lines counted at
+#      _DOC_SCAN_LINES_SIZE (row gaps survive at that resolution — at the
+#      150x200 grid an 8x downscale merges the gaps and a 40-line page reads
+#      as 5-10 bands). Scans measure 29-46 lines there; the colourless real
+#      typographic covers 1-3 (Susanna Clarke's cream cover = 3).
+#   B) a FULL-PAGE dense colourless page (any paper tone): ink rows cover
+#      most of the height AND the per-row ink comes in WORD-SIZED runs
+#      (longest contiguous run <= _DOC_SCAN_MAX_RUN_SHARE of the width) —
+#      solid illustration blocks have far longer runs and stay real.
 _DOC_SCAN_MIN_PAPER_LUM = 150  # branch A paper must be light
 _DOC_SCAN_PAPER_TOL = 18  # |lum - median| within this = paper pixel
 _DOC_SCAN_INK_DROP = 25  # darker than the paper median by this = ink
 _DOC_SCAN_MIN_PAPER_FRAC = 0.55
-_DOC_SCAN_MAX_LINE_HEIGHT = 3
-# Branch B (full-page dense scan) — calibrated on the two wild samples:
-# ink rows 64 % / 95 % of height, spans 96 % / 98 %, median word-run 9 % /
-# 19 % of width; the line-art control sits at a 47 % run.
+# Line counting happens at 600x800: high enough that scan row gaps survive
+# (a 1240x1752 scan's ~12 px gaps are still ~6 px there), low enough that
+# the per-pixel Python loop stays cheap. A text line at this scale is up to
+# _DOC_SCAN_LINES_MAX_HEIGHT rows tall; taller bands are illustration
+# blocks and do not count.
+_DOC_SCAN_LINES_SIZE = (600, 800)
+_DOC_SCAN_LINES_MAX_HEIGHT = 16
+_DOC_SCAN_MIN_LINES = 16  # scans 29-46, colourless real typography 1-3
+# Branch B (full-page dense scan) — calibrated on the wild samples: ink
+# rows 64-95 % of height, spans 96-98 %, median word-run 9-19 % of width;
+# the line-art control sits at a 47 % run.
 _DOC_SCAN_MIN_DARK_MED = 128  # even a dark scan's median must be lighter than deep black
 _DOC_SCAN_MIN_INK_ROWS_FRAC = 0.55
 _DOC_SCAN_MIN_SPAN = 0.80
 _DOC_SCAN_MAX_RUN_SHARE = 0.30
 # Median per-row ink coverage: a text line fills roughly half the row (words
 # + gaps), a noisy gradient's below-median smear stays around a third — the
-# measured 0.30 (gradient control) vs 0.42-0.47 (the two wild scans) puts
-# the gate between them with margin on the real-cover side.
+# measured 0.30 (gradient control) vs 0.42-0.47 (the wild scans) puts the
+# gate between them with margin on the real-cover side.
 _DOC_SCAN_MIN_ROW_COVERAGE = 0.38
 
 # Vendor no-cover placeholders: databazeknih serves a shared branding image
@@ -179,9 +196,12 @@ _PLACEHOLDER_COVER_MD5 = {
 # recomputed — old rows self-heal lazily as they are read. v4 added the
 # calibre JPEG-COM marker: parchment-template covers measured as "real"
 # under v3 carry the marker and must recompute. v5 added the doc_scan
-# signal (paper-relative text lines): faint photocopies and aged-paper
-# text scans measured as "real" under v4 and must recompute.
-_COVER_ANALYSIS_VERSION = 5
+# signal (paper-relative text lines). v6 colour-gated both doc_scan
+# branches and moved branch A's line count to 600x800: v5's dense branch
+# flagged real ARTWORK covers (busy illustration = dense short-run ink)
+# and its 150x200 line count merged real scan row gaps into a handful of
+# bands, so both verdict classes must recompute.
+_COVER_ANALYSIS_VERSION = 6
 
 
 @dataclass
@@ -524,23 +544,21 @@ def _text_page_stats(small) -> tuple[float, float, int]:
 	return white_frac, colour_frac, bands
 
 
-def _doc_scan_stats(small) -> tuple[int, float, int, float, float, float, float]:
-	"""(paper median luminance, paper fraction, short-line count, ink-row
-	span, median word-run share, ink-row density, median per-row ink
-	coverage) of the 150x200 downscale — the document-scan signal material.
+def _doc_scan_stats(small) -> tuple[int, float, float, float, float, float]:
+	"""(paper median luminance, paper fraction, ink-row span, median
+	word-run share, ink-row density, median per-row ink coverage) of the
+	150x200 downscale — the document-scan signal material.
 
 	The paper tone is the MEDIAN luminance (a text page is mostly paper, so
 	the median IS the paper; artwork has no single dominant tone). Paper
 	pixels sit within _DOC_SCAN_PAPER_TOL of the median; ink is RELATIVE —
 	darker than the paper by _DOC_SCAN_INK_DROP — which catches the shapes
 	the absolute signal-4 gates cannot see: faint photocopies (ink above
-	lum 128) and aged/dark-paper scans. A text LINE at this resolution is a
-	short band (<= _DOC_SCAN_MAX_LINE_HEIGHT rows); dense pages merge their
-	lines at the downscale, so the signal's second branch instead profiles
-	the WHOLE page: how much of the height carries ink (density), how far it
-	reaches (span), and whether the per-row ink comes in word-sized runs
-	(the longest contiguous run share) — solid illustration blocks have far
-	longer runs and stay real.
+	lum 128) and aged/dark-paper scans. The per-row profile (how much of
+	the height carries ink, how far it reaches, whether the ink comes in
+	word-sized runs) feeds branch B; branch A's LINE COUNT lives in
+	_doc_scan_lines at a higher resolution, where scan row gaps survive
+	the downscale.
 	"""
 	grey = small.convert("L")
 	hist = grey.histogram()
@@ -554,10 +572,8 @@ def _doc_scan_stats(small) -> tuple[int, float, int, float, float, float, float]
 			break
 	paper_frac = sum(hist[max(0, med_lum - _DOC_SCAN_PAPER_TOL):med_lum + _DOC_SCAN_PAPER_TOL + 1]) / total
 	ink_threshold = max(0, med_lum - _DOC_SCAN_INK_DROP)
-	w, h = small.size
+	w, h = grey.size
 	gp = grey.load()
-	lines = 0
-	band_top: int | None = None
 	ink_rows: list[int] = []
 	longest_runs: list[int] = []
 	coverages: list[float] = []
@@ -571,34 +587,68 @@ def _doc_scan_stats(small) -> tuple[int, float, int, float, float, float, float]
 				best = max(best, run)
 			else:
 				run = 0
-		is_ink = ink_px >= _TEXT_INK_ROW_PIXELS
-		if is_ink and band_top is None:
-			band_top = y
-		elif not is_ink and band_top is not None:
-			if y - band_top <= _DOC_SCAN_MAX_LINE_HEIGHT:
-				lines += 1
-			band_top = None
-		if is_ink:
+		if ink_px >= _TEXT_INK_ROW_PIXELS:
 			ink_rows.append(y)
 			longest_runs.append(best)
 			coverages.append(ink_px / w)
-	if band_top is not None and h - band_top <= _DOC_SCAN_MAX_LINE_HEIGHT:
-		lines += 1
 	span = (ink_rows[-1] - ink_rows[0] + 1) / h if ink_rows else 0.0
 	density = len(ink_rows) / h if h else 0.0
 	longest_runs.sort()
 	run_share = (longest_runs[len(longest_runs) // 2] / w) if longest_runs else 1.0
 	coverages.sort()
 	coverage = coverages[len(coverages) // 2] if coverages else 1.0
-	return med_lum, paper_frac, lines, span, run_share, density, coverage
+	return med_lum, paper_frac, span, run_share, density, coverage
 
 
-def _classify_pixels(small, width: int, height: int) -> CoverInfo:
+def _doc_scan_lines(img) -> int:
+	"""Count SEPARATED short text bands at _DOC_SCAN_LINES_SIZE.
+
+	The 150x200 grid merges a real scan's row gaps (an 8x downscale turns a
+	12 px gap into one antialiased pixel), so a 40-line page reads as 5-10
+	bands there — worthless as a discriminator. At 600x800 the gaps
+	survive: measured wild scans count 29-46 lines, colourless real
+	typographic covers 1-3. A band taller than _DOC_SCAN_LINES_MAX_HEIGHT
+	rows is an illustration block and does not count.
+	"""
+	grey = img.resize(_DOC_SCAN_LINES_SIZE).convert("L")
+	hist = grey.histogram()
+	total = sum(hist) or 1
+	cum = 0
+	med_lum = 255
+	for lum, count in enumerate(hist):
+		cum += count
+		if cum * 2 >= total:
+			med_lum = lum
+			break
+	ink_threshold = max(0, med_lum - _DOC_SCAN_INK_DROP)
+	w, h = grey.size
+	gp = grey.load()
+	min_row_ink = _TEXT_INK_ROW_PIXELS * (w / 150)
+	lines = 0
+	band_top: int | None = None
+	for y in range(h):
+		ink_px = sum(1 for x in range(w) if gp[x, y] <= ink_threshold)
+		is_ink = ink_px >= min_row_ink
+		if is_ink and band_top is None:
+			band_top = y
+		elif not is_ink and band_top is not None:
+			if y - band_top <= _DOC_SCAN_LINES_MAX_HEIGHT:
+				lines += 1
+			band_top = None
+	if band_top is not None and h - band_top <= _DOC_SCAN_LINES_MAX_HEIGHT:
+		lines += 1
+	return lines
+
+
+def _classify_pixels(small, width: int, height: int, lines_img=None) -> CoverInfo:
 	"""Pixel math shared by the path-based and bytes-based analyzers.
 
 	*small* is the 150x200 RGB downscale of the cover; *width*/*height* are
 	the FULL-RESOLUTION dimensions (the Calibre-default size signal compares
-	against those).
+	against those). *lines_img* is the full-resolution RGB image (or None):
+	signal 6's line count runs at _DOC_SCAN_LINES_SIZE, where scan row gaps
+	survive, so it must resize from the source rather than the 150x200 grid
+	— and is only consulted when the cheap colour/paper gates pass.
 	"""
 	info = CoverInfo(width=width, height=height)
 
@@ -657,23 +707,31 @@ def _classify_pixels(small, width: int, height: int) -> CoverInfo:
 		info.confidence += 0.5
 		info.signals.append(f"text_page ({bands} ink bands, {white_frac:.0%} white)")
 
-	# Signal 6: document scan — the same page-of-text shape, measured
-	# RELATIVE to the page's own paper tone. Branch A: light paper with
-	# many separated lines (the classic page the absolute signal-4 gates
-	# miss through faint ink or tinted paper). Branch B: a FULL-PAGE dense
-	# scan on ANY paper tone — ink covers most of the height in word-sized
+	# Signal 6: document scan — databazeknih serves a scan of the book's own
+	# printed page as the cover. COLOUR-GATED first: every wild scan is
+	# grayscale end-to-end, while the real covers sharing the page shape
+	# (busy artwork, coloured typography) are not — without the gate the
+	# dense branch flagged Děti Duny / Harry Potter covers. Branch A: light
+	# paper + many separated text lines counted at 600x800 (the 150x200
+	# grid merges scan row gaps; the count is lazy — only colourless
+	# light-paper covers pay for it). Branch B: a FULL-PAGE dense colourless
+	# page on any paper tone — ink covers most of the height in word-sized
 	# runs; solid illustration blocks have far longer runs and stay real.
+	greyish = colour_frac <= _TEXT_MAX_COLOUR_FRAC
 	try:
-		doc_med, paper_frac, lines, span, run_share, density, coverage = _doc_scan_stats(small)
+		doc_med, paper_frac, span, run_share, density, coverage = _doc_scan_stats(small)
 	except Exception:  # noqa: BLE001
-		doc_med, paper_frac, lines, span, run_share, density, coverage = 0, 0.0, 0, 0.0, 1.0, 0.0, 1.0
-	doc_lines = (
-		doc_med >= _DOC_SCAN_MIN_PAPER_LUM
-		and paper_frac >= _DOC_SCAN_MIN_PAPER_FRAC
-		and lines >= _TEXT_MIN_INK_BANDS
-	)
+		doc_med, paper_frac, span, run_share, density, coverage = 0, 0.0, 0.0, 1.0, 0.0, 1.0
+	doc_lines = doc_lines_n = 0
+	if greyish and doc_med >= _DOC_SCAN_MIN_PAPER_LUM and paper_frac >= _DOC_SCAN_MIN_PAPER_FRAC:
+		try:
+			doc_lines_n = _doc_scan_lines(lines_img) if lines_img is not None else 0
+		except Exception:  # noqa: BLE001
+			doc_lines_n = 0
+		doc_lines = doc_lines_n >= _DOC_SCAN_MIN_LINES
 	doc_dense = (
-		doc_med >= _DOC_SCAN_MIN_DARK_MED
+		greyish
+		and doc_med >= _DOC_SCAN_MIN_DARK_MED
 		and density >= _DOC_SCAN_MIN_INK_ROWS_FRAC
 		and span >= _DOC_SCAN_MIN_SPAN
 		and run_share <= _DOC_SCAN_MAX_RUN_SHARE
@@ -681,7 +739,7 @@ def _classify_pixels(small, width: int, height: int) -> CoverInfo:
 	)
 	if doc_lines or doc_dense:
 		info.confidence += 0.5
-		shape = f"{lines} lines, {paper_frac:.0%} paper" if doc_lines else f"dense page, {density:.0%} ink rows"
+		shape = f"{doc_lines_n} lines, {paper_frac:.0%} paper" if doc_lines else f"dense page, {density:.0%} ink rows"
 		info.signals.append(f"doc_scan ({shape})")
 
 	info.is_generated = info.confidence >= _GENERATED_THRESHOLD
@@ -709,13 +767,16 @@ def _analyze_cover_uncached(path: Path) -> CoverInfo:
 			# The COM comment rides in the header — grab it while the image
 			# is open (info/applist are gone after close).
 			calibre_sig = _calibre_comment_signal(img)
+			# convert() COPIES the pixels, so rgb survives the close —
+			# signal 6's high-res line count needs the full source.
+			rgb = img.convert("RGB")
 			# Downscale for colour analysis (the full-res image is overkill
 			# for counting dominant colours and is slow on 1200x1600).
-			small = img.convert("RGB").resize((150, 200))
+			small = rgb.resize((150, 200))
 	except Exception as e:  # noqa: BLE001
 		log.debug("cover analysis failed for %s: %s", path, e)
 		return CoverInfo()
-	info = _classify_pixels(small, width, height)
+	info = _classify_pixels(small, width, height, lines_img=rgb)
 	for sig in (_vendor_placeholder_signal(data), calibre_sig):
 		if sig:
 			info.signals.append(sig)
@@ -743,11 +804,12 @@ def analyze_cover_bytes(data: bytes) -> CoverInfo:
 		with Image.open(io.BytesIO(data)) as img:
 			width, height = img.size
 			calibre_sig = _calibre_comment_signal(img)
-			small = img.convert("RGB").resize((150, 200))
+			rgb = img.convert("RGB")
+			small = rgb.resize((150, 200))
 	except Exception as e:  # noqa: BLE001
 		log.debug("cover byte analysis failed: %s", e)
 		return CoverInfo()
-	info = _classify_pixels(small, width, height)
+	info = _classify_pixels(small, width, height, lines_img=rgb)
 	for sig in (_vendor_placeholder_signal(data), calibre_sig):
 		if sig:
 			info.signals.append(sig)
@@ -1012,7 +1074,61 @@ def epub_cover_image(book_path: str | Path) -> bytes | None:
 				))
 				if img in names:
 					return zf.read(img)
+			return None
+	except (etree.XMLSyntaxError, zipfile.BadZipFile, KeyError, RuntimeError, OSError):
 		return None
+
+
+def epub_abs_pick_image(book_path: str | Path) -> tuple[str, bytes, bool] | None:
+	"""(zip name, bytes, wired) of the image Audiobookshelf will serve as
+	this EPUB's cover when no sidecar cover exists.
+
+	Wired = the OPF-declared cover (the truth for readers). UNWIRED is the
+	scanner fallback ABS applies when the OPF declares nothing: the first
+	image resource of the package. Measured 2026-09-17: the DBK page-scan
+	covers survive every sidecar cleanup through exactly this hole — the
+	EPUB carries the scan as ``index-1_1.png`` without any OPF cover wiring,
+	so the OPF-only probe sees "no embedded cover" while ABS happily serves
+	the scan it finds in the zip. Only the STRIP engine should rely on the
+	unwired arm (a GUI preview or recovery path must not treat a content
+	illustration as "the cover").
+	"""
+	book_path = Path(book_path)
+	if book_path.suffix.lower() != ".epub" or not book_path.is_file():
+		return None
+	try:
+		with zipfile.ZipFile(book_path, "r") as zf:
+			names = zf.namelist()
+			if "META-INF/container.xml" not in names:
+				return None
+			container = etree.fromstring(zf.read("META-INF/container.xml"))
+			rootfile = container.find(f".//{{{_OCF_NS}}}rootfile")
+			if rootfile is None or not rootfile.get("full-path"):
+				return None
+			opf_path = rootfile.get("full-path")
+			opf_root = etree.fromstring(zf.read(opf_path))
+			_manifest, _m, _s, _g, img_items, _p, _r = _opf_cover_parts(opf_root)
+			for item in img_items:
+				href = (item.get("href") or "").split("#", 1)[0]
+				if not href:
+					continue
+				img = posixpath.normpath(posixpath.join(
+					posixpath.dirname(opf_path), unquote(href),
+				))
+				if img in names:
+					return img, zf.read(img), True
+			# No wiring — ABS's fallback order: a cover-NAMED image wins,
+			# else the first image member in zip order.
+			images = [
+				n for n in names
+				if posixpath.splitext(n)[1].lower() in ABS_IMAGE_EXTS
+			]
+			pick = next((n for n in images if posixpath.basename(n).split(".")[0].lower() == "cover"), None)
+			if pick is None and images:
+				pick = images[0]
+			if pick is None:
+				return None
+			return pick, zf.read(pick), False
 	except (etree.XMLSyntaxError, zipfile.BadZipFile, KeyError, RuntimeError, OSError):
 		return None
 
@@ -1076,7 +1192,45 @@ def _epub_strip_cover_opf(opf_root, opf_dir: str, docs: dict[str, bytes]) -> set
 	return drop
 
 
-def strip_cover_from_book(book_path: str | Path) -> bool:
+def _epub_strip_unwired_cover(opf_root, opf_dir: str, docs: dict[str, bytes], image: str) -> set[str]:
+	"""Drop an UNWIRED cover image (no OPF cover status points at it) plus
+	every document that embeds it inline, so no dangling ``<img src>``
+	survives — the same invariant the wired strip keeps.
+
+	For the ABS-fallback class (the scan sits in the zip as index-1_1.png
+	while a title-page xhtml shows it): the image AND its wrapper pages go
+	together, along with their manifest items and spine entries. Returns the
+	zip paths to drop; empty set when the OPF cannot be parsed safely.
+	"""
+	ns = {"o": _OPF_NS}
+	manifest = opf_root.find("o:manifest", ns)
+	if manifest is None:
+		return set()
+
+	def zip_path(href: str) -> str:
+		href = unquote((href or "").split("#", 1)[0])
+		return posixpath.normpath(posixpath.join(opf_dir, href))
+
+	base = posixpath.basename(image).encode()
+	pages = {
+		name for name, data in docs.items()
+		if name.endswith((".xhtml", ".html", ".htm")) and base in data
+	}
+	drop = {image} | pages
+	dropped_ids: set[str] = set()
+	for item in list(manifest.findall("o:item", ns)):
+		if zip_path(item.get("href") or "") in drop:
+			dropped_ids.add(item.get("id") or "")
+			manifest.remove(item)
+	spine = opf_root.find("o:spine", ns)
+	if spine is not None:
+		for itemref in list(spine.findall("o:itemref", ns)):
+			if (itemref.get("idref") or "") in dropped_ids:
+				spine.remove(itemref)
+	return drop
+
+
+def strip_cover_from_book(book_path: str | Path, *, unwired_image: str | None = None) -> bool:
 	"""Remove the cover EMBEDDED in an ebook file, keeping the book itself.
 
 	The "clean out the invalid calibre cover" counterpart to
@@ -1091,8 +1245,11 @@ def strip_cover_from_book(book_path: str | Path) -> bool:
 	The zip is rewritten atomically (temp file + ``os.replace``): the cover
 	image and cover page entries are dropped, the OPF loses its cover wiring
 	(see :func:`_epub_strip_cover_opf`), everything else is byte-identical.
-	On ANY doubt (not an EPUB, corrupt zip, unparseable OPF) the file is
-	left untouched and False is returned.
+	*unwired_image* names a zip member to cut when the OPF declares NO cover
+	at all — the ABS scanner fallback class (see :func:`epub_abs_pick_image`):
+	the image and every page embedding it are removed together, so ABS has
+	nothing left to pick. On ANY doubt (not an EPUB, corrupt zip, unparseable
+	OPF) the file is left untouched and False is returned.
 	"""
 	book_path = Path(book_path)
 	if book_path.suffix.lower() != ".epub" or not book_path.is_file():
@@ -1112,6 +1269,10 @@ def strip_cover_from_book(book_path: str | Path) -> bool:
 		opf_path = rootfile.get("full-path")
 		opf_root = etree.fromstring(docs[opf_path])
 		drop = _epub_strip_cover_opf(opf_root, posixpath.dirname(opf_path), docs)
+		if not drop and unwired_image and unwired_image in names:
+			drop = _epub_strip_unwired_cover(
+				opf_root, posixpath.dirname(opf_path), docs, unwired_image,
+			)
 		if not drop:
 			return False  # no cover wiring found — nothing to strip
 		fd, name = tempfile.mkstemp(
@@ -1362,10 +1523,16 @@ def strip_generated_covers(
 			if min(info.width, info.height) < min_size and _bak_away(p, result.small_baks):
 				result.small_sizes[p.name] = (info.width, info.height)
 
+	# EMBEDDED covers — including the ABS-fallback class: when the OPF
+	# declares no cover, ABS serves the FIRST image of the package anyway
+	# (epub_abs_pick_image), so the probe must see that image too or the
+	# scan survives every sidecar cleanup (measured 2026-09-17: cover.png
+	# gone, ABS still serving the EPUB's index-1_1.png scan).
 	for epub in sorted(folder.glob("*.epub")):
-		data = epub_cover_image(epub)
-		if data is None:
+		pick = epub_abs_pick_image(epub)
+		if pick is None:
 			continue
+		zip_name, data, wired = pick
 		invalid_hit = _emb(invalid) and not image_is_readable(data)
 		generated_hit = (
 			not invalid_hit and _emb(generated)
@@ -1373,7 +1540,9 @@ def strip_generated_covers(
 		)
 		if not (invalid_hit or generated_hit):
 			continue
-		if dry_run or strip_cover_from_book(epub):
+		if dry_run or strip_cover_from_book(
+			epub, unwired_image=None if wired else zip_name,
+		):
 			(result.invalid_epubs if invalid_hit else result.stripped_epubs).append(epub.name)
 		else:
 			result.failed_epubs.append(epub.name)
@@ -1435,15 +1604,18 @@ def download_cover(url: str, dest_path: str | Path, *, timeout: float = 15.0) ->
 		# Pixel gate: the URL came from a book-matching source, so a minimalist
 		# real cover (few colours) is accepted — the book's own cover beats
 		# none. Refused is only the junk: the TEXT-PAGE RENDER (screenshot of
-		# page 1) and a KNOWN VENDOR PLACEHOLDER arriving under an URL the
-		# registry did not recognize (a mirror/proxy path). "Only real
-		# covers." The same math as the C11 detector's signals.
+		# page 1), the DBK PAGE SCAN (doc_scan — the same junk class the
+		# enricher keeps re-serving for old books; without this arm every
+		# apply re-downloads the scan the cleanup just bakked) and a KNOWN
+		# VENDOR PLACEHOLDER arriving under an URL the registry did not
+		# recognize (a mirror/proxy path). "Only real covers." The same math
+		# as the C11 detector's signals.
 		info = analyze_cover_bytes(content)
-		if info.is_generated and any(s.startswith("vendor_placeholder") for s in info.signals):
-			log.warning("downloaded cover from %s is a known vendor placeholder; discarding", url)
-			return False
-		if info.is_generated and any(s.startswith("text_page") for s in info.signals):
-			log.warning("downloaded cover from %s looks like a text-page render; discarding", url)
+		if info.is_generated and any(
+			s.startswith(("vendor_placeholder", "text_page", "doc_scan"))
+			for s in info.signals
+		):
+			log.warning("downloaded cover from %s looks generated (%s); discarding", url, info.signals)
 			return False
 
 	# Backup existing cover, then atomic write.

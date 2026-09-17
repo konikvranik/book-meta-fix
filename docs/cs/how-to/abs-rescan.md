@@ -112,7 +112,7 @@ sweepování, se svým progressbarem:
   cestu obálky, důvod (není obrázkový soubor / soubor chybí / soubor
   nejde dekódovat / generovaná calibre obálka).
 - **`--apply`**: každý rozbitý řádek vynuluje přes
-  `DELETE /api/items/{id}/cover` (to zároveň pročistí cover cache ABS) a
+  `DELETE /api/items/{id}/cover` a
   přidá položky do rescanu, takže ABS zvolí skutečnou obálku znovu —
   obrázkový soubor ve složce (preferuje cover.*) nebo embedded obálku
   e-knihy. Řádek je „rozbitý“, když cíl nemá obrázkovou příponu, když
@@ -124,6 +124,22 @@ sweepování, se svým progressbarem:
   když obrázek nese calibrův marker `Generated cover` (screenshot
   placeholder schovaný v cache). Záměrně jen marker — obálku nahranou
   přes UI ABS audit nikdy nesmaže.
+- **zastaralá cache**: serverová *cache* obálek může řádek přežít.
+  Změřeno na ABS 2.36.0: `DELETE` už prázdného řádku je no-op, který se
+  k větši purgu cache nikdy nedostane, a ani per-item rescan cacheovanou
+  obálku neodkládá — kniha, které se vyčistily všechny obálkové zdroje
+  na disku, servovala starou generovanou obálku navěky. Když se po delete
+  pořád servují byty z cache, `--apply` provede tanec upload+delete
+  (upload fixního 2×3 stubu zase nastaví řádek, takže následující delete
+  proběhne purge větví; stub soubor, který upload na knihovnách
+  ukládajících obálky do složky knihy dropne do složky, se hned zase
+  smaže). Audit chytá i tvar *zdravý řádek, smetí v cache*: když je
+  disková obálka malý, ale skutečný náhled (< 400 px na kratší straně —
+  tam se zastaralé cache koncentrují), jednou stáhne servované byty a
+  řádek rozbitý označí, když nesou jednoznačný smetí tvar stránky
+  (calibrův marker / vendor placeholder / textová stránka / scan
+  dokumentu). Minimalistická obálka s pár barvami je akceptovaná
+  skutečná obálka a zůstává.
 
 Nejdřív vyčisti stranu souborů: `bmf strip-covers --invalid --apply` a
 pak až `bmf abs-rescan --fix-covers --apply`. Složka, ve které pořád leží

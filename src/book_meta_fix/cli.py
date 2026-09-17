@@ -2340,7 +2340,9 @@ def abs_rescan(library: Path | None, since: str, url: str | None, abs_library: s
 				with _new_progress() as progress:
 					task_id = progress.add_task(_("Clearing broken covers"), total=len(broken))
 					for b in broken:
-						if client.clear_item_cover(b.item.id):
+						if client.clear_item_cover(
+							b.item.id, library_root=cfg.library, abs_folders=abs_folders,
+						):
 							cleared_ids.append(b.item.id)
 						else:
 							failed_clears.append(b.item.title or b.item.id)

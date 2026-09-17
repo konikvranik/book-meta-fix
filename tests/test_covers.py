@@ -92,11 +92,14 @@ def _minimalist_white_cover(path: Path, size: tuple[int, int] = (600, 900)) -> N
 
 def _beige_text_page(
 	path: Path, size: tuple[int, int] = (600, 900), *, lines: int = 18,
-	paper=(212, 198, 168), ink=(72, 62, 48),
+	paper=(208, 202, 196), ink=(74, 70, 64),
 ) -> None:
 	"""A scanned page of text on AGED paper — signal 4's absolute gates reject
-	it (beige is under the near-white luminance and over the colourless
-	spread); only the paper-relative doc_scan signal can see the lines."""
+	it (aged tone under the near-white luminance gate); only the paper-relative
+	doc_scan signal can see the lines. The tones are warm GREYS on purpose:
+	every wild scan measured (2026-09-16) is grayscale end-to-end (colour
+	fraction 0.0 %) — the doc_scan colour gate would reject a sepia fixture,
+	and sepia scans do not exist in the measured library."""
 	img = Image.new("RGB", size, color=paper)
 	px = img.load()
 	import random
@@ -120,6 +123,51 @@ def _faint_text_page(path: Path, size: tuple[int, int] = (600, 900)) -> None:
 	ink threshold 128, so the absolute band count sees nothing). The doc_scan
 	signal's RELATIVE ink (paper minus 25) catches every line."""
 	_beige_text_page(path, size=size, paper=(250, 250, 250), ink=(170, 170, 170))
+
+
+def _wild_scan_cover(path: Path, size: tuple[int, int] = (1240, 1752)) -> None:
+	"""The databazeknih page-scan shape at its real-world resolution — the
+	regression fixture for the 150x200 line-merge bug: at an 8x downscale the
+	row gaps antialias away and a 35-line page reads as 5-10 bands, so the
+	old branch A missed it. The ink is FAINT (lum ~170, above signal 4's
+	absolute 128 threshold — the measured Andymon/Dedič ríše covers defeat
+	the absolute gates exactly this way) and word-sparse, copying the measured
+	wild profile: light paper, 29-46 lines at 600x800."""
+	img = Image.new("RGB", size, color=(250, 250, 250))
+	px = img.load()
+	import random
+
+	random.seed(11)
+	margin_x, line_h, gap = 140, 20, 14
+	y = 170
+	while y + line_h < size[1] - 150:
+		for dy in range(0, line_h, 2):  # glyph strokes, not solid bars
+			for x in range(margin_x, size[0] - margin_x):
+				if random.random() < 0.38:
+					v = random.randint(155, 185)
+					px[x, y + dy] = (v, v, v)
+		y += line_h + gap
+	img.save(path)
+
+
+def _colourful_busy_cover(path: Path, size: tuple[int, int] = (1240, 1752)) -> None:
+	"""Busy COLOURFUL artwork — the Děti Duny / Harry Potter regression
+	shape. It passes every branch-B shape gate (most rows carry ink in short
+	noisy runs, full span, high coverage) and only the colour gate keeps it
+	real: v5 flagged exactly this shape as a "dense page" scan."""
+	img = Image.new("RGB", size)
+	px = img.load()
+	import random
+
+	random.seed(3)
+	for y in range(size[1]):
+		for x in range(size[0]):
+			if random.random() < 0.45:  # dark ink half -> density/coverage pass
+				r, g, b = (random.randint(30, 90) for _ in range(3))
+			else:  # bright paper half -> median stays high
+				r, g, b = (random.randint(170, 235) for _ in range(3))
+			px[x, y] = (r, g, b)
+	img.save(path)
 
 
 def _line_art_cover(path: Path, size: tuple[int, int] = (600, 900)) -> None:
@@ -208,6 +256,27 @@ def _calibre_marked_jpeg_bytes(size: tuple[int, int] = (1200, 1600)) -> bytes:
 			b = (y * 2 + random.randint(0, 50)) % 256
 			px[x, y] = (r, g, b)
 	img.save(buf, format="JPEG", comment=b"Generated cover: calibre 5.42.0")
+	return buf.getvalue()
+
+
+def _wild_scan_cover_bytes(size: tuple[int, int] = (1240, 1752)) -> bytes:
+	"""The DBK page-scan shape in memory — for the analyze_cover_bytes gate."""
+	buf = io.BytesIO()
+	img = Image.new("RGB", size, color=(250, 250, 250))
+	px = img.load()
+	import random
+
+	random.seed(11)
+	margin_x, line_h, gap = 140, 20, 14
+	y = 170
+	while y + line_h < size[1] - 150:
+		for dy in range(0, line_h, 2):
+			for x in range(margin_x, size[0] - margin_x):
+				if random.random() < 0.38:
+					v = random.randint(155, 185)
+					px[x, y + dy] = (v, v, v)
+		y += line_h + gap
+	img.save(buf, format="JPEG")
 	return buf.getvalue()
 
 
@@ -622,6 +691,37 @@ _OPF_NO_COVER = """<?xml version="1.0" encoding="UTF-8"?>
   <spine><itemref idref="chap1"/></spine>
 </package>"""
 
+_OPF_UNWIRED_IMAGE = """<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Kniha</dc:title><dc:identifier id="id">test-id</dc:identifier>
+  </metadata>
+  <manifest>
+    <item id="id2" href="index-1_1.png" media-type="image/png"/>
+    <item id="titlepage" href="index_split_000.html" media-type="application/xhtml+xml"/>
+    <item id="chap1" href="chap.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="titlepage"/>
+    <itemref idref="chap1"/>
+  </spine>
+</package>"""
+
+
+def _make_unwired_epub(path: Path, image_bytes: bytes) -> Path:
+	"""The ABS-fallback shape measured in the wild: no OPF cover wiring, the
+	scan sits in the zip as index-1_1.png and a wrapper page shows it."""
+	with zipfile.ZipFile(path, "w") as zf:
+		mimetype = zipfile.ZipInfo("mimetype")
+		mimetype.compress_type = zipfile.ZIP_STORED
+		zf.writestr(mimetype, "application/epub+zip")
+		zf.writestr("META-INF/container.xml", _CONTAINER.format(opf="content.opf"))
+		zf.writestr("content.opf", _OPF_UNWIRED_IMAGE)
+		zf.writestr("index-1_1.png", image_bytes)
+		zf.writestr("index_split_000.html", b"<html><body><img src='index-1_1.png'/></body></html>")
+		zf.writestr("chap.xhtml", b"<html><body>text</body></html>")
+	return path
+
 
 def _make_epub(path: Path, opf_tmpl: str = _OPF_EPUB2, opf_name: str = "content.opf",
                chapter: bytes = b"<html><body>text</body></html>",
@@ -659,6 +759,59 @@ def _make_epub(path: Path, opf_tmpl: str = _OPF_EPUB2, opf_name: str = "content.
 def _mimetype_is_stored(epub: Path) -> bool:
 	with zipfile.ZipFile(epub) as zf:
 		return zf.getinfo("mimetype").compress_type == zipfile.ZIP_STORED
+
+
+class TestUnwiredEmbeddedStrip:
+	"""The ABS scanner-fallback class: an EPUB whose OPF declares NO cover
+	still gets a served cover — ABS picks the first image of the package.
+	Measured 2026-09-17 (Tyrolské elegie): the DBK page-scan rides in the
+	zip as index-1_1.png, the OPF-only probe sees "no embedded cover", and
+	ABS re-serves the scan after every sidecar cleanup + row clear."""
+
+	def test_pick_image_unwired_falls_back_to_first(self, tmp_path: Path) -> None:
+		from book_meta_fix.covers import epub_abs_pick_image
+
+		epub = _make_unwired_epub(tmp_path / "b.epub", _wild_scan_cover_bytes())
+		pick = epub_abs_pick_image(epub)
+		assert pick is not None
+		name, data, wired = pick
+		assert name == "index-1_1.png" and wired is False and data
+
+	def test_pick_image_wired_wins(self, tmp_path: Path) -> None:
+		from book_meta_fix.covers import epub_abs_pick_image
+
+		epub = _make_epub(tmp_path / "b.epub", cover_bytes=_gradient_jpeg_bytes())
+		pick = epub_abs_pick_image(epub)
+		assert pick is not None
+		name, _data, wired = pick
+		assert name.endswith("cover.jpg") and wired is True
+
+	def test_unwired_scan_stripped_with_wrapper_page(self, tmp_path: Path) -> None:
+		from book_meta_fix.covers import strip_generated_covers
+
+		epub = _make_unwired_epub(tmp_path / "b.epub", _wild_scan_cover_bytes())
+		result = strip_generated_covers(tmp_path, dry_run=False, generated="embedded")
+		assert result.stripped_epubs == ["b.epub"]
+		with zipfile.ZipFile(epub) as zf:
+			names = zf.namelist()
+			opf = zf.read("content.opf").decode()
+		# The image AND its wrapper page go together — no dangling img src.
+		assert "index-1_1.png" not in names
+		assert "index_split_000.html" not in names
+		assert "chap.xhtml" in names and names[0] == "mimetype"
+		assert "index-1_1.png" not in opf and "index_split_000.html" not in opf
+		assert 'idref="titlepage"' not in opf and 'idref="chap1"' in opf
+
+	def test_unwired_real_image_kept(self, tmp_path: Path) -> None:
+		from book_meta_fix.covers import strip_generated_covers
+
+		# A first image that is real artwork stays — the fallback probe does
+		# not make every content illustration strippable.
+		_make_unwired_epub(tmp_path / "b.epub", _gradient_jpeg_bytes(size=(300, 450)))
+		result = strip_generated_covers(tmp_path, dry_run=False, generated="embedded")
+		assert result.stripped_epubs == []
+		with zipfile.ZipFile(tmp_path / "b.epub") as zf:
+			assert "index-1_1.png" in zf.namelist()
 
 
 class TestStripCover:
@@ -1300,12 +1453,15 @@ class TestCoverAnalysisCache:
 
 
 class TestDocScanSignal:
-	"""Signal 6: a scanned page of text whose PAPER defeats signal 4's absolute
-	gates — aged beige paper (under the near-white gate, over the colourless
-	gate) or faint grey ink (above the lum-128 threshold). Ink is measured
-	RELATIVE to the paper median; only short line-height bands count (tall
-	dark runs are illustration blocks). Both shapes measured in the wild
-	2026-09-16 on covers surviving clean+abs-rescan as "real"."""
+	"""Signal 6: databazeknih serves a scan of the book's own printed page
+	(body text or the title page) as the cover image. The PAPER may defeat
+	signal 4's absolute gates (aged tone, faint ink) — ink is measured
+	RELATIVE to the paper median, and line bands are counted at 600x800
+	where scan row gaps survive the downscale. COLOUR-GATED: every wild scan
+	is grayscale end-to-end, busy colourful artwork is not — v5 flagged real
+	illustrated covers (Děti Duny, Harry Potter) through the dense branch
+	before the gate. Shapes measured in the wild 2026-09-16 on covers
+	surviving clean+abs-rescan as "real"."""
 
 	def test_aged_paper_text_scan_is_generated(self, tmp_path: Path) -> None:
 		cover = tmp_path / "cover.jpg"
@@ -1320,6 +1476,35 @@ class TestDocScanSignal:
 		info = analyze_cover(cover)
 		assert info.is_generated is True
 		assert any(s.startswith("doc_scan") for s in info.signals)
+
+	def test_wild_resolution_scan_is_generated(self, tmp_path: Path) -> None:
+		# The real DBK scan shape (1240x1752, ~12 px row gaps): at the 150x200
+		# grid the gaps merge and the old branch A read 5-10 bands — only the
+		# 600x800 line count catches it (measured: Andymon, Dedič ríše,
+		# Maigretova dýmka, Cikánská historie all classified real under v5).
+		cover = tmp_path / "cover.jpg"
+		_wild_scan_cover(cover)
+		info = analyze_cover(cover)
+		assert info.is_generated is True
+		assert any(s.startswith("doc_scan (") and "lines" in s for s in info.signals)
+
+	def test_wild_scan_bytes_classified_generated(self) -> None:
+		# The bytes gate (download_cover refuses text-page downloads) shares
+		# the same math.
+		from book_meta_fix.covers import analyze_cover_bytes
+
+		info = analyze_cover_bytes(_wild_scan_cover_bytes())
+		assert info.is_generated is True
+
+	def test_colourful_busy_artwork_stays_real(self, tmp_path: Path) -> None:
+		# The v5 regression: busy colourful artwork passes every branch-B
+		# shape gate (dense ink rows, short noisy runs, high coverage) — only
+		# the colour gate keeps Děti Duny / Harry Potter covers real.
+		cover = tmp_path / "cover.jpg"
+		_colourful_busy_cover(cover)
+		info = analyze_cover(cover)
+		assert info.is_generated is False
+		assert not any(s.startswith("doc_scan") for s in info.signals)
 
 	def test_minimalist_title_block_gets_no_doc_scan(self, tmp_path: Path) -> None:
 		# A short title block (few lines) on tinted paper — a real minimalist
@@ -1715,7 +1900,7 @@ class TestDownloadCoverTextPageGate:
 
 	def test_minimalist_solid_download_accepted(self, tmp_path: Path) -> None:
 		"""A minimalist (few-colours) real cover from the source is ACCEPTED —
-		the download gate refuses only text-page renders, not sparse artwork
+		the download gate refuses only junk classes, not sparse artwork
 		(the book's own cover beats none)."""
 		buf = io.BytesIO()
 		Image.new("RGB", (300, 450), color=(240, 238, 230)).save(buf, format="JPEG")
@@ -1724,6 +1909,16 @@ class TestDownloadCoverTextPageGate:
 		with patch("requests.get", return_value=mock_response):
 			assert download_cover("https://example.com/cover.jpg", dest) is True
 		assert dest.is_file()
+
+	def test_doc_scan_download_rejected(self, tmp_path: Path) -> None:
+		"""The DBK page-scan class must be refused too — without this arm every
+		apply re-downloads the very scan the cleanup just bakked (measured
+		2026-09-17: cover.png reappeared 15 minutes after --apply)."""
+		mock_response = type("R", (), {"status_code": 200, "content": _wild_scan_cover_bytes()})
+		dest = tmp_path / "cover.jpg"
+		with patch("requests.get", return_value=mock_response):
+			assert download_cover("https://example.com/cover.jpg", dest) is False
+		assert not dest.exists()
 
 
 class TestSidecarCoverUsable:

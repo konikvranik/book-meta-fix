@@ -7,16 +7,16 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-09-16 16:57+0200\n"
+"POT-Creation-Date: 2026-09-17 07:13+0200\n"
 "PO-Revision-Date: 2026-08-15 10:28+0200\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: cs\n"
 "Language-Team: cs <LL@li.org>\n"
-"Plural-Forms: nplurals=3; plural=((n==1) ? 0 : (n>=2 && n<=4) ? 1 : 2)\n"
+"Plural-Forms: nplurals=3; plural=((n==1) ? 0 : (n>=2 && n<=4) ? 1 : 2);\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Generated-By: Babel 2.8.0\n"
+"Generated-By: Babel 2.18.0\n"
 
 #: src/book_meta_fix/catalog.py:22
 msgid "Author and title are swapped"
@@ -205,8 +205,8 @@ msgstr ""
 "calibrův vlastní marker — JPEG komentář „Generated cover: calibre "
 "<verze>“, který jeho generátor zapisuje do každé obálky (pergamenovou "
 "default šablonu přechytí každý pixelový signál). Skutečná obálka se "
-"navrhne z enricherů, když nějaká je; GUI umí také obnovit vloženou "
-"obálku z knižního souboru (renderované stránky se odmítají)."
+"navrhne z enricherů, když nějaká je; GUI umí také obnovit vloženou obálku"
+" z knižního souboru (renderované stránky se odmítají)."
 
 #: src/book_meta_fix/catalog.py:108
 msgid "Author field pollution (slug/artefact)"
@@ -576,7 +576,7 @@ msgstr ""
 msgid "Classifying"
 msgstr "Klasifikuji"
 
-#: src/book_meta_fix/cli.py:291
+#: src/book_meta_fix/cli.py:292
 #, python-brace-format
 msgid ""
 "{identified} book(s) identified (accepted): MISSING_* with author+title "
@@ -1289,7 +1289,7 @@ msgstr "Přeskočená sloučení:"
 msgid "review.yaml to edit (default: $BMF_REVIEW or review.yaml)"
 msgstr "review.yaml k úpravě (výchozí: $BMF_REVIEW nebo review.yaml)"
 
-#: src/book_meta_fix/cli.py:988
+#: src/book_meta_fix/cli.py:989
 msgid ""
 "`bmf organize` was merged into `bmf apply`. Run `bmf analyze` (it flags "
 "misplaced books with a move proposal), review in `bmf gui` if needed, "
@@ -1510,8 +1510,8 @@ msgid "books scanned"
 msgstr "prohledaných knih"
 
 #: src/book_meta_fix/cli.py:1287
-msgid "cover.jpg renamed to .bak"
-msgstr "cover.jpg přejmenováno na .bak"
+msgid "generated cover files renamed to .bak"
+msgstr "generovaných obálek přejmenováno na .bak"
 
 #: src/book_meta_fix/cli.py:1288
 msgid "invalid cover files renamed to .bak"
@@ -1545,6 +1545,11 @@ msgstr "Postižené knihy (prvních 25)"
 #: src/book_meta_fix/cli.py:1302
 msgid "Actions"
 msgstr "Akce"
+
+#: src/book_meta_fix/cli.py:1306
+#, python-brace-format
+msgid "generated -> .bak: {files}"
+msgstr "generované -> .bak: {files}"
 
 #: src/book_meta_fix/cli.py:1308
 #, python-brace-format
@@ -2304,6 +2309,7 @@ msgid "Clearing stale series"
 msgstr "Mazání přebytečných sérií"
 
 #: src/book_meta_fix/cli.py:2427
+#, python-brace-format
 msgid ""
 "Failed to clear the series of {count} item(s) (e.g. {sample}) — check the"
 " token (must be an ADMIN API token)."
@@ -2312,6 +2318,7 @@ msgstr ""
 "zkontroluj token (musí být ADMIN API token)."
 
 #: src/book_meta_fix/cli.py:2431
+#, python-brace-format
 msgid ""
 "Cleared the stale series of {count} item(s) — the rescan below refreshes "
 "their metadata."
@@ -2663,7 +2670,7 @@ msgstr "Hledat:"
 msgid "+ library"
 msgstr "+ knihovna"
 
-#: src/book_meta_fix/gui.py:2385
+#: src/book_meta_fix/gui.py:2386
 msgid ""
 "Search the whole library too, not only review.yaml: books matching the "
 "search (author, title, series, folder path, annotation) that are not in "
@@ -2685,7 +2692,7 @@ msgstr ""
 msgid "Bulk edit (Ctrl+E)"
 msgstr "Hromadná úprava (Ctrl+E)"
 
-#: src/book_meta_fix/gui.py:2418
+#: src/book_meta_fix/gui.py:2419
 msgid ""
 "Set the author or series for all selected books at once.\n"
 "Select rows with Ctrl+click (toggle) and Shift+click (range);\n"
@@ -2725,7 +2732,7 @@ msgstr "Původní"
 msgid "Proposed"
 msgstr "Návrh"
 
-#: src/book_meta_fix/gui.py:2748
+#: src/book_meta_fix/gui.py:2749
 msgid ""
 "∅ mark: the field is applied as EMPTY (a proposal that is wrong while the"
 " correct value is unknown). Click again to restore editing."
@@ -2745,7 +2752,7 @@ msgstr "Cílová složka:"
 msgid "Verified"
 msgstr "Verified"
 
-#: src/book_meta_fix/gui.py:2797
+#: src/book_meta_fix/gui.py:2798
 msgid ""
 "Mark the book as OK: apply writes `verified: true` into metadata.json, "
 "later analyze runs skip the book entirely, and apply places it on the "
@@ -2835,7 +2842,7 @@ msgstr "  přečteno jako:"
 msgid "actually is:"
 msgstr "skutečně je:"
 
-#: src/book_meta_fix/gui.py:2949
+#: src/book_meta_fix/gui.py:2950
 msgid ""
 "Double-encoding repair: „read as“ = the codec the text was originally "
 "mis-read through (typically cp1250); „actually is“ = the real encoding of"
@@ -2888,7 +2895,7 @@ msgstr "otevření prohlížeče selhalo"
 msgid "search opened: {query}"
 msgstr "vyhledávání otevřeno: {query}"
 
-#: src/book_meta_fix/gui.py:3687
+#: src/book_meta_fix/gui.py:3688
 msgid "not in review.yaml — deciding or editing it adds it to review on save"
 msgstr "není v review.yaml — rozhodnutí či úprava ho při uložení přidá do review"
 
@@ -2917,12 +2924,12 @@ msgstr "text vyberete a zkopírujete (Ctrl+C) — zavřete Esc"
 msgid "Merge into the same-work folder (C19)"
 msgstr "Sloučení do složky téhož díla (C19)"
 
-#: src/book_meta_fix/gui.py:4078
+#: src/book_meta_fix/gui.py:4079
 #, python-brace-format
 msgid "merge target not found on disk: {path}"
 msgstr "cíl sloučení chybí na disku: {path}"
 
-#: src/book_meta_fix/gui.py:4083
+#: src/book_meta_fix/gui.py:4084
 #, python-brace-format
 msgid "this book's folder is missing on disk: {path}"
 msgstr "složka této knihy chybí na disku: {path}"
@@ -3180,7 +3187,7 @@ msgstr ""
 msgid "Field-by-field: pick which book's value the merged book keeps"
 msgstr "Po polích: vyberte, kterou hodnotu knihy sloučená kniha podrží"
 
-#: src/book_meta_fix/gui.py:4674
+#: src/book_meta_fix/gui.py:4675
 msgid ""
 "Defaults follow the survivor; a field the survivor lacks takes the first "
 "value found. ∅ = keep the field empty. Picked values are written to the "
@@ -3190,7 +3197,7 @@ msgstr ""
 "nemá, se přiřadí první nalezená hodnota. ∅ = nechat pole prázdné. Vybrané"
 " hodnoty se zapíšou do sloučené knihy a přebíjejí konfliktní návrh."
 
-#: src/book_meta_fix/gui.py:4680
+#: src/book_meta_fix/gui.py:4681
 msgid ""
 "The survivor keeps its folder and review entry; the other books' files "
 "move in and their folders are removed. review.yaml is saved right after "
@@ -3239,7 +3246,7 @@ msgstr "k rozdělení jsou ve složce potřeba alespoň dva soubory e-knih"
 msgid "Split book into two"
 msgstr "Rozdělit knihu na dvě"
 
-#: src/book_meta_fix/gui.py:4802
+#: src/book_meta_fix/gui.py:4803
 msgid ""
 "Two unrelated books sharing one folder (a wrong merge): the checked files"
 " move out into a NEW book; the unchecked ones stay here."
@@ -3260,7 +3267,7 @@ msgstr "Nová kniha (zaškrtnuté soubory přejdou do ní):"
 msgid "Target folder: {path}"
 msgstr "Cílová složka: {path}"
 
-#: src/book_meta_fix/gui.py:4858
+#: src/book_meta_fix/gui.py:4859
 msgid ""
 "⚠ the new book looks like the SAME work as what stays here — a split "
 "would create two copies of one book"
@@ -3634,7 +3641,7 @@ msgstr ""
 "kolečko: widget pod myší, na jeho okraji formulář; obálka v seznamu → "
 "popup při najetí)"
 
-#: src/book_meta_fix/review.py:71
+#: src/book_meta_fix/review.py:72
 #, python-brace-format
 msgid ""
 "Auto-generated by book-meta-fix on {date}\n"
@@ -4155,4 +4162,7 @@ msgstr ""
 #~ " GUI umí také obnovit vloženou obálku"
 #~ " z knižního souboru (renderované stránky"
 #~ " se odmítají)."
+
+#~ msgid "cover.jpg renamed to .bak"
+#~ msgstr "cover.jpg přejmenováno na .bak"
 
